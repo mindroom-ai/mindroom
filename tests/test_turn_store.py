@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -38,9 +39,7 @@ from mindroom.handled_turns import (
     TurnRecordCodec,
     _reset_handled_turn_ledger_runtime,
 )
-from mindroom.history import archive
 from mindroom.history.storage import (
-    archive_compaction_chunk,
     read_scope_seen_event_ids,
     read_scope_state,
     update_scope_seen_event_ids,
@@ -71,7 +70,7 @@ from tests.conftest import (
     seed_session,
     test_runtime_paths,
 )
-from tests.history_helpers import StoredGeneration, compaction_generations
+from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
 from tests.journal_helpers import admit_room_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
 
@@ -271,7 +270,15 @@ def _seeded_storage(
         return storage
     seed_session(storage, session)
     storage.close()
+    _as_older_release(tmp_path / name / "sessions" / f"{name}.db", name)
     return create_state_storage(name, tmp_path / name, subdir="sessions", session_table=f"{name}_sessions")
+
+
+def _as_older_release(db_file: Path, name: str) -> None:
+    """Drop the summary-row tables seeding created, since older releases had none; the next open adopts their state."""
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(f'DROP TABLE IF EXISTS "{name}_sessions_summaries"')
+        connection.execute(f'DROP TABLE IF EXISTS "{name}_sessions_removed_runs"')
 
 
 def _stored(storage: BaseDb, session: AgentSession | TeamSession) -> AgentSession | TeamSession:
@@ -425,6 +432,24 @@ async def test_redaction_delivered_in_another_room_leaves_the_recorded_conversat
     assert await store.redacted_history_events(target, (redacted_event_id,)) == {}
     assert await store.mark_source_redacted(redacted_event_id, room_id=target.room_id) is not None
     assert store._is_revision_redacted(redacted_event_id)
+
+
+@pytest.mark.asyncio
+async def test_redacted_event_ids_include_ledger_tombstones_the_journal_no_longer_holds(
+    journal_store: EventJournalStore,
+) -> None:
+    """Leaving a room drops its journal tombstones, so the ledger's tombstones still report what was redacted."""
+    # The journal holds no tombstone for the redacted turn, as after the agent left the room.
+    journal = AsyncMock(return_value=frozenset({"$journal-only"}))
+    store = TurnStore(replace((await _store(journal_store)).deps, redacted_event_ids=journal))
+    await store.warm()
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(_owned_turn_record(target))
+    assert await store.mark_source_redacted("$user_msg", room_id=target.room_id) is not None
+
+    requested = ("$journal-only", "$other", "$user_msg")
+    assert await store.redacted_event_ids(target.room_id, requested) == frozenset({"$journal-only", "$user_msg"})
+    journal.assert_awaited_with(target.room_id, requested)
 
 
 @pytest.mark.asyncio
@@ -970,11 +995,11 @@ async def test_prepare_redaction_removes_causal_run_suffix(journal_store: EventJ
 
 
 @pytest.mark.asyncio
-async def test_edit_pruning_follows_a_redaction_rollback(
+async def test_editing_a_folded_turn_beside_a_redacted_one_leaves_no_runs_or_summary(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
-    """A rollback that restores the edited turn's compacted run happens before pruning, not after."""
+    """Editing a folded turn while a later folded turn is redacted cuts both runs and the summary that folded them."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$a")
     scope = HistoryScope(kind="agent", scope_id="agent")
 
@@ -996,14 +1021,7 @@ async def test_edit_pruning_follows_a_redaction_rollback(
     )
     stored = get_agent_session(storage, target.session_id)
     assert stored is not None
-    archive_compaction_chunk(
-        storage=storage,
-        session=stored,
-        scope=scope,
-        summary=SessionSummary(summary="summary of a and b"),
-        summary_model="summary-model",
-        archived_runs=list(stored.runs or []),
-    )
+    compact_runs(storage, stored, scope, [run.run_id for run in stored.runs or [] if run.run_id], "summary of a and b")
     store = await _store_with_storage(journal_store, storage)
     records = {
         event_id: TurnRecord.create(
@@ -1380,12 +1398,8 @@ async def test_prepare_redaction_invalidates_legacy_compacted_replay(
     assert stored.summary is None
     assert read_scope_seen_event_ids(storage, stored, scope) == set()
     assert read_scope_state(stored, scope) == HistoryScopeState()
-    assert compaction_generations(storage, scope.key, target.session_id) == [
-        StoredGeneration(summary=None, summary_model=None, legacy=True),
-    ]
-    assert archive.archived_run_ids(storage, session_id=target.session_id, run_ids=["$compacted-run"]) == {
-        "$compacted-run",
-    }
+    assert summary_rows_of(storage, scope.key, target.session_id) == []
+    assert stored_run_ids(storage, target.session_id) == []
 
 
 @pytest.mark.asyncio
@@ -2581,6 +2595,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     for run in session.runs or []:
         storage.upsert_run(run, session_id=session.session_id)
     storage.close()
+    _as_older_release(tmp_path / "sessions" / "agent.db", "agent")
     storage = storage_factory()
     initial_persisted = get_agent_session(storage, target.session_id)
     assert initial_persisted is not None
@@ -2967,17 +2982,16 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
         storage.upsert_run(run, session_id=session.session_id)
     storage.close()
     if later_run_names_revision:
-        # A modern compaction archives the later run on top of the legacy summary.
+        # A modern compaction folds the later run on top of the legacy summary.
         storage = storage_factory()
         reopened_session = get_agent_session(storage, target.session_id)
         assert reopened_session is not None
-        archive_compaction_chunk(
-            storage=storage,
-            session=reopened_session,
-            scope=scope,
-            summary=SessionSummary(summary="DELETED_EDIT_MARKER and later"),
-            summary_model="summary-model",
-            archived_runs=list(reopened_session.runs or []),
+        compact_runs(
+            storage,
+            reopened_session,
+            scope,
+            [run.run_id for run in reopened_session.runs or [] if run.run_id],
+            "DELETED_EDIT_MARKER and later",
         )
         storage.close()
     _reset_handled_turn_ledger_runtime()

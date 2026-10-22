@@ -38,13 +38,11 @@ from tests.conftest import (
     make_relation_lookup,
     runtime_paths_for,
 )
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
-
-    from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _make_config(agents: dict[str, AgentConfig]) -> Config:
@@ -55,47 +53,8 @@ def _make_config(agents: dict[str, AgentConfig]) -> Config:
     )
 
 
-def _runtime_paths(storage_path: Path) -> RuntimePaths:
-    """Create explicit runtime paths for delegate-tool agent creation tests."""
-    return resolve_runtime_paths(
-        config_path=storage_path / "config.yaml",
-        storage_path=storage_path,
-        process_env={},
-    )
-
-
 def _bind_runtime_paths(config: Config, storage_path: Path) -> Config:
     return bind_runtime_paths(config, _runtime_paths(storage_path))
-
-
-def _delegate_runtime_context(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> ToolRuntimeContext:
-    """Build the requester context every successful delegation requires."""
-    room_id = execution_identity.room_id if execution_identity is not None else "!room:example.org"
-    source_thread_id = execution_identity.thread_id if execution_identity is not None else None
-    resolved_thread_id = execution_identity.resolved_thread_id if execution_identity is not None else None
-    session_id = execution_identity.session_id if execution_identity is not None else room_id
-    requester_id = execution_identity.requester_id if execution_identity is not None else "@alice:example.org"
-    return make_test_tool_runtime_context(
-        agent_name="leader",
-        target=MessageTarget(
-            room_id=room_id,
-            source_thread_id=source_thread_id,
-            resolved_thread_id=resolved_thread_id,
-            reply_to_event_id=None,
-            session_id=session_id,
-        ),
-        requester_id=requester_id,
-        client=MagicMock(),
-        config=config,
-        runtime_paths=runtime_paths,
-        relations=make_relation_lookup(),
-        conversation_reader=make_conversation_reader_mock(),
-    )
 
 
 def _fake_indexing_settings(base_id: str) -> IndexingSettings:

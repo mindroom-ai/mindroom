@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.models.groq import Groq
 
+from mindroom.providers.model_http_client import KeepHttpClient
 from mindroom.providers.tool_policy import disable_tool_selection, provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -18,7 +19,7 @@ _COMPOUND_MODELS = frozenset({"groq/compound", "groq/compound-mini", "compound-b
 
 
 @dataclass
-class MindRoomGroq(Groq):
+class MindRoomGroq(KeepHttpClient, Groq):
     """Groq model that keeps native execution outside participation decisions."""
 
     def get_request_params(

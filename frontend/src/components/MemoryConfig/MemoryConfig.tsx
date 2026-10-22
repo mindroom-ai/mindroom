@@ -85,11 +85,9 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   },
   auto_flush: {
     enabled: false,
-    flush_interval_seconds: 1800,
+    flush_interval_seconds: 300,
     idle_seconds: 120,
-    max_dirty_age_seconds: 600,
     stale_ttl_seconds: 86400,
-    max_cross_session_reprioritize: 5,
     retry_cooldown_seconds: 30,
     max_retry_cooldown_seconds: 300,
     batch: {
@@ -700,7 +698,7 @@ export function MemoryConfig() {
 
               <FieldGroup
                 label="Auto Flush"
-                helperText="Automatically persist durable memory from dirty sessions."
+                helperText="Automatically save durable memories from the new turns of conversations."
                 htmlFor="auto-flush-enabled"
               >
                 <Select
@@ -724,20 +722,17 @@ export function MemoryConfig() {
 
               <FieldGroup
                 label="Flush Interval (seconds)"
-                helperText="Worker cycle interval for background flush processing."
+                helperText="Time between background flush passes."
                 htmlFor="flush-interval-seconds"
               >
                 <Input
                   id="flush-interval-seconds"
                   type="number"
                   min={5}
-                  value={localConfig.auto_flush?.flush_interval_seconds ?? 1800}
+                  value={localConfig.auto_flush?.flush_interval_seconds ?? 300}
                   onChange={(e) =>
                     updateAutoFlush({
-                      flush_interval_seconds: parseInteger(
-                        e.target.value,
-                        1800,
-                      ),
+                      flush_interval_seconds: parseInteger(e.target.value, 300),
                     })
                   }
                   className="transition-colors hover:border-ring focus:border-ring"
@@ -746,7 +741,7 @@ export function MemoryConfig() {
 
               <FieldGroup
                 label="Idle Seconds"
-                helperText="Minimum idle time before a dirty session is eligible."
+                helperText="How long a conversation must be quiet before its new turns are flushed."
                 htmlFor="idle-seconds"
               >
                 <Input
@@ -764,27 +759,8 @@ export function MemoryConfig() {
               </FieldGroup>
 
               <FieldGroup
-                label="Max Dirty Age (seconds)"
-                helperText="Force flush eligibility after this dirty age."
-                htmlFor="max-dirty-age-seconds"
-              >
-                <Input
-                  id="max-dirty-age-seconds"
-                  type="number"
-                  min={1}
-                  value={localConfig.auto_flush?.max_dirty_age_seconds ?? 600}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      max_dirty_age_seconds: parseInteger(e.target.value, 600),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
                 label="Stale TTL (seconds)"
-                helperText="How long to keep inactive dirty-session state entries."
+                helperText="Give up on turns whose flush has kept failing for this long."
                 htmlFor="stale-ttl-seconds"
               >
                 <Input
@@ -802,32 +778,8 @@ export function MemoryConfig() {
               </FieldGroup>
 
               <FieldGroup
-                label="Cross-Session Reprioritize"
-                helperText="Number of same-agent dirty sessions to boost on incoming prompts."
-                htmlFor="max-cross-session-reprioritize"
-              >
-                <Input
-                  id="max-cross-session-reprioritize"
-                  type="number"
-                  min={0}
-                  value={
-                    localConfig.auto_flush?.max_cross_session_reprioritize ?? 5
-                  }
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      max_cross_session_reprioritize: parseInteger(
-                        e.target.value,
-                        5,
-                      ),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
                 label="Retry Cooldown (seconds)"
-                helperText="Base cooldown before retrying failed extraction."
+                helperText="Base cooldown before retrying a failed flush."
                 htmlFor="retry-cooldown-seconds"
               >
                 <Input
@@ -870,7 +822,7 @@ export function MemoryConfig() {
 
               <FieldGroup
                 label="Batch: Max Sessions Per Cycle"
-                helperText="Upper bound of sessions processed in one flush iteration."
+                helperText="Conversations flushed in one pass, across all agents."
                 htmlFor="max-sessions-per-cycle"
               >
                 <Input
@@ -891,7 +843,7 @@ export function MemoryConfig() {
 
               <FieldGroup
                 label="Batch: Max Sessions Per Agent"
-                helperText="Per-agent cap for each flush iteration."
+                helperText="Conversations of one agent or private instance flushed in one pass."
                 htmlFor="max-sessions-per-agent"
               >
                 <Input
@@ -916,7 +868,7 @@ export function MemoryConfig() {
 
               <FieldGroup
                 label="Extractor: Max Messages Per Flush"
-                helperText="How much recent chat is considered during one extraction."
+                helperText="New messages read by one extraction; a longer backlog is read over later passes."
                 htmlFor="max-messages-per-flush"
               >
                 <Input

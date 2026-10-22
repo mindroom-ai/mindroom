@@ -44,6 +44,8 @@ class SpanAttempt:
     register: Callable[[asyncio.Task[None]], None]
     # Shows the Stop button on the reply's event, best effort.
     add_stop_button: Callable[[str], Awaitable[None]]
+    # Returns the reply's event once the reply shows one in the room.
+    reply_event: Callable[[], Coroutine[Any, Any, str | None]]
 
 
 @dataclass(frozen=True)
@@ -159,14 +161,20 @@ class ResponseAttemptRunner:
             message_id = request.existing_event_id
             task: asyncio.Task[None] = asyncio.create_task(request.response_function(message_id))
             request.span.register(task)
+            # Whether the attempt had ended before it was awaited, so awaiting it raised the attempt's own outcome.
+            ended_before_awaited = False
             try:
-                if message_id is not None:
-                    await self._add_stop_button(request, message_id)
+                button_event_id = await self._reply_event_while_running(request, task)
+                if button_event_id is not None:
+                    await self._add_stop_button(request, button_event_id)
 
+                ended_before_awaited = task.done()
                 await asyncio.shield(task)
             except asyncio.CancelledError as caught_cancellation:
                 cancellation = caught_cancellation
-                if task.done() and task.cancelled():
+                # Only the first read of a cancelled task's outcome keeps its provenance, so read it here only when
+                # awaiting the attempt did not already raise it.
+                if task.done() and task.cancelled() and not ended_before_awaited:
                     try:
                         task.result()
                     except asyncio.CancelledError as child_cancellation:
@@ -193,6 +201,25 @@ class ResponseAttemptRunner:
                 # running after its span ends, where a Stop no longer reaches it.
                 await self._forward_cancel_to_attempt_task(task, asyncio.CancelledError())
                 raise
+
+    async def _reply_event_while_running(
+        self,
+        request: ResponseAttemptRequest,
+        task: asyncio.Task[None],
+    ) -> str | None:
+        """Return the reply's event once it shows one while the attempt runs, which the Stop button goes on.
+
+        That is the placeholder or earlier answer the attempt adopted, or else
+        the first event the attempt sends itself: a reply without a placeholder,
+        such as an adaptive participation reply, shows nothing until its stream
+        sends something. An attempt that ends first leaves nothing to stop.
+        """
+        shown = asyncio.create_task(request.span.reply_event())
+        try:
+            await asyncio.wait((task, shown), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            shown.cancel()
+        return None if task.done() else shown.result()
 
     async def _add_stop_button(self, request: ResponseAttemptRequest, message_id: str) -> None:
         """Show the Stop button on the reply's event when wanted; the reply records it and redacts it."""

@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 
 from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.agents import create_agent, enable_all_history_replay
+from mindroom.agents import create_agent, enable_all_history_replay, team_background_jobs
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import (
     accumulate_model_request_metrics,
@@ -71,8 +71,12 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
+from mindroom.history.mid_turn_compaction import (
+    bind_compaction_lifecycle,
+    install_mid_turn_compaction,
+    without_fold_records,
+)
 from mindroom.history.native import restore_native_history
-from mindroom.history.prompt_tokens import team_tool_definition_payloads_for_logging
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -103,12 +107,12 @@ from mindroom.response_turn import (
     BlockingTurnAdapter,
     CompletedApprovalRun,
     CompletedAttempt,
-    DynamicContinuationRunState,
     ExcludedAttempt,
     HandledAttempt,
     PausedAttempt,
     ResponseTurnContext,
     StreamingTurnAdapter,
+    TurnContinuationRunState,
     TurnPartialSnapshot,
     TurnSinks,
     apply_local_approval_decisions,
@@ -129,6 +133,10 @@ from mindroom.team_exact_members import (
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.timing import emit_timing_event
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.notices import append_turn_start_job_note
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
@@ -852,7 +860,7 @@ def _has_visible_team_output(response: TeamRunOutput | RunOutput) -> bool:
     and neither do session-history assistant messages (excluded in
     ``_get_response_content``) — both made the empty-run guard dead after the
     first turn of a session. The "No team response generated." placeholder
-    does not count either, so the dynamic-tool continuation limit message can
+    does not count either, so the turn continuation limit message can
     replace it.
     """
     return bool(format_team_response(response)) or bool(_get_response_content(response).strip())
@@ -1756,7 +1764,7 @@ def _extract_cancelled_team_tool_trace(
 def _collect_team_tool_executions(response: TeamRunOutput | RunOutput) -> list[ToolExecution]:
     """Collect raw tool executions from a possibly nested team response.
 
-    Any member's completed load/unload call surfaces here and drives a
+    Any member's completed model-switch call surfaces here and drives a
     whole-fan continuation, even when the team already produced visible
     output. That mirrors the agent path deliberately: gating on visible
     output would disable continuation in coordinate mode, where the leader
@@ -1939,14 +1947,12 @@ async def _ensure_attempt_team_members(
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     *,
-    session_id: str | None,
     reason_prefix: str,
     configured_team_name: str | None,
 ) -> ResolvedExactTeamMembers:
     """Return the turn's member set, rebuilding released members.
 
-    A continuation releases the spent members; the rebuild bakes the loaded
-    dynamic-tool schema into fresh member agents.
+    A continuation releases the spent members; the rebuild gives fresh member agents the switched model.
     """
     members = holder.team_members
     if members is None:
@@ -1955,7 +1961,6 @@ async def _ensure_attempt_team_members(
             agent_names,
             orchestrator,
             execution_identity,
-            session_id=session_id,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
             active_model_names=holder.member_model_names,
@@ -1971,9 +1976,9 @@ def _initial_team_continuation(
     current_prompt_is_structured: bool,
     current_event_id: str | None,
     run_id: str | None,
-) -> DynamicContinuationRunState:
+) -> TurnContinuationRunState:
     """Build the continuation state for one team turn's first attempt."""
-    return DynamicContinuationRunState.initial(
+    return TurnContinuationRunState.initial(
         prompt=message,
         model_prompt=None,
         current_timestamp_ms=current_timestamp_ms,
@@ -2034,7 +2039,7 @@ def _build_team_runtime_db_callbacks(
 
     Releasing between continuation attempts closes the spent member agents'
     runtime DBs and drops them so the next attempt rebuilds members with the
-    updated dynamic-tool schema baked in.
+    switched model.
     """
 
     def _release_attempt_members(scope_context: ScopeSessionContext | None) -> None:
@@ -2071,24 +2076,16 @@ def materialize_exact_team_members(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-    session_id: str | None = None,
     include_openai_compat_guidance: bool = False,
     materializable_agent_names: set[str] | None = None,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     reason_prefix: str = "Team request",
-    dynamic_tool_continuation: bool = False,
     supports_native_tool_approval: bool = False,
     active_model_names: Mapping[str, str] | None = None,
     required_tool_names: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ResolvedExactTeamMembers:
-    """Materialize the exact team-member set without silent fallback.
-
-    ``dynamic_tool_continuation`` must only be enabled by callers that run the
-    members under a continuation-capable response-turn driver; other callers
-    (for example the OpenAI-compatible API) leave it off so a load/unload does
-    not truncate the run.
-    """
+    """Materialize the exact team-member set without silent fallback."""
     if not requested_agent_names:
         raise ValueError(_NO_AGENTS_RESPONSE)
 
@@ -2120,17 +2117,11 @@ def materialize_exact_team_members(
             config,
             runtime_paths,
             execution_identity=execution_identity,
-            session_id=session_id
-            if session_id is not None
-            else execution_identity.session_id
-            if execution_identity
-            else None,
             active_model_name=model_name,
             knowledge=knowledge_resolution.knowledge,
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
             refresh_scheduler=refresh_scheduler,
-            dynamic_tool_continuation=dynamic_tool_continuation,
             supports_native_tool_approval=supports_native_tool_approval,
             required_tool_names=(required_tool_names or {}).get(agent_name, ()),
         )
@@ -2182,7 +2173,6 @@ def _materialize_team_members(
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     *,
-    session_id: str | None = None,
     configured_team_name: str | None = None,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
     reason_prefix: str = "Team request",
@@ -2205,11 +2195,9 @@ def _materialize_team_members(
         config=orchestrator.config,
         runtime_paths=orchestrator.runtime_paths,
         execution_identity=execution_identity,
-        session_id=session_id,
         materializable_agent_names=materializable_agent_names,
         unavailable_bases=unavailable_bases,
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
-        dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
         active_model_names=active_model_names,
         reason_prefix=reason_prefix,
@@ -2296,8 +2284,6 @@ def _create_team_instance(
         model,
         notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
     )
-    # The team budget caps the coordinator's own calls; members carry their own.
-    install_model_call_cap(model, entity_name=configured_team_name or team_display_name)
     team_scope = config.resolve_entity(
         configured_team_name if configured_team_name is not None and configured_team_name in config.teams else None,
     )
@@ -2318,16 +2304,19 @@ def _create_team_instance(
         agent.add_session_summary_to_context = False
 
     install_message_builder_patch()
+    job_controls = team_background_jobs(model, config, runtime_paths, execution_identity)
     team_members: list[Agent | Team] = [*agents]
     team = Team(
         members=team_members,
+        tools=None if job_controls is None else [job_controls],
         id=team_id,
         name=team_display_name,
         model=model,
         db=scope_context.storage if scope_context is not None else None,
         delegate_to_all_members=mode == TeamMode.COLLABORATE,
         add_history_to_context=True,
-        add_session_summary_to_context=True,
+        # The summary replays as a history message instead (history/agno_compat_message_builder.py).
+        add_session_summary_to_context=False,
         num_history_runs=history_settings.policy.num_history_runs,
         num_history_messages=history_settings.policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
@@ -2344,6 +2333,16 @@ def _create_team_instance(
     )
     if history_settings.policy.mode == "all":
         enable_all_history_replay(team)
+    install_mid_turn_compaction(
+        team,
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name=configured_team_name if configured_team_name in config.teams else None,
+        model_name=model_name,
+    )
+    # The team budget caps the coordinator's own calls; members carry their own. Installed after mid-turn
+    # compaction so a refused request never spends a summary call.
+    install_model_call_cap(model, entity_name=configured_team_name or team_display_name)
     return team
 
 
@@ -2647,7 +2646,10 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-async def continue_paused_team_run(
+@owned_tool_execution(
+    enabled=lambda *, config, runtime_paths, **_kwargs: background_tool_jobs_enabled(config, runtime_paths),
+)
+async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cleanup boundaries.
     *,
     member_names: tuple[str, ...],
     mode: TeamMode,
@@ -2700,6 +2702,7 @@ async def continue_paused_team_run(
         if scope is None:
             msg = "Paused team history is no longer available"
             raise RuntimeError(msg)
+        set_consumption_storage(scope.storage_factory)
         session = scope.session
         persisted = session.get_run(run_id) if isinstance(session, TeamSession) else None
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
@@ -2727,9 +2730,7 @@ async def continue_paused_team_run(
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
-            session_id=session_id,
             refresh_scheduler=refresh_scheduler,
-            dynamic_tool_continuation=True,
             supports_native_tool_approval=True,
             active_model_names=member_model_names,
             required_tool_names={name: task.result() for name, task in required_tool_tasks.items()},
@@ -2828,17 +2829,20 @@ async def continue_paused_team_run(
             ),
         )
     finally:
-        with stack:
-            _register_team_notice_storage(
-                scope_context=scope,
-                session_id=session_id,
-                entity_name=configured_team_name,
-            )
-            close_team_runtime_state_dbs(
-                agents=members.agents if members is not None else [],
-                team_db=cast("BaseDb | None", team.db) if team is not None else None,
-                shared_scope_storage=scope.storage if scope is not None else None,
-            )
+        try:
+            await finalize_consumption()
+        finally:
+            with stack:
+                _register_team_notice_storage(
+                    scope_context=scope,
+                    session_id=session_id,
+                    entity_name=configured_team_name,
+                )
+                close_team_runtime_state_dbs(
+                    agents=members.agents if members is not None else [],
+                    team_db=cast("BaseDb | None", team.db) if team is not None else None,
+                    shared_scope_storage=scope.storage if scope is not None else None,
+                )
 
 
 async def prepare_materialized_team_execution(
@@ -2861,8 +2865,13 @@ async def prepare_materialized_team_execution(
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    turn_recorder: TurnRecorder | None = None,
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
+    ctx = replace(
+        ctx,
+        transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items),
+    )
     if ctx.system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(ctx.system_enrichment_items)
         _append_additional_context(team, rendered_system_context)
@@ -2898,6 +2907,7 @@ async def prepare_materialized_team_execution(
         pipeline_timing=pipeline_timing,
     )
     prepared_history = prepared_execution.prepared_history
+    bind_compaction_lifecycle(team, compaction_lifecycle, turn_recorder)
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)
@@ -2909,9 +2919,8 @@ async def prepare_materialized_team_execution(
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
-        tools_schema=team_tool_definition_payloads_for_logging(team),
         model_params=model_params_payload(team.model) if team.model is not None else {},
-        extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
+        extra_metadata=deep_merge_metadata(without_fold_records(ctx.matrix_run_metadata), run_extra_content),
     )
     return _PreparedMaterializedTeamExecution(
         messages=prepared_execution.messages,
@@ -2994,7 +3003,6 @@ async def team_response(  # noqa: C901, PLR0915
             agent_names,
             orchestrator,
             execution_identity,
-            session_id=ctx.session_id,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
@@ -3009,6 +3017,7 @@ async def team_response(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_name,
+        background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
             unavailable_bases,
@@ -3023,7 +3032,7 @@ async def team_response(  # noqa: C901, PLR0915
 
     async def _run_team_attempt(  # noqa: C901, PLR0912, PLR0915
         run: TurnRunState,
-        continuation_state: DynamicContinuationRunState,
+        continuation_state: TurnContinuationRunState,
     ) -> BlockingAttemptResolution:
         """Run one prepared team attempt."""
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
@@ -3036,7 +3045,6 @@ async def team_response(  # noqa: C901, PLR0915
             agent_names,
             orchestrator,
             execution_identity,
-            session_id=ctx.session_id,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
         )
@@ -3081,6 +3089,7 @@ async def team_response(  # noqa: C901, PLR0915
             configured_team_name=configured_team_name,
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             pipeline_timing=pipeline_timing,
+            turn_recorder=turn_recorder,
         )
         run_input = prepared_execution.run_input
         run.unseen_event_ids = prepared_execution.unseen_event_ids
@@ -3466,7 +3475,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
             requested_agent_names,
             orchestrator,
             execution_identity,
-            session_id=ctx.session_id,
             unavailable_bases=unavailable_bases,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
@@ -3481,6 +3489,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_label,
+        background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
             unavailable_bases,
@@ -3495,7 +3504,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
     async def _run_team_stream_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
-        continuation_state: DynamicContinuationRunState,
+        continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[_TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt, ending with its ``AttemptResolved`` sentinel."""
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
@@ -3508,7 +3517,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
             requested_agent_names,
             orchestrator,
             execution_identity,
-            session_id=ctx.session_id,
             reason_prefix=reason_prefix,
             configured_team_name=configured_team_name,
         )
@@ -3553,6 +3561,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             configured_team_name=configured_team_name,
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             pipeline_timing=pipeline_timing,
+            turn_recorder=turn_recorder,
         )
         run_input = prepared_execution.run_input
         run.unseen_event_ids = prepared_execution.unseen_event_ids
@@ -3812,7 +3821,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 # The driver emits response_text only after settling the
                 # attempt: a pre-settle yield would leak the fallback
                 # placeholder before an empty-run retry, or stale
-                # first-attempt text before a dynamic-tool continuation.
+                # first-attempt text before a same-turn continuation.
                 yield AttemptResolved(
                     CompletedAttempt(
                         response_text=response_text,

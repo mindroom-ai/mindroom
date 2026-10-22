@@ -39,9 +39,7 @@ from mindroom.mcp.results import tool_result_from_call_result
 from mindroom.mcp.surface_projection import (
     MCPFunctionSurfaceContext,
     MCPScopedFunctionState,
-    function_collision_messages,
     function_collision_reports,
-    mcp_tool_unavailable_messages,
     scoped_oauth_state_has_configured_agent,
 )
 from mindroom.mcp.transports import build_transport_handle
@@ -68,6 +66,7 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
+from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
@@ -1176,11 +1175,16 @@ class MCPServerManager:
             msg = f"MCP server '{state.server_id}' is not connected"
             raise MCPConnectionError(state.server_id, msg)
         try:
-            result = await session.call_tool(
-                remote_tool_name,
-                arguments=arguments,
-                read_timeout_seconds=timeout_seconds,
-                progress_callback=progress_callback,
+            # The SDK keeps the context each request is sent from until the session's next message, and a
+            # turn's contextvars hold its Agent and tools; awaiting the task still forwards cancellation.
+            result = await asyncio.create_task(
+                session.call_tool(
+                    remote_tool_name,
+                    arguments=arguments,
+                    read_timeout_seconds=timeout_seconds,
+                    progress_callback=progress_callback,
+                ),
+                context=Context(),
             )
         except Exception as exc:
             raise self._wrap_runtime_exception(state.server_id, exc) from exc
@@ -1505,9 +1509,11 @@ class MCPServerManager:
         filtered_tools: list[MCPDiscoveredTool] = []
         function_names: set[str] = set()
         for tool in discovered_tools:
-            if exclude_tools and tool.name in exclude_tools:
-                continue
-            if include_tools and tool.name not in include_tools:
+            if not tool_name_allowed(
+                tool.name,
+                include=include_tools or None,
+                exclude=exclude_tools or None,
+            ):
                 continue
             try:
                 function_name = validate_mcp_function_name(
@@ -1776,7 +1782,11 @@ class MCPServerManager:
             sorted(
                 tool.remote_name
                 for tool in catalog.tools
-                if (not included or tool.remote_name in included) and (not excluded or tool.remote_name not in excluded)
+                if tool_name_allowed(
+                    tool.remote_name,
+                    include=included or None,
+                    exclude=excluded or None,
+                )
             ),
         )
         if remote_tool_name not in available_tools:
@@ -1957,53 +1967,6 @@ class MCPServerManager:
             marked_states = self._mark_function_name_collision_errors(errors_by_state)
         await self._disconnect_function_validation_states(marked_states)
         return {state.server_id for state in marked_states}
-
-    def mcp_tool_unavailable_messages_for_loaded_tools(
-        self,
-        agent_name: str,
-        loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str],
-    ) -> list[str]:
-        """Return unavailable non-OAuth MCP server messages for a candidate loaded dynamic-tool state."""
-        context = self._function_surface_context()
-        if context is None:
-            return []
-        return mcp_tool_unavailable_messages(context, agent_name, loaded_tools)
-
-    def function_name_collision_messages_for_loaded_tools(
-        self,
-        agent_name: str,
-        loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str],
-        *,
-        worker_target: ResolvedWorkerTarget | None = None,
-    ) -> list[str]:
-        """Return collision messages for a candidate loaded dynamic-tool state."""
-        context = self._function_surface_context()
-        if context is None:
-            return []
-        credential_surfaces: set[MCPOAuthCredentialScope] = set()
-        if worker_target is not None:
-            for server_id in sorted(self._states):
-                state = self._states[server_id]
-                if state.config.auth is None:
-                    continue
-                canonical_target = self._oauth_credential_context(
-                    state,
-                    worker_target=worker_target,
-                ).worker_target
-                try:
-                    credential_surface = _resolved_oauth_scope(
-                        canonical_target,
-                        provider_id=state.oauth_provider_id or server_id,
-                    )
-                except OAuthConnectionRequired:
-                    continue
-                credential_surfaces.add(credential_surface)
-        return function_collision_messages(
-            context,
-            agent_name,
-            loaded_tools,
-            credential_surfaces=credential_surfaces,
-        )
 
     @classmethod
     def _runtime_exception_message(cls, exc: BaseException) -> str:

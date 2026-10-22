@@ -18,17 +18,19 @@ import pytest
 from mindroom.automations.dreaming import check_dreaming
 from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.automations import DreamingAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 TODAY = datetime.now(UTC).date()
 YESTERDAY = f"memory/{TODAY - timedelta(days=1)}.md"
@@ -62,26 +64,63 @@ def _dreaming_clock_on_today(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("mindroom.automations.dreaming.datetime", _ClockOnToday)
 
 
+ALICE = "@alice:example.test"
+
+
 class _Workspace:
-    """An agent with file memory, its config, and helpers to play the dream and review runs."""
+    """An agent with file memory, or one requester's private instance of it, and helpers to play the dream and review runs."""
 
-    def __init__(self, tmp_path: Path, **agent_fields: object) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        requester_id: str | None = None,
+        private_context_files: list[str] | None = None,
+        **agent_fields: object,
+    ) -> None:
         self.tmp_path = tmp_path
+        self.requester_id = requester_id
+        self.private_context_files = private_context_files
         self.agent_fields = agent_fields
-        self.config, self.paths, self.root = self._build()
+        self.config, self.paths, self.identity, self.root = self._build()
+        self.state_dir = (
+            automations_tracking_root(self.paths) / "mind"
+            if requester_id is None
+            else tmp_path / "tracking" / "instance-automations"
+        )
 
-    def _build(self) -> tuple[Config, RuntimePaths, Path]:
+    def _build(self) -> tuple[Config, RuntimePaths, ToolExecutionIdentity | None, Path]:
+        private = (
+            None
+            if self.requester_id is None
+            else AgentPrivateConfig(per="user_agent", context_files=self.private_context_files)
+        )
         agent = AgentConfig(
             display_name="Mind",
             memory_backend="file",
+            private=private,
             automations=[DreamingAutomation()],
             **self.agent_fields,
         )
-        config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
+        config = Config(
+            agents={"mind": agent},
+            rooms={"lobby": {}},
+            personal_rooms={"agent": "mind", "onboarding_rooms": ["lobby"]},
+            router=RouterConfig(model="default"),
+        )
         paths = resolve_runtime_paths(config_path=self.tmp_path / "config.yaml", storage_path=self.tmp_path)
-        root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+        identity = (
+            None
+            if self.requester_id is None
+            else build_requester_execution_identity(
+                agent_name="mind",
+                runtime_paths=paths,
+                requester_id=self.requester_id,
+            )
+        )
+        root = resolve_agent_runtime("mind", config, paths, identity, create=True).file_memory_root
         assert root is not None
-        return config, paths, root
+        return config, paths, identity, root
 
     def write(self, path: str, text: str, *, age: timedelta = timedelta()) -> None:
         target = self.root / path
@@ -103,8 +142,10 @@ class _Workspace:
                 entry=entry,
                 options={},
                 settings={},
+                requester_id=self.requester_id,
+                execution_identity=self.identity,
                 workspace=self.root,
-                state_dir=automations_tracking_root(self.paths) / "mind",
+                state_dir=self.state_dir,
             ),
         )
 
@@ -148,17 +189,18 @@ class _Workspace:
             if done.on_loop is not None:
                 done.on_loop()
         self.refreshed = refresh.called
+        self.refresh_call = refresh.call_args
         return done
 
     def state(self) -> dict[str, object]:
-        path = self.tmp_path / "tracking" / "automations" / "mind" / "dreaming.json"
+        path = self.state_dir / "dreaming.json"
         if not path.exists():
             return {"reviewed": {}, "attempted": {}, "pending_run": None, "latest_run": None}
         return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _workspace(tmp_path: Path, **agent_fields: object) -> _Workspace:
-    workspace = _Workspace(tmp_path, **agent_fields)
+def _workspace(tmp_path: Path, **fields: object) -> _Workspace:
+    workspace = _Workspace(tmp_path, **fields)
     workspace.write("memory/projects.md", PROJECTS, age=timedelta(days=30))
     return workspace
 
@@ -773,3 +815,51 @@ def test_a_linked_memory_directory_fails_the_check_loudly(tmp_path: Path) -> Non
 
     with pytest.raises(OSError):  # noqa: PT011 - the platform names the error
         workspace.check()
+
+
+# Private instances
+
+
+def test_a_private_instance_keeps_its_progress_in_the_state_dir_it_is_given(tmp_path: Path) -> None:
+    """Each requester's instance has its own progress, so one requester's reviewed inputs never hide another's."""
+    workspace = _workspace(tmp_path, requester_id=ALICE)
+    workspace.write(EXPORT, "messages: [hello]\n")
+
+    _started(workspace)
+
+    assert EXPORT in workspace.state()["attempted"]
+    assert not (automations_tracking_root(workspace.paths) / "mind").exists()
+
+
+def test_an_applied_private_proposal_refreshes_the_requesters_memory_search(tmp_path: Path) -> None:
+    """The re-index resolves the requester's instance, not the shared agent's."""
+    workspace = _workspace(tmp_path, requester_id=ALICE)
+    workspace.write(EXPORT, "messages: [Sam moved to Utrecht]\n")
+    ask = _started(workspace)
+    workspace.stage("memory/projects.md", PROJECTS + "- Sam moved to Utrecht.\n")
+    review = workspace.dream(ask)
+
+    done = workspace.review(review, "VERDICT: APPROVE")
+
+    assert done.notice.startswith("✅ Dreaming applied")
+    assert workspace.refresh_call.args == (
+        "mind",
+        workspace.root,
+        workspace.config,
+        workspace.paths,
+        build_requester_execution_identity(agent_name="mind", runtime_paths=workspace.paths, requester_id=ALICE),
+    )
+
+
+def test_a_private_context_file_is_outside_what_a_private_run_may_change(tmp_path: Path) -> None:
+    """A private agent's own context files load into every prompt, so dreaming never proposes changes to them."""
+    workspace = _workspace(tmp_path, requester_id=ALICE, private_context_files=["memory/profile.md"])
+    workspace.write(EXPORT, "messages: [hello]\n")
+    ask = _started(workspace)
+    workspace.stage("memory/profile.md", "New text.\n")
+
+    done = workspace.dream(ask)
+
+    assert isinstance(done, Done)
+    assert done.notice.startswith("⚠️ Dreaming stopped:")
+    assert "memory/profile.md is outside what this run may change" in done.notice

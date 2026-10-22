@@ -5,13 +5,15 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from mindroom.api import config_lifecycle, connections
+from mindroom.api.connections_session_cookie import connections_session_cookie, issue_connections_session
 from tests.api.test_mcp_gateway_api import (
     MCP_HEADERS,
     ORIGIN,
@@ -68,14 +70,14 @@ def paginated_client(gateway_app: FastAPI) -> Iterator[TestClient]:
         yield client
 
 
-def _provision(client: TestClient, user: str) -> str:
+def _provision(client: TestClient, user: str, *, domain: str = "example.org", active: bool = True) -> str:
     response = client.post(
         SCIM,
         headers={"Authorization": f"Bearer {SCIM_TOKEN}"},
         json={
             "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
-            "userName": f"{user}@example.org",
-            "active": True,
+            "userName": f"{user}@{domain}",
+            "active": active,
         },
     )
     assert response.status_code == 201, response.text
@@ -127,6 +129,88 @@ def test_unavailable_mcp_account_preserves_connections_without_granting_access(
         assert denied.status_code == 403
     _, consent_url = _authorize(managed_client)
     assert managed_client.get(consent_url, headers=headers).status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("session_user", "env_change", "accounts", "enabled"),
+    [
+        ("alice", "template", [{}], True),
+        ("bob", "template", [{}], False),
+        ("alice", "template", [{"active": False}], False),
+        ("alice", None, [{}], False),
+        ("alice", "template", [{}, {"domain": "EXAMPLE.ORG"}], False),
+        ("alice", "template", [{"user": "Alice"}], False),
+        ("alice", "template", [{"domain": "other.org"}], False),
+        ("alice", "template", [{"user": "bob", "domain": "other.org"}, {}], True),
+        ("alice", "template+signed-claim", [{}], False),
+        ("alice", "template+header", [{}], True),
+    ],
+    ids=[
+        "mapped",
+        "other-user",
+        "inactive",
+        "no-email-mapping",
+        "ambiguous",
+        "localpart-case",
+        "outside-domain",
+        "outside-domain-skipped",
+        "signed-matrix-claim-wins",
+        "strict-jwt-header-must-agree",
+    ],
+)
+def test_portal_session_finds_the_account_its_email_mapping_names(
+    gateway_app: FastAPI,
+    managed_client: TestClient,
+    session_user: str,
+    env_change: str | None,
+    accounts: list[dict[str, Any]],
+    enabled: bool,
+) -> None:
+    """A Chat-opened portal has no email, so the one account whose email maps to its Matrix user owns MCP access."""
+    snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
+    env = dict(snapshot.runtime_paths.process_env)
+    if env_change is None or "signed-claim" not in env_change:
+        # Upstream logins take a signed Matrix claim over the email template, which then decides nothing.
+        del env["MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"]
+    if env_change is not None:
+        env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE"] = "@{localpart}:example.org"
+        env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"] = "example.org"
+    if env_change == "template+header":
+        # Under strict JWT a Matrix ID header must equal what the template gives, so the template still decides.
+        env["MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"] = "X-Trusted-Matrix-User"
+    snapshot.runtime_paths = replace(snapshot.runtime_paths, process_env=env)
+    gateway_app.include_router(connections.router)
+    for account in accounts:
+        _provision(managed_client, **{"user": "alice", **account})
+    managed_client.cookies.set(
+        connections_session_cookie(ORIGIN),
+        issue_connections_session(f"@{session_user}:example.org", now=time.time(), dashboard=False),
+    )
+
+    selection = managed_client.get("/api/connections/mcp/selection")
+    clients = managed_client.get(CLIENTS)
+    saved = managed_client.post(
+        "/api/connections/mcp/selection",
+        headers={"Origin": ORIGIN},
+        json={"agents": {"personal": None}},
+    )
+
+    assert selection.status_code == 200, selection.text
+    assert selection.json()["enabled"] is enabled
+    assert ("unavailable_reason" in selection.json()) is not enabled
+    assert clients.status_code == 200, clients.text
+    assert clients.json()["enabled"] is enabled
+    assert saved.status_code == (200 if enabled else 403), saved.text
+    if enabled:
+        # The session also approves and revokes the account's MCP clients, as an upstream login with its email can.
+        token = _connect(managed_client, {})["access_token"]
+        assert _list(managed_client, token).status_code == 200
+        revoked = managed_client.post(f"{CLIENTS}/revoke-all", headers={"Origin": ORIGIN}, json={})
+        assert revoked.status_code == 200, revoked.text
+        assert _list(managed_client, token).status_code == 401
+    else:
+        _, consent_url = _authorize(managed_client)
+        assert managed_client.get(consent_url).status_code == 403
 
 
 def test_client_management_is_owner_scoped_and_preserves_other_client_access(

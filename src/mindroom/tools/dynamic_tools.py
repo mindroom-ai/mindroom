@@ -1,7 +1,7 @@
 """Dynamic-tools metadata registration.
 
 Registers the ``dynamic_tools`` control-plane tool for UI visibility.
-The actual toolkit requires agent and session context and is instantiated
+The actual toolkit searches the agent's deferred toolkits and is instantiated
 directly in ``create_agent()``, so it is NOT added to ``TOOL_REGISTRY``.
 """
 
@@ -19,7 +19,7 @@ register_builtin_tool_metadata(
         name="dynamic_tools",
         file_access=ToolFileAccess.NONE,
         display_name="Dynamic Tools",
-        description="Load and unload deferred tools for the current session",
+        description="Search deferred tools and call them",
         category=ToolCategory.DEVELOPMENT,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,
@@ -27,6 +27,6 @@ register_builtin_tool_metadata(
         icon_color="text-sky-500",
         config_fields=[],
         dependencies=[],
-        function_names=("list_tools", "load_tool", "unload_tool", "tool_search"),
+        function_names=("tool_search", "call_tool"),
     ),
 )

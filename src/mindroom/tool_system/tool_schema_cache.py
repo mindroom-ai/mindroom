@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass
 from inspect import isfunction
 from threading import Lock
@@ -100,3 +101,38 @@ def clear_tool_schema_cache() -> None:
     """Clear cached schemas after plugin or tool code changes."""
     with _SCHEMA_CACHE_LOCK:
         _SCHEMA_CACHE.clear()
+
+
+def processed_function_definition(function: Function) -> dict[str, object]:
+    """Return one model-facing definition with a processed schema, never mutating the input."""
+    if function.skip_entrypoint_processing or function.entrypoint is None:
+        return live_function_definition(function)
+    effective_strict = False if function.strict is None else function.strict
+    snapshot = cached_processed_schema(function, strict=effective_strict)
+    if snapshot is None:
+        prepared_function = function.model_copy(deep=True)
+        prepared_function.process_entrypoint(strict=effective_strict)
+        return {
+            "name": prepared_function.name,
+            "description": prepared_function.description or "",
+            "parameters": prepared_function.parameters or default_function_parameters(),
+        }
+    return {
+        "name": function.name,
+        "description": snapshot.description or "",
+        "parameters": snapshot.parameters or default_function_parameters(),
+    }
+
+
+def live_function_definition(function: Function) -> dict[str, object]:
+    """Return one model-facing definition from a Function's current schema fields."""
+    return {
+        "name": function.name,
+        "description": function.description or "",
+        "parameters": deepcopy(function.parameters) if function.parameters else default_function_parameters(),
+    }
+
+
+def default_function_parameters() -> dict[str, object]:
+    """Return the parameters schema of a function without arguments."""
+    return {"type": "object", "properties": {}, "required": []}

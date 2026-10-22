@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import os
 import shlex
 import signal
@@ -13,7 +14,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.shell.execution import ProcessRecord, kill_all_records, kill_command, run_command, signal_record
+from mindroom.shell.execution import (
+    ProcessRecord,
+    check_command,
+    kill_all_records,
+    kill_command,
+    run_command,
+    signal_record,
+)
 from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
 
 if TYPE_CHECKING:
@@ -61,6 +69,36 @@ async def _run(registry: dict[str, ProcessRecord], argv: list[str], cwd: Path, *
     )
     assert result.handle is None
     return result.message
+
+
+@pytest.mark.asyncio
+async def test_a_finished_handle_is_swept_ten_minutes_after_it_finished_however_long_it_ran(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """Desktop shell and script handles stay readable for ten minutes after their command ends."""
+    finished = await run_command(
+        registry,
+        namespace="test",
+        argv=["echo", "long-output"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=10,
+        register_finished=True,
+    )
+    assert finished.handle is not None
+    record = registry[finished.handle]
+    # It started long ago but finished just now.
+    record.started_at -= 900
+
+    await _run(registry, ["true"], tmp_path)
+    assert "long-output" in check_command(registry, namespace="test", handle=finished.handle)
+
+    assert record.finished_at is not None
+    record.finished_at -= 700
+    await _run(registry, ["true"], tmp_path)
+    assert finished.handle not in registry
 
 
 async def _wait_until_gone(pid: int) -> bool:
@@ -141,12 +179,12 @@ async def test_default_foreground_exit_keeps_background_children_and_seam_kills_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kill_group_after_exit", [False, True])
-async def test_seam_kills_term_resistant_group_member_when_foreground_is_cancelled(
+async def test_cancelling_a_running_command_kills_its_term_resistant_group_members(
     registry: dict[str, ProcessRecord],
     tmp_path: Path,
     kill_group_after_exit: bool,
 ) -> None:
-    """Cancelling the foreground removes descendants that ignore the polite stop only with the seam."""
+    """Cancelling a command that still runs stops its whole process group, including members that ignore SIGTERM."""
     script = (
         "import os, pathlib, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
         "pathlib.Path('child.pid').write_text(str(os.getpid())); time.sleep(30)"
@@ -163,10 +201,7 @@ async def test_seam_kills_term_resistant_group_member_when_foreground_is_cancell
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        if kill_group_after_exit:
-            assert await _wait_until_gone(child)
-        else:
-            os.kill(child, 0)
+        assert await _wait_until_gone(child)
     finally:
         if pid_file.exists() and pid_file.read_text():
             with contextlib.suppress(ProcessLookupError):
@@ -196,12 +231,12 @@ async def test_caller_capture_receives_exit_code_and_full_spool(
 
 
 @pytest.mark.asyncio
-async def test_signal_record_reports_delivery_and_kill_command_messages_stay_the_same(
+async def test_signal_record_reports_delivery_and_kill_command_names_the_signal(
     registry: dict[str, ProcessRecord],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Callers learn whether a signal reached the group, while kill_command keeps its exact wording."""
+    """Callers learn whether a signal reached the group, and kill_command says which signal it sent."""
     capture = _RecordingCapture(tmp_path)
     try:
         started = await run_command(
@@ -228,7 +263,7 @@ async def test_signal_record_reports_delivery_and_kill_command_messages_stay_the
             )
         assert capture.incomplete is False
         assert kill_command(registry, namespace="test", handle=started.handle) == (
-            f"Terminated process {record.pid} (SIGTERM sent). Use check_shell_command('{started.handle}') to confirm exit."
+            f"Terminated process {record.pid} (SIGTERM sent)."
         )
         assert capture.incomplete is True
         assert await _wait_until_gone(record.pid)
@@ -267,3 +302,107 @@ async def test_register_finished_keeps_a_command_that_finished_in_time_as_a_fini
         assert list(registry) == [result.handle]
     finally:
         capture.release()
+
+
+_TERM_IGNORING_CHILD = (
+    "import os, pathlib, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "pathlib.Path('child.pid').write_text(str(os.getpid())); time.sleep(30)"
+)
+
+
+@pytest.mark.asyncio
+async def test_a_command_past_its_timeout_is_stopped_with_its_output_so_far(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """A stopped command returns what it printed on both streams, says it was stopped, and leaves no handle."""
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "echo started; echo warming up >&2; sleep 30"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=0.5,
+        on_timeout="kill",
+    )
+
+    assert result.handle is None
+    assert result.message == "Stopped after 0.5s.\nOutput:\nstarted\nStderr:\nwarming up"
+    assert registry == {}
+
+
+@pytest.mark.asyncio
+async def test_stopping_a_command_kills_a_child_that_ignores_sigterm_after_its_leader_exited(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """The leader dies of SIGTERM at the stop; a group member that ignores it is killed anyway."""
+    child_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(_TERM_IGNORING_CHILD)} >/dev/null 2>&1 &"
+    pid_file = tmp_path / "child.pid"
+    try:
+        result = await run_command(
+            registry,
+            namespace="test",
+            argv=["/bin/sh", "-c", f"{child_command} sleep 30"],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=100,
+            timeout=1,
+            on_timeout="kill",
+        )
+
+        assert result.message.startswith("Stopped after 1s.")
+        assert await _wait_until_gone(int(pid_file.read_text()))
+    finally:
+        if pid_file.exists() and pid_file.read_text():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_a_command_without_a_timeout_runs_until_it_ends(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+) -> None:
+    """No timeout means no limit, for a command that would be stopped at any short one."""
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "sleep 0.3; echo done"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=None,
+        on_timeout="kill",
+    )
+
+    assert result.message == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_running_command_reports_its_latest_output_as_progress(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While it runs, a command reports the tail of both streams when it changed, never the same text twice."""
+    monkeypatch.setattr("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1)
+    reports: list[str] = []
+
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=["/bin/sh", "-c", "echo one; sleep 0.5; echo two; echo warn >&2; sleep 0.5"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=10,
+        on_timeout="kill",
+        on_progress=reports.append,
+    )
+
+    assert result.message == "one\ntwo"
+    assert reports[0] == "one"
+    assert reports[-1] == "one\ntwo\nStderr:\nwarn"
+    assert all(earlier != later for earlier, later in itertools.pairwise(reports))

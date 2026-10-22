@@ -1078,14 +1078,15 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     assert orchestrator.reconcile_reply_authorized_calls.await_count == 3
 
 
-def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Path) -> None:
     """Call admission is rechecked for call-state and underlying room-member changes."""
     bot = _agent_bot(tmp_path)
     client = MagicMock(spec=nio.AsyncClient)
     call_manager = MagicMock()
 
-    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
-        bot._register_call_manager_callbacks(client)
+    with patch("mindroom.bot.maybe_build_call_manager", new=AsyncMock(return_value=call_manager)):
+        await bot._register_call_manager_callbacks(client)
 
     assert bot._call_manager is call_manager
     client.add_event_callback.assert_not_called()
@@ -1135,8 +1136,8 @@ async def test_call_manager_room_callbacks_run_without_legacy_delivery_provenanc
         "org.matrix.msc3401.call.member",
     )
 
-    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
-        bot._register_call_manager_callbacks(client)
+    with patch("mindroom.bot.maybe_build_call_manager", new=AsyncMock(return_value=call_manager)):
+        await bot._register_call_manager_callbacks(client)
 
     await bot._journal_dispatcher.callbacks.on_room_lifecycle(room, membership_event)
     rtc_callback = bot._journal_dispatcher.callbacks.on_rtc
@@ -1147,13 +1148,14 @@ async def test_call_manager_room_callbacks_run_without_legacy_delivery_provenanc
     call_manager.on_room_event.assert_awaited_once_with(room, call_event)
 
 
-def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: Path) -> None:
     """Persisted ad-hoc ownership is cleaned even when voice dependencies are absent."""
     bot = _agent_bot(tmp_path)
     client = MagicMock(spec=nio.AsyncClient)
 
-    with patch("mindroom.bot.maybe_build_call_manager", return_value=None):
-        bot._register_call_manager_callbacks(client)
+    with patch("mindroom.bot.maybe_build_call_manager", new=AsyncMock(return_value=None)):
+        await bot._register_call_manager_callbacks(client)
 
     assert bot._call_manager is None
     client.add_event_callback.assert_not_called()

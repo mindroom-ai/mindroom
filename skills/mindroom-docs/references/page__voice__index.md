@@ -3,9 +3,9 @@
 This page covers Matrix voice messages sent to agents and teams: speech-to-text (STT) setup, transcript cleanup, what appears in the room, and what happens without STT.
 For live spoken conversations in Matrix calls, see [Voice Calls](https://docs.mindroom.chat/voice-calls/).
 
-<video controls playsinline preload="metadata" aria-label="A voice message becomes a reminder" style="width: 100%" poster="https://github.com/user-attachments/assets/d8829350-12c9-4045-aed0-4a5a5127213c" data-poster-light="https://github.com/user-attachments/assets/d8829350-12c9-4045-aed0-4a5a5127213c" data-poster-dark="https://github.com/user-attachments/assets/9ec1837a-3566-4b0c-8274-7af7c30b988c">
-  <source src="https://github.com/user-attachments/assets/823df173-50ae-4304-b652-36a61bfbc911" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/f048c8cc-3384-41e2-be59-000d3ab22099" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A voice message becomes a reminder" style="width: 100%" poster="https://github.com/user-attachments/assets/5b7b4f52-ea23-415c-b2d5-50b3fbbb7bc1" data-poster-light="https://github.com/user-attachments/assets/5b7b4f52-ea23-415c-b2d5-50b3fbbb7bc1" data-poster-dark="https://github.com/user-attachments/assets/3fb56349-ad0f-435d-be4e-6c95860e7b9a">
+  <source src="https://github.com/user-attachments/assets/4c49c8f1-2b87-45a1-949a-b165d0e18c1a" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/f91d0d7f-b8b0-4039-9fda-c7a9caed7534" type="video/mp4">
 </video>
 
 With voice enabled, MindRoom transcribes each voice message, cleans up the transcript, and handles it like a text message prefixed with `🎤`.

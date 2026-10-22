@@ -1873,6 +1873,8 @@ def _update_helper(**fields: object) -> Callable[[dict[str, Any]], object]:
         ),
         pytest.param(_update_helper(participation={"decline_reaction": "👍"}), "helper", id="participation"),
         pytest.param(_update_helper(mid_turn={"judgment": {"provider": "typesafe"}}), "helper", id="mid-turn"),
+        pytest.param(_update_helper(cheap_model="fast"), "helper", id="cheap-model"),
+        pytest.param(_update_helper(cheap_model="fast", cold_cache={}), "helper", id="cold-cache"),
         pytest.param(_update_helper(access={"users": ["@alice:localhost"]}), "helper", id="access"),
         pytest.param(lambda data: data["teams"]["crew"].update(mode="collaborate"), "crew", id="team-mode"),
         pytest.param(lambda data: data["teams"]["crew"].update(agents=["helper", "other"]), "crew", id="team-members"),
@@ -1935,7 +1937,8 @@ def test_config_update_plan_restarts_a_stopped_bot_for_any_edit(
     assert plan.live_updated_entities == set()
 
 
-def test_config_update_plan_restarts_running_entities_when_construction_prompts_change() -> None:
+@pytest.mark.parametrize("prompt_name", ["HIDDEN_TOOL_CALLS_PROMPT", "DELEGATE_BACKGROUND_JOB_INSTRUCTIONS"])
+def test_config_update_plan_restarts_running_entities_when_construction_prompts_change(prompt_name: str) -> None:
     """Construction-time root prompt overrides should restart running agents, teams, and router."""
     old_config = _runtime_bound_config(
         Config(
@@ -1961,7 +1964,7 @@ def test_config_update_plan_restarts_running_entities_when_construction_prompts_
                 ),
             },
             router=RouterConfig(model="default"),
-            prompts={"HIDDEN_TOOL_CALLS_PROMPT": "Custom hidden tool-call prompt."},
+            prompts={prompt_name: "Custom construction-time prompt."},
         ),
     )
 
@@ -2261,6 +2264,21 @@ def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_
     )
 
     assert plan.entities_to_restart & {"general", "writer"} == expected_call_restarts | in_call
+
+
+def test_a_knowledge_graph_change_leaves_an_agent_in_a_call_running() -> None:
+    """Starting the graphs over does not end a call in progress, which keeps the graphs it joined with."""
+    running_entities = {ROUTER_AGENT_NAME, "general", "writer", "helper"}
+
+    plan = build_config_update_plan(
+        current_config=_two_call_agents_config(),
+        new_config=_two_call_agents_config(lambda d: d.update(knowledge_graph={"generation": 1})),
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots=_call_bots(running_entities, in_call={"general"}),
+    )
+
+    assert plan.entities_to_restart == set()
 
 
 def test_config_update_plan_restarts_call_agents_when_administrators_change() -> None:

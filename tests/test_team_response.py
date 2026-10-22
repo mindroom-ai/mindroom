@@ -1877,6 +1877,9 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
             captured_prompts.append((full_prompt, None))
             return 0
 
+        def non_prompt_tokens(self) -> int:
+            return 0
+
     with patch("mindroom.execution_preparation.team_static_token_estimator", FakeTeamStaticTokenEstimator):
         prepared = await _prepare_bound_team_execution_context(
             make_turn_context(),

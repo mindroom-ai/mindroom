@@ -14,6 +14,8 @@ This page lists every command and fully covers `!help`, `!hi`, and `!config`; th
 | `!list_schedules` | List pending scheduled tasks | [Scheduling](https://docs.mindroom.chat/scheduling/#list_schedules) |
 | `!cancel_schedule <id>` | Cancel a scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#cancel_schedule) |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#edit_schedule) |
+| `!jobs` | List the background jobs running in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
+| `!cancel_job <id\|all>` | Cancel a background job by the short ID `!jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](https://docs.mindroom.chat/tools/desktop/#desktop) |
 | `!mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
@@ -101,4 +103,5 @@ When `defaults.show_stop_button` is `true` (the default), MindRoom adds that �
 Setting `show_stop_button: false` hides only that reaction; a 🛑 reaction you add yourself still cancels.
 
 The stop button only works on messages still being generated, and 🛑 reactions from agents are ignored.
+The exception is an agent's [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply) call, which stops a reply on behalf of the user it works for.
 See [Cancellation and Errors](https://docs.mindroom.chat/streaming/#cancellation-and-errors) for how a cancelled response is finalized.

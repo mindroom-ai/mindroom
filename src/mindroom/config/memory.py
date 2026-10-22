@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -69,6 +69,14 @@ class _MemoryEmbedderConfig(BaseModel):
     )
     config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
 
+    @model_validator(mode="after")
+    def _prefixes_need_openai_provider(self) -> Self:
+        """Reject prefixes that the configured provider would silently ignore."""
+        if self.provider != "openai" and (self.config.query_prefix or self.config.document_prefix):
+            msg = "memory.embedder.config.query_prefix and document_prefix apply only to the openai provider"
+            raise ValueError(msg)
+        return self
+
 
 class _MemoryLLMConfig(BaseModel):
     """Memory LLM configuration."""
@@ -116,12 +124,12 @@ class _MemoryAutoFlushBatchConfig(BaseModel):
     max_sessions_per_cycle: int = Field(
         default=10,
         ge=1,
-        description="Maximum sessions processed in one auto-flush loop iteration",
+        description="Maximum conversations flushed in one auto-flush pass, across all agents",
     )
     max_sessions_per_agent_per_cycle: int = Field(
         default=3,
         ge=1,
-        description="Maximum sessions per agent processed in one auto-flush loop iteration",
+        description="Maximum conversations of one agent or private instance flushed in one auto-flush pass",
     )
 
 
@@ -143,6 +151,10 @@ class _MemoryAutoFlushContextConfig(BaseModel):
 class _MemoryAutoFlushExtractorConfig(BaseModel):
     """Extraction limits for one background memory flush job."""
 
+    model: str | None = Field(
+        default=None,
+        description="Model config that runs extraction instead of the agent's own model",
+    )
     no_reply_token: str = Field(
         default="NO_REPLY",
         description="Token indicating no durable memory should be written",
@@ -150,17 +162,17 @@ class _MemoryAutoFlushExtractorConfig(BaseModel):
     max_messages_per_flush: int = Field(
         default=20,
         ge=1,
-        description="Maximum session chat messages considered by one extraction job",
+        description="Maximum new messages read by one extraction job; a longer backlog is read over later passes",
     )
     max_chars_per_flush: int = Field(
         default=12000,
         ge=1,
-        description="Maximum message characters considered by one extraction job",
+        description="Maximum message characters read by one extraction job",
     )
     max_extraction_seconds: int = Field(
         default=30,
         ge=1,
-        description="Timeout for one extraction job before retrying in a later cycle",
+        description="Timeout for one extraction job before retrying in a later pass",
     )
     include_memory_context: _MemoryAutoFlushContextConfig = Field(
         default_factory=_MemoryAutoFlushContextConfig,
@@ -168,39 +180,34 @@ class _MemoryAutoFlushExtractorConfig(BaseModel):
     )
 
 
+# LEGACY_COMPAT: Retired push-model auto-flush settings.
+# Legacy format: memory.auto_flush.max_dirty_age_seconds and memory.auto_flush.max_cross_session_reprioritize, which the dashboard wrote on every save.
+# Last legacy release: v2026.10.335; replacement: v2026.10.336 flushes quiet conversations from stored sessions and removes both fields.
+# Handling: this model ignores unknown fields, so a config that still sets them loads unchanged and the next dashboard save drops them.
+# Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_auto_flush_fields_still_load.
 class MemoryAutoFlushConfig(BaseModel):
     """Background memory auto-flush configuration."""
 
     enabled: bool = Field(default=False, description="Enable background file-memory auto-flush worker")
     flush_interval_seconds: int = Field(
-        default=1800,
+        default=300,
         ge=5,
-        description="Background auto-flush loop interval",
+        description="Time between auto-flush passes",
     )
     idle_seconds: int = Field(
         default=120,
         ge=0,
-        description="Session idle time before dirty session becomes flush-eligible",
-    )
-    max_dirty_age_seconds: int = Field(
-        default=600,
-        ge=1,
-        description="Force flush eligibility once a session remains dirty for this long",
+        description="How long a conversation must be quiet before its new turns are flushed",
     )
     stale_ttl_seconds: int = Field(
         default=86400,
         ge=60,
-        description="Drop stale flush-state entries older than this TTL",
-    )
-    max_cross_session_reprioritize: int = Field(
-        default=5,
-        ge=0,
-        description="Maximum same-agent dirty sessions reprioritized per incoming prompt",
+        description="Give up on turns whose flush has kept failing for this long",
     )
     retry_cooldown_seconds: int = Field(
         default=30,
         ge=1,
-        description="Cooldown before retrying a failed extraction attempt",
+        description="Cooldown before retrying a failed flush",
     )
     max_retry_cooldown_seconds: int = Field(
         default=300,

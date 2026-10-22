@@ -11,11 +11,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
+from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history, projected_thread_history
 from mindroom.thread_summary import current_thread_summary_from_history
 from mindroom.token_budget import approximate_o200k_tokens
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -168,10 +170,10 @@ async def resolve_call_origin_context(  # noqa: PLR0911
     for message in history:
         if message.sender in trusted_sender_ids and isinstance(message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
             continue
-        body = message.body.strip()
+        body = body_without_tool_markers(message.body, message.content).strip()
         if not body:
             continue
-        label = "You" if message.sender == context.client.user_id else member_label(room, message.sender)
+        label = _brief_label(message, room, own_user_id=context.client.user_id, trusted_sender_ids=trusted_sender_ids)
         messages.append(_CallBriefMessage(label=label, body=body))
     return CallOriginContext(
         origin=origin,
@@ -204,6 +206,20 @@ def _thread_title(
         trusted_sender_ids=trusted_sender_ids,
     )
     return None if current_summary is None else current_summary.summary
+
+
+def _brief_label(
+    message: ResolvedVisibleMessage,
+    room: nio.MatrixRoom,
+    *,
+    own_user_id: str,
+    trusted_sender_ids: frozenset[str],
+) -> str:
+    """Label hook output by its hook, so progress posted from the agent's account never reads as the agent's words."""
+    hook_source = hook_source_from_content(message.content) if message.sender in trusted_sender_ids else None
+    if hook_source is not None:
+        return f"{hook_source} hook"
+    return "You" if message.sender == own_user_id else member_label(room, message.sender)
 
 
 def member_label(room: nio.MatrixRoom | None, user_id: str) -> str:

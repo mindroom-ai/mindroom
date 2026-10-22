@@ -70,14 +70,14 @@ MindRoom runs the whole OAuth flow for OAuth-backed tools and MCP servers: conne
 Each connection is stored for one credential scope, so the right person's account is used for each agent.
 Providers, built in or from plugins, supply only provider-specific details such as endpoints, scopes, and client configuration.
 
-<video controls playsinline preload="metadata" aria-label="A user connects an account from the conversation, then the agent answers from it" style="width: 100%" poster="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-light="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-dark="https://github.com/user-attachments/assets/9849b052-508e-409a-867c-cf155a640d31">
-  <source src="https://github.com/user-attachments/assets/c3a4166f-79a4-4ccb-a176-3a7c9922b828" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/62767b38-9729-4277-b615-e2b7b6863234" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A user connects an account from the conversation, then the agent answers from it" style="width: 100%" poster="https://github.com/user-attachments/assets/474025d7-38f7-4695-a838-d75c8404efe0" data-poster-light="https://github.com/user-attachments/assets/474025d7-38f7-4695-a838-d75c8404efe0" data-poster-dark="https://github.com/user-attachments/assets/b54e0d21-18fb-4c85-ad0a-4b8052f7b379">
+  <source src="https://github.com/user-attachments/assets/3d033cc5-268c-4467-a69e-3badddc337a6" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/9ccc5590-0d48-4ddd-8272-28d7d485c21f" type="video/mp4">
 </video>
 
 ### Connect An Account
 
-Users connect an account from the dashboard **Tools** tab, the [Connections portal](deployment/trusted-upstream-auth.md#connections-portal), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
+Users connect an account from the dashboard **Tools** tab, the [Connections portal](connections-portal.md) (opened from MindRoom Chat or signed in through trusted upstream strict JWT auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
 The API routes are:
 
 | Method | Route | Purpose |
@@ -113,13 +113,14 @@ Standalone installs identify the dashboard user through `MINDROOM_OWNER_USER_ID`
 
 Room-independent access comes from `access.users`, administrator authority, or a `members_of_rooms` grant; `access.current_room_members` and team access do not apply, because a browser request has no current room or team.
 Managing a personal connection grants no general dashboard access and no authority over shared credentials.
-With the Connections portal enabled, eligible users manage their connections there, and ordinary dashboard routes require administrator authority.
+Eligible users manage their connections on the Connections portal, and under trusted upstream auth with `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard routes require administrator authority.
+A portal session from MindRoom Chat covers the portal, the OAuth callback for flows it starts, and the OAuth success page, and reaches dashboard routes only for an administrator whose token the homeserver bound to this deployment ([Sessions and dashboard access](connections-portal.md#sessions-and-dashboard-access)).
 Unauthorized connect, authorize, status, disconnect, and callback requests return HTTP 403 before any credential is exposed or changed.
 See [Authorization](authorization.md#platform-and-credential-authority) for administrators and credential managers.
 
 ### Where Connections Are Stored
 
-Providers that store credentials per requester, such as GitHub and Atlassian, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+Providers that store credentials per requester, such as GitHub, Atlassian, and Microsoft 365, always save the token in the requester's `user` scope and never fall back to a shared or global token.
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -130,7 +131,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub and Google OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, and Microsoft 365 OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -139,6 +140,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](tools/project-management.md#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](tools/atlassian.md) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](deployment/google-services-oauth.md) |
+| Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](tools/microsoft-365.md) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](mcp.md#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.
@@ -164,6 +166,9 @@ These rules apply to built-in providers and to providers that plugins register (
 - `pkce_code_challenge_method="S256"` enables PKCE; a custom `token_exchanger` receives `(provider, code, client_config, runtime_paths, code_verifier)` so it can send the verifier.
 - `allowed_email_domains`, `allowed_hosted_domains`, and a custom `claim_validator` restrict which accounts may connect.
   If a restriction cannot be checked from the provider's verified claims, the connection fails and nothing is saved.
+- `account_claims_reader` (callable, default `None`) takes the token data of a finished code exchange and returns verified account claims, such as `{"login": "octo"}`, for a provider whose token response names no account.
+  It runs once per connection, never on refresh, and the callback waits for it, so it should answer within a few seconds; if it raises or returns `{}`, the account still connects, without a label.
+  The Connections pages label the account with the claim `email`, else `login`.
 
 ### Troubleshooting OAuth Connections
 

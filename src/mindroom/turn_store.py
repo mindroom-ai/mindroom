@@ -17,7 +17,7 @@ from mindroom.handled_turns import (
     TurnRecordCodec,
     same_turn_identity,
 )
-from mindroom.history.storage import remove_history_of_redacted_events, remove_run_by_event_id
+from mindroom.history.storage import remove_history_of_redacted_events, remove_runs_answering
 from mindroom.legacy_revision_replay import summary_source_id
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
@@ -656,6 +656,15 @@ class TurnStore:
         """Return exact durable physical-event invalidation."""
         return self._any_source_redacted((revision_id,))
 
+    async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+        """Return which of a room's events are redacted, for readers of stored conversations outside a reply.
+
+        The journal knows every redaction in the room; the ledger's tombstones also outlive a departure
+        that drops the room's journal tombstones.
+        """
+        redacted = await self.deps.redacted_event_ids(room_id, event_ids)
+        return redacted.union(event_id for event_id in event_ids if self._any_source_redacted((event_id,)))
+
     async def redacted_history_events(
         self,
         target: MessageTarget,
@@ -877,8 +886,8 @@ class TurnStore:
     ) -> bool:
         """Remove persisted runs using the exact recorded target and history scope.
 
-        History derived from redacted events goes first, so a compaction rollback
-        cannot restore the turn's old runs after they were pruned.
+        History derived from redacted events goes first, so a loaded run holding a
+        redacted event still retires a legacy summary before the edit removes that run.
         """
         target = turn_record.conversation_target
         scope = turn_record.history_scope
@@ -906,7 +915,7 @@ class TurnStore:
                 _remove_runs_for_sources,
                 storage,
                 target.session_id,
-                session_type,
+                scope,
                 turn_record.indexed_event_ids,
             )
         finally:
@@ -925,22 +934,13 @@ class TurnStore:
 def _remove_runs_for_sources(
     storage: BaseDb,
     session_id: str,
-    session_type: SessionType,
+    scope: HistoryScope,
     source_event_ids: tuple[str, ...],
 ) -> bool:
-    """Remove each source's runs and every run after them; return whether any went."""
+    """Remove what answered each source and everything after it; return whether anything went."""
     removed_any = False
     for source_event_id in source_event_ids:
-        removed_any = (
-            remove_run_by_event_id(
-                storage,
-                session_id,
-                source_event_id,
-                session_type=session_type,
-                remove_following_runs=True,
-            )
-            or removed_any
-        )
+        removed_any = remove_runs_answering(storage, session_id, scope, source_event_id) or removed_any
     return removed_any
 
 

@@ -1735,6 +1735,31 @@ class TestSidecarResolution:
         assert [message.content["body"] for message in page.messages] == [whole]
         assert page.refresh_pending == ()
 
+    async def test_a_resolved_attachment_stores_only_the_fields_readers_use(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The text, its formatting, and MindRoom's metadata are stored; anything else the uploader wrote is not."""
+        source = self._sidecar_source("$long", "preview [Message continues in attached file]", "mxc://s/long")
+        await admit_all(alice, [source])
+        read_fields = {
+            "msgtype": "m.text",
+            "body": "whole",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>whole</p>",
+            "m.mentions": {"user_ids": [BOB]},
+            STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+        }
+        client = FakeClient(
+            events={"$long": source},
+            sidecars={"mxc://s/long": json.dumps({**read_fields, "pad": [1e15] * 10})},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [dict(message.content) for message in page.messages] == [read_fields]
+
     async def test_a_non_strict_read_reports_the_message_as_missing_rather_than_truncated(
         self,
         alice: PrincipalStore,
@@ -1939,6 +1964,54 @@ class TestSidecarResolution:
                 },
             ]
             assert page.refresh_pending == ()
+
+    @pytest.mark.parametrize("nested_layer", [False, True], ids=["whole_edit", "nested_edit_layer"])
+    async def test_a_refetched_long_edit_stores_the_text_it_shows(
+        self,
+        alice: PrincipalStore,
+        nested_layer: bool,
+    ) -> None:
+        """An edit's attachment holds the whole edit, and only its new content is installed.
+
+        The outer body is the ``* `` fallback for clients that do not apply
+        edits, and the new content repeats the text, so installing the whole
+        edit would serve the fallback and store the text twice. A layer nested
+        in the new content is dropped, so a sidecar reference hidden there
+        cannot leave the message owing a refetch.
+        """
+        original = raw("$m", "first answer", ts=1_000)
+        preview = self._sidecar_source("$e1", "The edit beg [continues]", "mxc://s/edit", ts=2_000)
+        edit = {
+            **preview,
+            "content": {
+                "msgtype": "m.text",
+                "body": "* The edit beg [continues]",
+                "m.new_content": preview["content"],
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$m"},
+            },
+        }
+        await admit_all(alice, [original, edit])
+        whole_edit = build_edit_event_content(
+            event_id="$m",
+            new_content={"msgtype": "m.text", "body": "The edit, whole"},
+            new_text="The edit, whole",
+        )
+        if nested_layer:
+            nested = self._sidecar_source("$e2", "nested [continues]", "mxc://s/nested", ts=2_000)["content"]
+            whole_edit["m.new_content"] = {**whole_edit["m.new_content"], "m.new_content": nested}
+        client = FakeClient(
+            events={"$m": original},
+            relations={"$m": [edit]},
+            sidecars={"mxc://s/edit": json.dumps(whole_edit)},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [dict(message.content) for message in page.messages] == [
+            {"msgtype": "m.text", "body": "The edit, whole"},
+        ]
+        assert page.refresh_pending == ()
 
     async def test_an_unreadable_edit_with_a_nested_edit_layer_settles_once(
         self,

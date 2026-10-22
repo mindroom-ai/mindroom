@@ -27,6 +27,7 @@ from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
 import mindroom.knowledge.collections as knowledge_collections_module
+import mindroom.knowledge.indexing_config as knowledge_indexing_config
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.read_proxy as knowledge_read_proxy
 import mindroom.knowledge.registry as knowledge_registry
@@ -38,6 +39,7 @@ from mindroom.embeddings.errors import (
     embedder_failure_is_transient,
     embedder_retry_after_seconds,
 )
+from mindroom.embeddings.signatures import effective_knowledge_embedder_signature, effective_mem0_embedder_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import (
     CandidateCheckpoint,
@@ -74,6 +76,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.status import get_knowledge_index_status
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
+from mindroom.model_defaults import SENTENCE_TRANSFORMERS_DEFAULT
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.knowledge_test_support import chroma_get_result, metadata_matches, validate_where_operands
 
@@ -553,13 +556,14 @@ def _config(
     *,
     chunk_size: int = 5000,
     chunk_overlap: int = 0,
+    memory: dict[str, Any] | None = None,
 ) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=["docs"])},
             models={},
-            memory={},
+            memory=memory or {},
             knowledge_bases={
                 "docs": KnowledgeBaseConfig(
                     path=str(docs_path),
@@ -1350,6 +1354,23 @@ def test_batch_prefetch_embedder_degrades_for_providers_without_batching() -> No
     adapter.clear_cache()
     assert adapter.get_embedding("one") == [3.0, 1.0]
     assert inner.single_requests == ["one", "two", "one"]
+
+
+class _QueryPromptedEmbedder(_NonBatchingEmbedder):
+    """Embedder whose query vectors differ from its document vectors, like a prompted local model."""
+
+    def get_embedding(self, text: str) -> list[float]:
+        del text
+        return [0.0, 0.0]
+
+
+def test_batch_prefetch_embeds_chunks_as_documents() -> None:
+    """Per-chunk prefetch must use the document path, or prompted models index chunks as queries."""
+    inner = _QueryPromptedEmbedder()
+    adapter = BatchPrefetchEmbedder(inner=inner)
+
+    assert adapter.embed_batch_into_cache(["chunk"]) == 1
+    assert adapter.get_embedding_and_usage("chunk") == ([5.0, 1.0], None)
 
 
 # --------------------------------------------------------------------------
@@ -2282,19 +2303,19 @@ def test_per_item_fallback_preserves_order_and_validates_dimensions() -> None:
     widening.supports_batch = False
     adapter = BatchPrefetchEmbedder(inner=widening)
     assert adapter.embed_batch_into_cache(["one"]) == 1
-    original_get = widening.get_embedding
-    widening.get_embedding = lambda text: [*original_get(text), 9.0]  # type: ignore[method-assign]
+    original_get = widening.get_embedding_and_usage
+    widening.get_embedding_and_usage = lambda text: ([*original_get(text)[0], 9.0], None)  # type: ignore[method-assign]
     # Validation guards the path Agno's writer uses, so a widened vector cannot
     # reach the collection even though prefetch treats its own faults as best effort.
     with pytest.raises(EmbedderRequestError, match="3-dimension vector, expected 2"):
-        adapter.get_embedding("two")
+        adapter.get_embedding_and_usage("two")
 
 
 def test_empty_vector_is_rejected_by_the_batch_adapter() -> None:
     """An empty vector is never cached, whatever path produced it."""
     inner = _RecordingEmbedder()
     inner.supports_batch = False
-    inner.get_embedding = lambda _text: []  # type: ignore[method-assign]
+    inner.get_embedding_and_usage = lambda _text: ([], None)  # type: ignore[method-assign]
     adapter = BatchPrefetchEmbedder(inner=inner)
 
     assert adapter.embed_batch_into_cache(["anything"]) == 0, "prefetch leaves it to the per-file path"
@@ -4224,6 +4245,41 @@ async def test_forced_reindex_rebuilds_every_vector_instead_of_copying_it(
 
     assert result.index_published is True
     assert result.indexed_count == 3, "a forced rebuild reused the vectors it was asked to replace"
+    for index in range(3):
+        assert embedder.embedded_count(f"content {index}") == 1
+
+
+@pytest.mark.asyncio
+async def test_local_index_built_before_prompted_embedding_is_rebuilt_not_reused(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local-model vectors from before query and document prompts are incompatible, so none survive a refresh."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    local_embedder = {"provider": "sentence_transformers", "config": {"model": SENTENCE_TRANSFORMERS_DEFAULT}}
+    config = _config(tmp_path, docs_path, memory={"embedder": local_embedder})
+    runtime_paths = runtime_paths_for(config)
+    # Publish under the identity local vectors had before the prompts: the plain model, like Mem0's.
+    monkeypatch.setattr(
+        knowledge_indexing_config,
+        "effective_knowledge_embedder_signature",
+        effective_mem0_embedder_signature,
+    )
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    monkeypatch.setattr(
+        knowledge_indexing_config,
+        "effective_knowledge_embedder_signature",
+        effective_knowledge_embedder_signature,
+    )
+    embedder.embedded_texts.clear()
+
+    assert knowledge_registry.get_published_index("docs", config=config, runtime_paths=runtime_paths).index is None
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 3, "the refresh reused vectors embedded without the model's prompts"
     for index in range(3):
         assert embedder.embedded_count(f"content {index}") == 1
 

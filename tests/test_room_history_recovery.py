@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Self
 import nio
 import pytest
 
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
 from mindroom.event_journal import (
     ConversationCursor,
     DepartureSource,
@@ -25,10 +27,14 @@ from mindroom.matrix.conversation_hydration import (
     ConversationHydrator,
     _HydrationError,
 )
+from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore
 
@@ -1152,3 +1158,34 @@ async def test_expected_membership_mismatch_installs_neither_events_nor_settleme
     assert await principal.room_history_recovery(ROOM) == recovery
     assert (await principal.read_conversation(room_id=ROOM, thread_id=None, limit=10)).messages == ()
     assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+
+async def test_redaction_lookup_repairs_a_room_whose_sync_skipped_a_gap(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """Background readers learn redactions made inside a skipped gap, which only the room's repair journals."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        test_runtime_paths(tmp_path),
+    )
+    agent_user = AgentMatrixUser(agent_name="general", password=TEST_PASSWORD, display_name="General", user_id=BOT)
+    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), journal_store=journal_store)
+    await bot._turn_store.warm()
+    redaction = {
+        "event_id": "$redaction",
+        "sender": ALICE,
+        "origin_server_ts": 2_000,
+        "type": "m.room.redaction",
+        "redacts": "$secret",
+        "content": {},
+    }
+    client = PagedClient(pages=[([redaction], None)])
+    bot.client = client  # type: ignore[assignment]
+    await bot.journal_principal().record_room_history_recovery(ROOM)
+
+    assert await bot.redacted_event_ids(ROOM, ("$kept", "$secret")) == frozenset({"$secret"})
+    assert await bot.journal_principal().room_history_recovery(ROOM) is None
+    # A room without a skipped gap is answered from the journal alone.
+    assert await bot.redacted_event_ids("!quiet:example.org", ("$kept",)) == frozenset()
+    assert client.calls == 1

@@ -17,12 +17,18 @@ from mindroom.entity_resolution import (
     configured_call_agent_name_for_room,
     entity_identity_registry,
     persisted_bot_user_ids,
+    prepared_entity_names_by_user_id,
 )
+from mindroom.matrix import state as matrix_state
+from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 
 def _call_config(tmp_path: Path, **accept_invites_by_agent: bool) -> Config:
@@ -285,7 +291,7 @@ def test_persisted_bot_user_ids_keep_removed_entities_and_skip_internal_user(tmp
     state.save(runtime_paths=runtime_paths)
 
     assert persisted_bot_user_ids(runtime_paths) == frozenset(
-        {"@mindroom_router:server", "@mindroom_retired:server", "@mindroom_legacy:localhost"},
+        {"@mindroom_router:server", "@mindroom_retired:server", "@mindroom_legacy:mindroom.chat"},
     )
 
 
@@ -313,3 +319,53 @@ def test_entity_identity_registry_rejects_duplicate_persisted_entity_ids(tmp_pat
 
     with pytest.raises(DuplicateManagedEntityIdentityError, match="shared_bot"):
         entity_identity_registry(config, runtime_paths)
+
+
+def test_prepared_entity_names_skip_entities_without_accounts(tmp_path: Path) -> None:
+    """Entities whose Matrix accounts are prepared are named by their user ID; one not prepared yet is left out."""
+    config = Config(agents={"mind": AgentConfig(display_name="Mind"), "pal": AgentConfig(display_name="Pal")})
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    domain = config.get_domain(runtime_paths)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account(managed_account_key("mind"), "mindroom_mind", "pw", domain=domain)
+    state.save(runtime_paths=runtime_paths)
+
+    assert prepared_entity_names_by_user_id(config, runtime_paths) == {f"@mindroom_mind:{domain}": "mind"}
+
+
+@pytest.mark.parametrize("resolve", [entity_identity_registry, prepared_entity_names_by_user_id])
+def test_resolving_every_entity_reads_matrix_state_once(
+    resolve: Callable[[Config, RuntimePaths], object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolving every configured entity reads Matrix state once, not once per entity.
+
+    Message handling builds the identity registry many times per turn.
+    """
+    config = bind_runtime_paths(
+        Config(agents={name: AgentConfig(display_name=name.title()) for name in ("general", "writer", "coder")}),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        ),
+    )
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState()
+    for entity_name in (ROUTER_AGENT_NAME, *config.agents):
+        state.add_account(managed_account_key(entity_name), f"mindroom_{entity_name}", "pw", domain="localhost")
+    state.save(runtime_paths=runtime_paths)
+    reads = 0
+    cache_key = matrix_state._matrix_state_cache_key
+
+    def counting_cache_key(state_file: Path) -> tuple[Path, int, int | None, int | None]:
+        nonlocal reads
+        reads += 1
+        return cache_key(state_file)
+
+    monkeypatch.setattr(matrix_state, "_matrix_state_cache_key", counting_cache_key)
+
+    resolve(config, runtime_paths)
+
+    assert reads == 1

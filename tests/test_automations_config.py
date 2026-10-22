@@ -23,6 +23,21 @@ def _mind(**fields: object) -> AgentConfig:
     return AgentConfig(display_name="Mind", memory_backend="file", **fields)
 
 
+def _personal_rooms_config(defaults: list[object] | None = None, **agents: AgentConfig) -> Config:
+    """A config whose personal rooms belong to the agent named `mind`."""
+    return Config(
+        defaults={"automations": defaults} if defaults is not None else {},
+        agents=agents,
+        rooms={"lobby": {}},
+        personal_rooms={"agent": "mind", "onboarding_rooms": ["lobby"]},
+        router=RouterConfig(model="default"),
+    )
+
+
+def _private_mind(**fields: object) -> AgentConfig:
+    return _mind(private=AgentPrivateConfig(per="user_agent"), **fields)
+
+
 def test_a_bare_name_enables_a_built_in_with_its_defaults() -> None:
     """`- prompt_curation` is shorthand for the built-in with every default."""
     (automation,) = _config(mind=_mind(automations=["prompt_curation"])).resolve_entity("mind").automations
@@ -64,7 +79,7 @@ def test_a_mapping_overrides_fields() -> None:
 
 
 def test_eligible_agents_inherit_default_automations() -> None:
-    """Defaults reach file-memory shared agents; private and non-file agents are skipped, and [] opts out."""
+    """Defaults reach file-memory shared agents; private agents without personal rooms and non-file agents are skipped, and [] opts out."""
     config = _config(
         ["prompt_curation"],
         mind=_mind(),
@@ -81,7 +96,7 @@ def test_eligible_agents_inherit_default_automations() -> None:
 @pytest.mark.parametrize(
     ("agent", "message"),
     [
-        (_mind(private=AgentPrivateConfig(per="user"), automations=["prompt_curation"]), "private"),
+        (_mind(private=AgentPrivateConfig(per="user"), automations=["prompt_curation"]), "personal_rooms.agent"),
         (AgentConfig(display_name="Mem0", memory_backend="mem0", automations=["prompt_curation"]), "memory_backend"),
         (
             AgentConfig(display_name="Mem0", memory_backend="mem0", automations=["dreaming"]),
@@ -90,9 +105,43 @@ def test_eligible_agents_inherit_default_automations() -> None:
     ],
 )
 def test_an_agent_cannot_list_automations_it_cannot_run(agent: AgentConfig, message: str) -> None:
-    """Unattended runs need a shared agent, and the built-ins need file memory."""
+    """A private agent's runs need its requesters' personal rooms, and the built-ins need file memory."""
     with pytest.raises(ValidationError, match=message):
         _config(mind=agent)
+
+
+def test_the_personal_rooms_private_agent_can_list_automations() -> None:
+    """Each requester's runs post in their personal room, so the agent that owns personal rooms may run automations."""
+    config = _personal_rooms_config(mind=_private_mind(automations=["prompt_curation", "dreaming"]))
+
+    assert [entry.name for entry in config.resolve_entity("mind").automations] == ["prompt_curation", "dreaming"]
+
+
+def test_a_private_agent_other_than_the_personal_rooms_agent_gets_no_automations() -> None:
+    """Personal rooms belong to one agent, so another private agent has nowhere private to post."""
+    with pytest.raises(ValidationError, match=r"personal_rooms\.agent"):
+        _personal_rooms_config(mind=_mind(), other=_private_mind(automations=["prompt_curation"]))
+    config = _personal_rooms_config(["prompt_curation"], mind=_mind(), other=_private_mind())
+
+    assert config.resolve_entity("other").automations == []
+
+
+def test_a_private_agent_entry_cannot_choose_a_room() -> None:
+    """A configured room would show one requester's private files to everyone in it."""
+    with pytest.raises(ValidationError, match="cannot set room"):
+        _personal_rooms_config(mind=_private_mind(automations=[{"name": "prompt_curation", "room": "lobby"}]))
+
+
+def test_the_personal_rooms_private_agent_inherits_defaults_without_a_room() -> None:
+    """A default entry that names a room stays with the shared agents."""
+    config = _personal_rooms_config(
+        ["prompt_curation", {"name": "dreaming", "room": "lobby"}],
+        mind=_private_mind(),
+        shared=_mind(),
+    )
+
+    assert [entry.name for entry in config.resolve_entity("mind").automations] == ["prompt_curation"]
+    assert [entry.name for entry in config.resolve_entity("shared").automations] == ["prompt_curation", "dreaming"]
 
 
 @pytest.mark.parametrize(
@@ -119,7 +168,10 @@ def test_invalid_entries_fail_config_load(entry: object) -> None:
 
 def test_a_misspelled_built_in_names_the_built_ins() -> None:
     """Any other name is read as a plugin automation, so a typo's error says which names are built in."""
-    with pytest.raises(ValidationError, match=r"'dreamng' is not a built-in automation \(prompt_curation, dreaming\)"):
+    with pytest.raises(
+        ValidationError,
+        match=r"'dreamng' is not a built-in automation \(prompt_curation, dreaming, exploration\)",
+    ):
         _mind(automations=["dreamng"])
 
 

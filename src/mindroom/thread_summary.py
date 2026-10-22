@@ -30,7 +30,7 @@ from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
 from mindroom.model_defaults import (
     CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
     GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
-    OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
+    OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
 )
 from mindroom.providers import model_loading
 from mindroom.providers.model_instance_checks import isinstance_of_loaded
@@ -49,6 +49,7 @@ from mindroom.thread_tags import (
     set_thread_tags_if_empty,
 )
 from mindroom.timing import timed
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -154,7 +155,8 @@ def _summary_model_requires_provider_temperature(model: object) -> bool:
         isinstance(model, _IdentifiedModel)
         and (
             model.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
-            or model.id.casefold().endswith(OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
+            # OpenRouter-style IDs carry a provider prefix, such as openai/gpt-5-mini.
+            or model.id.casefold().rsplit("/", 1)[-1].startswith(OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES)
             or (
                 isinstance_of_loaded(model, _GOOGLE_GEMINI_CLASS)
                 and model.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
@@ -582,7 +584,7 @@ def _build_conversation_text(
         if _is_thread_summary_message(msg, trusted_sender_ids=trusted_sender_ids):
             continue
         sender = msg.sender or "unknown"
-        body = msg.body or ""
+        body = body_without_tool_markers(msg.body or "", msg.content)
         if body:
             lines.append(f"{sender}: {body}")
 
@@ -1033,6 +1035,28 @@ async def _send_thread_summary_event(
         return delivered.event_id
     logger.warning("Failed to send thread summary", room_id=room_id, thread_id=thread_id)
     return None
+
+
+async def send_welcome_thread_summary(
+    client: nio.AsyncClient,
+    room_id: str,
+    welcome_event_id: str,
+    conversation_reader: ConversationReader,
+) -> None:
+    """Title the router welcome without counting it toward automatic summaries.
+
+    A zero count keeps the first reply in the welcome thread due for an
+    automatic summary, which then replaces this unpinned title.
+    """
+    await _send_thread_summary_event(
+        client,
+        room_id,
+        welcome_event_id,
+        "Welcome to MindRoom",
+        0,
+        "manual",
+        conversation_reader,
+    )
 
 
 async def set_manual_thread_summary(

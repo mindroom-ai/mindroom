@@ -7,9 +7,9 @@ icon: lucide/radio
 MindRoom streams agent responses to Matrix by progressively editing a single message, so users see text appear as the model generates it.
 This page covers when streaming is used, how to tune or disable it, how streamed messages show tool calls, completion, cancellation, and errors, and how oversized responses are delivered.
 
-<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%" poster="https://github.com/user-attachments/assets/fa232e8f-a26b-425f-b667-433fb12da6ec" data-poster-light="https://github.com/user-attachments/assets/fa232e8f-a26b-425f-b667-433fb12da6ec" data-poster-dark="https://github.com/user-attachments/assets/54a96fc9-91dc-48a7-985c-7d4e41ad9be8">
-  <source src="https://github.com/user-attachments/assets/571db927-105b-4907-9c83-ed4f9ef1fc4a" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/c913ed8a-4afb-43be-8d90-cdd2aa4158a9" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%" poster="https://github.com/user-attachments/assets/dc935612-af9a-4556-a502-5c1ffaf3810a" data-poster-light="https://github.com/user-attachments/assets/dc935612-af9a-4556-a502-5c1ffaf3810a" data-poster-dark="https://github.com/user-attachments/assets/d3312f2a-0315-4109-83d6-3470bb2a4247">
+  <source src="https://github.com/user-attachments/assets/0545ae90-c825-496d-81ad-45d3cc069822" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/71036d2f-4ccd-4cdd-99c2-518b915f2ba0" type="video/mp4">
 </video>
 
 <a id="streaming-responses_1"></a>
@@ -119,5 +119,6 @@ A Matrix event holds at most about 64 KB, so `defaults.large_message_strategy` c
 | `split` | Several complete rich-text messages: the first replaces the streaming placeholder and the rest follow it in the same thread or room. |
 
 The `sidecar` strategy applies to messages over about 55 KB and edits over about 27 KB, and the preview omits inline tool-trace metadata.
-With `split`, each segment renders as standalone Markdown, text is cut at paragraph or line boundaries and never inside a fenced code block, and the segments together reproduce the full response exactly.
+With `split`, each segment renders as standalone Markdown, text is cut at paragraph or line boundaries and never inside a fenced code block, and the segments together reproduce the full response text exactly.
+Each segment carries the tool calls it shows, numbered from 1; a segment with many tool calls may show them without their input and output previews, or, when even their names do not fit, without them.
 Even with `split`, non-text payloads, metadata that alone exceeds the size budget, and a single code block larger than one event use the sidecar.

@@ -1,6 +1,6 @@
 """Where a turn stops being the journal's work and becomes the outbox's.
 
-Contract 2 of the event-journal cutover moves that handoff off "the turn is
+The event-journal cutover moves that handoff off "the turn is
 terminal" and onto "the answer is durably owed to a room". The two are not the
 same moment and not the same fact: a turn can be terminal with nothing durable
 behind it, and an answer can be durable long before its turn ends.
@@ -197,6 +197,8 @@ def _dispatcher(
             source_has_live_owner=lambda _event_id: owner_is_live,
             turn_has_live_claim=lambda _event_id: False,
             replies_ended=lambda _reply_ids: None,
+            on_job_follow_up=AsyncMock(),
+            on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, BOT),
     )
@@ -446,7 +448,7 @@ class TestWhatARestartOwesAfterTheHandoff:
 
 
 class TestTheJournalNoLongerAsksWhetherATurnFinished:
-    """The duplicate execution authority contract 2 exists to remove."""
+    """The duplicate execution authority the outbox-enqueue handoff exists to remove."""
 
     async def test_a_terminal_turn_does_not_retire_a_source_the_journal_still_owes(
         self,

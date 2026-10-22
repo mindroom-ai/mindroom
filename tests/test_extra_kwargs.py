@@ -425,7 +425,6 @@ def test_vertexai_claude_provider() -> None:
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
-    assert model.context_window == 200000
 
 
 def test_bedrock_claude_provider_uses_runtime_env() -> None:
@@ -894,12 +893,7 @@ async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_prov
         Message(role="user", content="Current question"),
     ]
 
-    fitted_messages = await model._fit_request_messages(
-        messages,
-        tools=None,
-        response_format=None,
-        compress_tool_results=False,
-    )
+    fitted_messages = model._request_messages(messages)
     chat_messages, _system_prompt = format_messages(fitted_messages)
 
     assert [block.type for block in chat_messages[1]["content"]] == ["text", "tool_use"]
@@ -966,22 +960,22 @@ def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> 
 
 
 def test_prompt_cache_ladder_preserves_adjacent_turn_prefix_with_transient_context() -> None:
-    """Transient context must follow the cacheable user block across turns."""
+    """Transient context after the prompt takes no marker, so the next turn reuses the prompt's breakpoint."""
     transient_context = render_transient_context(
         ("<mindroom_message_context>Current location: Amsterdam</mindroom_message_context>",),
     )
     first_turn_messages, _system_message = format_messages(
         [
-            Message(role="user", content=transient_context, add_to_agent_memory=False),
             Message(role="user", content="Question one"),
+            Message(role="user", content=transient_context, add_to_agent_memory=False),
         ],
     )
     second_turn_messages, _system_message = format_messages(
         [
             Message(role="user", content="Question one"),
             Message(role="assistant", content="Answer one"),
-            Message(role="user", content=transient_context, add_to_agent_memory=False),
             Message(role="user", content="Question two"),
+            Message(role="user", content=transient_context, add_to_agent_memory=False),
         ],
     )
     first_request = {
@@ -1867,7 +1861,7 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         setup_finished.set()
         return request_kwargs
 
-    monkeypatch.setattr("mindroom.providers.claude_prompt_cache.prepare_claude_request_kwargs", blocking_prepare)
+    monkeypatch.setattr("mindroom.providers.claude_prompt_cache._prepare_claude_request_kwargs", blocking_prepare)
     vars(model)["get_async_client"] = lambda: client
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"max_tokens": 1}
     vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta

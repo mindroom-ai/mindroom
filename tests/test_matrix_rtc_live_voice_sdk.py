@@ -15,9 +15,13 @@ from livekit import rtc
 from livekit.plugins.openai.realtime import GPTLiveSession
 from structlog.testing import capture_logs
 
-from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
-from mindroom.matrix_rtc.voice_agent import LiveVoiceAgentOptions, LiveVoiceUsage, RealtimeVoiceBridge
+from mindroom.matrix_rtc.voice_agent import (
+    CallAgentResponse,
+    LiveVoiceAgentOptions,
+    LiveVoiceUsage,
+    RealtimeVoiceBridge,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -121,12 +125,10 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> _ProviderHTTP:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("remote_close", [False, True])
 @pytest.mark.parametrize("cancel_close", [False, True])
-@pytest.mark.parametrize("fail_final_write", [False, True])
-async def test_live_sdk_retains_cumulative_voice_usage_through_close(  # noqa: PLR0915
+async def test_live_sdk_retains_cumulative_voice_usage_through_close(
     provider: _ProviderHTTP,
     remote_close: bool,
     cancel_close: bool,
-    fail_final_write: bool,
 ) -> None:
     """Repeated totals cannot inflate usage, and teardown must persist the provider's final seconds."""
     updates: list[LiveVoiceUsage] = []
@@ -134,17 +136,11 @@ async def test_live_sdk_retains_cumulative_voice_usage_through_close(  # noqa: P
     final_write_started = asyncio.Event()
     release_final_write = asyncio.Event()
     terminated: list[bool] = []
-    final_write_failed = False
 
     async def record_usage(usage: LiveVoiceUsage) -> None:
-        nonlocal final_write_failed
         if usage.finalized:
             final_write_started.set()
             await release_final_write.wait()
-            if fail_final_write and not final_write_failed:
-                final_write_failed = True
-                msg = "Transient storage failure"
-                raise OSError(msg)
         updates.append(usage)
         recorded.set()
 

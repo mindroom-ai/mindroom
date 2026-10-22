@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from mindroom import redaction
@@ -37,6 +38,7 @@ from mindroom.approval.tool_approval import (
     shutdown_approval_runtime,
     tool_may_require_approval,
 )
+from mindroom.cli.config import _full_template
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
@@ -67,6 +69,7 @@ from mindroom.matrix.large_messages import (
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content
 from mindroom.response_sources import ResponseSources
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
+from mindroom.tools import config_manager as _config_manager  # noqa: F401 - registers the approval exemptions
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
@@ -773,6 +776,16 @@ async def test_continuation_decision_wakes_its_owning_bot_sources() -> None:
     await transport.wake_continuation_sources("code", "!room:example.org", ("$source-1", "$source-2"))
 
     owner.retry_approval_sources.assert_called_once_with("!room:example.org", ("$source-1", "$source-2"))
+
+
+def test_job_card_grants_bind_to_the_principal_its_entity_pauses_replies_under() -> None:
+    """A job card's timed approvals share a paused reply's scope only through the same responder principal."""
+    owner = MagicMock()
+    owner.journal_principal.return_value.principal_id = "code@@mindroom_code:localhost"
+    transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda name: owner if name == "code" else None)
+
+    assert transport.responder_principal_id("code") == "code@@mindroom_code:localhost"
+    assert transport.responder_principal_id("removed") is None
 
 
 @pytest.mark.asyncio
@@ -2094,6 +2107,38 @@ async def test_evaluate_tool_approval_honors_tool_approval_exemption(
         "request_network_access",
         {"hostnames": hostnames, "ttl_minutes": 5, "reason": "Need docs."},
         "code",
+    )
+
+    assert requires_approval is expected
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "expected"),
+    [
+        ("manage_config", {"operation": "patch", "changes": [{"op": "remove", "path": "/agents/mind"}]}, True),
+        ("manage_agent", {"operation": "update", "agent_name": "mind", "role": "Something else"}, True),
+        ("manage_team", {"team_name": "crew", "display_name": "Crew", "role": "Help", "agents": ["mind"]}, True),
+        ("manage_config", {"operation": "inspect", "path": "/agents/mind"}, False),
+        ("manage_agent", {"operation": "validate", "agent_name": "mind"}, False),
+        ("get_info", {"info_type": "agent_config", "name": "mind"}, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_starter_config_asks_before_config_manager_changes_configuration(
+    tmp_path: Path,
+    tool_name: str,
+    arguments: dict[str, object],
+    expected: bool,
+) -> None:
+    """The config init starter, which seeds hosted instances too, gates config_manager writes but not its reads."""
+    config = Config.model_validate(yaml.safe_load(_full_template("openrouter", matrix_server="self-hosted")))
+
+    requires_approval, _ = await evaluate_tool_approval(
+        config,
+        test_runtime_paths(tmp_path),
+        tool_name,
+        arguments,
+        "mind",
     )
 
     assert requires_approval is expected

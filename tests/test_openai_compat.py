@@ -73,6 +73,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.providers.media_fallback import install_provider_media_fallback
+from mindroom.providers.portable_tool_search import portable_deferred_tool_names
 from mindroom.routing import ResponderSelection
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
@@ -200,7 +201,6 @@ def _prepared_team_execution_context(
         replay_plan=replay_plan,
         unseen_event_ids=[],
         replays_persisted_history=replays_persisted_history,
-        compaction_outcomes=[],
         compaction_decision=CompactionDecision(mode="none", reason="unclassified"),
         compaction_reply_outcome="none",
         prepared_context_tokens=prepared_context_tokens,
@@ -464,8 +464,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "run_shell_command" not in exposed_tool_names
-    assert "check_shell_command" in exposed_tool_names
-    assert "kill_shell_command" in exposed_tool_names
+    assert "read_file" in exposed_tool_names
 
 
 def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -> None:
@@ -523,7 +522,7 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -
 
 
 def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_path: Path) -> None:
-    """OpenAI-compatible dynamic tooling should not advertise or load context-bound todo."""
+    """OpenAI-compatible tool search should neither offer nor find context-bound todo."""
     runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     config = Config(
         agents={
@@ -558,22 +557,15 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_pa
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
-            session_id="openai-session",
             include_openai_compat_guidance=True,
         )
 
     toolkits = {toolkit.name: toolkit for toolkit in agent.tools}
     assert "todo" not in toolkits
-    dynamic_tools = toolkits["dynamic_tools"]
-    listing = json.loads(dynamic_tools.list_tools())
-    search_result = json.loads(dynamic_tools.tool_search("todo"))
-    load_result = json.loads(dynamic_tools.load_tool("todo"))
+    search_result = json.loads(toolkits["dynamic_tools"].tool_search("todo"))
 
-    assert [tool["name"] for tool in listing["tools"]] == ["sleep"]
-    assert listing["loaded_tools"] == []
     assert search_result["matches"] == []
-    assert load_result["status"] == "unknown"
-    assert load_result["available_tools"] == ["sleep"]
+    assert portable_deferred_tool_names(agent.model) == frozenset({"sleep"})
 
 
 def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, tmp_path: Path) -> None:
@@ -1041,6 +1033,7 @@ class TestChatCompletions:
         assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
         assert data["choices"][0]["finish_reason"] == "stop"
         assert data["usage"]["prompt_tokens"] == 0
+        assert mock_ai.call_args.kwargs["show_tool_calls"] is False
 
     def test_non_stream_completion_reports_run_token_usage(self, app_client: TestClient) -> None:
         """Non-streaming usage comes from the run's own token metrics instead of zeros."""
@@ -5057,11 +5050,6 @@ class TestTeamCompletion:
                     new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
                 ),
                 patch(
-                    "mindroom.teams.team_tool_definition_payloads_for_logging",
-                    return_value=[{"name": "demo_tool", "description": "Demo"}],
-                    create=True,
-                ),
-                patch(
                     "mindroom.teams.model_params_payload",
                     return_value={"temperature": 0.7},
                     create=True,
@@ -5081,7 +5069,7 @@ class TestTeamCompletion:
 
         assert prepared_prompt.prompt == "assistant: Previous team reply\n\nAnalyze this."
         assert prepared_prompt.run_metadata is not None
-        assert prepared_prompt.run_metadata["tools_schema"] == [{"name": "demo_tool", "description": "Demo"}]
+        assert "tools_schema" not in prepared_prompt.run_metadata
         assert prepared_prompt.run_metadata["model_params"] == {"temperature": 0.7}
         assert prepared_prompt.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         with open_bound_scope_session_context(
@@ -5348,7 +5336,6 @@ class TestTeamCompletion:
                 runtime_paths,
                 execution_identity=execution_identity,
                 scope_context=scope_context,
-                session_id="openai-team-session",
                 models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
             )
 

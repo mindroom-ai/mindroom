@@ -14,9 +14,10 @@ The third caller is why hydration runs at all for a conversation that already
 has a marker. A skipped gap makes the projection wrong rather than merely
 short, and the store answers "not hydrated" for every conversation in a room
 with a repairable obligation precisely so the next read comes back here. Repair
-happens on that read and nowhere else, for the same reason nothing else here is a
-background pass: an unreachable homeserver should degrade a read that someone
-is waiting for, not accumulate retry state nobody is watching.
+happens on that read, or on a lookup of the room's redactions, and nowhere else,
+for the same reason nothing else here is a background pass: an unreachable
+homeserver should degrade a read that someone is waiting for, not accumulate
+retry state nobody is watching.
 
 "Once per membership" is a statement about what a marker discharges, and a
 marker only discharges the question its walk answered. A bounded walk answers
@@ -138,6 +139,29 @@ _HIDDEN_EVENT_ERRCODES = frozenset({"M_NOT_FOUND", "M_FORBIDDEN"})
 
 _UNREADABLE_SIDECAR_NOTICE = "[The rest of this message could not be loaded.]"
 _UNREADABLE_EDIT_NOTICE = "[A later edit of this message could not be read.]"
+
+# The Matrix message fields readers of a stored message use. An attachment holds
+# whatever its uploader wrote, and what it resolves to is stored with every
+# message naming it, so only these and MindRoom's own namespaced metadata are kept.
+# A shown layer has no edit wrapper of its own, so ``m.new_content`` is not one.
+_STORED_MESSAGE_FIELDS = frozenset(
+    {
+        "msgtype",
+        "body",
+        "format",
+        "formatted_body",
+        "m.mentions",
+        "m.relates_to",
+        "url",
+        "file",
+        "info",
+        "filename",
+        "geo_uri",
+        "org.matrix.msc3245.voice",
+        "org.matrix.msc1767.audio",
+    },
+)
+_MINDROOM_KEY_PREFIXES = ("io.mindroom.", "com.mindroom.")
 
 
 class _HydrationError(RuntimeError):
@@ -1329,7 +1353,13 @@ class ConversationHydrator:
         )
         resolved_content = resolved.get("content")
         if isinstance(resolved_content, dict) and not holds_unresolved_sidecar(resolved_content):
-            return resolved_content
+            # An edit's attachment holds the whole edit, so what the message
+            # shows is its new content, as settling an unreadable one keeps too.
+            return {
+                key: value
+                for key, value in visible_content(resolved_content).items()
+                if key in _STORED_MESSAGE_FIELDS or key.startswith(_MINDROOM_KEY_PREFIXES)
+            }
         logger.info(
             "conversation_refresh_sidecar_unresolved",
             event_id=event_id,

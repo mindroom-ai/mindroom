@@ -204,6 +204,11 @@ class Reply:
         return self.state in _TERMINAL_STATES
 
     @property
+    def running(self) -> bool:
+        """Return whether a span runs the reply: while active, or paused with the span that waits in place current."""
+        return self.state is ReplyState.ACTIVE or (self.state is ReplyState.PAUSED and self.current_span_id is not None)
+
+    @property
     def unapplied_stop(self) -> bool:
         """Return whether a recorded Stop still has to reach the reply."""
         return self.stop_receipt_order is not None and (
@@ -1689,15 +1694,11 @@ def redactions_done(reply: Reply, event_ids: tuple[str, ...], *, now_ns: int) ->
 def record_stop_button(reply: Reply, *, event_id: str, membership_current: bool, now_ns: int) -> Transition:
     """Record the Stop button reaction sent for a running reply, or queue it for removal (I8).
 
-    A reply runs while active, and while paused with the span that waits in
-    place still current. A reply shows one button: one it already recorded is
-    queued for removal. A button the room was left before it landed stays,
-    as everything owed to that room is dropped.
+    A reply shows one button: one it already recorded is queued for removal.
+    A button the room was left before it landed stays, as everything owed to
+    that room is dropped.
     """
-    running = reply.state is ReplyState.ACTIVE or (
-        reply.state is ReplyState.PAUSED and reply.current_span_id is not None
-    )
-    if not running:
+    if not reply.running:
         if not membership_current:
             return _unchanged(Outcome.DUPLICATE, reply)
         return Transition(outcome=Outcome.APPLIED, reply=_touch(_with_redactions(reply, event_id), now_ns))

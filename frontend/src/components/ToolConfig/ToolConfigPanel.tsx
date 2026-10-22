@@ -453,11 +453,11 @@ export function ToolConfigPanel({
               htmlFor={`${lazyId}-defer`}
               className="cursor-pointer text-sm"
             >
-              Load lazily
+              Defer until searched
             </Label>
           </div>
           <p className="pl-6 text-xs text-muted-foreground">
-            Hide this tool until the agent loads it for the current session.
+            Hide this tool's definitions until the agent searches for them.
           </p>
           <div className="flex items-center gap-2 pl-6">
             <Checkbox
@@ -474,7 +474,7 @@ export function ToolConfigPanel({
                 deferEnabled ? "" : "text-muted-foreground"
               }`}
             >
-              Load at session start
+              Send on every request
             </Label>
           </div>
         </div>

@@ -16,7 +16,6 @@ from uuid import NAMESPACE_URL, uuid5
 from weakref import WeakValueDictionary
 
 import nio
-from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
@@ -477,7 +476,6 @@ class SendTextRequest:  # noqa: D101
     skip_mentions: bool = False
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
-    retry_sync_recovery: bool = False
     # The turn this send belongs to, when it belongs to one. Present, the send
     # goes through the outbox and carries a transaction ID derived from this
     # value, so a resend after a crash collapses onto the event the homeserver
@@ -497,7 +495,6 @@ class EditTextRequest:  # noqa: D101
     new_text: str
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
-    retry_sync_recovery: bool = False
     delivery_result: dict[str, object] | None = None
     # Set when this edit is a durable write of an agent or team reply.
     reply_write: ReplyWrite | None = None
@@ -572,9 +569,10 @@ class StreamingDeliveryRequest:
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
-    visible_progress_callback: Callable[[str], None] | None = None
+    visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     allow_new_terminal_message: Callable[[], bool] | None = None
+    placeholder_ready: Callable[[], Awaitable[bool]] | None = None
 
 
 @dataclass(frozen=True)
@@ -589,7 +587,7 @@ class DeliveryGatewayDeps:
     resolver: ConversationResolver
     response_hooks: ResponseHookService
     outbox: MatrixDeliveryView
-    # Contract 2's handoff: the journal owns an actionable source until the
+    # The outbox-enqueue handoff: the journal owns an actionable source until the
     # turn's answer is durably owed to a room, and this is where that becomes
     # true. Everything after it is the outbox's to recover.
     turn_handoff: TurnHandoff
@@ -785,8 +783,6 @@ class DeliveryGateway:
     async def _send_claimed(
         self,
         claimed: MatrixDelivery,
-        *,
-        retry_sync_recovery: bool,
     ) -> DeliveredMatrixEvent:
         """Send one claimed delivery exactly as it was frozen, continuations included.
 
@@ -804,7 +800,6 @@ class DeliveryGateway:
             transaction_id=claimed.transaction_id,
             what="delivery",
             operation="edit_message" if claimed.edits_event_id is not None else "send_message",
-            retry_sync_recovery=retry_sync_recovery,
         )
         for index, continuation in enumerate(_continuation_payloads(claimed.result), start=1):
             await self._send_frozen(
@@ -812,7 +807,6 @@ class DeliveryGateway:
                 continuation,
                 transaction_id=_segment_transaction_id(claimed.transaction_id, index),
                 what=f"continuation {index}",
-                retry_sync_recovery=retry_sync_recovery,
             )
         return outcome
 
@@ -824,7 +818,6 @@ class DeliveryGateway:
         transaction_id: str,
         what: str,
         operation: str = "send_message",
-        retry_sync_recovery: bool,
     ) -> DeliveredMatrixEvent:
         """Send one frozen event of a claimed delivery, mapping refusals to exceptions."""
         outcome = await send_message_outcome(
@@ -832,7 +825,6 @@ class DeliveryGateway:
             claimed.room_id,
             content,
             operation=operation,
-            retry_sync_recovery=retry_sync_recovery,
             transaction_id=transaction_id,
             content_is_prepared=True,
         )
@@ -945,7 +937,7 @@ class DeliveryGateway:
         """Use the same writer and exact locks for recovery and normal delivery."""
 
         async def send(claimed: MatrixDelivery) -> str:
-            delivered = await self._send_claimed(claimed, retry_sync_recovery=True)
+            delivered = await self._send_claimed(claimed)
             return delivered.event_id
 
         return self._response_delivery(send, handoff=None)
@@ -1031,7 +1023,6 @@ class DeliveryGateway:
                 continuations[index],
                 transaction_id=_segment_transaction_id(claimed.transaction_id, index + 1),
                 what=f"continuation {index + 1}",
-                retry_sync_recovery=True,
             )
         if missing_indices:
             self.deps.logger.info(
@@ -1085,20 +1076,18 @@ class DeliveryGateway:
                 content=content,
                 new_text=None,
                 result=request.delivery_result,
-                retry_sync_recovery=request.retry_sync_recovery,
             )
         if request.delivery_turn_id is None:
             return await send_message_outcome(
                 client,
                 room_id,
                 content,
-                retry_sync_recovery=request.retry_sync_recovery,
             )
         requested_delivery: DeliveredMatrixEvent | None = None
 
         async def send(claimed: MatrixDelivery) -> str:
             nonlocal requested_delivery
-            delivered = await self._send_claimed(claimed, retry_sync_recovery=request.retry_sync_recovery)
+            delivered = await self._send_claimed(claimed)
             if claimed.stage is DeliveryStage.FINAL:
                 requested_delivery = delivered
             return delivered.event_id
@@ -1162,7 +1151,6 @@ class DeliveryGateway:
         content: dict[str, Any],
         new_text: str | None,
         result: dict[str, object] | None,
-        retry_sync_recovery: bool,
     ) -> MatrixSendOutcome | None:
         """Send one durable write of a reply as its next row, after the reply's earlier rows.
 
@@ -1178,7 +1166,7 @@ class DeliveryGateway:
 
         async def send(claimed: MatrixDelivery) -> str:
             nonlocal requested
-            delivered = await self._send_claimed(claimed, retry_sync_recovery=retry_sync_recovery)
+            delivered = await self._send_claimed(claimed)
             if claimed.delivery_id == predicted.get("delivery_id") and claimed.stage == write.stage:
                 requested = delivered
             return delivered.event_id
@@ -1263,7 +1251,7 @@ class DeliveryGateway:
             # The reply's create bound its event when Matrix acknowledged it; the span reads it from here on.
             reply = await self.deps.outbox.replies.load(write.reply_id)
             if reply is not None:
-                write.handle.reply = reply
+                write.handle.note_reply(reply)
         if requested is not None and requested.event_id == delivery.event_id:
             return requested
         return DeliveredMatrixEvent(event_id=delivery.event_id, content_sent=content)
@@ -1328,7 +1316,7 @@ class DeliveryGateway:
         while True:
             reply = await self.deps.outbox.replies.load(handle.reply_id)
             assert reply is not None, "a span's reply exists while the span ends"
-            handle.reply = reply
+            handle.note_reply(reply)
             if reply.unapplied_stop and handle.span.kind is not rl.SpanKind.APPROVAL_RESUME:
                 # A Stop committed before this span ended; its note is the cancellation.
                 state, note = ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED)
@@ -1401,7 +1389,6 @@ class DeliveryGateway:
                     skip_mentions=skip_mentions,
                     tool_trace=tool_trace,
                     extra_content=extra_content,
-                    retry_sync_recovery=True,
                     delivery_result=delivery_result,
                     reply_write=write,
                 ),
@@ -1413,7 +1400,6 @@ class DeliveryGateway:
                 new_text=text,
                 tool_trace=tool_trace,
                 extra_content=extra_content,
-                retry_sync_recovery=True,
                 delivery_result=delivery_result,
                 reply_write=write,
             ),
@@ -1580,6 +1566,9 @@ class DeliveryGateway:
         if handle.reply.stop_button_event_id is not None:
             # An earlier span of the reply already shows one.
             return
+        if not handle.reply.running:
+            # The reply ended before its button was sent; one sent as it ends is queued for removal below.
+            return
         button_event_id = await send_stop_button(self._ready_client(), handle.reply.room_id, event_id)
         if button_event_id is None:
             return
@@ -1713,22 +1702,15 @@ class DeliveryGateway:
         )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
-        failure_reason = "durable Matrix delivery was refused"
-        try:
-            outcome = await self._send_content(request, resolved_target.room_id, content)
-        except SendRetryError:
-            delivered = None
-            failure_reason = "matrix timeline recovery still blocked the send"
-        else:
-            delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
-            if isinstance(outcome, MatrixDeliveryFailure):
-                failure_reason = _matrix_delivery_failure_reason(outcome)
-        if delivered is not None:
-            self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
-            return delivered.event_id
+        outcome = await self._send_content(request, resolved_target.room_id, content)
+        if isinstance(outcome, DeliveredMatrixEvent):
+            self.deps.logger.info("Sent response", event_id=outcome.event_id, **resolved_target.log_context)
+            return outcome.event_id
         self.deps.logger.error(
             "Failed to send response to room",
-            error=failure_reason,
+            error=_matrix_delivery_failure_reason(outcome)
+            if isinstance(outcome, MatrixDeliveryFailure)
+            else "durable Matrix delivery was refused",
             **resolved_target.log_context,
         )
         return None
@@ -1752,7 +1734,6 @@ class DeliveryGateway:
                 content=content,
                 new_text=request.new_text,
                 result=request.delivery_result,
-                retry_sync_recovery=request.retry_sync_recovery,
             )
         return await edit_message_outcome(
             client,
@@ -1760,7 +1741,6 @@ class DeliveryGateway:
             request.event_id,
             content,
             request.new_text,
-            retry_sync_recovery=request.retry_sync_recovery,
         )
 
     async def edit_text(self, request: EditTextRequest) -> bool:
@@ -1779,23 +1759,16 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
 
-        failure_reason = "durable Matrix edit was refused"
-        try:
-            outcome = await self._edit_content(request, target.room_id, content)
-        except SendRetryError:
-            delivered = None
-            failure_reason = "matrix timeline recovery still blocked the edit"
-        else:
-            delivered = outcome if isinstance(outcome, DeliveredMatrixEvent) else None
-            if isinstance(outcome, MatrixDeliveryFailure):
-                failure_reason = _matrix_delivery_failure_reason(outcome)
-        if delivered is not None:
+        outcome = await self._edit_content(request, target.room_id, content)
+        if isinstance(outcome, DeliveredMatrixEvent):
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
-            error=failure_reason,
+            error=_matrix_delivery_failure_reason(outcome)
+            if isinstance(outcome, MatrixDeliveryFailure)
+            else "durable Matrix edit was refused",
             **target.log_context,
         )
         return False
@@ -2053,7 +2026,7 @@ class DeliveryGateway:
         """Edit the foreground compaction lifecycle notice after failure."""
         if event.notice_event_id is None:
             return
-        body = f"Compaction failed; continuing with trimmed history. {event.failure_reason}"
+        body = f"Compaction failed; continuing without compaction. {event.failure_reason}"
         await self._edit_compaction_lifecycle_notice(
             target=target,
             event_id=event.notice_event_id,
@@ -2168,6 +2141,7 @@ class DeliveryGateway:
             interactive_creator_agent=self.deps.agent_name,
             interactive_source_event_id=delivery_turn_id,
             allow_new_terminal_message=request.allow_new_terminal_message,
+            placeholder_ready=request.placeholder_ready,
             # What a stopped attempt at the reply showed; the stream continues below it.
             resumed=handle.resumed,
             **reply_hooks,
@@ -2203,7 +2177,6 @@ class DeliveryGateway:
             *,
             content: dict[str, Any],
             new_text: str | None,
-            retry_sync_recovery: bool,
         ) -> DeliveredMatrixEvent | None:
             """Deliver one stream row, rendering it again once when the Stop path's own row met its Stop."""
             for rendered_again in (False, True):
@@ -2216,7 +2189,6 @@ class DeliveryGateway:
                         # A create's text is its content's body; an edit names its new text.
                         new_text=new_text,
                         result=None,
-                        retry_sync_recovery=retry_sync_recovery,
                     )
                 except ReplyWriteRefusedError as refused:
                     if rendered_again or refused.transition.outcome is not ReplyOutcome.RECOMPUTE:
@@ -2237,7 +2209,6 @@ class DeliveryGateway:
             content: dict[str, Any],
             display_text: str,
             *,
-            retry_sync_recovery: bool = False,
             progress: ProgressState,
         ) -> DeliveredMatrixEvent | None:
             # A create sends its content as rendered; only an edit names its new text.
@@ -2246,7 +2217,6 @@ class DeliveryGateway:
                 lambda: initial_write(handle, shown(progress), placeholder_only=progress.placeholder_only),
                 content=content,
                 new_text=None,
-                retry_sync_recovery=retry_sync_recovery,
             )
 
         def answered_nothing(state_content: dict[str, Any], progress: ProgressState) -> bool:
@@ -2278,7 +2248,6 @@ class DeliveryGateway:
             content: dict[str, Any],
             display_text: str,
             *,
-            retry_sync_recovery: bool = False,
             progress: ProgressState,
         ) -> DeliveredMatrixEvent | None:
             # A create sends its content as rendered; only an edit names its new text.
@@ -2289,7 +2258,6 @@ class DeliveryGateway:
                 lambda: terminal(content, progress),
                 content=content,
                 new_text=None,
-                retry_sync_recovery=retry_sync_recovery,
             )
 
         async def terminal_edit(
@@ -2299,7 +2267,6 @@ class DeliveryGateway:
             content: dict[str, Any],
             display_text: str,
             *,
-            retry_sync_recovery: bool = False,
             progress: ProgressState,
         ) -> DeliveredMatrixEvent | None:
             del client, room_id
@@ -2309,7 +2276,6 @@ class DeliveryGateway:
                 lambda: terminal(content, progress),
                 content=content,
                 new_text=display_text,
-                retry_sync_recovery=retry_sync_recovery,
             )
 
         async def progress_write_ahead(progress: ProgressState) -> ProgressPermission:
@@ -2337,7 +2303,7 @@ class DeliveryGateway:
         identity: ResponseIdentity,
         show_tool_calls: bool,
         extra_content: dict[str, Any] | None = None,
-        visible_progress_callback: Callable[[str], None] | None = None,
+        visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     ) -> AbstractAsyncContextManager[ProgressPublisher]:
         """Stream live progress into an existing reply whose terminal delivery the caller owns.
 

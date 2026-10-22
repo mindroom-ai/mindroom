@@ -138,16 +138,17 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Research Sources](research-sources.md) - ArXiv, Google Scholar, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](ai-and-generation.md) - Image, video, speech, and transcription APIs.
 - [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging and voice messages, thread tags, resolution, moves, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging and voice messages, thread tags, resolution, moves, summaries, stopping other agents' replies, model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Matrix Message Tool](matrix-message.md) - Send, read, edit, and react to messages with `matrix_message`.
 - [Agent Chat UI Actions](chat-ui.md) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](../canvases.md) in MindRoom Chat.
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](atlassian.md) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
+- [Microsoft 365](microsoft-365.md) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, SharePoint lists and pages, Outlook mail and calendars, To Do tasks, Teams channels and chats, Teams meeting transcripts, OneNote pages, and the people directory through Microsoft Graph.
 - [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](memory-and-storage.md) - Mem0 and Zep external memory services; the built-in [`memory`](../memory.md#memory) tool is documented with the memory system.
 - [Agent Orchestration](agent-orchestration.md) - Delegation, Dynamic Workflows, report publishing, config tools, and Claude Agent sessions.
-- [Dynamic Tools](dynamic-tools.md) - Per-tool lazy loading for optional agent capabilities.
+- [Dynamic Tools](dynamic-tools.md) - Keep rarely used tools out of the model's context until the agent searches for them.
 - [Automation & Platforms](automation-and-platforms.md) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](location-commerce-and-home.md) - Maps, weather, commerce, and Home Assistant.
 

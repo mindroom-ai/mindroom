@@ -380,6 +380,7 @@ models:
 Provider slugs are in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
 Account-level OpenRouter settings (ignored providers, data-policy filters) still apply, so pinning an upstream your account excludes fails with `No endpoints found`.
 Verify a new pin with a direct API request and check the `provider` field in the response.
+MindRoom's `LLM usage` log line names the upstream that served each OpenRouter response in `served_provider`.
 
 ## Azure OpenAI
 
@@ -455,12 +456,13 @@ Common options include:
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., [OpenRouter provider routing](#openrouter-provider-routing))
 
+When a Claude response reaches `max_tokens`, its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
+
 Some models reject sampling controls:
 
 - Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
 - MindRoom also omits those controls for direct Gemini 3.8 Flash and Gemini 3.5 Flash-Lite requests.
 - [GPT-6 Astra does not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Sol and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
-- For Mem0 memory extraction with `provider: openai`, use GPT-6 Luna; MindRoom drops the `temperature` and `top_p` values Mem0 sends, which GPT-6 models reject.
 
 ## Prompt Caching
 
@@ -480,6 +482,55 @@ Kimi Code caches repeated request prefixes automatically and reports them as `ca
 For `codex` and `kimi`, conversations share a `prompt_cache_key` per agent and requester within one MindRoom storage path, account, and channel, while different agents and requesters stay separate.
 Set `extra_kwargs.prompt_cache_key` to choose your own cache group, for example to separate deployments that share a storage path and provider account, or set it to `null` to send no key.
 A shared key still needs identical prefixes and tools, and provider routing can produce cache misses.
+
+## Cold-Cache Model
+
+Claude providers read a cached prompt for a small fraction of the normal input price and charge more than the normal price to write a new cache; the exact rates vary by model and provider.
+Switching models mid-thread therefore usually costs money, because the new model starts without a cache.
+Once the agent model's cache for a thread has expired, the next turn pays for a full write either way, and a cheaper model can continue a simple conversation for a fraction of the cost.
+Set `agents.<name>.cheap_model` to the agent's cheaper alternative and `agents.<name>.cold_cache` to let a judge switch to it:
+
+```yaml
+agents:
+  assistant:
+    model: opus
+    cheap_model: haiku
+    cold_cache:
+      judgment:
+        provider: openai_decisions
+        threshold: 0.8
+```
+
+Set `defaults.cheap_model` to give every agent the same cheap model; an agent's own `cheap_model` wins, and an agent whose `model` is the default cheap model has none.
+`cold_cache: {}` enables the switch with the default judge, which asks `cheap_model` itself whether it can answer.
+`cold_cache` requires a cheap model, and the cheap model needs `context_window` set on both models or neither; when set, it must be at least the agent model's.
+
+| `cold_cache` field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `idle_seconds` | integer | `3600` | Seconds since the agent's last reply in a thread after which its prompt cache counts as cold |
+| `judgment` | object or null | `null` | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends). Unset asks `cheap_model` itself |
+
+A thread counts as cold once the agent's last reply in it, timed from that reply's final edit, is older than `idle_seconds`.
+The default of one hour matches the cache lifetime MindRoom sets for Claude; set it to your provider's, for example `300` with `extra_kwargs.extended_cache_time: false`.
+A thread the agent has not replied in yet keeps the agent model, so no thread is decided by its first request.
+
+On a cold turn, the judge sees the thread and the new request, and decides whether the cheap model can continue the whole conversation as well as the agent model; the question names both by their configured model `id`.
+Tool calls in the thread reach it as `<tool>` tags with the short input and output previews the chat shows.
+A simple request in a thread about coding, planning, or other demanding work counts as a no.
+Long threads reach the judge as their newest messages that fit its 16 KB request, with long messages shortened to their start and end.
+Only an accepting decision switches; a decline, abstention, timeout, or missing credential keeps the agent model.
+Warm turns make no judgment call.
+
+An accepted switch is saved as the agent's thread override, like `!model`, so the thread stays on the cheap model without further judgments, even after the cheap model's own cache expires.
+`!model` shows it, and `!model reset` or another `!model` choice ends it.
+`!model reset` returns the thread to automatic selection, so a later idle turn can switch it again; choose the agent's model with `!model` to keep it.
+Removing `cold_cache` stops new switches, and after a `cheap_model` change new switches use the new model; threads that already switched stay on their saved model until their override is reset.
+
+The switch never happens when a scheduled model, a `!model` or `!room_model` override (even one naming the agent's own model), or a `room_models` entry that selects a different model applies, or when the request carries images, audio, video, or files, or regenerates or resumes an earlier answer.
+Earlier attachments reach the judge only as placeholders, so pick a cheap model that supports the same media as the agent model.
+Agents in `thread_mode: room` keep their model, because a room has no thread to switch.
+Teams and the router keep their models.
+Each decision logs `Cold cache model selected` with a `reason`: `no_earlier_reply`, `warm`, `history_unavailable`, `request_incomplete`, `judgment_unavailable`, or `judged`.
 
 ## Stalled Streams
 

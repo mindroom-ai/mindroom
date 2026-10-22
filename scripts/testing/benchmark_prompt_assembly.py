@@ -5,9 +5,7 @@ clears, tool-schema preparations, Function deep copies, and payload
 serializations across three phases:
 
 - ``agent_build``: repeated warm ``create_agent`` calls for one config.
-- ``tool_surface``: one turn's static token budgeting (execution preparation
-  plus the history-runtime re-estimate) and run-metadata payload assembly on
-  one fresh agent instance.
+- ``tool_surface``: one turn's static token budgeting on one fresh agent instance.
 - ``prompt_branches``: controlled file-memory and agent-build delays executed
   sequentially (before) and concurrently (after).
 """
@@ -33,11 +31,7 @@ from mindroom.agents import create_agent
 from mindroom.config.main import ResolvedRuntimeModel, load_config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.history import prompt_tokens as prompt_tokens_module
-from mindroom.history.prompt_tokens import (
-    agent_static_token_estimator,
-    agent_tool_definition_payloads_for_logging,
-    estimate_agent_static_tokens,
-)
+from mindroom.history.prompt_tokens import agent_static_token_estimator
 from mindroom.memory import MemoryPromptParts
 from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS
 from mindroom.pre_model_preparation import prepare_prompt_branches
@@ -328,13 +322,9 @@ def main() -> None:
         def _run_turn_surface(agent: KnowledgeToolDescribingAgent) -> None:
             # Execution preparation: static budgeting with a request-local estimator.
             agent_static_token_estimator(agent).estimate(prompt)
-            # History runtime: an independent re-estimate for replay planning.
-            estimate_agent_static_tokens(agent, prompt)
-            # Run metadata: model-visible tool schema payloads.
-            agent_tool_definition_payloads_for_logging(agent)
 
         # A fresh agent per iteration mirrors production, where every turn
-        # rebuilds the agent instance before budgeting and metadata assembly.
+        # rebuilds the agent instance before budgeting.
         results.append(
             _phase(
                 "tool_surface_per_turn",

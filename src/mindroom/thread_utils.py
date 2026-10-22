@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.entity_resolution import EntityIdentityRegistry
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
 
@@ -30,6 +31,8 @@ if TYPE_CHECKING:
 # Accepts both single and double quotes (mautrix bridges use single quotes).
 # Requires @localpart:domain format to avoid feeding malformed IDs to MatrixID.parse.
 _MATRIX_PILL_RE = re.compile(r"""href=["']https://matrix\.to/#/(@[^"':]+:[^"']+)["']""")
+# A 64 KiB Matrix event holds fewer than 10,000 user IDs, so only a resolved long-text sidecar lists more.
+_MAX_MENTIONED_USER_IDS = 10_000
 
 _AgentResponseSkipReason = Literal[
     "sender_not_allowed",
@@ -64,24 +67,18 @@ def _extract_mentioned_user_ids(
     mentions = content.get("m.mentions")
     user_ids = cast("dict[str, object]", mentions).get("user_ids") if isinstance(mentions, dict) else None
     if isinstance(user_ids, list) and user_ids:
-        return [user_id for user_id in user_ids if isinstance(user_id, str)]
+        return [user_id for user_id in user_ids[:_MAX_MENTIONED_USER_IDS] if isinstance(user_id, str)]
 
     formatted_body = content.get("formatted_body")
     if isinstance(formatted_body, str):
         pill_user_ids = _MATRIX_PILL_RE.findall(formatted_body)
         if pill_user_ids:
-            return pill_user_ids
+            return pill_user_ids[:_MAX_MENTIONED_USER_IDS]
 
     body = content.get("body")
     if isinstance(body, str):
         return resolve_mentioned_user_ids_from_text(body, config, runtime_paths)
     return []
-
-
-def _is_bot_or_agent(sender: str, config: Config, runtime_paths: RuntimePaths) -> bool:
-    """Return True when *sender* is a MindRoom agent **or** listed in ``bot_accounts``."""
-    registry = entity_identity_registry(config, runtime_paths)
-    return registry.current_entity_name_for_user_id(sender) is not None or sender in config.bot_accounts
 
 
 def is_router_only_agent_mention(
@@ -120,9 +117,12 @@ def check_agent_mentioned(
     raw_content = event_source.get("content", {})
     content = visible_content_from_content(raw_content) if isinstance(raw_content, dict) else {}
     all_mentioned_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
-    mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config, runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
+    mentioned_agents = _agents_from_user_ids(all_mentioned_ids, registry)
     am_i_mentioned = agent_id in mentioned_agents
-    non_agent_mentions = [uid for uid in all_mentioned_ids if not _is_bot_or_agent(uid, config, runtime_paths)]
+    non_agent_mentions = [
+        uid for uid in all_mentioned_ids if not registry.is_managed_user_id(uid) and uid not in config.bot_accounts
+    ]
     has_non_agent_mentions = bool(non_agent_mentions) and (
         not room_membership_is_complete(room)
         or not authorization.cached_joined_member_ids(room).isdisjoint(non_agent_mentions)
@@ -162,13 +162,8 @@ def get_agents_in_thread(
     return agents
 
 
-def _agents_from_user_ids(
-    user_ids: list[str],
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> list[MatrixID]:
+def _agents_from_user_ids(user_ids: list[str], registry: EntityIdentityRegistry) -> list[MatrixID]:
     """Return agent MatrixIDs from a list of raw Matrix user ID strings."""
-    registry = entity_identity_registry(config, runtime_paths)
     agents: list[MatrixID] = []
     for user_id in user_ids:
         agent_name = registry.current_entity_name_for_user_id(user_id)
@@ -189,12 +184,12 @@ def has_multiple_non_agent_users_in_thread(
     Senders that are MindRoom agents or listed in ``config.bot_accounts`` are
     excluded from the count. Human bridge aliases count as their canonical
     identity, without changing the original message sender.
+    Each distinct sender is classified once: long threads repeat a few
+    senders, and classifying one is far costlier than reading a message.
     """
     non_agent_senders: set[str] = set()
-    if current_sender_id and is_human_requester_id(current_sender_id, config, runtime_paths):
-        non_agent_senders.add(resolve_human_requester_alias(current_sender_id, config, runtime_paths))
-    for msg in thread_history:
-        sender = msg.sender
+    senders = dict.fromkeys([current_sender_id, *(msg.sender for msg in thread_history)])
+    for sender in senders:
         if sender and is_human_requester_id(sender, config, runtime_paths):
             non_agent_senders.add(resolve_human_requester_alias(sender, config, runtime_paths))
             if len(non_agent_senders) > 1:
@@ -264,11 +259,12 @@ def get_all_mentioned_agents_in_thread(
     """
     mentioned_agents = []
     seen_ids: set[str] = set()
+    registry = entity_identity_registry(config, runtime_paths)
 
     for msg in thread_history:
         content = msg.content
         user_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
-        agents = _agents_from_user_ids(user_ids, config, runtime_paths)
+        agents = _agents_from_user_ids(user_ids, registry)
 
         for agent in agents:
             if agent.full_id not in seen_ids:

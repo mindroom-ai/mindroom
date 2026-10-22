@@ -11,7 +11,6 @@ from uuid import UUID
 
 import nio
 import pytest
-from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 from nio.durable import DurableSyncConfig
@@ -59,6 +58,7 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
+    FakeModel,
     drain_coalescing,
     runtime_paths_for,
     unwrap_extracted_collaborator,
@@ -269,7 +269,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_client.add_event_callback = MagicMock()
         mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
         ingestion_session = AsyncMock()
         mock_login.return_value = _owned_login(mock_client, ingestion_session)
 
@@ -339,7 +338,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_client.add_event_callback = MagicMock()
         mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
         mock_ensure_user.return_value = None
 
         async def _login_with_actual_identity(
@@ -451,10 +449,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
-        mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
-        mock_client.has_uncommitted_classic_sync_state = False
         mock_client.next_batch = ""
         mock_client.user_id = mock_agent_user.user_id
         mock_client.device_id = "DEVICEID"
@@ -1576,7 +1571,6 @@ class TestAgentBot(AgentBotTestBase):
                 "can_reply_to_sender_in_room",
                 return_value=False,
             ),
-            patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
             await self._invoke_handler(bot, handler_name, room, event)
 
@@ -1617,7 +1611,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_load_config.return_value = config
 
         # Mock get_model_instance to return a mock model
-        mock_model = Ollama(id="test-model")
+        mock_model = FakeModel(id="test-model", provider="fake")
         mock_get_model_instance.return_value = mock_model
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
         fake_member = MagicMock()

@@ -8,47 +8,47 @@ Use a canvas when seeing or clicking beats reading or typing; for a quick choice
 
     A narrated film of all four: a scheduling grid, a data fit, a slide deck, and a trip planner.
 
-    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/77e36a87-9fec-41f9-b626-73b950003845" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/381f7395-4f1b-4167-8749-7f85080da8ce" type="video/mp4">
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/5941fd9d-90d2-4a52-b0e9-abbff53354b4" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/3a2e29e3-90a0-4cf7-a3cb-c0e41765695a" type="video/mp4">
     </video>
-    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/d2b7a4a6-0723-4d22-af2a-6b2ee7213602" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/1a820f71-dd19-415f-9301-611310c3d510" type="video/mp4">
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/dc3e3352-7cef-45ce-95be-3edad3bc7fe5" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/a704564b-be05-45cd-9c74-2b5de4f5c875" type="video/mp4">
     </video>
 
 === "Scheduling"
 
     A week grid of four people's availability; the pick goes back with **Send**, and the agent books the meeting after approval.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%" poster="https://github.com/user-attachments/assets/c44fdc29-a35d-45ed-9b67-8a8f2d046bef" data-poster-light="https://github.com/user-attachments/assets/c44fdc29-a35d-45ed-9b67-8a8f2d046bef" data-poster-dark="https://github.com/user-attachments/assets/df646508-7bd3-494f-b560-c49bd5ec0982">
-      <source src="https://github.com/user-attachments/assets/e6698792-c676-4a4f-9824-ae04c1e970da" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/89fb462e-4895-43a0-9cf6-44f91fd7084d" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%" poster="https://github.com/user-attachments/assets/21d0d8ad-a7c4-4937-8fac-3d178b047011" data-poster-light="https://github.com/user-attachments/assets/21d0d8ad-a7c4-4937-8fac-3d178b047011" data-poster-dark="https://github.com/user-attachments/assets/1247f0ca-1c73-4759-bfa7-1b06fb8c2635">
+      <source src="https://github.com/user-attachments/assets/2ae227fd-8edb-4aa2-af62-f1ef3c99a530" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/3926d694-04cf-4f17-ae4b-70f00dde705e" type="video/mp4">
     </video>
 
 === "Data"
 
     An interactive fit drawn in inline SVG with the theme variables; leaving out an outlier refits the curve live.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%" poster="https://github.com/user-attachments/assets/d6a4d93a-2ce0-466a-bca6-8b7b2f84cad3" data-poster-light="https://github.com/user-attachments/assets/d6a4d93a-2ce0-466a-bca6-8b7b2f84cad3" data-poster-dark="https://github.com/user-attachments/assets/f283e9b8-4b9a-40be-a8e9-da758ad163a1">
-      <source src="https://github.com/user-attachments/assets/39a4fa17-51f4-46df-821d-7391c2418071" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/62d2d1d3-5754-4d6a-a5a4-d70b0a354d43" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%" poster="https://github.com/user-attachments/assets/795ebae7-99dc-4660-bf7c-2754fdc5916d" data-poster-light="https://github.com/user-attachments/assets/795ebae7-99dc-4660-bf7c-2754fdc5916d" data-poster-dark="https://github.com/user-attachments/assets/61718584-7b95-4bac-87f3-2e71b3cb6ab4">
+      <source src="https://github.com/user-attachments/assets/7385503a-982b-4811-9146-0a3a0378084d" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/36d79992-fc82-47e2-a012-6bc2c07b4956" type="video/mp4">
     </video>
 
 === "Slides"
 
     A deck the agent writes to a workspace file and shows by `path`; after a change request it rewrites the file and the open deck updates in place.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%" poster="https://github.com/user-attachments/assets/a397afe2-943b-436c-813d-c5a7e03d81cf" data-poster-light="https://github.com/user-attachments/assets/a397afe2-943b-436c-813d-c5a7e03d81cf" data-poster-dark="https://github.com/user-attachments/assets/1517814d-cb7f-47f1-be9f-d2fc52ceffa8">
-      <source src="https://github.com/user-attachments/assets/fa8b1989-9b8c-4dad-b55d-18dd0412013a" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/e215f9e4-ffdb-4e64-9782-e787d3dd464b" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%" poster="https://github.com/user-attachments/assets/0a8304cd-77bb-481a-8654-c735d91f5fd4" data-poster-light="https://github.com/user-attachments/assets/0a8304cd-77bb-481a-8654-c735d91f5fd4" data-poster-dark="https://github.com/user-attachments/assets/1e2819a7-8c5a-4095-8749-a7a3610dddc9">
+      <source src="https://github.com/user-attachments/assets/c033ea6b-fc57-4a66-a235-be716d33286c" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/6219e504-dcf2-40a7-a919-fc5b372c13d6" type="video/mp4">
     </video>
 
 === "Trip planner"
 
     One canvas, two steps: pick a stay, then plan the days against a live budget, updated in place with `canvas_event_id`.
 
-    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%" poster="https://github.com/user-attachments/assets/57143ac5-9fb7-400d-8ad4-ccf036f16b5e" data-poster-light="https://github.com/user-attachments/assets/57143ac5-9fb7-400d-8ad4-ccf036f16b5e" data-poster-dark="https://github.com/user-attachments/assets/01cf9610-83fc-4752-ac72-64750807af71">
-      <source src="https://github.com/user-attachments/assets/dd5ab134-eeba-4cd5-93e3-4dd6e8d0a9cd" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/3e772d7a-1acc-44bf-8e6e-f7e3032ee374" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%" poster="https://github.com/user-attachments/assets/fbe6bf8f-f1b4-4195-ad37-df3a2dfdbe80" data-poster-light="https://github.com/user-attachments/assets/fbe6bf8f-f1b4-4195-ad37-df3a2dfdbe80" data-poster-dark="https://github.com/user-attachments/assets/c71df2bd-54c9-4946-a8b1-54e191db5c3b">
+      <source src="https://github.com/user-attachments/assets/341cd5bd-7fb1-441f-8a6a-470b701359d6" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/26870d8e-5303-4cfd-bb10-9fa66c1d6632" type="video/mp4">
     </video>
 
 ## Turn canvases on
@@ -70,6 +70,7 @@ agents:
 
 `enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
 It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine).
+`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind needs only the Chat switch.
 
 Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
 
@@ -119,7 +120,7 @@ Opening a page that uses a library tells jsDelivr the viewer's IP address and wh
 
 ## What the user sees
 
-Each canvas appears in the conversation as a notice with an **Open canvas** button.
+Each canvas appears in the conversation as its title with an **Open canvas** button.
 Chat opens the panel by itself under the same conditions as other [Chat UI actions](https://docs.mindroom.chat/tools/chat-ui/#what-the-user-sees); otherwise the user chooses **Open canvas**.
 The panel names the agent that made the page, and the user can resize it or expand it to the full width of the conversation.
 The room header's **Canvas** button lists the conversation's canvases, newest update first, and reopens one after the user closed it.
@@ -132,7 +133,7 @@ When the panel cannot open, the **Open canvas** button is disabled and a message
 | Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
-Other people in the room, and other Matrix clients, see only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
+Other people in the room who use MindRoom Chat on the agent's homeserver see the title without the button; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
 
 ### Find a canvas again
 

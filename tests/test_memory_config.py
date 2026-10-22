@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import tempfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,6 +17,7 @@ from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
 from mem0.llms.openai import OpenAILLM
 from mem0.utils.factory import LlmFactory
+from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -40,7 +46,13 @@ from mindroom.model_defaults import (
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
+from mindroom.tool_system.dependencies import optional_dependency_environment
 from tests.conftest import orchestrator_runtime_paths
+
+
+def _fake_mem0_llm() -> SimpleNamespace:
+    """Return a stand-in for Mem0's default Ollama LLM, whose client call MindRoom counts."""
+    return SimpleNamespace(config=SimpleNamespace(model="gemma4"), client=SimpleNamespace(chat=MagicMock()))
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -154,28 +166,43 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("model_id", "expected_temperature", "expected_top_p", "legacy_request_builder"),
+        ("model_id", "expected_temperature", "expected_top_p", "sends_max_tokens", "legacy_request_builder"),
         [
-            ("gpt-6-astra", None, None, False),
-            (OPENAI_GPT_LUNA, None, None, False),
-            (OPENAI_GPT_SOL, None, None, False),
-            ("gpt-5.6-luna", 0.1, None, False),
-            ("gpt-5.6-terra", 0.1, None, False),
+            ("gpt-6-astra", None, None, False, False),
+            (OPENAI_GPT_LUNA, None, None, False, False),
+            (OPENAI_GPT_SOL, None, None, False, False),
+            ("gpt-5.6-luna", None, None, False, False),
+            ("gpt-5.6-terra", None, None, False, False),
+            ("gpt-5.4-mini", None, None, False, False),
+            ("gpt-5-mini", None, None, False, False),
+            ("gpt-5-2025-08-07", None, None, False, False),
             # Keep a legacy non-reasoning model as the sampling-control positive case.
-            ("gpt-4", 0.1, 0.8, False),
-            (OPENAI_GPT_SOL, None, None, True),
+            ("gpt-4", 0.1, 0.8, True, False),
+            (OPENAI_GPT_SOL, None, None, False, True),
         ],
-        ids=["astra", "luna", "sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-4", "sol-legacy-mem0"],
+        ids=[
+            "astra",
+            "luna",
+            "sol",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-5.4-mini",
+            "gpt-5-mini",
+            "gpt-5-snapshot",
+            "gpt-4",
+            "sol-legacy-mem0",
+        ],
     )
-    async def test_mem0_openai_sampling_support_is_model_specific(
+    async def test_mem0_openai_request_parameters_are_model_specific(
         self,
         tmp_path: Path,
         model_id: str,
         expected_temperature: float | None,
         expected_top_p: float | None,
+        sends_max_tokens: bool,
         legacy_request_builder: bool,
     ) -> None:
-        """Memory extraction must omit only sampling controls rejected by its model."""
+        """Memory extraction omits for GPT-5 and later models what Mem0 omits for the reasoning models it knows."""
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="ollama",
@@ -229,6 +256,9 @@ class TestMemoryConfig:
         assert {name: request_params[name] for name in expected_sampling if name in request_params} == {
             name: value for name, value in expected_sampling.items() if value is not None
         }
+        assert ("max_tokens" in request_params) is sends_max_tokens
+        # A max_completion_tokens cap would also count reasoning tokens and could leave no answer.
+        assert "max_completion_tokens" not in request_params
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,
@@ -313,6 +343,20 @@ class TestMemoryConfig:
         local_config = Config(memory=local_memory, router=RouterConfig(model="default"))
 
         assert _memory_collection_name(openai_config) != _memory_collection_name(local_config)
+
+    def test_memory_collection_name_changes_when_embedder_prefixes_change(self) -> None:
+        """Memories embedded with prefixes are isolated from unprefixed ones."""
+
+        def collection(**prefixes: str) -> str:
+            embedder = _MemoryEmbedderConfig(
+                provider="openai",
+                config=EmbedderConfig(model="embeddinggemma-2", **prefixes),
+            )
+            return _memory_collection_name(
+                Config(memory=MemoryConfig(embedder=embedder, llm=None), router=RouterConfig(model="default")),
+            )
+
+        assert len({collection(), collection(query_prefix="q: "), collection(document_prefix="d: ")}) == 3
 
     def test_get_memory_config_uses_runtime_shared_credentials_path(self, tmp_path: Path) -> None:
         """Runtime-shared credential overrides should be visible to Mem0 provider config."""
@@ -431,6 +475,45 @@ class TestMemoryConfig:
 
         resolved_settings = resolve_embedder_settings(config, runtime_paths)
         assert "named-key" not in repr(resolved_settings)
+
+    def test_embedder_prefixes_reach_the_client_and_its_identity(self, tmp_path: Path) -> None:
+        """Changing a prefix builds a new client, since it changes every vector the client returns."""
+        runtime_paths = _runtime_paths(tmp_path)
+
+        def config_with(prefix: str | None) -> Config:
+            return Config(
+                memory={
+                    "embedder": {
+                        "provider": "openai",
+                        "config": {
+                            "model": "embeddinggemma-2",
+                            "host": "http://local/v1",
+                            "api_key": "sk-test",
+                            "query_prefix": prefix,
+                            "document_prefix": "d: ",
+                        },
+                    },
+                },
+                router=RouterConfig(model="default"),
+            )
+
+        embedder = cast("MindRoomOpenAIEmbedder", create_configured_embedder(config_with("q: "), runtime_paths))
+
+        assert (embedder.query_prefix, embedder.document_prefix) == ("q: ", "d: ")
+        assert (
+            resolve_embedder_settings(config_with("q: "), runtime_paths).client_signature
+            != resolve_embedder_settings(config_with("other: "), runtime_paths).client_signature
+        )
+
+    def test_embedder_prefixes_require_an_openai_compatible_provider(self) -> None:
+        """Other providers would ignore the prefixes, so configuring them there is an error."""
+        with pytest.raises(ValidationError, match="query_prefix and document_prefix"):
+            _MemoryEmbedderConfig.model_validate(
+                {
+                    "provider": "sentence_transformers",
+                    "config": {"model": "google/embeddinggemma-2", "query_prefix": "q: "},
+                },
+            )
 
     def test_keyless_local_endpoint_constructs_both_real_clients(
         self,
@@ -565,7 +648,7 @@ class TestMemoryConfig:
         embedder = create_configured_embedder(config, runtime_paths)
         assert embedder.api_key == "openrouter-key"
         assert str(embedder.client.base_url) == f"{OPENROUTER_BASE_URL_DEFAULT}/"
-        assert embedder.embedding_request_parameters("hi")["dimensions"] == 1536
+        assert embedder.embedding_request_parameters("hi", query=True)["dimensions"] == 1536
 
     def test_get_memory_config_ollama_embedder_uses_credential_host_before_config(self, tmp_path: Path) -> None:
         """Credential-backed Ollama host should override the embedder config host."""
@@ -750,7 +833,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        expected_memory = SimpleNamespace(vector_store=object())
+        expected_memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
         mock_from_config.return_value = expected_memory
 
         result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
@@ -758,6 +841,53 @@ class TestMemoryConfig:
         assert result is expected_memory
         mock_ensure_sentence_transformers_dependencies.assert_called_once_with(_runtime_paths(tmp_path))
         mock_from_config.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.tool_system.dependencies.check_deps_installed", return_value=True)
+    @patch.object(AsyncMemory, "from_config")
+    async def test_create_memory_instance_waits_for_installs_off_event_loop(
+        self,
+        mock_from_config: MagicMock,
+        mock_check_deps_installed: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Local-embedder Mem0 checks dependencies and waits for a running install without stalling the event loop."""
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="sentence_transformers",
+                config=EmbedderConfig(model="sentence-transformers/all-MiniLM-L6-v2"),
+            ),
+            llm=None,
+        )
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
+        install_running = threading.Event()
+        finish_install = threading.Event()
+
+        def run_install() -> None:
+            with optional_dependency_environment(exclusive=True):
+                install_running.set()
+                finish_install.wait(5)
+
+        installer = threading.Thread(target=run_install)
+        installer.start()
+        try:
+            assert install_running.wait(5)
+            creation = asyncio.create_task(
+                create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path)),
+            )
+            started = time.monotonic()
+            await asyncio.sleep(0.2)
+            # A blocked event loop would only finish this sleep after the install's 5 s timeout.
+            assert time.monotonic() - started < 2
+            assert not creation.done()
+        finally:
+            finish_install.set()
+            installer.join(5)
+        assert await creation is mock_from_config.return_value
+        mock_check_deps_installed.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_create_memory_instance_replaces_mem0_openai_embedder_with_strict_adapter(
@@ -782,7 +912,7 @@ class TestMemoryConfig:
             api_key="sk-test",
             openai_client=client,
         )
-        memory = SimpleNamespace(vector_store=object(), embedding_model=object())
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object(), embedding_model=object())
 
         with (
             patch.object(AsyncMemory, "from_config", return_value=memory),
@@ -817,6 +947,33 @@ class TestMemoryConfig:
         # Consuming the failure resets the next operation.
         adapter.raise_for_operation_failure()
 
+    def test_mem0_strict_adapter_embeds_searches_as_queries_and_memories_as_documents(self) -> None:
+        """Mem0 names the purpose of each embedding, so stored memories get the document prefix."""
+        client = MagicMock()
+        client.embeddings.create.side_effect = lambda **kwargs: SimpleNamespace(
+            data=[SimpleNamespace(embedding=[1.0])]
+            * (len(kwargs["input"]) if isinstance(kwargs["input"], list) else 1),
+            usage=None,
+        )
+        adapter = _Mem0StrictOpenAIEmbedder(
+            MindRoomOpenAIEmbedder(
+                id="embeddinggemma-2",
+                api_key="sk-test",
+                base_url="http://local/v1",
+                openai_client=client,
+                query_prefix="q: ",
+                document_prefix="d: ",
+            ),
+        )
+
+        adapter.embed("find\nme", "search")
+        adapter.embed("remember", "add")
+        adapter.embed("changed", "update")
+        adapter.embed_batch(["one", "two"])
+
+        inputs = [call.kwargs["input"] for call in client.embeddings.create.call_args_list]
+        assert inputs == ["q: find me", "d: remember", "d: changed", ["d: one", "d: two"]]
+
     def test_memory_auto_flush_batch_config_is_parameterized(self) -> None:
         """Auto-flush batch/extractor limits should be configurable."""
         memory = MemoryConfig.model_validate(
@@ -844,10 +1001,26 @@ class TestMemoryConfig:
         assert memory.auto_flush.extractor.max_messages_per_flush == 12
         assert memory.auto_flush.extractor.max_chars_per_flush == 9000
 
-    def test_memory_auto_flush_default_interval_is_30_minutes(self) -> None:
-        """Auto-flush should default to a half-hour worker interval."""
+    def test_memory_auto_flush_extractor_model_must_be_configured(self) -> None:
+        """A misspelled extractor model fails when the config loads, not on every flush."""
+        with pytest.raises(ValidationError, match=r"Unknown memory\.auto_flush\.extractor\.model: 'fast'"):
+            Config(memory={"auto_flush": {"extractor": {"model": "fast"}}})
+
+    def test_memory_auto_flush_default_interval_is_5_minutes(self) -> None:
+        """Without the reply path waking it, auto-flush passes every five minutes by default."""
         memory = MemoryConfig()
-        assert memory.auto_flush.flush_interval_seconds == 1800
+        assert memory.auto_flush.flush_interval_seconds == 300
+
+    def test_retired_auto_flush_fields_still_load(self) -> None:
+        """A config the dashboard saved with the retired dirty-queue fields loads, and a save drops them."""
+        memory = MemoryConfig.model_validate(
+            {
+                "backend": "file",
+                "auto_flush": {"enabled": True, "max_dirty_age_seconds": 600, "max_cross_session_reprioritize": 5},
+            },
+        )
+        assert memory.auto_flush.enabled is True
+        assert memory.model_dump(exclude_unset=True) == {"backend": "file", "auto_flush": {"enabled": True}}
 
     def test_memory_config_accepts_disabled_backend(self) -> None:
         """The memory config should accept disabled memory in object and shorthand form."""

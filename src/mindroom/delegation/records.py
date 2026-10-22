@@ -24,7 +24,7 @@ from mindroom.durable_write import create_directory_durable, write_json_file_dur
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, write_file_within_root
 from mindroom.redaction import redact_sensitive_data
-from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
@@ -292,6 +292,17 @@ class DelegationRecordOwner:
             child_execution_identity=child_execution_identity,
         )
         handle = self._resolve_handle(locator)
+        # A new private child's first data can be this record, written before the child runs.
+        record_private_instance_owner(
+            metadata.child_agent_name,
+            resolve_agent_storage(
+                metadata.child_agent_name,
+                self.config,
+                self.runtime_paths,
+                execution_identity=child_execution_identity,
+            ).execution,
+            self.runtime_paths,
+        )
         run = redact_sensitive_data(
             {
                 "schema_version": _SCHEMA_VERSION,

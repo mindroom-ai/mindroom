@@ -18,7 +18,7 @@ from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api.agent_cli import router as agent_cli_router
-from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
+from mindroom.api.auth import ApiAuthState, dashboard_cors_origins, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.budgets import router as budgets_router
 from mindroom.api.computers import active_computer_worker_keys, rebind_computer_runtime
@@ -27,10 +27,13 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResul
 from mindroom.api.config_reload import router as config_reload_router
 from mindroom.api.config_schema import router as config_schema_router
 from mindroom.api.connections import router as connections_router
+from mindroom.api.connections_session import router as connections_session_router
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
+from mindroom.api.egress_broker import router as egress_broker_router
+from mindroom.api.egress_credentials import router as egress_credentials_router
 from mindroom.api.external_triggers import router as external_triggers_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
@@ -61,18 +64,20 @@ from mindroom.embeddings.embedder_health import get_embedder_failure
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.knowledge_graph.store import knowledge_graph_failure
 from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
-from mindroom.origins import normalized_origin
+from mindroom.origins import allowed_client_origins
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
+from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
 from mindroom.usage.legacy_usage_storage import migrate_usage_storage
-from mindroom.worker_computer.auth import computer_origins
 from mindroom.workers.backend import maintain_workers
-from mindroom.workers.runtime import lease_configured_primary_worker_manager
+from mindroom.workers.in_flight import touch_workers_in_flight
+from mindroom.workers.runtime import lease_configured_primary_worker_manager, shutdown_primary_worker_manager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -88,18 +93,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
-_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
-_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
     config_lifecycle.CONFIG_GENERATION_HEADER,
     config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
     config_lifecycle.CONFIG_PENDING_RESTART_HEADER,
-)
-_DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
-    "http://localhost:3003",
-    "http://localhost:5173",
-    "http://127.0.0.1:3003",
-    "http://127.0.0.1:5173",
 )
 
 
@@ -145,7 +142,11 @@ class _RuntimeDashboardCorsMiddleware:
 
     def _middleware_for_current_runtime(self, path: str) -> CORSMiddleware:
         paths = self._current_runtime_paths()
-        origins = computer_origins(paths) if path.startswith("/api/computers") else gateway_cors_origins(paths, path)
+        origins = (
+            allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
+            if path.startswith("/api/computers")
+            else gateway_cors_origins(paths, path)
+        )
         settings = (
             _DashboardCorsSettings(origins, allow_credentials=False, expose_headers=("WWW-Authenticate",))
             if origins is not None
@@ -251,6 +252,7 @@ def _cleanup_workers_once(
             touch_live_workers(worker_manager)
         for worker_key in computer_worker_keys:
             worker_manager.touch_worker(worker_key)
+        touch_workers_in_flight(worker_manager)
         maintenance = maintain_workers(worker_manager)
     if maintenance.cleaned:
         logger.info(
@@ -554,7 +556,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler = app_state.orchestrator_knowledge_refresh_scheduler
-    if knowledge_refresh_scheduler is None:
+    # `mindroom run` binds its scheduler before it serves this app, so without one the API runs on its own.
+    standalone = knowledge_refresh_scheduler is None
+    if standalone:
         api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
         standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler)
@@ -587,6 +591,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     if api_owned_knowledge_refresh_scheduler is not None:
         await api_owned_knowledge_refresh_scheduler.shutdown()
     close_usage_export_runner(_app)
+    if standalone:
+        # `mindroom run` stops the worker manager itself once its bots have stopped.
+        # An API running on its own must stop it here, or its Docker worker containers outlive the process.
+        await run_blocking_until_complete(shutdown_primary_worker_manager)
 
 
 def bind_orchestrator_knowledge_refresh_scheduler(
@@ -636,44 +644,10 @@ def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | N
     return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
 
 
-def _api_cors_origins(runtime_paths: constants.RuntimePaths) -> list[str]:
-    """Return hosted browser origins allowed to make credentialed API calls."""
-    return list(
-        dict.fromkeys(
-            origin
-            for origin in (
-                normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
-                normalized_origin(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
-            )
-            if origin is not None
-        ),
-    )
-
-
 def _dashboard_cors_settings(runtime_paths: constants.RuntimePaths) -> _DashboardCorsSettings:
-    """Return dashboard CORS settings for one runtime context."""
-    if runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
-        return _DashboardCorsSettings(allow_origins=("*",), allow_credentials=False)
-
-    configured_origins = runtime_paths.env_value(_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV)
-    if configured_origins is None:
-        hosted_origins = tuple(_api_cors_origins(runtime_paths))
-        if hosted_origins:
-            return _DashboardCorsSettings(allow_origins=hosted_origins, allow_credentials=True)
-
-    origins = _parse_dashboard_cors_allowed_origins(configured_origins)
-    return _DashboardCorsSettings(
-        allow_origins=origins,
-        allow_credentials="*" not in origins,
-    )
-
-
-def _parse_dashboard_cors_allowed_origins(configured_origins: str | None) -> tuple[str, ...]:
-    """Parse a comma-separated dashboard CORS origin list."""
-    if configured_origins is None:
-        return _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
-    origins = tuple(origin for origin in (part.strip() for part in configured_origins.split(",")) if origin)
-    return origins or _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+    """Return dashboard CORS settings for one runtime context; credentials are never allowed with `*`."""
+    origins = dashboard_cors_origins(runtime_paths)
+    return _DashboardCorsSettings(allow_origins=origins, allow_credentials="*" not in origins)
 
 
 def _add_dashboard_cors_middleware(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
@@ -761,9 +735,12 @@ def _set_config_generation_header(response: Response, generation: int) -> None:
 
 # Include routers
 app.include_router(auth_router)
+app.include_router(connections_session_router)
 app.include_router(connections_router)
+app.include_router(egress_credentials_router)
 install_gateway_routes(app)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
+app.include_router(egress_broker_router, dependencies=[Depends(verify_user)])
 app.include_router(provider_setup_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
 app.include_router(integrations_router, dependencies=[Depends(verify_user)])
@@ -812,6 +789,9 @@ async def health_check(request: Request) -> JSONResponse:
         # Additive diagnostic only: a broken embedder degrades semantic search
         # but must not flip liveness and restart an otherwise usable runtime.
         response["embedder"] = {"status": "failing", "detail": embedder_failure}
+    if (knowledge_graph_failure_detail := knowledge_graph_failure()) is not None:
+        # Additive diagnostic only, like the embedder block: a failing graph must not flip liveness.
+        response["knowledge_graph"] = {"status": "failing", "detail": knowledge_graph_failure_detail}
 
     if runtime_state.phase == "ready" and not sync_health.is_healthy:
         response["status"] = "unhealthy"

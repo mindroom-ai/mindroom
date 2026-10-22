@@ -66,6 +66,10 @@ class EventKind(StrEnum):
     RTC = "rtc"
     REDACTION = "redaction"
     OPAQUE_HISTORY = "opaque_history"
+    # A runtime source, not a Matrix event: background jobs ended that no reply collected.
+    JOB_FOLLOW_UP = "job_follow_up"
+    # A person asks from their client to cancel background jobs.
+    JOB_CANCEL = "job_cancel"
 
 
 # Kinds whose work outlives its callback, because the callback only starts a

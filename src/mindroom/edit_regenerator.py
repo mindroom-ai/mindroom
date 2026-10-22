@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mindroom.coalescing.batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import hook_ingress_policy
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
@@ -152,9 +151,6 @@ class EditRegenerator:
         if not event_info.original_event_id:
             return None
         original_event_id = event_info.original_event_id
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        if registry.current_entity_name_for_user_id(event.sender):
-            return None
 
         # Every decision below is taken from the record's own conversation target, never from the thread the
         # edit names.

@@ -3,9 +3,9 @@
 Schedule agents or teams to do one-time or recurring work, such as reminders, daily reports, or periodic checks, using natural language.
 Create schedules with the `!schedule` chat command or let an agent create them with the `scheduler` tool.
 
-<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%" poster="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-light="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-dark="https://github.com/user-attachments/assets/38261697-8f2a-478d-a256-32559e107315">
-  <source src="https://github.com/user-attachments/assets/e59e09c8-c8c7-4e90-8e3c-30b8f18b6de2" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/fdbc3860-9301-4d62-907a-857c818d4e73" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%" poster="https://github.com/user-attachments/assets/ada165aa-24ad-407f-9831-30928126d091" data-poster-light="https://github.com/user-attachments/assets/ada165aa-24ad-407f-9831-30928126d091" data-poster-dark="https://github.com/user-attachments/assets/01a8d67f-f1ed-4c6a-b2df-a1681149722e">
+  <source src="https://github.com/user-attachments/assets/99f7e664-131d-4831-9c7e-64a2d95b2b6b" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/67fd537c-d810-4a3c-b5a5-d8e307708d56" type="video/mp4">
 </video>
 
 ## Commands
@@ -97,9 +97,9 @@ Use `!list_schedules` to find task IDs.
 
 ## [`scheduler`]
 
-<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%" poster="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-light="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-dark="https://github.com/user-attachments/assets/6194d6c7-89e7-4e66-8810-048efc3b3001">
-  <source src="https://github.com/user-attachments/assets/2fa5d666-16bd-4864-b27f-fb212609e2a1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/7a68cee9-24d4-43cf-84de-599405fd16d7" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%" poster="https://github.com/user-attachments/assets/7221a1d4-2429-4591-8b6f-aca242cc152b" data-poster-light="https://github.com/user-attachments/assets/7221a1d4-2429-4591-8b6f-aca242cc152b" data-poster-dark="https://github.com/user-attachments/assets/70ad19a8-6728-4344-9e6d-0258c43b5173">
+  <source src="https://github.com/user-attachments/assets/3377307e-268f-4ae0-a0e6-061dd16c1627" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/4423fd02-b6c9-4cf5-bf10-ae50149ebd2e" type="video/mp4">
 </video>
 
 The `scheduler` tool lets an agent create, edit, list, and cancel the same tasks as the chat commands.
@@ -241,6 +241,7 @@ A run waits rather than proceeding when membership cannot be confirmed.
 ## Persistence and Missed Runs
 
 Schedules are stored in Matrix room state and survive restarts.
+In a room MindRoom did not create, a room admin may need to raise the router's power level to the room's state-event level, usually 50, before schedules can be saved; raising the router is enough for every agent, and the error names the account and the level to grant.
 MindRoom only acts on schedule state written by its own router, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16), as Synapse, Tuwunel, and Dendrite do; otherwise reading tasks fails.
 
@@ -266,7 +267,7 @@ For `schedule:fired` hooks that run more than once for the same occurrence, see 
 ## Automations
 
 Automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
-MindRoom ships two, [`prompt_curation`](#prompt_curation) and [`dreaming`](#dreaming), and [plugins](https://docs.mindroom.chat/plugins/#automations) can add more.
+MindRoom ships three, [`prompt_curation`](#prompt_curation), [`dreaming`](#dreaming), and [`exploration`](#exploration), and [plugins](https://docs.mindroom.chat/plugins/#automations) can add more.
 The check runs in code, so a schedule that finds nothing to do costs no model call and posts nothing.
 Enable them per agent in `config.yaml`, or under `defaults` for every eligible agent:
 
@@ -290,12 +291,15 @@ agents:
 - `room` is a room alias or ID; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
-- Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
-- The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
+- A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) runs its automations once for each requester who has used it, as that requester and on that requester's own files, and posts in their [personal room](https://docs.mindroom.chat/personal-rooms/) with the agent.
+  Only the agent named by `personal_rooms.agent` can run automations as a private agent, its entries cannot set `room`, and it inherits only default entries without `room`.
+  A requester without a personal room, or whom the agent may no longer answer, is skipped.
+  Everyone who can read that personal room, such as an agent the requester invited or an adopted room's other participants, sees the prompts and replies, like any other reply there.
+- `prompt_curation` and `dreaming` need `memory_backend: file`, and `exploration` needs `knowledge_graph: true`; an agent that lacks what a default entry needs skips it and keeps inheriting the others.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
 - When the response to a prompt is final, or an hour after the prompt was posted without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
-- An agent runs one automation at a time; one that comes due meanwhile starts when the other ends.
+- An agent, or each requester's instance of a private agent, runs one automation at a time; one that comes due meanwhile starts when the other ends.
 - A check that cannot read what it checks posts a warning in the room.
 - A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
 
@@ -306,7 +310,7 @@ For conditions that need your own code, write a [plugin automation](https://docs
 Agents append to `MEMORY.md` and their `context_files` far more often than they condense them, and every model call re-sends those files.
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
-1. The check measures `MEMORY.md` plus the agent's `context_files` with the estimate behind `static_prompt_tokens` (characters / 4).
+1. The check measures `MEMORY.md` plus the agent's `context_files` with the estimate behind `static_prompt_tokens` (characters / 4); for a private agent these are `MEMORY.md` and `private.context_files` in the requester's private root, because agent-level `context_files` load from the workspace every requester shares.
 2. Above `trigger_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", a cut between `min_reduction` and `max_reduction` (10 to 15%).
 3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
@@ -357,3 +361,40 @@ Each run keeps its agenda and report, and a run that reached review also its pat
 `dreaming` needs `memory_backend: file` and something to work from: [auto-flush](https://docs.mindroom.chat/memory/#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](https://docs.mindroom.chat/thread-exports/) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
 It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
 Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.
+
+### `exploration`
+
+`exploration` asks an agent with a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) to explore its data sources on a schedule, so the graph learns about projects, people, and documents nobody has asked about yet.
+
+```yaml
+agents:
+  mind:
+    knowledge_graph: true
+    tools: [mcp_github, duckduckgo]
+    automations:
+      - name: exploration
+        cron: "0 */6 * * *"
+        room: "#mind-exploration"
+        max_tool_calls: 30
+```
+
+1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
+2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks.
+3. The agent answers the prompt like any message, with its own tools and [approval rules](https://docs.mindroom.chat/tool-approval/); a shared agent's call that needs approval is denied, because no person asked for the run, while a private agent's call waits in the thread until its requester answers or the request expires.
+4. When the run ends, MindRoom marks the thread resolved and adds its tool results to the graph; the agent's own summary is not added, and an interrupted run adds nothing.
+
+The prompt tells the agent to only read and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
+The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so a shared agent's exploration needs a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
+A turn whose message was redacted can still be listed until the agent next replies in that conversation.
+
+| Field | Default | Description |
+|---|---|---|
+| `cron` | `30 2 * * *` | When to check |
+| `room` | required for a shared agent | Where the prompt is posted |
+| `max_tool_calls` | `40` (1 to 1000) | Tool calls the prompt asks one run to stay within |
+| `max_leads` | `20` (0 to 200) | Most recent tool calls listed in the prompt |
+| `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run, if people talked to the agent since |
+| `model` | the agent's model | A key of `models` to run the exploration with |
+
+Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`.
+Its model usage counts as ordinary replies, and extracting what it read counts as `knowledge_graph` usage.

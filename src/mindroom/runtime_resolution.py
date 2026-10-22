@@ -21,6 +21,7 @@ from mindroom.constants import (
     resolve_session_state_root,
 )
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
@@ -156,6 +157,7 @@ def _resolved_private_state_root(
 def resolve_agent_execution(
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
@@ -173,6 +175,10 @@ def resolve_agent_execution(
         if not execution_identity.requester_id or not execution_identity.requester_id.strip():
             msg = f"Private agent '{agent_name}' requires a requester identity to resolve requester-local state"
             raise ValueError(msg)
+        # MindRoom's own accounts act for no one, so they never own a private instance.
+        if not is_access_checked_requester_id(execution_identity.requester_id, config, runtime_paths):
+            msg = f"Private agent '{agent_name}' requires a human or bot-account requester to resolve requester-local state"
+            raise ValueError(msg)
     resolved_worker_execution = resolve_worker_execution_scope(
         execution_scope,
         agent_name=agent_name,
@@ -187,6 +193,32 @@ def resolve_agent_execution(
         execution_scope=execution_scope,
         execution_identity=resolved_worker_execution.execution_identity,
         worker_key=resolved_worker_execution.worker_key,
+    )
+
+
+def record_private_instance_owner(
+    agent_name: str,
+    resolved_execution: ResolvedAgentExecution,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Record who owns a private instance before the primary stores its first data there.
+
+    A scope that already holds data when its record is first written stays undiscoverable, so every primary path
+    that creates private state calls this first.
+    """
+    # The identity record sits in the private scope above the workspace, which
+    # dedicated workers never mount; only the primary creates or locks it.
+    if not resolved_execution.policy.private_workspace_enabled or runs_in_dedicated_worker(runtime_paths):
+        return
+    execution_identity = resolved_execution.execution_identity
+    worker_key = resolved_execution.worker_key
+    if execution_identity is None or worker_key is None or execution_identity.requester_id is None:
+        msg = f"Private agent '{agent_name}' has unresolved private execution state"
+        raise ValueError(msg)
+    ensure_private_instance_identity(
+        runtime_paths.storage_root,
+        worker_key=worker_key,
+        requester_id=execution_identity.requester_id,
     )
 
 
@@ -207,20 +239,8 @@ def resolve_agent_runtime(
     )
     resolved_execution = resolved_storage.execution
     state_root = resolved_storage.state_root
-
-    # The identity record sits in the private scope above the workspace, which
-    # dedicated workers never mount; only the primary creates or locks it.
-    if create and resolved_execution.policy.private_workspace_enabled and not runs_in_dedicated_worker(runtime_paths):
-        execution_identity = resolved_execution.execution_identity
-        worker_key = resolved_execution.worker_key
-        if execution_identity is None or worker_key is None or execution_identity.requester_id is None:
-            msg = f"Private agent '{agent_name}' has unresolved private execution state"
-            raise ValueError(msg)
-        ensure_private_instance_identity(
-            runtime_paths.storage_root,
-            worker_key=worker_key,
-            requester_id=execution_identity.requester_id,
-        )
+    if create:
+        record_private_instance_owner(agent_name, resolved_execution, runtime_paths)
 
     workspace = resolve_agent_workspace_from_state_path(
         agent_name,
@@ -281,6 +301,7 @@ def resolve_agent_storage(
     resolved_execution = resolve_agent_execution(
         agent_name,
         config,
+        runtime_paths,
         execution_identity=execution_identity,
     )
     if resolved_execution.policy.private_workspace_enabled:
@@ -345,7 +366,8 @@ def resolve_knowledge_binding(
             base_id=base_id,
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
             knowledge_path=knowledge_path,
-            # Shared Git bases poll through STALE scheduling after their interval, not READY access scheduling.
+            # Polled shared bases (Git, or local with poll_interval_seconds) refresh through STALE scheduling
+            # after their interval; Git bases never use READY access scheduling.
             incremental_sync_on_access=base_config.watch and base_config.git is None and not start_watchers,
         )
 
@@ -379,6 +401,7 @@ __all__ = [
     "ResolvedAgentRuntime",
     "ResolvedAgentStorage",
     "ResolvedKnowledgeBinding",
+    "record_private_instance_owner",
     "resolve_agent_execution",
     "resolve_agent_runtime",
     "resolve_agent_storage",

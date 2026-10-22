@@ -16,12 +16,12 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.logging_config import get_logger
-from mindroom.memory import add_agent_memory
+from mindroom.matrix_rtc.spoken_turns import spoken_continuation
+from mindroom.memory import add_agent_memory, redact_memory_text
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, read_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
     from pathlib import Path
     from typing import TextIO
 
@@ -32,24 +32,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _TRANSCRIPT_DIRNAME = "calls"
-# Speech providers can close a transcript item mid-sentence, so the next one may start with punctuation.
-_GLUED_PUNCTUATION = tuple(",.;:!?…)]}")
-
-
-def _spoken_continuation(fragment: str) -> str:
-    """Return one normalized, non-empty speech fragment prefixed for appending to the same speaker's turn."""
-    return fragment if fragment.startswith(_GLUED_PUNCTUATION) else f" {fragment}"
-
-
-def merge_spoken_turns(turns: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Join consecutive normalized, non-empty fragments from the same speaker into one turn."""
-    merged: list[tuple[str, str]] = []
-    for role, text in turns:
-        if merged and merged[-1][0] == role:
-            merged[-1] = (role, merged[-1][1] + _spoken_continuation(text))
-        else:
-            merged.append((role, text))
-    return merged
 
 
 def _new_call_transcript_path(base: Path, *, room_id: str, started_at: datetime) -> Path:
@@ -151,7 +133,7 @@ class CallTranscript:
         if not text:
             return
         if self._open_speaker == speaker:
-            continuation = _spoken_continuation(text)
+            continuation = spoken_continuation(text)
             self._spoken[-1] = (speaker, self._spoken[-1][1] + continuation)
             self._pending.append(continuation)
         else:
@@ -267,7 +249,7 @@ class CallTranscript:
                     self.path.relative_to(self.reference_root),
                     truncate=True,
                 )
-                memory_content = f"{summary}\n\n{transcript.decode('utf-8', errors='replace')}"
+                memory_content = f"{summary}\n\n{redact_memory_text(transcript.decode('utf-8', errors='replace'))}"
             await add_agent_memory(
                 memory_content,
                 self.agent_name,

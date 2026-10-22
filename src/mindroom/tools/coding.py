@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     description="Find code, search across files, and make precise edits",
     category=ToolCategory.DEVELOPMENT,
     file_access=ToolFileAccess.AGENT,
-    managed_init_args=(ToolManagedInitArg.FILE_ACCESS,),
+    managed_init_args=(ToolManagedInitArg.FILE_ACCESS, ToolManagedInitArg.SHARED_DIRECTORY_ROOTS),
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,

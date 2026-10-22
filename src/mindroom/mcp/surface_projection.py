@@ -18,6 +18,7 @@ from mindroom.mcp.function_surface import (
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -29,14 +30,11 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.types import MCPOAuthCredentialScope, MCPServerCatalog, MCPServerState
 
-type _LoadedToolNames = list[str] | tuple[str, ...] | set[str] | frozenset[str]
 
 __all__ = [
     "MCPFunctionSurfaceContext",
     "MCPScopedFunctionState",
-    "function_collision_messages",
     "function_collision_reports",
-    "mcp_tool_unavailable_messages",
     "scoped_oauth_state_has_configured_agent",
 ]
 
@@ -82,8 +80,11 @@ def _catalog_function_names_for_tool_config(
     return {
         tool.function_name
         for tool in catalog.tools
-        if (not exclude_tools or tool.remote_name not in exclude_tools)
-        and (not include_tools or tool.remote_name in include_tools)
+        if tool_name_allowed(
+            tool.remote_name,
+            include=include_tools or None,
+            exclude=exclude_tools or None,
+        )
     }
 
 
@@ -121,17 +122,12 @@ def scoped_oauth_state_has_configured_agent(
     return False
 
 
-def _configured_tool_configs(
-    context: MCPFunctionSurfaceContext,
-    agent_name: str,
-    *,
-    loaded_tools: _LoadedToolNames | None,
-) -> tuple[EffectiveToolConfig, ...]:
-    """Return provider-visible tool configs for one agent surface."""
+def _configured_tool_configs(context: MCPFunctionSurfaceContext, agent_name: str) -> tuple[EffectiveToolConfig, ...]:
+    """Return one agent's eager tool configs; agent builds hide MCP functions that collide with deferred ones."""
     return visible_tool_surface(
         agent_name=agent_name,
         config=context.config,
-        loaded_tools=loaded_tools,
+        deferred_tools=(),
         enable_dynamic_tools_manager=True,
         include_matrix_room_runtime_tools=True,
     ).runtime_tool_configs
@@ -196,13 +192,11 @@ def _toolkit_function_names(toolkit: Toolkit) -> set[str]:
 def _configured_function_surface(
     context: MCPFunctionSurfaceContext,
     agent_name: str,
-    *,
-    loaded_tools: _LoadedToolNames | None,
 ) -> tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]]:
     """Return one agent's provider-visible local functions and MCP assignments."""
     local_tool_configs, mcp_tool_configs = _partition_tool_configs(
         context,
-        _configured_tool_configs(context, agent_name, loaded_tools=loaded_tools),
+        _configured_tool_configs(context, agent_name),
     )
     if not mcp_tool_configs:
         # Local names only collide with this agent's MCP functions; building toolkits can auto-install deps.
@@ -242,19 +236,14 @@ def _agent_function_surface_snapshot(
     context: MCPFunctionSurfaceContext,
     agent_name: str,
     *,
-    loaded_tools: _LoadedToolNames | None,
     credential_surface: MCPOAuthCredentialScope | None,
-    candidate_state: MCPServerState | None = None,
-    candidate_catalog: MCPServerCatalog | None = None,
-    configured_surface: tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]] | None = None,
+    candidate_state: MCPServerState | None,
+    candidate_catalog: MCPServerCatalog | None,
+    configured_surface: tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]],
 ) -> MCPFunctionSurfaceSnapshot:
     """Snapshot one configured agent and credential surface from supplied runtime state."""
     agent_execution_scope = context.config.resolve_entity(agent_name).execution_scope
-    local_function_names, configured_mcp_tool_configs = configured_surface or _configured_function_surface(
-        context,
-        agent_name,
-        loaded_tools=loaded_tools,
-    )
+    local_function_names, configured_mcp_tool_configs = configured_surface
     server_function_sources: list[tuple[str, tuple[frozenset[str], ...]]] = []
     for server_id in sorted(configured_mcp_tool_configs):
         state = context.states.get(server_id)
@@ -310,14 +299,12 @@ def function_collision_reports(
         if scoped.state.catalog is not None and scoped.state.last_error is None
     } | ({credential_surface} if credential_surface is not None else set())
     configured_surfaces = {
-        agent_name: _configured_function_surface(context, agent_name, loaded_tools=[])
-        for agent_name in sorted(context.config.agents)
+        agent_name: _configured_function_surface(context, agent_name) for agent_name in sorted(context.config.agents)
     }
     snapshots = tuple(
         _agent_function_surface_snapshot(
             context,
             agent_name,
-            loaded_tools=[],
             credential_surface=surface,
             candidate_state=candidate_state,
             candidate_catalog=candidate_catalog,
@@ -327,66 +314,3 @@ def function_collision_reports(
         for agent_name in sorted(context.config.agents)
     )
     return analyze_mcp_function_collisions(snapshots)
-
-
-def mcp_tool_unavailable_messages(
-    context: MCPFunctionSurfaceContext,
-    agent_name: str,
-    loaded_tools: _LoadedToolNames,
-) -> list[str]:
-    """Return unavailable non-OAuth server messages for one dynamic-tool surface."""
-    _local_tool_configs, mcp_tool_configs = _partition_tool_configs(
-        context,
-        _configured_tool_configs(context, agent_name, loaded_tools=loaded_tools),
-    )
-    messages: list[str] = []
-    for server_id in sorted(mcp_tool_configs):
-        server_config = context.config.mcp_servers.get(server_id)
-        state = context.states.get(server_id)
-        if server_config is not None and server_config.auth is not None:
-            continue
-        if state is not None and state.config.auth is not None:
-            continue
-        if state is None:
-            messages.append(f"MCP server '{server_id}' is not configured or has not been synchronized.")
-        elif state.last_error is not None:
-            messages.append(f"MCP server '{server_id}' is unavailable: {state.last_error}")
-        elif state.catalog is None or state.session is None or not state.connected:
-            messages.append(f"MCP server '{server_id}' is not connected.")
-    return messages
-
-
-def function_collision_messages(
-    context: MCPFunctionSurfaceContext,
-    agent_name: str,
-    loaded_tools: _LoadedToolNames,
-    *,
-    credential_surfaces: set[MCPOAuthCredentialScope],
-) -> list[str]:
-    """Return collision messages for one candidate dynamic-tool surface."""
-    active_states = (*context.states.values(), *(scoped.state for scoped in context.scoped_states))
-    if not any(
-        state.last_error is None
-        and (state.catalog is not None or (state.oauth_credential_scope is None and state.config.auth is not None))
-        for state in active_states
-    ):
-        return []
-    ensure_tool_registry_loaded(context.runtime_paths, context.config)
-    configured_surface = _configured_function_surface(context, agent_name, loaded_tools=loaded_tools)
-    snapshots = tuple(
-        _agent_function_surface_snapshot(
-            context,
-            agent_name,
-            loaded_tools=loaded_tools,
-            credential_surface=credential_surface,
-            configured_surface=configured_surface,
-        )
-        for credential_surface in (sorted(credential_surfaces) or [None])
-    )
-    return sorted(
-        {
-            message
-            for report in analyze_mcp_function_collisions(snapshots)
-            for _function_name, message in report.function_name_collisions
-        },
-    )

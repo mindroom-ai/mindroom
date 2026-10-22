@@ -63,7 +63,6 @@ from mindroom.constants import (
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
     RuntimePaths,
 )
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, run_error_event_text
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.turn_recorder import TurnRecorder
@@ -78,7 +77,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_runner import (
     _paused_with_committed_presentation,
-    prepare_memory_and_model_context,
+    _prepare_memory_and_model_context,
 )
 from mindroom.response_turn import CompletedAttempt, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -95,6 +94,7 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
     tool_execution_identity,
 )
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config,
@@ -371,7 +371,7 @@ class TestUserIdPassthrough:
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        memory_prompt, memory_thread_history, model_prompt, model_thread_history = prepare_memory_and_model_context(
+        memory_prompt, memory_thread_history, model_prompt, model_thread_history = _prepare_memory_and_model_context(
             "report",
             [],
             config=config,
@@ -397,7 +397,7 @@ class TestUserIdPassthrough:
 
         existing_model_prompt = "[2026-03-20 08:15 PDT] report\n\nAvailable attachment IDs: att_report."
 
-        _memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
+        _memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = _prepare_memory_and_model_context(
             "report",
             [],
             config=config,
@@ -417,7 +417,7 @@ class TestUserIdPassthrough:
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
+        memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = _prepare_memory_and_model_context(
             "plain text message",
             [],
             config=config,
@@ -437,7 +437,7 @@ class TestUserIdPassthrough:
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        _memory_prompt, memory_thread_history, _model_prompt, model_thread_history = prepare_memory_and_model_context(
+        _memory_prompt, memory_thread_history, _model_prompt, model_thread_history = _prepare_memory_and_model_context(
             "current",
             [
                 make_visible_message(
@@ -753,7 +753,7 @@ class TestUserIdPassthrough:
         assert agent is mock_agent
         assert full_prompt == "test"
         assert unseen_event_ids == []
-        assert prepared_history.compaction_outcomes == []
+        assert prepared_history.compaction_reply_outcome == "none"
         assert prepared_history.replays_persisted_history is False
         assert prepared_history.replay_plan is not None
         assert prepared_history.replay_plan.mode == "configured"
@@ -863,7 +863,7 @@ class TestUserIdPassthrough:
         assert agent is mock_agent
         assert full_prompt == "prepared prompt"
         assert unseen_event_ids == []
-        assert prepared_history.compaction_outcomes == []
+        assert prepared_history.compaction_reply_outcome == "none"
         assert mock_build_prompt_parts.await_args is not None
         assert mock_build_prompt_parts.await_args.args[0] == "raw prompt"
         assert mock_prepare_execution.await_args is not None
@@ -1321,7 +1321,6 @@ class TestUserIdPassthrough:
             },
             "reply_to_event_id": "e1",
             "correlation_id": "e1",
-            "tools_schema": [],
             "model_params": {},
             "matrix_event_id": "e1",
             "matrix_seen_event_ids": ["e1"],
@@ -1877,7 +1876,6 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai.agent_tool_definition_payloads_for_logging", return_value=[]),
         ):
             mock_prepare.return_value = _prepared_prompt_result(agent, prompt=prepared_prompt)
             chunks = [
@@ -2096,8 +2094,8 @@ class TestUserIdPassthrough:
         assert len(tool_trace) == 1
 
     @pytest.mark.asyncio
-    async def test_ai_response_continues_after_dynamic_tool_load(self, tmp_path: Path) -> None:
-        """Dynamic tool loads should rebuild the agent and continue the same task."""
+    async def test_ai_response_continues_after_next_turn_model_switch(self, tmp_path: Path) -> None:
+        """A next-turn model switch should rebuild the agent and continue the same task."""
         first_agent = MagicMock()
         first_agent.model = MagicMock()
         first_agent.model.__class__.__name__ = "OpenAIChat"
@@ -2112,28 +2110,24 @@ class TestUserIdPassthrough:
         second_agent.name = "GeneralAgent"
         second_agent.add_history_to_context = False
 
-        load_tool_execution = ToolExecution(
-            tool_call_id="call-load",
-            tool_name="load_tool",
-            tool_args={"tool_name": "sleep"},
+        switch_execution = ToolExecution(
+            tool_call_id="call-switch",
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
-                {
-                    "status": "loaded",
-                    "tool": "dynamic_tools",
-                    "tool_name": "sleep",
-                },
+                {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
             ),
             stop_after_tool_call=True,
         )
 
         first_run_output = MagicMock()
         first_run_output.content = ""
-        first_run_output.tools = [load_tool_execution]
+        first_run_output.tools = [switch_execution]
         first_run_output.status = RunStatus.completed
         first_agent.arun = AsyncMock(return_value=first_run_output)
 
         second_run_output = MagicMock()
-        second_run_output.content = "Used the loaded tool."
+        second_run_output.content = "Finished the task."
         second_run_output.tools = []
         second_run_output.status = RunStatus.completed
         second_agent.arun = AsyncMock(return_value=second_run_output)
@@ -2156,7 +2150,7 @@ class TestUserIdPassthrough:
                 tool_trace_collector=tool_trace,
             )
 
-        assert response == "Used the loaded tool."
+        assert response == "Finished the task."
         assert mock_prepare.await_count == 2
         assert mock_prepare.await_args_list[0].kwargs["model_prompt"] == "test\n\nUse attachment att_1."
         assert mock_prepare.await_args_list[1].kwargs["model_prompt"] == "Use attachment att_1."
@@ -2321,8 +2315,8 @@ class TestUserIdPassthrough:
         assert observed_tool_models == ["default", "large"]
 
     @pytest.mark.asyncio
-    async def test_ai_response_continuation_cancelled_run_preserves_dynamic_tool_trace(self, tmp_path: Path) -> None:
-        """Cancelled continuation runs should keep dynamic-tool calls in interrupted history."""
+    async def test_ai_response_continuation_cancelled_run_preserves_first_attempt_trace(self, tmp_path: Path) -> None:
+        """Cancelled continuation runs should keep the first attempt's tool calls in interrupted history."""
         first_agent = MagicMock()
         first_agent.model = MagicMock()
         first_agent.model.__class__.__name__ = "OpenAIChat"
@@ -2337,22 +2331,18 @@ class TestUserIdPassthrough:
         second_agent.name = "GeneralAgent"
         second_agent.add_history_to_context = False
 
-        load_tool_execution = ToolExecution(
-            tool_call_id="call-load",
-            tool_name="load_tool",
-            tool_args={"tool_name": "sleep"},
+        switch_execution = ToolExecution(
+            tool_call_id="call-switch",
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
-                {
-                    "status": "loaded",
-                    "tool": "dynamic_tools",
-                    "tool_name": "sleep",
-                },
+                {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
             ),
             stop_after_tool_call=True,
         )
         first_run_output = MagicMock()
         first_run_output.content = ""
-        first_run_output.tools = [load_tool_execution]
+        first_run_output.tools = [switch_execution]
         first_run_output.status = RunStatus.completed
         first_agent.arun = AsyncMock(return_value=first_run_output)
 
@@ -2393,11 +2383,11 @@ class TestUserIdPassthrough:
         snapshot = recorder.interrupted_snapshot()
         assert snapshot.user_message == "test"
         assert snapshot.partial_text == "Half done"
-        assert [tool.tool_name for tool in snapshot.completed_tools] == ["load_tool", "run_shell_command"]
+        assert [tool.tool_name for tool in snapshot.completed_tools] == ["switch_thread_model", "run_shell_command"]
 
     @pytest.mark.asyncio
-    async def test_stream_agent_response_continues_after_dynamic_tool_load(self, tmp_path: Path) -> None:
-        """Streaming dynamic tool loads should rebuild the agent before continuing."""
+    async def test_stream_agent_response_continues_after_next_turn_model_switch(self, tmp_path: Path) -> None:
+        """Streaming next-turn model switches should rebuild the agent before continuing."""
         first_agent = MagicMock()
         first_agent.model = MagicMock()
         first_agent.model.__class__.__name__ = "OpenAIChat"
@@ -2412,27 +2402,23 @@ class TestUserIdPassthrough:
         second_agent.name = "GeneralAgent"
         second_agent.add_history_to_context = False
 
-        load_tool_execution = ToolExecution(
-            tool_call_id="call-load",
-            tool_name="load_tool",
-            tool_args={"tool_name": "sleep"},
+        switch_execution = ToolExecution(
+            tool_call_id="call-switch",
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
-                {
-                    "status": "loaded",
-                    "tool": "dynamic_tools",
-                    "tool_name": "sleep",
-                },
+                {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
             ),
             stop_after_tool_call=True,
         )
 
         async def first_stream() -> AsyncIterator[object]:
-            yield ToolCallCompletedEvent(tool=load_tool_execution)
+            yield ToolCallCompletedEvent(tool=switch_execution)
             yield RunCompletedEvent(content=None)
 
         async def second_stream() -> AsyncIterator[object]:
-            yield RunContentEvent(content="Used the loaded tool.")
-            yield RunCompletedEvent(content="Used the loaded tool.")
+            yield RunContentEvent(content="Finished the task.")
+            yield RunCompletedEvent(content="Finished the task.")
 
         first_agent.arun = MagicMock(return_value=first_stream())
         second_agent.arun = MagicMock(return_value=second_stream())
@@ -2456,7 +2442,9 @@ class TestUserIdPassthrough:
                 )
             ]
 
-        assert [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)] == ["Used the loaded tool."]
+        assert [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)] == [
+            "Finished the task.",
+        ]
         assert mock_prepare.await_count == 2
         assert mock_prepare.await_args_list[0].kwargs["model_prompt"] == "test\n\nUse attachment att_1."
         assert mock_prepare.await_args_list[1].kwargs["model_prompt"] == "Use attachment att_1."
@@ -2489,22 +2477,18 @@ class TestUserIdPassthrough:
         second_agent.name = "GeneralAgent"
         second_agent.add_history_to_context = False
 
-        load_tool_execution = ToolExecution(
-            tool_call_id="call-load",
-            tool_name="load_tool",
-            tool_args={"tool_name": "sleep"},
+        switch_execution = ToolExecution(
+            tool_call_id="call-switch",
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "large", "when": "next-turn"},
             result=json.dumps(
-                {
-                    "status": "loaded",
-                    "tool": "dynamic_tools",
-                    "tool_name": "sleep",
-                },
+                {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
             ),
             stop_after_tool_call=True,
         )
 
         async def first_stream() -> AsyncIterator[object]:
-            yield ToolCallCompletedEvent(tool=load_tool_execution)
+            yield ToolCallCompletedEvent(tool=switch_execution)
             yield RunCompletedEvent(content=None)
 
         async def second_stream() -> AsyncIterator[object]:
@@ -2542,14 +2526,14 @@ class TestUserIdPassthrough:
 
         snapshot = recorder.interrupted_snapshot()
         assert snapshot.partial_text == "Half done"
-        assert [tool.tool_name for tool in snapshot.completed_tools] == ["load_tool", "run_shell_command"]
+        assert [tool.tool_name for tool in snapshot.completed_tools] == ["switch_thread_model", "run_shell_command"]
 
     @pytest.mark.asyncio
-    async def test_ai_response_returns_message_after_dynamic_tool_limit(self, tmp_path: Path) -> None:
-        """Repeated dynamic tool manager calls should return fallback text in the default visible mode."""
+    async def test_ai_response_returns_message_after_continuation_limit(self, tmp_path: Path) -> None:
+        """Repeated rejected model switches should return fallback text in the default visible mode."""
         agents = []
         prepared_runs = []
-        for index in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+        for index in range(TURN_CONTINUATION_LIMIT + 1):
             agent = MagicMock()
             agent.model = MagicMock()
             agent.model.__class__.__name__ = "OpenAIChat"
@@ -2557,22 +2541,16 @@ class TestUserIdPassthrough:
             agent.name = "GeneralAgent"
             agent.add_history_to_context = False
 
-            load_tool_execution = ToolExecution(
-                tool_call_id=f"call-load-{index}",
-                tool_name="load_tool",
-                tool_args={"tool_name": "missing_tool"},
-                result=json.dumps(
-                    {
-                        "status": "unknown",
-                        "tool": "dynamic_tools",
-                        "tool_name": "missing_tool",
-                    },
-                ),
+            switch_execution = ToolExecution(
+                tool_call_id=f"call-switch-{index}",
+                tool_name="switch_thread_model",
+                tool_args={"model_name": "missing", "when": "next-turn"},
+                result=json.dumps({"status": "error", "tool": "thread_model", "message": "Unknown model"}),
                 stop_after_tool_call=True,
             )
             run_output = MagicMock()
             run_output.content = ""
-            run_output.tools = [load_tool_execution]
+            run_output.tools = [switch_execution]
             run_output.status = RunStatus.completed
             agent.arun = AsyncMock(return_value=run_output)
 
@@ -2588,18 +2566,16 @@ class TestUserIdPassthrough:
                 config=_config(),
             )
 
-        assert "Dynamic tool calls did not produce a final answer" in response
-        assert "`load_tool` for `missing_tool`" in response
-        assert "`unknown`" in response
-        assert mock_prepare.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
+        assert "Model switching did not produce a final answer" in response
+        assert mock_prepare.await_count == TURN_CONTINUATION_LIMIT + 1
         assert all(agent.arun.await_count == 1 for agent in agents)
 
     @pytest.mark.asyncio
-    async def test_stream_agent_response_returns_message_after_dynamic_tool_limit(self, tmp_path: Path) -> None:
-        """Streaming repeated dynamic tool manager calls should yield visible fallback text."""
+    async def test_stream_agent_response_returns_message_after_continuation_limit(self, tmp_path: Path) -> None:
+        """Streaming repeated rejected model switches should yield visible fallback text."""
         agents = []
         prepared_runs = []
-        for index in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+        for index in range(TURN_CONTINUATION_LIMIT + 1):
             agent = MagicMock()
             agent.model = MagicMock()
             agent.model.__class__.__name__ = "OpenAIChat"
@@ -2607,21 +2583,15 @@ class TestUserIdPassthrough:
             agent.name = "GeneralAgent"
             agent.add_history_to_context = False
 
-            load_tool_execution = ToolExecution(
-                tool_call_id=f"call-load-{index}",
-                tool_name="load_tool",
-                tool_args={"tool_name": "missing_tool"},
-                result=json.dumps(
-                    {
-                        "status": "unknown",
-                        "tool": "dynamic_tools",
-                        "tool_name": "missing_tool",
-                    },
-                ),
+            switch_execution = ToolExecution(
+                tool_call_id=f"call-switch-{index}",
+                tool_name="switch_thread_model",
+                tool_args={"model_name": "missing", "when": "next-turn"},
+                result=json.dumps({"status": "error", "tool": "thread_model", "message": "Unknown model"}),
                 stop_after_tool_call=True,
             )
 
-            async def stream(execution: ToolExecution = load_tool_execution) -> AsyncIterator[object]:
+            async def stream(execution: ToolExecution = switch_execution) -> AsyncIterator[object]:
                 yield ToolCallCompletedEvent(tool=execution)
                 yield RunCompletedEvent(content=None)
 
@@ -2644,10 +2614,8 @@ class TestUserIdPassthrough:
 
         content_chunks = [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)]
         assert len(content_chunks) == 1
-        assert "Dynamic tool calls did not produce a final answer" in content_chunks[0]
-        assert "`load_tool` for `missing_tool`" in content_chunks[0]
-        assert "`unknown`" in content_chunks[0]
-        assert mock_prepare.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
+        assert "Model switching did not produce a final answer" in content_chunks[0]
+        assert mock_prepare.await_count == TURN_CONTINUATION_LIMIT + 1
         assert all(agent.arun.call_count == 1 for agent in agents)
 
     @pytest.mark.asyncio
@@ -2829,7 +2797,6 @@ class TestUserIdPassthrough:
 
         assert metadata == {
             "reply_to_event_id": "$primary",
-            "tools_schema": [],
             "model_params": {},
             MATRIX_EVENT_ID_METADATA_KEY: "$primary",
             MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$selection", "$unseen"],
@@ -2849,7 +2816,6 @@ class TestUserIdPassthrough:
                 "reply_to_event_id": "$reply",
                 "requester_id": "@alice:localhost",
                 "correlation_id": "corr-existing",
-                "tools_schema": [{"name": "demo"}],
                 "model_params": {"temperature": 0.3},
             },
         )
@@ -2860,7 +2826,6 @@ class TestUserIdPassthrough:
         assert metadata["reply_to_event_id"] == "$reply"
         assert metadata["requester_id"] == "@alice:localhost"
         assert metadata["correlation_id"] == "corr-existing"
-        assert metadata["tools_schema"] == [{"name": "demo"}]
         assert metadata["model_params"] == {"temperature": 0.3}
 
     def test_stream_completed_without_visible_output_accepts_final_body_only_completion(self) -> None:
@@ -2955,17 +2920,21 @@ class TestUserIdPassthrough:
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
-            async for _chunk in stream_agent_response(
-                make_turn_context("general", session_id="session1"),
-                prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
-                turn_recorder=recorder,
-            ):
-                pass
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session1"),
+                    prompt="test",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    turn_recorder=recorder,
+                )
+            ]
 
         assert recorder.outcome == "completed"
         assert recorder.assistant_text == "hello from final event"
+
+        assert not any(isinstance(chunk, RunContentEvent) for chunk in chunks)
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_final_event_overwrites_partial_text_in_turn_recorder(

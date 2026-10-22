@@ -25,7 +25,7 @@ including markers Agno itself adds, is capped at the API limit of four.
 
 Agent-built system prompts carry an explicit boundary before their session
 context. Split that text into two system blocks and move the existing system
-marker to the shared prefix. Dates, summaries, and learning can then change
+marker to the shared prefix. Dates and learning can then change
 without invalidating the agent's instructions. The message rungs still cache
 the full system and conversation prefix within each thread.
 
@@ -74,7 +74,9 @@ from mindroom.logging_config import get_logger
 from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 from mindroom.providers.agno_compat_claude import (
     BEDROCK_MAX_INLINE_MEDIA_BYTES,
+    MAX_INLINE_IMAGE_BYTES,
     MAX_INLINE_MEDIA_BYTES,
+    PARTNER_MAX_INLINE_IMAGE_BYTES,
     request_kwargs_with_leading_tool_results,
     request_kwargs_with_replay_safe_tool_search_results,
     request_kwargs_with_supported_inline_media,
@@ -91,9 +93,10 @@ from mindroom.providers.tool_policy import provider_tools_disabled
 from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from agno.models.anthropic import Claude as AnthropicClaude
+    from agno.models.message import Message
 
     from mindroom.providers.bedrock_claude import MindRoomBedrockClaude
 
@@ -123,6 +126,7 @@ def native_tool_search_supported(provider: str, model_id: str) -> bool:
 
 _ANTHROPIC_CLAUDE_CLASS = ("agno.models.anthropic.claude", "Claude")
 _BEDROCK_CLAUDE_CLASS = ("mindroom.providers.bedrock_claude", "MindRoomBedrockClaude")
+_VERTEX_CLAUDE_CLASS = ("mindroom.providers.vertex_claude_compat", "MindroomVertexAIClaude")
 logger = get_logger(__name__)
 
 
@@ -229,27 +233,6 @@ def _is_markable_block(block: object) -> bool:
     return True
 
 
-def _move_transient_context_to_user_suffix(messages: list[Any]) -> list[Any]:
-    """Move generated transient context after cacheable content in each user turn."""
-    prepared_messages = list(messages)
-    for message_index, message in enumerate(prepared_messages):
-        message_dict = as_dict(message)
-        content = message_dict.get("content") if message_dict is not None else None
-        if message_dict is None or message_dict.get("role") != "user" or not isinstance(content, list):
-            continue
-        transient_blocks = [block for block in content if _is_transient_context_block(block)]
-        if not transient_blocks:
-            continue
-        durable_blocks = [block for block in content if not _is_transient_context_block(block)]
-        reordered_content = [*durable_blocks, *transient_blocks]
-        if reordered_content == content:
-            continue
-        prepared_message = dict(message_dict)
-        prepared_message["content"] = reordered_content
-        prepared_messages[message_index] = prepared_message
-    return prepared_messages
-
-
 def _count_cache_markers(request_kwargs: dict[str, Any]) -> int:
     """Count cache_control markers already present in a wire-format request."""
     count = 0
@@ -341,10 +324,28 @@ def mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object
     return tools, 0
 
 
-def _model_deferred_tool_names(model: AnthropicClaude) -> frozenset[str]:
+def claude_deferred_tool_names(model: object) -> frozenset[str]:
     """Return the wire tool names registered for deferred loading on one model."""
     deferred_tool_names = vars(model).get(_DEFERRED_TOOL_NAMES_ATTR)
     return deferred_tool_names if isinstance(deferred_tool_names, frozenset) else frozenset()
+
+
+def claude_loaded_tool_names(messages: Sequence[Message]) -> frozenset[str]:
+    """Return the tool names whose definitions tool searches in these messages loaded into Claude's context."""
+    names: set[str] = set()
+    for message in messages:
+        blocks = message.provider_data.get("server_tool_blocks") if isinstance(message.provider_data, dict) else None
+        for block in blocks if isinstance(blocks, list) else ():
+            block_dict = as_dict(block)
+            content = as_dict(block_dict.get("content")) if block_dict is not None else None
+            if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE or content is None:
+                continue
+            references = content.get("tool_references")
+            for reference in references if isinstance(references, list) else ():
+                reference_dict = as_dict(reference)
+                if reference_dict is not None and isinstance(name := reference_dict.get("tool_name"), str):
+                    names.add(name)
+    return frozenset(names)
 
 
 def _request_tool_names(request_kwargs: dict[str, Any]) -> frozenset[str]:
@@ -386,7 +387,7 @@ def _request_kwargs_without_unavailable_tool_references(request_kwargs: dict[str
     """Drop replayed tool-search references to tools absent from this request.
 
     Search results can reference tools that a later request no longer offers after
-    its dynamic tool surface changes, which Claude rejects. A search left with no
+    its tool surface changes, which Claude rejects. A search left with no
     references stays as an empty result, like a search that matched nothing, so
     the signed thinking blocks around it are not moved together.
     """
@@ -461,8 +462,8 @@ def _request_kwargs_with_deferred_tool_search(
 def split_shared_system_prefix(system: list[Any]) -> list[Any]:
     """Move a marked first system text block's cache marker to the shared instructions.
 
-    The session-context suffix becomes a separate unmarked block, so dates,
-    summaries, and learning can change without invalidating the shared prefix.
+    The session-context suffix becomes a separate unmarked block, so dates
+    and learning can change without invalidating the shared prefix.
     Returns the input list unchanged when there is no marked boundary to split.
     """
     if not system:
@@ -499,17 +500,10 @@ def _request_kwargs_with_prompt_cache_ladder(
     cache_control: dict[str, str],
 ) -> dict[str, Any]:
     """Return request kwargs with ladder breakpoints added within the API budget."""
-    prepared_kwargs = request_kwargs
-    messages = request_kwargs.get("messages")
-    if isinstance(messages, list) and messages:
-        reordered_messages = _move_transient_context_to_user_suffix(messages)
-        if reordered_messages != messages:
-            prepared_kwargs = {**request_kwargs, "messages": reordered_messages}
-
-    marker_budget = MAX_CACHE_MARKERS - _count_cache_markers(prepared_kwargs)
+    marker_budget = MAX_CACHE_MARKERS - _count_cache_markers(request_kwargs)
     if marker_budget <= 0:
-        return prepared_kwargs
-    prepared_kwargs = dict(prepared_kwargs)
+        return request_kwargs
+    prepared_kwargs = dict(request_kwargs)
 
     messages = prepared_kwargs.get("messages")
     if isinstance(messages, list) and messages:
@@ -587,7 +581,7 @@ class _PromptCacheMessagesProxy:
         self._offload_stream_setup = offload_stream_setup
 
     def _prepared(self, request_kwargs: dict[str, Any]) -> dict[str, Any]:
-        return prepare_claude_request_kwargs(self._model, request_kwargs)
+        return _prepare_claude_request_kwargs(self._model, request_kwargs)
 
     def create(self, **request_kwargs: object) -> object:
         return self._messages_namespace.create(**self._prepared(request_kwargs))
@@ -617,7 +611,7 @@ def _request_kwargs_without_provider_execution(request_kwargs: dict[str, Any]) -
     return prepared
 
 
-def prepare_claude_request_kwargs(
+def _prepare_claude_request_kwargs(
     model: AnthropicClaude,
     request_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
@@ -633,10 +627,15 @@ def prepare_claude_request_kwargs(
             if isinstance_of_loaded(model, _BEDROCK_CLAUDE_CLASS)
             else MAX_INLINE_MEDIA_BYTES
         ),
+        max_image_bytes=(
+            PARTNER_MAX_INLINE_IMAGE_BYTES
+            if isinstance_of_loaded(model, _BEDROCK_CLAUDE_CLASS, _VERTEX_CLAUDE_CLASS)
+            else MAX_INLINE_IMAGE_BYTES
+        ),
     )
     prepared_kwargs = _request_kwargs_with_deferred_tool_search(
         prepared_kwargs,
-        _model_deferred_tool_names(model),
+        claude_deferred_tool_names(model),
     )
     prepared_kwargs = _request_kwargs_without_provider_execution(prepared_kwargs)
     if model.cache_system_prompt:

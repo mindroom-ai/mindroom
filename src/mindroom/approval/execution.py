@@ -42,7 +42,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.error_handling import run_error_event_text
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history
-from mindroom.history.session_context import ScopeSessionContext, close_agent_runtime_state_dbs
+from mindroom.history.session_context import ScopeSessionContext, close_agent_runtime_state_dbs, close_execution_storage
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
@@ -57,6 +57,9 @@ from mindroom.response_turn import (
     paused_attempt_from_response,
 )
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
@@ -134,7 +137,7 @@ async def _collect_agent_continuation(  # noqa: C901
         msg = "Agent continuation did not yield its final run"
         raise RuntimeError(msg)
     # Child approval results are also projected into the root presentation.
-    # Only calls owned by the parent run can change its next tool schema.
+    # Only calls owned by the parent run can continue its turn.
     parent_call_ids = {tool.tool_call_id for tool in response.tools or ()}
     current_tools = [tool for tool in current_tools if tool.tool_call_id in parent_call_ids]
     _reconcile_agent_tools(presentation, response)
@@ -157,10 +160,14 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
     if paused is not None:
         for tool in paused.tools:
             presentation.start_tool(tool)
+    completed_call_ids = {
+        entry.tool_call_id for entry in presentation.tool_tracker.completed_tools if entry.tool_call_id is not None
+    }
     for tool in response.tools or ():
         if tool.is_paused:
             presentation.start_tool(tool)
-        else:
+        elif tool.tool_call_id is None or tool.tool_call_id not in completed_call_ids:
+            # Repeated terminal completions must not match older public slots by name.
             presentation.complete_tool(tool)
 
 
@@ -384,6 +391,9 @@ class AgentApprovalExecution:
     knowledge_access: KnowledgeAccessSupport
     refresh_scheduler: Callable[[], KnowledgeRefreshScheduler | None]
 
+    @owned_tool_execution(
+        enabled=lambda self, *_args, **_kwargs: background_tool_jobs_enabled(self.config(), self.runtime_paths),
+    )
     async def continue_run(  # noqa: PLR0915 - native and CLI approvals share one reconstruction owner
         self,
         continuation: ApprovalContinuation,
@@ -422,6 +432,7 @@ class AgentApprovalExecution:
             execution_identity,
         )
         history_storage = await asyncio.to_thread(storage_factory)
+        set_consumption_storage(storage_factory)
         try:
             session = await asyncio.to_thread(
                 history_storage.get_session,
@@ -461,12 +472,10 @@ class AgentApprovalExecution:
                 config,
                 self.runtime_paths,
                 execution_identity,
-                session_id=continuation.session_id,
                 history_storage=history_storage,
                 active_model_name=continuation.runtime_model_name,
                 knowledge=knowledge,
                 refresh_scheduler=self.refresh_scheduler(),
-                dynamic_tool_continuation=True,
                 supports_native_tool_approval=True,
                 required_tool_names=required_tool_names,
                 agent_mode=(
@@ -600,15 +609,18 @@ class AgentApprovalExecution:
                         )
         finally:
             try:
-                ai_runtime.register_queued_notice_storage(
-                    storage_factory=storage_factory,
-                    session_id=continuation.session_id,
-                    session_type=SessionType.AGENT,
-                    entity_name=continuation.entity_name,
-                )
+                await finalize_consumption()
             finally:
                 try:
-                    close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
+                    ai_runtime.register_queued_notice_storage(
+                        storage_factory=storage_factory,
+                        session_id=continuation.session_id,
+                        session_type=SessionType.AGENT,
+                        entity_name=continuation.entity_name,
+                    )
                 finally:
-                    history_storage.close()
+                    try:
+                        close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
+                    finally:
+                        close_execution_storage(history_storage)
         return result

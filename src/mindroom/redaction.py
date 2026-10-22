@@ -24,6 +24,7 @@ __all__ = [
     "nests_beyond_redaction_depth",
     "redact_config_text",
     "redact_log_event",
+    "redact_private_keys",
     "redact_sensitive_data",
     "redact_sensitive_text",
     "truncate_review_text",
@@ -64,6 +65,12 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
+# A PEM private key from its BEGIN line through the matching END line, or to the end of the text without one, so a key
+# cut off by a length bound or a mismatched END line never leaves its body behind. Certificates are public and stay.
+_PRIVATE_KEY_PATTERN = re.compile(
+    r"-----BEGIN (?P<label>[A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?)-----.*?(?:-----END (?P=label)-----|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
     r"(?:sk|pk)-[A-Za-z0-9._-]+"
@@ -120,6 +127,7 @@ _RANDOM_RUN_PATTERN = re.compile(r"[A-Za-z0-9]{12,}")
 _ORDINARY_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*\.?")
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
+_GRAPH_SHARE_ID_PATTERN = re.compile(r"/shares/[^/]+")
 _PLACEHOLDER_OPEN = "\u27e6"
 _PLACEHOLDER_CLOSE = "\u27e7"
 # Matrix canonical JSON, required for unencrypted room events, rejects floats and integers outside this range.
@@ -156,6 +164,7 @@ _URL_QUERY_SECRET_KEYS: frozenset[str] = frozenset(
         "googleaccessid",
         "sig",
         "signature",
+        "tempauth",
         "x_amz_credential",
         "x_amz_security_token",
         "x_amz_signature",
@@ -463,6 +472,19 @@ def _redact_secret_assignments(value: str) -> str:
     return _replace_spans_with_redaction(value, spans)
 
 
+def _redacted_capability_path(host: str, path: str) -> str | None:
+    """Return the path of a capability URL with its credential removed, or None for any other URL.
+
+    A personal OneDrive download carries its credential in the path, and a Microsoft Graph share ID is the
+    base64 of a sharing link; both grant access on their own.
+    """
+    if host.endswith(".1drv.com") and path not in {"", "/"}:
+        return f"/{REDACTED}"
+    if host == "graph.microsoft.com" and "/shares/" in path:
+        return _GRAPH_SHARE_ID_PATTERN.sub(f"/shares/{REDACTED}", path)
+    return None
+
+
 def _redact_url(value: str) -> str:
     try:
         parsed = urlparse(value)
@@ -472,8 +494,13 @@ def _redact_url(value: str) -> str:
         return value
 
     netloc = parsed.netloc
+    path = parsed.path
     query = parsed.query
     changed = False
+    capability_path = _redacted_capability_path((parsed.hostname or "").lower(), path)
+    if capability_path is not None:
+        path = capability_path
+        changed = True
     if "@" in netloc:
         userinfo, host = netloc.rsplit("@", 1)
         netloc = f"{userinfo.split(':', 1)[0]}:***@{host}" if ":" in userinfo else f"***@{host}"
@@ -494,7 +521,7 @@ def _redact_url(value: str) -> str:
 
     if not changed:
         return value
-    return urlunparse(parsed._replace(netloc=netloc, query=query))
+    return urlunparse(parsed._replace(netloc=netloc, path=path, query=query))
 
 
 def _redact_query_fragment(value: str, *, max_length: int | None) -> str:
@@ -549,6 +576,11 @@ def _redact_prose_token(match: re.Match[str]) -> str:
     return _redact_matched_token(match)
 
 
+def redact_private_keys(value: str) -> str:
+    """Replace each PEM private key, which spans several lines, with the redaction placeholder."""
+    return _PRIVATE_KEY_PATTERN.sub(REDACTED, value)
+
+
 def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = False) -> str:
     bounded_value = _bounded_redaction_input(value, max_length=max_length)
     has_assignment = "=" in bounded_value or ":" in bounded_value
@@ -557,9 +589,12 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     has_bearer = "bearer" in lowered_value
     has_api_key_message = "api key" in lowered_value
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
-    if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token)):
+    has_private_key = "private key" in lowered_value
+    if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token, has_private_key)):
         return _truncate_text(bounded_value, max_length)
-    redacted = URL_PATTERN.sub(_redact_url_match, bounded_value) if has_url else bounded_value
+    # Keys go first, so the patterns below never see, or fail closed on, a key's body.
+    redacted = redact_private_keys(bounded_value) if has_private_key else bounded_value
+    redacted = URL_PATTERN.sub(_redact_url_match, redacted) if has_url else redacted
     redact_token = _redact_prose_token if prose else _redact_matched_token
     if has_bearer:
         redacted = _BEARER_TOKEN_PATTERN.sub(redact_token, redacted)

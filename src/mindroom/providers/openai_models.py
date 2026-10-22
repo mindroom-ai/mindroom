@@ -31,6 +31,7 @@ from mindroom.providers.agno_compat_openai_chat import OpenAIChatProviderCompat 
 from mindroom.providers.agno_compat_openai_responses import OpenAIResponsesProviderCompat
 from mindroom.providers.agno_compat_openai_responses_items import record_response_output, record_tool_search_items
 from mindroom.providers.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
+from mindroom.providers.model_http_client import KeepHttpClient
 from mindroom.providers.openai_prompt_cache import (
     formatted_input_with_shared_system_prefix,
     supports_openai_cache_breakpoints,
@@ -56,7 +57,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
 
-class OpenAIChatProviderCompat(AgnoOpenAIChatProviderCompat):
+class OpenAIChatProviderCompat(KeepHttpClient, AgnoOpenAIChatProviderCompat):
     """Repair canonical tool replay after provider parser compatibility.
 
     Mix in ahead of an ``OpenAIChat`` subclass; ``_format_all_messages`` is the
@@ -257,7 +258,7 @@ def _prepare_response_continuation(
 
 
 @dataclass
-class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderCompat, OpenAIResponses):
+class MindRoomOpenAIResponses(KeepHttpClient, NativeCompactionModel, OpenAIResponsesProviderCompat, OpenAIResponses):
     """OpenAI Responses model that preserves completed continuation and ordered output."""
 
     approval_receipt_after_response_id: ClassVar[bool] = True

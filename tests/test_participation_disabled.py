@@ -230,7 +230,6 @@ async def test_disabled_participation_preserves_ordinary_response(  # noqa: C901
         def create_agent(
             *_args: object,
             history_storage: BaseDb | None,
-            session_id: str | None,
             **_kwargs: object,
         ) -> Agent:
             return Agent(
@@ -238,7 +237,6 @@ async def test_disabled_participation_preserves_ordinary_response(  # noqa: C901
                 name=bot.agent_name,
                 tools=[multiply],
                 db=history_storage,
-                session_id=session_id,
                 telemetry=False,
                 retries=0,
             )

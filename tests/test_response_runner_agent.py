@@ -125,8 +125,10 @@ from tests.reply_span_helpers import reply_span, response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
+
+    from agno.models.message import Message
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
@@ -2589,8 +2591,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_fetch_thread_history,
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
-                prepare_memory_and_model_context=passthrough_prepare_context,
-                reprioritize_auto_flush_sessions=MagicMock(),
+                _prepare_memory_and_model_context=passthrough_prepare_context,
                 apply_post_response_effects=AsyncMock(),
             ),
         ):
@@ -2793,7 +2794,6 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_fetch_thread_history,
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch(
                 "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
@@ -2925,7 +2925,6 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch(
                 "mindroom.response_runner.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
@@ -3313,7 +3312,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
     )
     @pytest.mark.parametrize("backend", ["model", "typesafe", "llm"])
     @pytest.mark.parametrize("reaction", [None, "👍"])
-    async def test_participation_precedes_every_visible_effect(  # noqa: C901, PLR0915 - full delivery lifecycle assertions
+    async def test_participation_precedes_every_visible_effect(  # noqa: C901, PLR0912, PLR0915 - full delivery lifecycle assertions
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -3323,7 +3322,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
         backend: str,
         reaction: str | None,
     ) -> None:
-        """A silent decision must not send placeholders, typing, or retry notices."""
+        """A silent decision must not send placeholders, typing, retry notices, or a Stop button."""
         config = self._config_for_storage(tmp_path)
         # Keep background summaries out of foreground participation call counts.
         config.defaults.thread_summary_first_threshold = 100
@@ -3331,7 +3330,9 @@ class TestAdaptiveResponse(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=paths)
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-        bot.client.room_send.return_value = _room_send_response("$response")
+        unique_room_send_responses(bot.client, prefix="$response")
+        # The requester is online, so a running reply shows its Stop button.
+        monkeypatch.setattr("mindroom.response_attempt.is_user_online", AsyncMock(return_value=True))
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         model = ParticipationModel(
             asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
@@ -3386,6 +3387,28 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 "ashould_compress",
                 AsyncMock(side_effect=RuntimeError("Compression failed")),
             )
+        if streaming and action == "respond":
+            # Hold the answer until the approved reply's placeholder reached the room.
+            placeholder_sent = asyncio.Event()
+            unique_room_send = bot.client.room_send.side_effect
+
+            async def room_send(**kwargs: Any) -> MagicMock:  # noqa: ANN401
+                if kwargs["content"].get("body") == "Thinking...":
+                    placeholder_sent.set()
+                return unique_room_send(**kwargs)
+
+            bot.client.room_send.side_effect = room_send
+            answer_stream = model.ainvoke_stream
+
+            async def stream_after_placeholder(
+                messages: list[Message],
+                **kwargs: object,
+            ) -> AsyncIterator[ModelResponse]:
+                await asyncio.wait_for(placeholder_sent.wait(), timeout=5)
+                async for chunk in answer_stream(messages, **kwargs):
+                    yield chunk
+
+            monkeypatch.setattr(model, "ainvoke_stream", stream_after_placeholder)
         agent = Agent(model=model, name=bot.agent_name, telemetry=False, compression_manager=compression)
         monkeypatch.setattr(
             "mindroom.ai._prepare_agent_and_prompt",
@@ -3442,9 +3465,24 @@ class TestAdaptiveResponse(AgentBotTestBase):
             result = None
         assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
         assert thread_summary.await_count == (1 if action == "respond" else 0)
-        bodies = [call.kwargs["content"].get("body", "") for call in bot.client.room_send.await_args_list]
+        sends = bot.client.room_send.await_args_list
+        bodies = [call.kwargs["content"].get("body", "") for call in sends]
+        stop_buttons = [
+            (f"$response{index}", call.kwargs["content"]["m.relates_to"]["event_id"])
+            for index, call in enumerate(sends, start=1)
+            if call.kwargs["message_type"] == "m.reaction" and call.kwargs["content"]["m.relates_to"]["key"] == "🛑"
+        ]
         reactions = [
-            call.kwargs for call in bot.client.room_send.await_args_list if call.kwargs["message_type"] == "m.reaction"
+            call.kwargs
+            for call in sends
+            if call.kwargs["message_type"] == "m.reaction" and call.kwargs["content"]["m.relates_to"]["key"] != "🛑"
+        ]
+        # The approved reply's first streamed event carries its Stop button until the reply ends. A blocking
+        # answer is the reply's first event and ends the reply at once, leaving nothing to stop.
+        streamed_answer = action == "respond" and streaming
+        assert [target for _button, target in stop_buttons] == (["$response1"] if streamed_answer else [])
+        assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [
+            button for button, _target in stop_buttons
         ]
         if action == "stay_silent" and reaction is not None:
             assert len(reactions) == 1
@@ -3456,7 +3494,12 @@ class TestAdaptiveResponse(AgentBotTestBase):
         else:
             assert reactions == []
         bodies = [body for body in bodies if body]
-        assert all("Thinking" not in body and '"action"' not in body for body in bodies)
+        assert all('"action"' not in body for body in bodies)
+        # Only an approved streamed reply shows its placeholder, and only before its answer.
+        if streaming and action == "respond":
+            assert bodies[0] == "Thinking..."
+            bodies = bodies[1:]
+        assert all("Thinking" not in body for body in bodies)
         if action != "respond":
             assert result is None
             assert bodies == []
@@ -3472,7 +3515,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 0 if action == "compression_failure" or (backend != "model" and action != "decision_failure") else 1
             )
         else:
-            assert result == "$response"
+            assert result == "$response1"
             assert any("Useful answer" in body for body in bodies)
             assert source_settled == []
             assert len(model.requests) == (1 if backend != "model" else 2)

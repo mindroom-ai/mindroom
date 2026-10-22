@@ -27,6 +27,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Configuration | History & Compaction | `configuration/history.md` | `configuration/history/index.md` | `page__configuration__history__index.md` |
 | Features | Memory | `memory.md` | `memory/index.md` | `page__memory__index.md` |
 | Features | Knowledge Bases | `knowledge.md` | `knowledge/index.md` | `page__knowledge__index.md` |
+| Features | Knowledge Graph | `knowledge-graph.md` | `knowledge-graph/index.md` | `page__knowledge-graph__index.md` |
 | Features | Skills | `skills.md` | `skills/index.md` | `page__skills__index.md` |
 | Features | Scheduling | `scheduling.md` | `scheduling/index.md` | `page__scheduling__index.md` |
 | Features | Chat Commands | `chat-commands.md` | `chat-commands/index.md` | `page__chat-commands__index.md` |
@@ -66,6 +67,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Tools > Tool Catalog | Messaging & Social | `tools/messaging-and-social.md` | `tools/messaging-and-social/index.md` | `page__tools__messaging-and-social__index.md` |
 | Tools > Tool Catalog | Project Management | `tools/project-management.md` | `tools/project-management/index.md` | `page__tools__project-management__index.md` |
 | Tools > Tool Catalog | Atlassian Cloud | `tools/atlassian.md` | `tools/atlassian/index.md` | `page__tools__atlassian__index.md` |
+| Tools > Tool Catalog | Microsoft 365 | `tools/microsoft-365.md` | `tools/microsoft-365/index.md` | `page__tools__microsoft-365__index.md` |
 | Tools > Tool Catalog | Calendar & Tasks | `tools/calendar-and-scheduling.md` | `tools/calendar-and-scheduling/index.md` | `page__tools__calendar-and-scheduling__index.md` |
 | Tools > Tool Catalog | Mem0 & Zep | `tools/memory-and-storage.md` | `tools/memory-and-storage/index.md` | `page__tools__memory-and-storage__index.md` |
 | Tools > Tool Catalog | Agent Orchestration | `tools/agent-orchestration.md` | `tools/agent-orchestration/index.md` | `page__tools__agent-orchestration__index.md` |
@@ -74,9 +76,11 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Security & Access | Access Control | `authorization.md` | `authorization/index.md` | `page__authorization__index.md` |
 | Security & Access | Tool Approval | `tool-approval.md` | `tool-approval/index.md` | `page__tool-approval__index.md` |
 | Security & Access | Credentials & OAuth | `oauth-framework.md` | `oauth-framework/index.md` | `page__oauth-framework__index.md` |
+| Security & Access | Connections Portal | `connections-portal.md` | `connections-portal/index.md` | `page__connections-portal__index.md` |
 | Security & Access | Connect Google Accounts | `deployment/google-services-user-oauth.md` | `deployment/google-services-user-oauth/index.md` | `page__deployment__google-services-user-oauth__index.md` |
 | Security & Access | Google OAuth Apps & Scopes | `deployment/google-services-oauth.md` | `deployment/google-services-oauth/index.md` | `page__deployment__google-services-oauth__index.md` |
 | Security & Access | Security Model | `architecture/security-posture.md` | `architecture/security-posture/index.md` | `page__architecture__security-posture__index.md` |
+| Security & Access | Egress Broker Design | `architecture/egress-broker-design.md` | `architecture/egress-broker-design/index.md` | `page__architecture__egress-broker-design__index.md` |
 | Extend & Integrate | Plugins | `plugins.md` | `plugins/index.md` | `page__plugins__index.md` |
 | Extend & Integrate | Hooks | `hooks.md` | `hooks/index.md` | `page__hooks__index.md` |
 | Extend & Integrate | External Triggers | `external-triggers.md` | `external-triggers/index.md` | `page__external-triggers__index.md` |
@@ -87,6 +91,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Deployment | Docker | `deployment/docker.md` | `deployment/docker/index.md` | `page__deployment__docker__index.md` |
 | Deployment | Kubernetes | `deployment/kubernetes.md` | `deployment/kubernetes/index.md` | `page__deployment__kubernetes__index.md` |
 | Deployment | Workers & Sandboxing | `deployment/sandbox-proxy.md` | `deployment/sandbox-proxy/index.md` | `page__deployment__sandbox-proxy__index.md` |
+| Deployment | Agent Keys | `deployment/egress-broker.md` | `deployment/egress-broker/index.md` | `page__deployment__egress-broker__index.md` |
 | Deployment | Approved Egress | `deployment/approved-egress.md` | `deployment/approved-egress/index.md` | `page__deployment__approved-egress__index.md` |
 | Deployment | Trusted Upstream Auth | `deployment/trusted-upstream-auth.md` | `deployment/trusted-upstream-auth/index.md` | `page__deployment__trusted-upstream-auth__index.md` |
 | Deployment | Data Storage & Journal | `deployment/storage.md` | `deployment/storage/index.md` | `page__deployment__storage__index.md` |

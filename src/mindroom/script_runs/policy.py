@@ -29,6 +29,7 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
     {
         "browser",
         "script",
+        "claude_agent",
         "compact_context",
         "delegate",
         "dynamic_tools",
@@ -89,15 +90,11 @@ def _visible_script_tool_entries(
         msg = f"Background scripts require a configured agent owner; {context.agent_name!r} is not an agent."
         raise ValueError(msg)
     ensure_tool_registry_loaded(context.runtime_paths, config)
-    entity_view = config.resolve_entity(context.agent_name)
-    all_deferred_tools = [entry.name for entry in entity_view.authored_deferred_tool_configs]
     return tuple(
         entry
         for entry in visible_tool_surface(
             agent_name=context.agent_name,
             config=config,
-            loaded_tools=all_deferred_tools,
-            enable_dynamic_tools_manager=False,
         ).runtime_tool_configs
         if entry.name in TOOL_METADATA and entry.name not in _SCRIPT_RESTRICTED_TOOLKITS
     )
@@ -140,7 +137,6 @@ def _build_script_toolkits(
             agent_runtime=agent_runtime,
             tool_config_overrides=tool_entry.tool_config_overrides,
             execution_identity=execution_identity,
-            session_id=context.session_id,
         )
         if toolkit is not None:
             toolkits[tool_entry.name] = toolkit

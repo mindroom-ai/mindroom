@@ -45,7 +45,7 @@ class Backend(Protocol):
         ...
 
     async def read[T](self, operation: Operation[T]) -> T:
-        """Run one operation in a read transaction."""
+        """Run one operation in a read transaction, against one snapshot of committed state."""
         ...
 
     async def recovery_read[T](self, operation: Operation[T]) -> T:

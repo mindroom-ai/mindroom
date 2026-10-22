@@ -1,6 +1,7 @@
 """Test that ConfigField definitions match actual tool parameters from agno."""
 
 import inspect
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace, UnionType
 from typing import Any, Union, cast, get_args, get_origin, get_type_hints
@@ -12,6 +13,7 @@ from agno.tools import Toolkit
 import mindroom.tools  # noqa: F401
 from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths
+from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -387,10 +389,12 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
         tool_class.__init__,
         globalns=tool_class.__init__.__globals__
         | {
+            "Callable": Callable,
             "FileAccess": FileAccess,
             "Path": Path,
             "ResolvedWorkerTarget": ResolvedWorkerTarget,
             "RuntimePaths": RuntimePaths,
+            "SharedDirectoryRoot": SharedDirectoryRoot,
         },
     )
     agno_params = {}

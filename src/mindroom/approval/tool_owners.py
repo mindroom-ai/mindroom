@@ -205,7 +205,7 @@ async def required_approval_tool_names(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
 ) -> tuple[str, ...]:
-    """Restore only recorded toolkit origins, without changing session selection."""
+    """Return the toolkits a saved approval recorded, after checking that the agent may still use each."""
     if not calls:
         return ()
     if any(call.invoking_agent != agent_name or not call.toolkit_name for call in calls):
@@ -215,8 +215,7 @@ async def required_approval_tool_names(
     surface = visible_tool_surface(
         agent_name=agent_name,
         config=config,
-        loaded_tools=[entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs],
-        session_id=execution_identity.session_id,
+        enable_dynamic_tools_manager=True,
         include_matrix_room_runtime_tools=execution_identity.room_id is not None,
     )
     permitted = {entry.authored_name or entry.name: entry for entry in surface.runtime_tool_configs}

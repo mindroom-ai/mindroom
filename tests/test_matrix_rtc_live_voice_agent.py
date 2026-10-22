@@ -11,9 +11,8 @@ from livekit.agents.llm import ChatContext
 from livekit.plugins.openai.realtime import GPTLiveDelegation, GPTLiveSession
 from structlog.testing import capture_logs
 
-from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.live_voice_agent import _LiveDelegationRunner
-from mindroom.matrix_rtc.voice_agent import LiveVoiceAgentOptions
+from mindroom.matrix_rtc.voice_agent import CallAgentResponse, LiveVoiceAgentOptions
 
 if TYPE_CHECKING:
     from collections.abc import Callable

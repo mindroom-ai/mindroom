@@ -42,6 +42,7 @@ from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
+from mindroom.history.types import HistoryScope
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
@@ -50,7 +51,8 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     apply_exact_approval_decisions,
 )
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage, get_agent_session
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
@@ -61,6 +63,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tools.shell import shell_tools
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
+from tests.history_helpers import store_fold
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     agent_cli_api,
@@ -71,21 +74,21 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
 from tests.response_runner_helpers import _bot
 from tests.test_agent_cli_authority import _runtime_context
 from tests.test_agent_tool_calls import _catalog
-from tests.test_approval_dynamic_continuation import _ScriptedModel
+from tests.test_approval_turn_continuation import _ScriptedModel
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 @pytest.mark.asyncio
-async def test_approval_tool_restore_requires_current_dynamic_manager_assignment(tmp_path: Path) -> None:
-    """Native and hidden approvals can restore a loader only while deferred tools remain assigned."""
+async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp_path: Path) -> None:
+    """A saved approval owned by the search toolkit restores only while deferred tools remain assigned."""
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
         tools=["shell", {"sleep": {"defer": True}}],
     )
-    call = ApprovalCall("loader", "load_tool", "helper", 100, toolkit_name="dynamic_tools")
+    call = ApprovalCall("search", "tool_search", "helper", 100, toolkit_name="dynamic_tools")
     identity = build_execution_identity_from_runtime_context(runtime)
     required = await approval_tools.required_approval_tool_names(
         "helper",
@@ -109,7 +112,7 @@ async def test_approval_tool_restore_requires_current_dynamic_manager_assignment
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize("continuation_count", [2, 4])
-async def test_recovered_dynamic_call_retains_response_lifecycle(
+async def test_recovered_model_switch_call_retains_response_lifecycle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     continuation_count: int,
@@ -120,7 +123,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
-        tools=["shell", {"sleep": {"defer": True}}],
+        tools=["shell", "thread_model"],
         memory_backend="file",
         learning=False,
     )
@@ -159,7 +162,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
         session_id=runtime.session_id,
         agent_id="helper",
         metadata={"agent_mode": "minimal"},
-        messages=[Message(role="user", content="Load sleep and answer using knowledge")],
+        messages=[Message(role="user", content="Keep this model and answer using knowledge")],
     )
     session = AgentSession(
         session_id=runtime.session_id,
@@ -170,11 +173,12 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
     storage.upsert_session(session)
     storage.upsert_run(persisted, session_id=runtime.session_id)
     storage.close()
+    switch_arguments = {"model_name": "default", "when": "next-turn"}
     requirement = RunRequirement(
         ToolExecution(
-            tool_call_id="loader",
-            tool_name="load_tool",
-            tool_args={"tool_name": "sleep"},
+            tool_call_id="switch",
+            tool_name="switch_thread_model",
+            tool_args=switch_arguments,
             requires_confirmation=True,
         ),
     )
@@ -188,25 +192,25 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
         requester_id=runtime.requester_id,
         sources=ResponseSources((runtime.reply_to_event_id,), (runtime.reply_to_event_id,)),
         state="claimed",
-        request_body="Load sleep and answer using knowledge",
+        request_body="Keep this model and answer using knowledge",
         continuation_count=continuation_count,
         calls=(
             ApprovalCall(
-                "loader",
-                "load_tool",
+                "switch",
+                "switch_thread_model",
                 "helper",
                 100,
-                toolkit_name="dynamic_tools",
-                arguments_digest=approval_arguments_digest({"tool_name": "sleep"}),
+                toolkit_name="thread_model",
+                arguments_digest=approval_arguments_digest(switch_arguments),
             ),
         ),
         cli_call={
             "kind": "agent_cli",
-            "toolkit": "dynamic_tools",
-            "function": "load_tool",
-            "call_id": "loader",
+            "toolkit": "thread_model",
+            "function": "switch_thread_model",
+            "call_id": "switch",
             "parent_bash_call_id": "interrupted-bash",
-            "arguments": {"tool_name": "sleep"},
+            "arguments": switch_arguments,
             "requirements": [requirement.to_dict()],
             "delegation_depth": 2,
         },
@@ -230,15 +234,15 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
         paused_answer=PausedAnswer(),
         execution_identity=identity,
         tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
-        decisions={"loader": True},
-        denial_reasons={"loader": None},
+        decisions={"switch": True},
+        denial_reasons={"switch": None},
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
         run_id_callback=run_ids.append,
     )
     if continuation_count == 4:
-        assert "Dynamic tool calls did not produce a final answer" in result.response_text
+        assert "Model switching did not produce a final answer" in result.response_text
         assert requests == []
         assert run_ids == []
     else:
@@ -253,7 +257,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approved", [True, False])
-@pytest.mark.parametrize("control", [None, "after-toolcall", "next-turn", "invalid", "dynamic"])
+@pytest.mark.parametrize("control", [None, "after-toolcall", "next-turn", "invalid"])
 async def test_restart_resolves_hidden_call_and_never_replays_parent(
     tmp_path: Path,
     approved: bool,
@@ -262,9 +266,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     """Real prepared execution keeps arguments, while normal response gets an honest notice."""
     effects = []
     control_result = json.dumps(
-        {"tool": "dynamic_tools", "status": "loaded", "tool_name": "file"}
-        if control == "dynamic"
-        else {
+        {
             "tool": "thread_model",
             "action": "switch",
             "status": "error" if control == "invalid" else "ok",
@@ -281,12 +283,12 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     function = Function.from_callable(action)
     function.owning_toolkit = "actions"
     if control:
-        function.name = "load_tool" if control == "dynamic" else "switch_thread_model"
+        function.name = "switch_thread_model"
         function.stop_after_tool_call = True
     function.requires_confirmation = True
     catalog = await _catalog(tmp_path, [function])
     shell_toolkit = shell_tools()(runtime_paths=catalog.runtime_context.runtime_paths)
-    agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+    bind_toolkit_authority(shell_toolkit, authored_name="shell")
     catalog.agent = minimal_agent.MinimalAgent(id="helper", model=catalog.agent.model, tools=[function, shell_toolkit])
     catalog.run_response.agent_id = "helper"
     catalog.run_response.metadata = {"source": "original"}
@@ -415,7 +417,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
     """A shell approval rule on the outer Bash recovers as an honest notice, never a replay."""
     catalog = await _catalog(tmp_path, [])
     shell_toolkit = shell_tools()(runtime_paths=catalog.runtime_context.runtime_paths)
-    agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+    bind_toolkit_authority(shell_toolkit, authored_name="shell")
     catalog.agent = minimal_agent.MinimalAgent(id="helper", model=catalog.agent.model, tools=[shell_toolkit])
     catalog.run_response.agent_id = "helper"
     catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
@@ -486,14 +488,115 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
 
 
 @pytest.mark.asyncio
+async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summarized(tmp_path: Path) -> None:
+    """The paused reply's trace still lists the folded shell call and its nested tool; the saved record does not."""
+    catalog = await _catalog(tmp_path, [])
+    shell_toolkit = shell_tools()(runtime_paths=catalog.runtime_context.runtime_paths)
+    agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+    catalog.agent = minimal_agent.MinimalAgent(id="helper", model=catalog.agent.model, tools=[shell_toolkit])
+    catalog.run_response.agent_id = "helper"
+    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    folded = ToolExecution(
+        tool_call_id="folded-bash",
+        tool_name="run_shell_command",
+        tool_args={"command": "echo folded"},
+        result="folded shell output",
+        tool_call_error=False,
+    )
+    nested = ToolExecution(
+        tool_call_id="nested-call",
+        tool_name="read_file",
+        tool_args={"path": "notes.md"},
+        result="nested tool output",
+        tool_call_error=False,
+    )
+    # The fold took the earlier shell call out of the run's record and stored it on its summary row.
+    catalog.run_response.tools = [folded]
+    store_fold(
+        catalog.agent.db,
+        "session",
+        HistoryScope(kind="agent", scope_id="helper"),
+        "run",
+        tools=[folded.to_dict()],
+    )
+    arguments = {"command": "touch never"}
+    requirement = RunRequirement(
+        ToolExecution(
+            tool_call_id="bash",
+            tool_name="run_shell_command",
+            tool_args=arguments,
+            requires_confirmation=True,
+        ),
+    )
+    presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
+    for execution, parent in ((folded, None), (nested, "folded-bash")):
+        projected = project_cli_execution(execution, parent=parent, toolkit_name="shell")
+        presentation.start_tool(projected)
+        presentation.complete_tool(projected)
+    presentation.start_tool(project_cli_execution(requirement.tool_execution, parent="bash", toolkit_name="shell"))
+    continuation = approval_continuation(
+        run_id="run",
+        session_id="session",
+        entity_name="helper",
+        room_id="!room:test",
+        requester_id="@alice:test",
+        response_event_id="$response",
+        state="claimed",
+        calls=(
+            ApprovalCall(
+                "bash",
+                "run_shell_command",
+                "helper",
+                100,
+                decision=ApprovalDecision.DENIED,
+                toolkit_name="shell",
+                arguments_digest=approval_arguments_digest(arguments),
+            ),
+        ),
+        cli_call=CliApprovalCall(
+            toolkit="shell",
+            function="run_shell_command",
+            arguments=arguments,
+            call_id="bash",
+            parent_bash_call_id="bash",
+            requirements=(requirement,),
+            delegation_depth=0,
+        ).to_dict(),
+    )
+
+    with tool_runtime_context(catalog.runtime_context):
+        await cli_approval_recovery.continue_cli_approval(
+            catalog.agent,
+            continuation,
+            CliApprovalCall.from_dict(continuation.cli_call),
+            catalog.run_response,
+            catalog.session,
+            paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
+            runtime_context=catalog.runtime_context,
+            decisions={"bash": False},
+            denial_reasons={"bash": "Denied"},
+            tool_trace_collector=[],
+            refresh_scheduler=None,
+            authorize=AsyncMock(),
+            progress=None,
+        )
+
+    stored = get_agent_session(catalog.agent.db, "session")
+    assert stored is not None
+    saved = "\n".join(
+        str(message.content) for run in stored.runs or [] if run.run_id == "run" for message in run.messages or []
+    )
+    # The denied call is recorded, and no folded result returns beside the summary that holds it.
+    assert "Denied" in saved
+    assert "folded shell output" not in saved
+    assert "nested tool output" not in saved
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize(
     ("shell", "missing_shell_function", "nested"),
-    [
-        (shell, missing, None)
-        for shell in (False, True)
-        for missing in (None, "check_shell_command", "kill_shell_command")
-    ]
+    [(shell, missing, None) for shell in (False, True) for missing in (None, "run_shell_command")]
     + [(True, None, "media"), (True, None, "approval"), (True, None, "suspend")],
 )
 async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # noqa: C901 - checkpoint through real resumed provider
@@ -566,7 +669,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         runtime.config,
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
-        session_id=runtime.session_id,
         agent_mode="minimal",
         supports_native_tool_approval=True,
     )
@@ -582,7 +684,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
 
     toolkit = Toolkit(name="media", tools=[media])
     toolkit.functions["media"].requires_confirmation = nested in {"approval", "suspend"}
-    agents._set_toolkit_approval_origin(toolkit, "media")
+    bind_toolkit_authority(toolkit, authored_name="media")
     agent.add_tool(toolkit)
     name = "run_shell_command" if shell else "media"
     namespace = "shell" if shell else "media"
@@ -705,7 +807,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             runtime.config,
             runtime.runtime_paths,
             build_execution_identity_from_runtime_context(runtime),
-            session_id=runtime.session_id,
             agent_mode="minimal",
             supports_native_tool_approval=True,
         )
@@ -840,7 +941,8 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     with tool_runtime_context(runtime):
         if missing_shell_function:
             saved_before = agent.db.get_session(runtime.session_id).to_dict()
-            with pytest.raises(RuntimeError, match="run, check, and kill shell permissions"):
+            # A saved shell call loses its own toolkit first; any other call loses minimal mode's shell.
+            with pytest.raises(RuntimeError, match=r"no longer has its original toolkit|`run_shell_command` shell"):
                 await recover()
             assert shell_tokens == []
             assert requests == []

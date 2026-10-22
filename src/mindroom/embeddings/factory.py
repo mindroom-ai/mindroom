@@ -27,6 +27,8 @@ class _ResolvedEmbedderSettings:
     model: str
     host: str | None
     dimensions: int | None
+    query_prefix: str | None = None
+    document_prefix: str | None = None
     api_key: str | None = field(default=None, repr=False)
 
     @property
@@ -38,6 +40,8 @@ class _ResolvedEmbedderSettings:
                 "model": self.model,
                 "host": self.host,
                 "dimensions": self.dimensions,
+                "query_prefix": self.query_prefix,
+                "document_prefix": self.document_prefix,
                 "api_key": self.api_key,
             },
             sort_keys=True,
@@ -56,6 +60,8 @@ def resolve_embedder_settings(config: Config, runtime_paths: RuntimePaths) -> _R
             model=embedder_config.model,
             host=embedder_config.host,
             dimensions=embedder_config.dimensions,
+            query_prefix=embedder_config.query_prefix,
+            document_prefix=embedder_config.document_prefix,
             api_key=get_embedder_api_key(
                 runtime_paths,
                 explicit_api_key=embedder_config.api_key,
@@ -97,12 +103,16 @@ def create_configured_embedder(
                 api_key=settings.api_key,
                 base_url=settings.host,
                 dimensions=settings.dimensions,
+                query_prefix=settings.query_prefix,
+                document_prefix=settings.document_prefix,
             )
         return MindRoomOpenAIEmbedder(
             id=settings.model,
             api_key=settings.api_key,
             base_url=settings.host,
             dimensions=settings.dimensions,
+            query_prefix=settings.query_prefix,
+            document_prefix=settings.document_prefix,
             health_recorder=health_recorder,
         )
 

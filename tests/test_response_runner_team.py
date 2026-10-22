@@ -996,121 +996,11 @@ class TestAgentBot(AgentBotTestBase):
         assert result == "$reject"
 
     @pytest.mark.asyncio
-    async def test_generate_team_response_queues_memory_before_helper_failure(self, tmp_path: Path) -> None:
-        """A team response queues its memory save before the helper runs, so a failing helper keeps it."""
-
-        async def fake_store_conversation_memory(*args: object, **kwargs: object) -> None:
-            store_calls.append((args, kwargs))
-
-        scheduled_tasks: list[asyncio.Task[None]] = []
-        scheduled_names: list[str] = []
-        store_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-
-        def schedule_background_task(
-            coro: Coroutine[Any, Any, None],
-            *,
-            name: str,
-            error_handler: object | None = None,  # noqa: ARG001
-            owner: object | None = None,  # noqa: ARG001
-        ) -> asyncio.Task[None]:
-            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
-            scheduled_tasks.append(task)
-            scheduled_names.append(name)
-            return task
-
-        async def fail_helper(*_args: object, **_kwargs: object) -> str:
-            assert any(name.startswith("memory_save_team_") for name in scheduled_names)
-            msg = "boom"
-            raise RuntimeError(msg)
-
-        config = _configured_team_test_config(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        team_member = entity_ids(config, runtime_paths)["general"]
-        bot = make_test_team_bot(
-            _configured_team_user(config, runtime_paths),
-            tmp_path,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-        _wrap_extracted_collaborators(bot)
-        bot.client = _make_matrix_client_mock()
-
-        resolution = TeamResolution(
-            intent=TeamIntent.EXPLICIT_MEMBERS,
-            requested_members=[team_member],
-            member_statuses=[
-                TeamResolutionMember(
-                    agent=team_member,
-                    name="general",
-                    status=TeamMemberStatus.ELIGIBLE,
-                ),
-            ],
-            eligible_members=[team_member],
-            outcome=TeamOutcome.TEAM,
-            mode=TeamMode.COORDINATE,
-        )
-
-        with (
-            patch.object(
-                bot._turn_policy,
-                "responder_availability",
-                return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
-            ),
-            patch("mindroom.bot.resolve_configured_team", return_value=resolution),
-            patch.object(bot._response_runner, "generate_team_response_helper", new=AsyncMock(side_effect=fail_helper)),
-            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
-            pytest.raises(RuntimeError, match="boom"),
-        ):
-            await bot._run_regenerated_response(
-                ResponseRequest(
-                    sources=ResponseSources(
-                        pending_event_ids=("$event",),
-                        logical_source_event_ids=("$event",),
-                    ),
-                    prompt="Team, summarize this thread",
-                    thread_history=[],
-                    user_id="@alice:localhost",
-                    response_envelope=request_envelope(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$event",
-                        thread_id="$thread",
-                        prompt="Team, summarize this thread",
-                        user_id="@alice:localhost",
-                        agent_name=bot.agent_name,
-                    ),
-                ),
-            )
-
-        if scheduled_tasks:
-            await asyncio.gather(*scheduled_tasks)
-
-        assert len(store_calls) == 1
-        assert sum(name.startswith("memory_save_team_") for name in scheduled_names) == 1
-
-    @pytest.mark.asyncio
     async def test_team_generate_response_uses_shared_thread_summary_helper_for_summary_gate(
         self,
         tmp_path: Path,
     ) -> None:
         """Team replies should reuse the shared thread-summary helper for summary gating."""
-
-        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
-            return None
-
-        scheduled_tasks: list[asyncio.Task[None]] = []
-
-        def schedule_background_task(
-            coro: Coroutine[Any, Any, None],
-            *,
-            name: str,
-            error_handler: object | None = None,  # noqa: ARG001
-            owner: object | None = None,  # noqa: ARG001
-        ) -> asyncio.Task[None]:
-            task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
-            scheduled_tasks.append(task)
-            return task
-
         thread_history = [
             _visible_message(
                 sender=f"@user{i}:localhost",
@@ -1169,8 +1059,6 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.post_response_effects.maybe_generate_thread_summary",
                 new_callable=AsyncMock,
             ) as mock_thread_summary,
-            patch("mindroom.bot.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         ):
             await bot._run_regenerated_response(
                 ResponseRequest(
@@ -1191,9 +1079,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             )
-
-        if scheduled_tasks:
-            await asyncio.gather(*scheduled_tasks)
 
         mock_thread_summary.assert_not_called()
 
@@ -1291,7 +1176,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-            patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
+            patch("mindroom.response_runner.store_conversation_memory", side_effect=fake_store_conversation_memory),
             patch(
                 "mindroom.post_response_effects.maybe_generate_thread_summary",
                 new_callable=AsyncMock,

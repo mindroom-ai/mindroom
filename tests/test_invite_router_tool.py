@@ -115,7 +115,6 @@ def test_matrix_agents_get_zero_argument_invite_router_in_standard_tool_environm
         config,
         runtime_paths_for(config),
         execution_identity=identity,
-        session_id=identity.session_id,
     )
 
     toolkit = next(tool for tool in agent.tools if tool.name == "invite_router")
@@ -162,7 +161,6 @@ def test_matrix_runtime_ignores_authored_invite_router_function_filters(tmp_path
         config,
         runtime_paths_for(config),
         execution_identity=identity,
-        session_id=identity.session_id,
     )
 
     toolkit = next(tool for tool in agent.tools if tool.name == "invite_router")
@@ -193,7 +191,6 @@ def test_invite_router_stays_hidden_without_matrix_room_context(tmp_path: Path) 
         config,
         runtime_paths_for(config),
         execution_identity=identity,
-        session_id=identity.session_id,
     )
 
     assert "invite_router" not in {tool.name for tool in agent.tools}
@@ -250,7 +247,6 @@ def test_matrix_agents_reject_local_invite_router_function_collisions(
             config,
             runtime_paths_for(config),
             execution_identity=identity,
-            session_id=identity.session_id,
         )
 
 

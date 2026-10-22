@@ -67,7 +67,7 @@ from mindroom.knowledge.file_listing import (
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
-from mindroom.knowledge.indexing_config import IndexingSettings, knowledge_git_dir
+from mindroom.knowledge.indexing_config import IndexingSettings, indexing_settings_key, knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
 from mindroom.knowledge.redaction import (
     credential_free_repo_url,
@@ -89,7 +89,7 @@ from mindroom.knowledge.registry import (
     save_published_index_state,
 )
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
-from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.knowledge.watch import KnowledgeSourceWatcher, _shared_poll_targets
 from mindroom.logging_config import subprocess_logging_env
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -1282,46 +1282,63 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
     }
 
 
+def _assert_poller_lifecycle_logged(
+    logs: list[dict[str, object]],
+    *,
+    base_id: str,
+    poll_interval_seconds: float,
+    git: bool,
+) -> None:
+    """Operators grep these events, so pin their names and fields."""
+    expected_fields = {"base_id": base_id, "poll_interval_seconds": poll_interval_seconds, "git": git}
+    for event in ("Knowledge poller started", "Knowledge poller stopped"):
+        matching = [entry for entry in logs if entry["event"] == event]
+        assert len(matching) == 1
+        assert {field: matching[0][field] for field in expected_fields} == expected_fields
+
+
+def _polled_docs_config(tmp_path: Path, docs_path: Path, *, git: bool) -> Config:
+    """Configure one shared base polled every 5 seconds through its Git source or the local poll interval."""
+    if git:
+        git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=5)
+        return _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    return _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], poll_intervals={"docs": 5})
+
+
 @pytest.mark.asyncio
-async def test_git_knowledge_polling_waits_before_startup_refresh(tmp_path: Path) -> None:
-    """Shared Git bases should not burst refresh work immediately when runtime support starts."""
-    docs_path = tmp_path / "docs"
-    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=5)
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        git_configs={"docs": git_config},
-        watch=False,
-    )
+@pytest.mark.parametrize("git", [True, False], ids=["git", "local"])
+async def test_knowledge_polling_waits_before_startup_refresh(tmp_path: Path, git: bool) -> None:
+    """Polled shared bases should not burst refresh work immediately when runtime support starts."""
+    config = _polled_docs_config(tmp_path, tmp_path / "docs", git=git)
     runtime_paths = runtime_paths_for(config)
     refresh_scheduler = MagicMock()
     source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
 
-    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
-    try:
-        await asyncio.sleep(0)
-    finally:
-        await source_watcher.shutdown()
+    with capture_logs() as logs:
+        await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+        try:
+            await asyncio.sleep(0)
+        finally:
+            await source_watcher.shutdown()
 
     refresh_scheduler.schedule_refresh.assert_not_called()
+    _assert_poller_lifecycle_logged(logs, base_id="docs", poll_interval_seconds=5.0, git=git)
 
 
 @pytest.mark.asyncio
-async def test_git_knowledge_polling_repeats_after_poll_interval(
+@pytest.mark.parametrize(
+    ("git", "docs_dir"),
+    [(True, "docs"), (False, "docs"), (False, "not-yet-created/docs")],
+    ids=["git", "local", "local-missing-directory"],
+)
+async def test_knowledge_polling_repeats_after_poll_interval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    git: bool,
+    docs_dir: str,
 ) -> None:
-    """Shared Git bases should keep scheduling refreshes on their configured poll interval."""
-    docs_path = tmp_path / "docs"
-    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=5)
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        git_configs={"docs": git_config},
-        watch=False,
-    )
+    """Polled shared bases keep scheduling refreshes on their interval, and a poll target does not require its folder to exist."""
+    config = _polled_docs_config(tmp_path, tmp_path / docs_dir, git=git)
     runtime_paths = runtime_paths_for(config)
     second_schedule = asyncio.Event()
     refresh_scheduler = MagicMock()
@@ -1352,13 +1369,19 @@ async def test_git_knowledge_polling_repeats_after_poll_interval(
                 break
             await asyncio.sleep(0)
         else:
-            pytest.fail("Git poller did not schedule refresh after interval")
+            pytest.fail("Poller did not schedule refresh after interval")
     finally:
         await source_watcher.shutdown()
 
     assert refresh_scheduler.schedule_refresh.call_count == 2
     assert wait_calls >= 2
     assert [call.args for call in refresh_scheduler.schedule_refresh.call_args_list] == [("docs",), ("docs",)]
+
+
+def test_local_knowledge_without_poll_interval_starts_no_poller(tmp_path: Path) -> None:
+    """Without poll_interval_seconds a local base gets no poll target, so the watcher starts no poller for it."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    assert _shared_poll_targets(config, runtime_paths_for(config)) == {}
 
 
 @pytest.mark.asyncio
@@ -1928,6 +1951,21 @@ def test_knowledge_base_config_rejects_parent_traversal_patterns() -> None:
     """Config validation is the first containment layer, so the guard is never reached this way."""
     with pytest.raises(ValidationError):
         KnowledgeBaseConfig(path="./docs", include_patterns=["../*.md"])
+
+
+def test_local_poll_interval_is_rejected_on_git_bases() -> None:
+    """Git bases keep their own interval, so the local field must not be set beside git."""
+    with pytest.raises(ValidationError, match=r"use git\.poll_interval_seconds"):
+        KnowledgeBaseConfig(
+            poll_interval_seconds=60,
+            git=KnowledgeGitConfig(repo_url="https://example.com/x.git"),
+        )
+
+
+def test_local_poll_interval_is_rejected_on_files_mode_bases() -> None:
+    """Files-mode bases have no index to refresh, so a poller would only hash every file for nothing."""
+    with pytest.raises(ValidationError, match="poll_interval_seconds applies to semantic local knowledge bases"):
+        KnowledgeBaseConfig(mode="files", poll_interval_seconds=60)
 
 
 def test_tracked_path_listing_rejects_directories_and_missing_paths(tmp_path: Path) -> None:
@@ -3205,6 +3243,19 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
     assert IndexingSettings.from_metadata(key.indexing_settings.to_metadata()) == key.indexing_settings
     changed_repo_identity = replace(key.indexing_settings, repo_identity="https://example.com/other/repo.git")
     assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
+
+
+def test_embedder_prefixes_make_indexing_settings_incompatible(tmp_path: Path) -> None:
+    """An index embedded with other prefixes is neither queried nor reused."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    plain = indexing_settings_key(config, runtime_paths.storage_root, "docs", docs_path)
+    config.memory.embedder.config.document_prefix = "d: "
+
+    prefixed = indexing_settings_key(config, runtime_paths.storage_root, "docs", docs_path)
+
+    assert not knowledge_registry.published_index_settings_compatible(plain, prefixed)
 
 
 def test_legacy_empty_optional_filter_metadata_remains_compatible() -> None:

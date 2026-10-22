@@ -127,6 +127,13 @@ describe("forms rendered from the real configuration schema", () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it("leaves Agent Keys settings out, so nothing of the broker shows while it is off", () => {
+    const roots = resolveSettingsSections(ROOT).flatMap((section) =>
+      section.entries.map((entry) => entry.root),
+    );
+    expect(roots).not.toContain("egress_broker");
+  });
+
   it("shows a plugin automation entry with its name and keeps it through an edit", () => {
     const changes: unknown[] = [];
     const entry = {

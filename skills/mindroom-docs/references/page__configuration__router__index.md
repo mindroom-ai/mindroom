@@ -87,8 +87,10 @@ For the OpenAI Decisions API, set `provider: openai_decisions`; it uses the Open
 Unknown fields are rejected.
 
 The backend receives each candidate's role, tools, delegation targets, and brief instructions, the current message, and the last three visible messages with senders replaced by aliases.
-It does not receive system prompts, tool results, attachment contents, or the rest of the conversation.
-It runs only with 2 to 253 candidates and a request of at most 16,000 bytes; messages are never shortened, so long input or input that looks like a secret uses ordinary routing instead.
+Tool calls in those messages appear as `<tool>` tags with the same short input and output previews the chat shows.
+It does not receive system prompts, full tool output, attachment contents, or the rest of the conversation.
+It runs only with 2 to 253 candidates and a request of at most 16,000 bytes.
+Long recent messages are shortened to their start and end, and the oldest drop out first; the current message is never shortened, so a long current message or input that looks like a secret uses ordinary routing instead.
 
 | Outcome | Result |
 |---------|--------|

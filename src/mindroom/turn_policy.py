@@ -34,6 +34,7 @@ from mindroom.hooks import (
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
+from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import (
     filter_materializable_responders,
     live_responder_entity_names,
@@ -305,6 +306,13 @@ class TurnPolicy:
     """Own pure decision logic for one prepared inbound turn."""
 
     deps: TurnPolicyDeps
+
+    def _client(self) -> nio.AsyncClient:
+        client = self.deps.runtime.client
+        if client is None:
+            msg = "Matrix client is not ready for turn execution"
+            raise RuntimeError(msg)
+        return client
 
     def can_reply_to_sender_in_room(
         self,
@@ -632,7 +640,6 @@ class TurnPolicy:
         context: MessageContext,
         room: nio.MatrixRoom,
         requester_user_id: str,
-        is_dm: bool,
         *,
         availability: _ResponderAvailability,
         available_responders_in_room: list[MatrixID] | None = None,
@@ -661,6 +668,13 @@ class TurnPolicy:
                 requester_user_id,
                 availability,
             )
+        # Only a DM auto team depends on DM status, and it needs an unthreaded message
+        # with several responders, so skip the homeserver lookup otherwise.
+        is_dm = (
+            not context.is_thread
+            and len(available_responders_in_room) > 1
+            and await is_dm_room(self._client(), room.room_id)
+        )
         return decide_team_formation(
             context.mentioned_agents,
             agents_in_thread,
@@ -747,7 +761,6 @@ class TurnPolicy:
         event: PreparedIngress,
         dispatch: PreparedDispatch,
         *,
-        is_dm: bool,
         has_active_response_for_target: Callable[[MessageTarget], bool],
         extra_content: dict[str, Any] | None = None,
         media_events: list[MediaDispatchEvent] | None = None,
@@ -769,7 +782,6 @@ class TurnPolicy:
         action = await self._resolve_response_action(
             dispatch,
             room,
-            is_dm,
             has_active_response_for_target=has_active_response_for_target,
         )
         if action.kind == "skip":
@@ -798,7 +810,6 @@ class TurnPolicy:
         self,
         dispatch: PreparedDispatch,
         room: nio.MatrixRoom,
-        is_dm: bool,
         *,
         has_active_response_for_target: Callable[[MessageTarget], bool],
     ) -> ResponseAction:
@@ -872,7 +883,6 @@ class TurnPolicy:
                 context,
                 room,
                 requester_user_id,
-                is_dm,
                 availability=availability,
                 available_responders_in_room=sender_visible_responders_in_room,
             )

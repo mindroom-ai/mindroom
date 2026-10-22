@@ -18,6 +18,8 @@ from mindroom.runtime_env_policy import is_unset_env_value
 
 from .config import DEFAULT_API_HOST, DEFAULT_API_PORT, warn_dashboard_without_key, worker_dashboard_api_key_needed
 from .env_file import upsert_env_values
+from .help_format import examples
+from .interactive import confirm, section
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -30,7 +32,7 @@ _err_console = Console(stderr=True)
 
 service_app = typer.Typer(
     name="service",
-    help="""Install and manage MindRoom as a background user service.
+    help="""Run MindRoom in the background, starting at login.
 
 MindRoom runs the version installed by this command through `uv tool run` and starts automatically at login.
 That version is also installed as a uv tool, so the service runs from a persistent environment instead of uv's cache.
@@ -63,11 +65,10 @@ def _manager_or_exit() -> ServiceManager:
 def _confirm_action(message: str) -> bool:
     """Ask for confirmation and return whether the user accepted."""
     try:
-        answer = _console.input(f"[bold]{message} [Y/n]: [/bold]").strip().lower()
-    except (KeyboardInterrupt, EOFError):
+        return confirm(message, default=True)
+    except typer.Abort:
         _console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit(0) from None
-    return answer in {"", "y", "yes"}
 
 
 def _ensure_uv_installed(manager: ServiceManager, *, no_confirm: bool) -> bool:
@@ -101,7 +102,14 @@ def _print_service_action_result(result: ServiceActionResult) -> None:
     _console.print(f"[green]{result.message}[/green]")
 
 
-@service_app.command("install")
+@service_app.command(
+    "install",
+    epilog=examples(
+        ("mindroom service install", "Install and start the service"),
+        ("mindroom service status", "Check that it runs and show recent logs"),
+        ("mindroom service restart", "Pick up changes to .env"),
+    ),
+)
 def install_service(
     skip_deps: bool = typer.Option(False, "--skip-deps", help="Skip uv dependency check."),
     no_confirm: bool = typer.Option(False, "--no-confirm", "-y", help="Skip confirmation prompts."),
@@ -225,7 +233,7 @@ def _ask_for_login_service() -> ServiceManager | None:
     # Installing would fail without systemd, or repoint a service that already runs another setup.
     if not manager.is_available() or manager.get_service_status().installed:
         return None
-    _console.print()
+    _console.print(section("Keep running"))
     if not _confirm_action(f"Run MindRoom in the background and start it at login ({manager.description})?"):
         return None
     return manager

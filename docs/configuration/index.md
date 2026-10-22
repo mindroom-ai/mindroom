@@ -20,7 +20,7 @@ Validate a file with:
 mindroom config validate --path /path/to/config.yaml
 ```
 
-Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](../deployment/storage.md#event-journal) changes, which need a restart.
+Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](../deployment/storage.md#event-journal) changes and turning [background tool jobs](../tools/agent-orchestration.md#background-jobs) on or off or changing their excluded toolkits, which need a restart.
 Edits to an agent's or team's own settings, such as `instructions`, `model`, `tools`, or a team's `mode`, apply from its next reply without restarting it.
 Changing `display_name` or `accept_invites`, an agent's `private` settings, whether an agent has the `desktop` tool, or which MCP tools it has restarts that agent or team.
 An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition, knowledge base, or agent instruction change, applies within seconds even while agents are replying.
@@ -61,6 +61,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `defaults` | Fallback values for agent settings and global-only behavior | [Agents — Defaults](agents.md#defaults) |
 | `memory` | Memory backends and embedder | [Memory](../memory.md) |
 | `knowledge_bases` | File-backed knowledge bases | [Knowledge Bases](../knowledge.md) |
+| `knowledge_graph` | Graph of facts built from agents' conversations | [Knowledge Graph](../knowledge-graph.md) |
 | `mcp_servers` | External Model Context Protocol servers | [MCP](../mcp.md) |
 | `plugins` | Plugin loading | [Plugins](../plugins.md) |
 | `voice` | Speech-to-text for voice messages | [Voice](../voice.md) |
@@ -73,6 +74,8 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `timezone`, `scheduler_catch_up_grace_seconds` | Scheduled task timezone (default `UTC`) and missed-run catch-up | [Scheduling](../scheduling.md) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](../external-triggers.md) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](../tool-approval.md#tool-approval) |
+| `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](../deployment/egress-broker.md) |
+| `background_tool_jobs` | Experimental background execution of tool calls, off by default | [Background Jobs](../tools/agent-orchestration.md#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](../personal-rooms.md#personal-rooms) |
 | `budgets` | Default monthly spending cap per user and the fallback model | [Budgets](../budgets.md) |
 | `prompts` | Built-in prompt overrides | [Built-In Prompt Overrides](#built-in-prompt-overrides) |
@@ -81,7 +84,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `debug` | Provider request logging | [Debug Logging](../deployment/operational-log-events.md#debug-logging) |
 | `mindroom_user` | Internal MindRoom user account | [Internal User](../matrix.md#internal-user) |
 
-Optional tools that agents load on demand are configured as described in [Dynamic Tools](../tools/dynamic-tools.md), and skills in [Skills](../skills.md).
+Tools that stay out of the model's context until the agent searches for them are configured as described in [Dynamic Tools](../tools/dynamic-tools.md), and skills in [Skills](../skills.md).
 
 ## Splitting the Configuration Into Multiple Files
 
@@ -207,7 +210,7 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
+| `MATRIX_HOMESERVER` | Matrix homeserver URL; use the default URL for hosted pairing or your own URL for self-hosting | `https://mindroom.chat` |
 | `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
 | `MATRIX_SSL_VERIFY` | Set to `false` for a dev or self-signed homeserver; it covers `MATRIX_HOMESERVER` and its MatrixRTC voice-call requests, never the provisioning service or other homeservers (see [TLS Trust](../matrix.md#tls-trust)) | `true` |
 | `MATRIX_REGISTRATION_TOKEN` | Registration token for creating managed agent accounts on a self-hosted homeserver | _(unset)_ |
@@ -234,7 +237,7 @@ Provider keys from the environment or `.env` are also copied into the shared cre
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_API_KEY` | API key for dashboard/API requests; `mindroom config init` and first-run `mindroom run` add a generated key to `.env` when it has none; unset or empty means open access | _(none)_ |
-| `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, also read by deployment tooling; set the API server bind port with `mindroom run --api-port` instead | `8765` |
+| `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, and in the default [Connections token audience](../connections-portal.md#token-binding) when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; set the API server bind port with `mindroom run --api-port` instead, and set this too when the port changes | `8765` |
 | `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra host names that unauthenticated dashboard or `/v1` requests may address (see [Authorization](../authorization.md#unauthenticated-dashboard-host-names)) | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173`, or the hosted public origins when `MINDROOM_PUBLIC_URL` is set |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | `true` allows every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
@@ -249,10 +252,11 @@ Provider keys from the environment or `.env` are also copied into the shared cre
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
-| `MINDROOM_NO_AUTO_INSTALL_TOOLS` | `1`/`true`/`yes` disables automatic tool dependency installation | _(unset; auto-install enabled)_ |
+| `MINDROOM_NO_AUTO_INSTALL_TOOLS` | `1`/`true`/`yes` disables automatic installation of missing optional dependencies, such as tool and voice-call extras | _(unset; auto-install enabled)_ |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
+| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](../deployment/egress-broker.md#environment-variables) egress broker; setting it turns Agent Keys on, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; off)_ |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Worker-reachable background-script gateway base URL, including `/api/script-gateway` | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway and Agent CLI routes | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | `true` attests that the Kubernetes script-gateway listener exposes only the gateway and Agent CLI routes | `false` |

@@ -21,7 +21,7 @@ from mindroom.runtime_env_policy import (
     AZURE_OPENAI_ENV_BY_KEY,
     VERTEXAI_CLAUDE_ENV_BY_KEY,
 )
-from mindroom.tool_system.dependencies import ensure_optional_deps
+from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
     from agno.models.base import Model
@@ -44,6 +44,12 @@ _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
 # Local servers can stay silent for minutes while a request queues or a model
 # loads, so they and custom endpoints get an idle limit only when configured.
 _LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
+# Providers whose models hand `http_client` to their OpenAI, Groq, Cerebras, or Anthropic SDK client,
+# which otherwise builds an HTTP client of its own per model.
+_SHARED_HTTP_CLIENT_PROVIDERS = frozenset(
+    {"openai", "azure", "openrouter", "zai", "deepseek", "llama_cpp", "groq", "cerebras"}
+    | {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER},
+)
 
 
 def canonical_provider(provider: str) -> str:
@@ -308,9 +314,10 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             missing_message="Missing AWS Bedrock dependencies. Install with: pip install 'mindroom[aws_bedrock]'",
         )
         _populate_bedrock_claude_runtime_kwargs(extra_kwargs, runtime_paths)
-        from mindroom.providers.bedrock_claude import MindRoomBedrockClaude  # noqa: PLC0415
+        with optional_dependency_environment():
+            from mindroom.providers.bedrock_claude import MindRoomBedrockClaude  # noqa: PLC0415
 
-        return MindRoomBedrockClaude(id=model_id, **extra_kwargs)
+            return MindRoomBedrockClaude(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "openai":
         from mindroom.providers.openai_tool_search import openai_native_tool_search_supported  # noqa: PLC0415
@@ -348,11 +355,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if canonical_provider_key == "vertexai_claude":
         from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude  # noqa: PLC0415
 
-        return MindroomVertexAIClaude(
-            id=model_id,
-            context_window=model_config.context_window,
-            **extra_kwargs,
-        )
+        return MindroomVertexAIClaude(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "llama_cpp":
         from mindroom.providers.openai_models import MindRoomLlamaCpp  # noqa: PLC0415
@@ -486,6 +489,10 @@ def get_model_instance(
 
     if canonical_provider(provider) in {"codex", "openai_codex"}:
         extra_kwargs.setdefault("default_instructions", config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"))
+    if canonical_provider(provider) in _SHARED_HTTP_CLIENT_PROVIDERS:
+        from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT  # noqa: PLC0415
+
+        extra_kwargs["http_client"] = MODEL_HTTP_CLIENT
 
     model = _create_model_for_provider(
         provider,

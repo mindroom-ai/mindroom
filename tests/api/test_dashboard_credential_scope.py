@@ -217,10 +217,11 @@ class TestRequireAgentCredentialManagementAuthorized:
     _credential_managers: ClassVar[list[str]] = ["@alice:example.org"]
 
     def _runtime_paths(self) -> RuntimePaths:
+        """Return isolated runtime paths with an empty process env."""
         return resolve_runtime_paths(process_env={})
 
     def test_allowlisted_trusted_upstream_matrix_user_is_authorized(self) -> None:
-        """Return isolated runtime paths with an empty process env."""
+        """A trusted-upstream Matrix user on the credential-manager allowlist is authorized as that user."""
         identity = require_agent_credential_management_authorized(
             _request({"user_id": "alice", "auth_source": "trusted_upstream", "matrix_user_id": "@alice:example.org"}),
             config=_config(credential_managers=self._credential_managers),

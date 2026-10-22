@@ -1128,8 +1128,8 @@ def test_todo_refuses_changing_work_assigned_to_agent_the_requester_cannot_addre
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")
-def test_todo_attributes_items_to_whoever_wrote_the_title(tmp_path: Path) -> None:
-    """Writing a title records the current requester, human or not, and other changes keep that attribution."""
+def test_todo_attributes_items_to_whoever_last_changed_them(tmp_path: Path) -> None:
+    """Every write records the current requester, human or not, as the one the assignee works for."""
     config = _restricted_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     tool = get_tool_by_name("todo", runtime_paths, worker_target=None)
@@ -1145,10 +1145,6 @@ def test_todo_attributes_items_to_whoever_wrote_the_title(tmp_path: Path) -> Non
     planned_id = items[0]["id"]
     with tool_runtime_context(_tool_context(config, requester_id="@attacker:localhost")):
         tool.update_todo(agent=_agent(), todo_id=planned_id, priority="high", status="open")
-    assert _read_todos(config)["items"][0]["requester_id"] == "@user:localhost"
-
-    with tool_runtime_context(_tool_context(config, requester_id="@attacker:localhost")):
-        tool.update_todo(agent=_agent(), todo_id=planned_id, title="Attacker title")
     assert _read_todos(config)["items"][0]["requester_id"] == "@attacker:localhost"
 
     with tool_runtime_context(_tool_context(config, requester_id="@bridge:localhost")):
@@ -1156,7 +1152,11 @@ def test_todo_attributes_items_to_whoever_wrote_the_title(tmp_path: Path) -> Non
     assert bridge_result.startswith(f"Updated `{planned_id}`")
     assert _read_todos(config)["items"][0]["requester_id"] == "@bridge:localhost"
 
-    # Agent-to-agent turns are always allowed to address agents, so an agent may queue work for `secret`.
+    # An agent's own turn may queue work for `secret` only once `secret`'s access admits that agent.
+    with tool_runtime_context(_tool_context(config, requester_id=agent_requester)):
+        refused_result = tool.add_todo(agent=_agent(), title="Agent handoff", assigned_agent="secret")
+    assert refused_result.startswith("Cannot give or change todo work for 'secret'")
+    config.agents["secret"].access = ResponderAccessConfig(users=["@user:localhost", agent_requester])
     with tool_runtime_context(_tool_context(config, requester_id=agent_requester)):
         agent_result = tool.add_todo(agent=_agent(), title="Agent handoff", assigned_agent="secret")
     items = _read_todos(config)["items"]
@@ -1198,31 +1198,19 @@ def test_todo_write_records_requester_on_legacy_item(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")
-def test_todo_reassignment_keeps_title_author_bound_by_new_assignee_policy(tmp_path: Path) -> None:
-    """An authorized human cannot launder another requester's title into an agent that author cannot address."""
+def test_todo_reassignment_records_the_requester_who_reassigned(tmp_path: Path) -> None:
+    """A new assignee works for whoever handed it the item, not for whoever wrote the item's title."""
     config = _restricted_config(tmp_path)
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
 
     with tool_runtime_context(_tool_context(config, requester_id="@attacker:localhost")):
-        tool.add_todo(agent=_agent(), title="Exfiltrate secrets")
+        tool.add_todo(agent=_agent(), title="Review the release")
     item_id = _read_todos(config)["items"][0]["id"]
-    before = _read_todos(config)
 
     with tool_runtime_context(_tool_context(config)):
-        reassign_result = tool.update_todo(agent=_agent(), todo_id=item_id, assigned_agent="secret", priority="high")
-        assert _read_todos(config) == before
-        rewrite_result = tool.update_todo(
-            agent=_agent(),
-            todo_id=item_id,
-            title="Review the release",
-            assigned_agent="secret",
-        )
+        result = tool.update_todo(agent=_agent(), todo_id=item_id, assigned_agent="secret")
 
-    assert reassign_result == (
-        f"Cannot give todo `{item_id}` to 'secret': "
-        "the person who wrote it is not allowed to address that agent in this room."
-    )
-    assert rewrite_result.startswith(f"Updated `{item_id}`")
+    assert result == f"Updated `{item_id}`: assigned=secret"
     item = _read_todos(config)["items"][0]
     assert (item["title"], item["assigned_agent"], item["requester_id"]) == (
         "Review the release",

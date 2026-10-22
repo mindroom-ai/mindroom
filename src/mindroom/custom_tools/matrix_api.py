@@ -227,8 +227,8 @@ class MatrixApiTools(Toolkit):
         normalized_room_id = room_id.strip()
         if not normalized_room_id:
             return None, "room_id must be omitted or a non-empty Matrix room ID string."
-        if not normalized_room_id.startswith("!") or ":" not in normalized_room_id:
-            return None, "room_id must be a Matrix room ID in !room:server form."
+        if not normalized_room_id.startswith("!"):  # room version 12 IDs carry no ":server" part
+            return None, "room_id must be a Matrix room ID starting with !, not an alias."
         return normalized_room_id, None
 
     @staticmethod

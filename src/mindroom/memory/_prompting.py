@@ -6,6 +6,8 @@ import re
 from typing import TYPE_CHECKING
 
 from mindroom.prompt_templates import render_prompt_template
+from mindroom.redaction import REDACTION_FAILED, redact_private_keys, redact_sensitive_text
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -15,6 +17,17 @@ if TYPE_CHECKING:
     from ._shared import MemoryResult
 
 _USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
+
+
+def redact_memory_text(text: str) -> str:
+    """Remove credential-like values, on a best-effort basis, from conversation text kept in memory automatically.
+
+    Private keys, which span several lines, are removed whole first. Then each line is redacted on its own and a line
+    redaction cannot read safely, such as one with an unclosed quote, is dropped, so it does not cost the rest of the
+    message; a value on the line after its key is not recognized.
+    """
+    lines = (redact_sensitive_text(line) for line in redact_private_keys(text).splitlines())
+    return "\n".join(line for line in lines if line != REDACTION_FAILED)
 
 
 def format_memories_as_context(
@@ -44,11 +57,11 @@ def _build_conversation_messages(
     messages: list[dict] = []
     for message in thread_history:
         role = "user" if message.sender == user_id else "assistant"
-        body = message.body.strip()
+        body = redact_memory_text(body_without_tool_markers(message.body, message.content)).strip()
         if not body:
             continue
         messages.append({"role": role, "content": body})
-    messages.append({"role": "user", "content": current_prompt})
+    messages.append({"role": "user", "content": redact_memory_text(current_prompt)})
     return messages
 
 
@@ -58,6 +71,7 @@ def build_memory_messages(
     user_id: str | None,
 ) -> list[dict]:
     """Convert prompt and optional thread history into memory-save messages."""
+    # Mem0 extracts and stores memories from these messages, so credential-like values are removed first.
     if thread_history and user_id:
         return _build_conversation_messages(thread_history, prompt, user_id)
-    return [{"role": "user", "content": prompt}]
+    return [{"role": "user", "content": redact_memory_text(prompt)}]

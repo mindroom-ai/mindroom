@@ -26,8 +26,8 @@ from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 from mindroom.automations.registry import automation
-from mindroom.automations.steps import Ask, AutomationContext, Done
-from mindroom.automations.threads import automation_threads, automations_tracking_root
+from mindroom.automations.steps import Ask, AutomationContext, Done, workspace_context_files
+from mindroom.automations.threads import automation_threads
 from mindroom.logging_config import get_logger
 from mindroom.memory import refresh_agent_memory_search, write_scope_markdown_file
 from mindroom.path_confinement import (
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -105,7 +106,11 @@ class _Run:
 
     agent_name: str
     runtime_paths: RuntimePaths
+    # The requester's identity for a private instance, which its memory search resolves with, or None.
+    execution_identity: ToolExecutionIdentity | None
     root: Path
+    # Where the run's progress is kept, in primary storage outside the workspace.
+    state_dir: Path
     run_id: str
     # In-scope memory files by workspace-relative path, as they were at fire time; only compared, never written back.
     snapshot: Mapping[str, bytes]
@@ -132,15 +137,9 @@ class _Proposal:
     dream_thread: str
 
 
-def _state_root(runtime_paths: RuntimePaths, agent_name: str) -> Path:
-    return automations_tracking_root(runtime_paths) / agent_name
-
-
-def _load_state(runtime_paths: RuntimePaths, agent_name: str) -> _State:
+def _load_state(state_dir: Path) -> _State:
     try:
-        payload = json.loads(
-            read_regular_file_within_root(_state_root(runtime_paths, agent_name), "dreaming.json"),
-        )
+        payload = json.loads(read_regular_file_within_root(state_dir, "dreaming.json"))
     except FileNotFoundError:
         return _State()
     return _State(
@@ -155,25 +154,21 @@ def _versions(payload: dict[str, Any]) -> dict[str, _Version]:
     return {path: (version[0], version[1]) for path, version in payload.items()}
 
 
-def _update_state(runtime_paths: RuntimePaths, agent_name: str, change: Callable[[_State], None]) -> None:
-    # An agent's checks and steps never overlap, so nothing else writes its state meanwhile.
-    state = _load_state(runtime_paths, agent_name)
+def _update_state(state_dir: Path, change: Callable[[_State], None]) -> None:
+    # The checks and steps of one agent or private instance never overlap, so nothing else writes its state meanwhile.
+    state = _load_state(state_dir)
     change(state)
-    _save_state(runtime_paths, agent_name, state)
+    _save_state(state_dir, state)
 
 
-def _save_state(runtime_paths: RuntimePaths, agent_name: str, state: _State) -> None:
+def _save_state(state_dir: Path, state: _State) -> None:
     payload = {
         "reviewed": state.reviewed,
         "attempted": state.attempted,
         "pending_run": state.pending_run,
         "latest_run": state.latest_run,
     }
-    write_file_within_root(
-        _state_root(runtime_paths, agent_name),
-        "dreaming.json",
-        json.dumps(payload, indent=1, sort_keys=True).encode(),
-    )
+    write_file_within_root(state_dir, "dreaming.json", json.dumps(payload, indent=1, sort_keys=True).encode())
 
 
 def _walk(directory_fd: int, prefix: str, found: dict[str, os.stat_result], rejected: list[str]) -> None:
@@ -371,10 +366,6 @@ def _agenda(run: _Run, waiting: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _context_files(config: Config, agent_name: str) -> set[str]:
-    return {PurePosixPath(path).as_posix() for path in config.get_agent(agent_name).context_files}
-
-
 @automation("dreaming", requires_file_memory=True)
 def check_dreaming(ctx: AutomationContext) -> Ask | None:
     """Return the dream prompt when an input no agenda has listed is due, or None.
@@ -382,7 +373,7 @@ def check_dreaming(ctx: AutomationContext) -> Ask | None:
     Raises ``OSError`` or ``ValueError`` when memory or the state cannot be read safely.
     """
     config, runtime_paths, agent_name = ctx.config, ctx.runtime_paths, ctx.agent_name
-    # Automations only run for shared agents, whose file memory is the workspace root.
+    # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
     root = ctx.workspace
     # A workspace appears with the agent's first turn.
     if root is None or not root.is_dir():
@@ -390,14 +381,14 @@ def check_dreaming(ctx: AutomationContext) -> Ask | None:
     now = datetime.now(UTC)
     today = now.astimezone(ZoneInfo(config.timezone)).date().isoformat()
     tree = _read_memory_tree(root, "")
-    context_files = _context_files(config, agent_name)
+    context_files = workspace_context_files(config, agent_name)
     excluded = frozenset({f"{_MEMORY_DIR}/{today}.md", *context_files, *tree.rejected})
     snapshot = {path: payload for path, payload in tree.files.items() if path not in excluded}
-    state = _load_state(runtime_paths, agent_name)
+    state = _load_state(ctx.state_dir)
     inputs = _collect_inputs(root, snapshot, tree.versions, today, automation_threads(runtime_paths))
     if seeded := _unseen_and_old(inputs.values(), state, now):
         state.reviewed.update(seeded)
-        _save_state(runtime_paths, agent_name, state)
+        _save_state(ctx.state_dir, state)
 
     def seen(item: _Input) -> bool:
         return state.attempted.get(item.path) == item.version
@@ -415,7 +406,9 @@ def check_dreaming(ctx: AutomationContext) -> Ask | None:
     run = _Run(
         agent_name=agent_name,
         runtime_paths=runtime_paths,
+        execution_identity=ctx.execution_identity,
         root=root,
+        state_dir=ctx.state_dir,
         run_id=now.strftime("%Y%m%dT%H%M%S%fZ"),
         snapshot=snapshot,
         excluded=excluded,
@@ -433,7 +426,7 @@ def check_dreaming(ctx: AutomationContext) -> Ask | None:
     # cut short also waits for new evidence.
     state.attempted = {path: version for path, version in state.attempted.items() if path in run.inputs}
     state.attempted.update((item.path, item.version) for item in run.due)
-    _save_state(runtime_paths, agent_name, state)
+    _save_state(ctx.state_dir, state)
     logger.info("Dreaming starts a run", agent=agent_name, run=run.run_id, inputs=len(run.due))
     return Ask(
         config.render_prompt(
@@ -506,7 +499,7 @@ def _after_dream(run: _Run, config: Config, thread_id: str, timed_out: bool) -> 
     # Only the review may write a verdict, so a file the dream left there never counts as one.
     _remove(run.root, f"{run.run_dir}/verdict.md")
     # Pending from now on, so a restart before the review finishes still carries the proposal forward.
-    _update_state(run.runtime_paths, run.agent_name, partial(_keep_pending, run=run))
+    _update_state(run.state_dir, partial(_keep_pending, run=run))
     return Ask(
         config.render_prompt(
             "DREAMING_VERIFY_TEMPLATE",
@@ -569,9 +562,8 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
             "The next run carries the proposal forward.",
         )
     # A config reload during the run can make a proposed file a context file, which the automation never writes.
-    if not _unchanged_since_fire(run) or {*proposal.changed, *proposal.deleted} & _context_files(
-        config,
-        run.agent_name,
+    if not _unchanged_since_fire(run) or {*proposal.changed, *proposal.deleted} & set(
+        workspace_context_files(config, run.agent_name),
     ):
         return _end(
             run,
@@ -591,7 +583,14 @@ def _after_verify(run: _Run, proposal: _Proposal, config: Config, thread_id: str
         resolve=(proposal.dream_thread, thread_id),
         applied=tuple(proposal.changed),
         # The refresh is scheduled on the event loop, which this step does not run on.
-        on_loop=partial(refresh_agent_memory_search, run.agent_name, run.root, config, run.runtime_paths),
+        on_loop=partial(
+            refresh_agent_memory_search,
+            run.agent_name,
+            run.root,
+            config,
+            run.runtime_paths,
+            run.execution_identity,
+        ),
     )
 
 
@@ -637,7 +636,7 @@ def _end(
         state.latest_run = None
 
     if outcome in {"applied", "unchanged"}:
-        _update_state(run.runtime_paths, run.agent_name, record_progress)
+        _update_state(run.state_dir, record_progress)
     try:
         with open_directory_within_root(run.root, run.run_dir) as run_fd:
             shutil.rmtree("staging", dir_fd=run_fd)

@@ -21,6 +21,7 @@ from agno.run.base import RunContext, RunStatus
 from agno.run.messages import RunMessages
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 from agno.team import Team, _messages
 from agno.team import _run as team_run
@@ -180,6 +181,41 @@ async def test_team_list_message_patch_excludes_transient_input_from_persisted_r
     persisted_content = [message.content for message in response.messages or []]
     assert "Current location: Amsterdam" not in persisted_content
     assert "Current question" in persisted_content
+
+
+@pytest.mark.parametrize("entity_kind", ["agent", "team"])
+@pytest.mark.asyncio
+async def test_turn_context_follows_the_prompt_so_the_next_request_repeats_the_opening(entity_kind: str) -> None:
+    """Unstored turn context must not sit where the next turn replays the prompt."""
+    model = RecordingOpenAIChat(id="gpt-test", api_key="sk-test")
+    entity_kwargs: dict[str, Any] = {
+        "model": model,
+        "db": InMemoryDb(),
+        "add_history_to_context": True,
+        "markdown": False,
+        "telemetry": False,
+    }
+    entity = Agent(**entity_kwargs) if entity_kind == "agent" else Team(members=[], **entity_kwargs)
+
+    def turn_input(context: str, prompt: str) -> list[Message]:
+        return [Message(role="user", content=context, add_to_agent_memory=False), Message(role="user", content=prompt)]
+
+    first = await entity.arun(turn_input("context one", "question one"), session_id="session")
+    first_request = _conversation_messages(model)
+    await entity.arun(turn_input("context two", "question two"), session_id="session")
+
+    assert first_request == [
+        {"role": "user", "content": "question one"},
+        {"role": "user", "content": "context one"},
+    ]
+    assert _conversation_messages(model) == [
+        {"role": "user", "content": "question one"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "question two"},
+        {"role": "user", "content": "context two"},
+    ]
+    assert first.input is not None
+    assert [message.content for message in first.input.input_content] == ["context one", "question one"]
 
 
 @pytest.mark.parametrize("use_async", [False, True])
@@ -388,15 +424,18 @@ async def _paused_and_resumed_requests(
     *,
     stream: bool,
     media_storage: LocalMediaStorage | None = None,
+    summary: str | None = None,
 ) -> tuple[list[Message], list[Message]]:
     """Run a media turn, pause the next turn for approval, resume it, and return both requests."""
     model = _ApprovalScriptedModel(id="scripted")
+    db = InMemoryDb()
     entity_kwargs: dict[str, Any] = {
         "model": model,
-        "db": InMemoryDb(),
+        "db": db,
         "media_storage": media_storage,
         "tools": [Function(name="approve_me", entrypoint=lambda: "approved", requires_confirmation=True)],
         "add_history_to_context": True,
+        "add_session_summary_to_context": False,
         "store_history_messages": False,
         "telemetry": False,
     }
@@ -408,6 +447,10 @@ async def _paused_and_resumed_requests(
         images=[Image(id="mindroom_viewed_1", content=b"viewed-image", mime_type="image/png")],
         session_id="session",
     )
+    if summary is not None:
+        stored = entity.get_session(session_id="session")
+        stored.summary = SessionSummary(summary=summary)
+        db.upsert_session(stored)
     paused = await entity.arun("canvas response", session_id="session")
     assert paused.status == RunStatus.paused
     requirements = list(paused.requirements or [])

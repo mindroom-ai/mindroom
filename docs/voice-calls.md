@@ -18,7 +18,8 @@ Each calls-enabled agent uses one of three backends:
 
 ## Setup
 
-1. Install the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`).
+1. MindRoom installs the `matrix_calls` extra automatically when a calls-enabled agent starts, including after a config reload, unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+   If auto-install is disabled or fails, install it yourself with `pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`.
 2. Make sure your Matrix deployment has a MatrixRTC backend; see [Server requirements](#server-requirements).
 3. Define call profiles and assign one to each calls-enabled agent:
 
@@ -115,6 +116,7 @@ See the example in [Setup](#setup).
 Live answers from the agent's full rendered system prompt, including its context files and caller-specific workspace, and delegates requests that need tools, research, more memory, or actions to the normal MindRoom agent, then relays the result conversationally.
 If the agent's prompt plus voice guidance exceeds about 16,000 tokens (a local estimate, not a provider limit), Live instead delegates every substantive request, including questions about identity and preferences, to the normal agent.
 Delegated turns keep their history while the call lasts, and each new call starts a fresh delegate session.
+Each Live call runs its audio in a separate Python process, so a busy MindRoom process does not interrupt the call's audio; expect one extra process per active call, plus one idle process (about 130 MB) that MindRoom starts ahead of the next call so pickup stays fast.
 
 This example uses GPT-Live for speech and the `chat` model for delegated turns, with a voice credential independent of the agent's model provider:
 
@@ -241,11 +243,12 @@ A configured room assignment wins over invites; if several calls-enabled agents 
 The agent stays in a call only while one Matrix user is in it (that user may join from several devices) and only while that user passes the normal room and per-agent reply permissions.
 That user is the requester for tools, and requester-private agents use that user's workspace, memory, credentials, history, and knowledge.
 
-Tools that need confirmation, user input, external execution, or [`tool_approval`](tool-approval.md) are hidden during calls in every backend, because a call has no approval UI.
+Tools that need confirmation, user input, external execution, or [`tool_approval`](tool-approval.md) are unavailable during calls in every backend, because a call has no approval UI.
+With `cascaded` and `live`, the agent tells the caller to use text chat for them.
 [Deferred tools](tools/dynamic-tools.md) are available from the start of a call in every backend, with no search or loading step.
 
 The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
-A restart also drops it from the call, and so does any configuration change applied while the agent is in a call.
+A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.

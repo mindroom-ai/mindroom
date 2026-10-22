@@ -19,26 +19,22 @@ from mindroom.authorization import (
     is_sender_allowed_for_responder,
 )
 from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.main import Config
 from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
-from tests.conftest import runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
-
 
 def _allowed(
     sender_id: str,
-    config: object,
+    config: Config,
     memberships: AgentReplyMembershipIndex,
     *,
     room_id: str = "!current:example.com",
 ) -> bool:
-    from mindroom.config.main import Config  # noqa: PLC0415
-
-    assert isinstance(config, Config)
     return is_sender_allowed_for_responder(
         sender_id,
         "talent",
@@ -156,12 +152,56 @@ def test_unresolved_grant_room_fails_closed(tmp_path: Path) -> None:
     )
 
 
-def test_internal_identity_bypasses_responder_policy(tmp_path: Path) -> None:
-    """Current runtime-owned identities must remain trusted participants."""
-    config = membership_config(tmp_path, access={"users": []})
-    sender_id = entity_ids(config, runtime_paths_for(config))["talent"].full_id
+@pytest.mark.asyncio
+async def test_other_agent_account_needs_access_while_own_account_is_admitted(tmp_path: Path) -> None:
+    """Another MindRoom account passes a responder's access like any requester, and its own account always does."""
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "agents": {
+                    "talent": {"display_name": "Talent", "rooms": ["talent"]},
+                    "scout": {"display_name": "Scout"},
+                },
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    ids = entity_ids(config, runtime_paths_for(config))
+    scout_id = ids["scout"].full_id
+    router_id = ids["router"].full_id
+    memberships = await membership_index(config, {"talent": {scout_id}})
 
-    assert _allowed(sender_id, config, AgentReplyMembershipIndex())
+    # The default access admits an agent account joined to one of the responder's rooms.
+    assert _allowed(scout_id, config, memberships)
+    assert not _allowed(router_id, config, memberships)
+
+    config.agents["talent"].access = ResponderAccessConfig(members_of_rooms=[])
+    assert _allowed(ids["talent"].full_id, config, memberships)
+    assert not _allowed(scout_id, config, memberships)
+
+    config.agents["talent"].access = ResponderAccessConfig(members_of_rooms=[], users=[scout_id])
+    assert _allowed(scout_id, config, memberships)
+    assert not _allowed(router_id, config, memberships)
+
+
+def test_responder_without_a_prepared_account_still_applies_its_grants(tmp_path: Path) -> None:
+    """A responder whose Matrix account is not prepared yet must apply its grants instead of failing."""
+    config = membership_config(tmp_path)
+    config.agents["late"] = config.agents["talent"].model_copy(
+        update={"access": ResponderAccessConfig(users=["@owner:example.com"])},
+    )
+    memberships = AgentReplyMembershipIndex()
+    runtime_paths = runtime_paths_for(config)
+
+    assert is_sender_allowed_for_responder("@owner:example.com", "late", None, config, runtime_paths, memberships)
+    assert not is_sender_allowed_for_responder(
+        "@outsider:example.com",
+        "late",
+        None,
+        config,
+        runtime_paths,
+        memberships,
+    )
 
 
 def test_credential_authority_is_separate_from_conversation_access(tmp_path: Path) -> None:

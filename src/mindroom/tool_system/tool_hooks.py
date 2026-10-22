@@ -25,7 +25,10 @@ from mindroom.hooks import (
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.timing import elapsed_ms_since, emit_timing_event
+from mindroom.tool_jobs.control import job_checkpoint
+from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system import agno_compat_tool_hooks
 from mindroom.tool_system.call_record import tool_call_recorder
 from mindroom.tool_system.runtime_context import (
@@ -142,7 +145,7 @@ _SYNC_TOOL_COMPLETION_TRACKER: ContextVar[SyncToolCompletionTracker | None] = Co
 
 
 @contextmanager
-def track_sync_tool_completion(tracker: SyncToolCompletionTracker) -> Iterator[None]:
+def track_sync_tool_completion(tracker: SyncToolCompletionTracker | None) -> Iterator[None]:
     """Bind synchronous leaf completion ownership to one tool call."""
     token = _SYNC_TOOL_COMPLETION_TRACKER.set(tracker)
     try:
@@ -391,7 +394,7 @@ def _run_coroutine_from_sync(coroutine: _ToolHookResult) -> _ToolHookResult:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(runner_coroutine)
+        return asyncio.run(closing_model_connections(runner_coroutine))
     return _DeferredAsyncToolHookResult(runner_coroutine)
 
 
@@ -400,7 +403,7 @@ def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> _T
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(_await_result(deferred.awaitable))
+        return asyncio.run(closing_model_connections(deferred.awaitable))
 
     result_box: list[_ToolHookResult] = []
     error_box: list[BaseException] = []
@@ -408,7 +411,7 @@ def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> _T
 
     def runner() -> None:
         try:
-            result_box.append(context.run(asyncio.run, _await_result(deferred.awaitable)))
+            result_box.append(context.run(asyncio.run, closing_model_connections(deferred.awaitable)))
         except BaseException as exc:
             error_box.append(exc)
 
@@ -711,6 +714,42 @@ async def _maybe_emit_after_call_timed(
     )
 
 
+async def _check_before_body(
+    *,
+    timing: _ToolBridgeTiming,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    hook_arguments: dict[str, Any] | None,
+    args: dict[str, Any],
+    tool_name: str,
+    has_after_hooks: bool,
+) -> None:
+    """Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran."""
+    try:
+        job_checkpoint()
+        check_current_execution_authority(arguments=args)
+    except BaseException as stopped:
+        await _maybe_emit_after_call_timed(
+            has_after_hooks=has_after_hooks,
+            timing=timing,
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+            result=None,
+            error=stopped,
+            blocked=True,
+            duration_ms=timing.mark_result_ready(),
+        )
+        timing.emit_finish(
+            tool_name=tool_name,
+            agent_name=resolved_context.agent_name or None,
+            outcome="blocked_before_body",
+        )
+        raise
+
+
 async def _execute_bridge(
     *,
     hook_registry: HookRegistry,
@@ -727,6 +766,7 @@ async def _execute_bridge(
     approval_gate: _ToolApprovalGate | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
+    job_checkpoint()
     timing = _ToolBridgeTiming(started_at=started_at)
     effective_dispatch_context = _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context()
     bridge_context = _ToolHookBridgeContext(
@@ -792,6 +832,15 @@ async def _execute_bridge(
             )
             return BackgroundToolApprovalDenied(reason=reason)
 
+    await _check_before_body(
+        timing=timing,
+        hook_registry=hook_registry,
+        resolved_context=resolved_context,
+        hook_arguments=hook_arguments,
+        args=args,
+        tool_name=tool_name,
+        has_after_hooks=has_after_hooks,
+    )
     result: _ToolHookResult = None
     error: BaseException | None = None
     tool_body_started_at = time.perf_counter()

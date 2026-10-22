@@ -9,9 +9,9 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories ([Agno Learning](#agno-learning) stays on unless disabled) |
 
-<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-light="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-dark="https://github.com/user-attachments/assets/4ae62fd6-04fe-4dcc-aed6-d9b1de92b5f9">
-  <source src="https://github.com/user-attachments/assets/440c7742-da69-41e1-a131-788ca5307e31" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a7ccca20-2047-4d8c-8bf5-a2251e0946f3" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
+  <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/f1d8e8ce-8160-46bf-811d-2a3e71cde673" type="video/mp4">
 </video>
 
 ## Choosing a Backend
@@ -36,6 +36,8 @@ agents:
 
 With `none`, the agent gets no memories in its prompt, stores none after its turns, and does not receive the `memory` tool.
 `none` does not turn off [Agno Learning](#agno-learning); set `learning: false` as well to disable all built-in memory and learning.
+Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
+What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written, and [Agno Learning](#agno-learning) reads conversations without this removal.
 Conversation history is separate and stays in the session; see [History & Compaction](https://docs.mindroom.chat/configuration/history/).
 OpenClaw-compatible agents use this same backend selection.
 
@@ -76,6 +78,8 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 | `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
+| `config.query_prefix` | `null` | Text the `openai` provider prepends to search queries |
+| `config.document_prefix` | `null` | Text the `openai` provider prepends to indexed documents and stored memories |
 
 ```yaml
 memory:
@@ -108,7 +112,26 @@ memory:
 ```
 
 MindRoom installs the optional `sentence_transformers` extra the first time that provider is used.
-Changing the embedder provider, model, host, or dimensions switches Mem0 to a separate collection, so memories stored with the previous embedder are no longer retrieved.
+
+Some models expect a prompt in front of each text, different for queries and documents.
+With a local `sentence_transformers` model, knowledge, file-memory and knowledge-graph searches get the model's own prompts automatically, while Mem0 embeds without them.
+For the same model behind an OpenAI-compatible server such as llama.cpp, set the prompts as prefixes; the `openai` provider applies them everywhere, Mem0 included.
+For EmbeddingGemma 2:
+
+```yaml
+memory:
+  embedder:
+    provider: openai
+    config:
+      model: embeddinggemma-2
+      host: http://localhost:8080/v1
+      dimensions: 768
+      query_prefix: "task: search result | query: "
+      document_prefix: "title: none | text: "
+```
+
+Knowledge-graph texts all get the query prefix, because Graphiti embeds names, facts and searches through the same calls.
+Changing the embedder provider, model, host, dimensions, or prefixes switches Mem0 to a separate collection, so memories stored with the previous embedder are no longer retrieved.
 
 The `openai` embedder takes its API key from the first of these that is set:
 
@@ -126,7 +149,7 @@ When the embedder rejects its credential, semantic memory search reports the cau
 Supported providers are `ollama`, `openai`, `openrouter`, and `anthropic`.
 When `memory.llm` is omitted, MindRoom uses `gemma4` on the Ollama server set by `OLLAMA_HOST` (default `http://localhost:11434`).
 With `provider: ollama`, `config.host` points extraction at a different Ollama server, but a configured `OLLAMA_HOST` takes precedence; other providers ignore `host`.
-With `provider: openai`, use `gpt-6-luna`; MindRoom drops the `temperature` and `top_p` values Mem0 sends, which GPT-6 models reject.
+With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
 
 ```yaml
 memory:
@@ -178,6 +201,7 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines the start of `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
+An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies, its history is compacted, or MindRoom restarts; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
 Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.
 When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
@@ -235,25 +259,28 @@ To give each requester their own file memory from one agent definition, combine 
 
 ## File Auto-Flush Worker
 
-Auto-flush periodically turns recent conversation in file-backed agents into durable memories.
-It applies only to agents whose effective backend is `file`.
+Auto-flush periodically turns the new turns of file-backed agents' conversations into durable memories.
+It applies only to agents whose effective backend is `file`, including each requester's private instance.
 
-1. Each turn marks its session as having unsaved conversation.
-2. A background worker picks eligible sessions in bounded batches.
-3. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts.
-4. When the model answers with the `no_reply_token`, nothing is written.
-5. Results are appended to `memory/YYYY-MM-DD.md`.
+1. Every `flush_interval_seconds`, a background worker looks for conversations with new finished turns that have been quiet for `idle_seconds`.
+2. The agent's own model, or `extractor.model` when set, reads the new messages, plus existing memories to avoid duplicates, and writes durable facts; a longer backlog is read in order over later passes.
+3. When the model answers with the `no_reply_token`, nothing is written.
+4. Results are appended to `memory/YYYY-MM-DD.md`, and a retry never appends the same result twice.
 
-Turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start are not auto-flushed.
+Compacted turns and voice-call turns are included.
+Not auto-flushed: turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start, tasks another agent delegated, team conversations, conversations through the OpenAI-compatible API, and context that hooks attach to messages, such as location.
+A message redacted before its turn is flushed stays out of memory, and so do the turn that read it and every later turn its redaction removes from [history](https://docs.mindroom.chat/configuration/history/#compacted-history-and-redaction).
+A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
+Enabling auto-flush starts with the turns after that; earlier conversation is not flushed, and turning it off and on again flushes the turns in between.
+An agent switched to `file` memory later starts with its turns from about one `flush_interval_seconds` before auto-flush first sees it, and its private instances, including new ones, keep all their turns since then.
 
 ```yaml
 memory:
   backend: file
   auto_flush:
     enabled: true
-    flush_interval_seconds: 1800
+    flush_interval_seconds: 300
     idle_seconds: 120
-    max_dirty_age_seconds: 600
     batch:
       max_sessions_per_cycle: 10
     extractor:
@@ -263,19 +290,18 @@ memory:
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Turn on auto-flush |
-| `flush_interval_seconds` | `1800` (min 5) | Time between worker cycles |
-| `idle_seconds` | `120` (min 0) | Session idle time before it becomes eligible |
-| `max_dirty_age_seconds` | `600` (min 1) | Make a session eligible after this long with unsaved conversation, even if still active |
-| `stale_ttl_seconds` | `86400` (min 60) | Forget pending sessions older than this |
-| `max_cross_session_reprioritize` | `5` (min 0) | Other pending sessions of the same agent moved up the queue when a new message arrives |
-| `retry_cooldown_seconds` | `30` (min 1) | Wait before retrying a failed extraction |
+| `flush_interval_seconds` | `300` (min 5) | Time between worker passes |
+| `idle_seconds` | `120` (min 0) | How long a conversation must be quiet before its new turns are flushed |
+| `stale_ttl_seconds` | `86400` (min 60) | Give up on turns whose flush has kept failing for this long |
+| `retry_cooldown_seconds` | `30` (min 1) | Wait before retrying a failed flush |
 | `max_retry_cooldown_seconds` | `300` (min 1) | Upper bound for the growing retry wait |
-| `batch.max_sessions_per_cycle` | `10` (min 1) | Sessions processed per cycle |
-| `batch.max_sessions_per_agent_per_cycle` | `3` (min 1) | Sessions per agent processed per cycle |
+| `batch.max_sessions_per_cycle` | `10` (min 1) | Conversations flushed per pass, across all agents |
+| `batch.max_sessions_per_agent_per_cycle` | `3` (min 1) | Conversations flushed per pass for one agent or private instance |
+| `extractor.model` | none | A key of `models` that runs extraction instead of the agent's own model; set a fast model when extractions time out |
 | `extractor.no_reply_token` | `NO_REPLY` | Reply meaning nothing should be saved |
-| `extractor.max_messages_per_flush` | `20` (min 1) | Messages considered per extraction |
-| `extractor.max_chars_per_flush` | `12000` (min 1) | Message characters considered per extraction |
-| `extractor.max_extraction_seconds` | `30` (min 1) | Timeout for one extraction, retried in a later cycle |
+| `extractor.max_messages_per_flush` | `20` (min 1) | New messages read per extraction; a longer backlog is read over later passes |
+| `extractor.max_chars_per_flush` | `12000` (min 1) | Message characters read per extraction |
+| `extractor.max_extraction_seconds` | `30` (min 1) | Timeout for one extraction, retried in a later pass |
 | `extractor.include_memory_context.memory_snippets` | `5` (min 0) | Existing memories shown to the model to avoid duplicates |
 | `extractor.include_memory_context.snippet_max_chars` | `400` (min 1) | Characters per existing memory shown |
 

@@ -213,14 +213,13 @@ class ChatUITools(Toolkit):
                 action=action,
                 message="Chat UI actions require a configured agent identity; team and router contexts are unsupported.",
             )
-        transport_agent_name = context.transport_agent_name or context.agent_name
-        if transport_agent_name != context.agent_name:
+        if context.recipient != context.agent_name:
             return cls._payload(
                 "error",
                 action=action,
                 message="Chat UI actions do not support delegated transport identity mismatches.",
             )
-        if not context.room_id.startswith("!") or ":" not in context.room_id:
+        if not context.room_id.startswith("!"):  # room version 12 IDs carry no ":server" part
             return cls._payload(
                 "error",
                 action=action,
@@ -544,7 +543,11 @@ class ChatUITools(Toolkit):
 
         To replace the page in place, for the next step of a flow or a new version of
         a file you edited, call show_canvas again with ``canvas_event_id`` set to the
-        canvas ID. Without it, show_canvas creates a separate canvas: use a new canvas for a
+        canvas ID. show_canvas reads a ``path`` as soon as it starts, and tool calls made
+        together run at the same time, so call it only after the call that writes the
+        file has finished (for a background job, wait for its result), never alongside
+        it, or the user gets the old page.
+        Without ``canvas_event_id``, show_canvas creates a separate canvas: use a new canvas for a
         distinct artifact and an update for a new version of the same one. The user can
         switch between this conversation's canvases from the room header. Success means
         the request was sent, not that the user opened or answered it.

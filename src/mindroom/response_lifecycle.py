@@ -16,10 +16,11 @@ from mindroom.message_target import ResponseLifecycleKey
 from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
+from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator, Sequence
 
     from agno.db.base import BaseDb
     from structlog.stdlib import BoundLogger
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
     from mindroom.timing import DispatchPipelineTiming
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _LockedResponseResult = TypeVar("_LockedResponseResult")
@@ -144,7 +146,8 @@ class _QueuedMessageState:
     _pending_messages: dict[str, QueuedMessage] = field(default_factory=dict)
     mid_turn_gate: MidTurnGate | None = None
     _active_response_turns: int = 0
-    _event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Replaced on every change of the queue, so each waiter wakes once per change.
+    _changed: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     def __post_init__(self) -> None:
@@ -172,20 +175,29 @@ class _QueuedMessageState:
         if self._active_response_turns == 0:
             self._idle_event.set()
 
-    def add_waiting_human_message(self, source_event_id: str, *, text: str | None = None) -> bool:
+    def add_waiting_human_message(
+        self,
+        source_event_id: str,
+        *,
+        text: str | None = None,
+        requester_id: str | None = None,
+    ) -> bool:
         if source_event_id in self._pending_messages:
             return False
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
-        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
-        self._event.set()
+        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress, requester_id)
+        self._notify_changed()
         return True
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
         if source_event_id not in self._pending_messages:
             return
         del self._pending_messages[source_event_id]
-        if self.pending_human_messages == 0:
-            self._event.clear()
+        self._notify_changed()
+
+    def _notify_changed(self) -> None:
+        self._changed.set()
+        self._changed = asyncio.Event()
 
     def has_pending_human_messages(self) -> bool:
         return self.pending_human_messages > 0
@@ -194,13 +206,30 @@ class _QueuedMessageState:
         return self._active_response_turns > 0
 
     async def wait(self) -> None:
-        await self._event.wait()
+        """Return once a queued message needs the reply's attention; the mid-turn judge can let messages wait."""
+        while True:
+            changed = self._changed
+            if await self._interrupts():
+                return
+            # A queue that changed while it was judged or acknowledged is judged again at once.
+            await changed.wait()
+
+    async def _interrupts(self) -> bool:
+        pending = self.pending_message_snapshot()
+        if not pending:
+            return False
+        gate = self.mid_turn_gate
+        if gate is None:
+            return True
+
+        def still_queued() -> bool:
+            return pending == self.pending_message_snapshot()
+
+        # A decision counts only for the queue it judged.
+        return not await gate.defers(pending, current=still_queued) and still_queued()
 
     async def wait_until_idle(self) -> None:
         await self._idle_event.wait()
-
-    def is_set(self) -> bool:
-        return self._event.is_set()
 
 
 @dataclass(slots=True)
@@ -274,6 +303,13 @@ class ResponseLifecycleCoordinator:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
         return self._has_active_response_for_thread_key(target.lifecycle_key)
+
+    def has_waiting_messages_from(self, target: MessageTarget, requester_id: str) -> bool:
+        """Return whether one requester's messages wait for one canonical conversation's next turn."""
+        queued_signal = self._thread_queued_signals.get(target.lifecycle_key)
+        return queued_signal is not None and any(
+            message.requester_id == requester_id for message in queued_signal.pending_message_snapshot()
+        )
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
         """Return canonical thread IDs with active response lifecycles in one room."""
@@ -363,7 +399,10 @@ class ResponseLifecycleCoordinator:
         self._thread_queued_signals[lifecycle_key] = signal
         return signal
 
-    def visible_progress_callback(self, target: MessageTarget) -> Callable[[str], None] | None:
+    def visible_progress_callback(
+        self,
+        target: MessageTarget,
+    ) -> Callable[[str, Sequence[ToolTraceEntry]], None] | None:
         """Bind acknowledged Matrix text to the active response's opted-in judge."""
         signal = self._thread_queued_signals.get(target.lifecycle_key)
         if signal is None or signal.mid_turn_gate is None:
@@ -400,6 +439,7 @@ class ResponseLifecycleCoordinator:
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
+            requester_id=response_envelope.requester_id,
         ):
             return None
         return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)
@@ -422,6 +462,7 @@ class ResponseLifecycleCoordinator:
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
+            requester_id=response_envelope.requester_id,
         ):
             return None
         return response_envelope.source_event_id
@@ -539,7 +580,11 @@ class ResponseLifecycleCoordinator:
                     queued_signal=queued_signal,
                 )
                 queued_signal.mid_turn_gate = mid_turn_gate
-                with queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context:
+                with (
+                    # A newer human message also releases the reply's tool waits; other queued turns wait for it.
+                    pending_human_messages_context(queued_signal),
+                    queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context,
+                ):
                     try:
                         return await locked_operation(target)
                     finally:

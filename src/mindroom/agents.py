@@ -23,9 +23,14 @@ from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KNOWLEDGE_SEARCH_TOOL_NAME, knowledge_source_descriptions
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.approval.tool_approval import (
+    JOB_APPROVAL_TYPE,
+    POLICY_CONFIRMATION_APPROVAL_TYPE,
+    tool_may_require_approval,
+)
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import attach_computer_announcement
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.personas import (
     caller_toolkit_names,
     persona_allows,
@@ -35,6 +40,7 @@ from mindroom.delegation.personas import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
+from mindroom.history.mid_turn_compaction import install_mid_turn_compaction
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
@@ -47,31 +53,38 @@ from mindroom.providers.openai_tool_search import (
     install_openai_deferred_tool_search,
     openai_native_tool_search_supported,
 )
+from mindroom.providers.portable_tool_search import install_portable_deferred_tool_search
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
 )
 from mindroom.session_storage import agent_storage
+from mindroom.shared_directories.paths import describe_agent_shared_directories
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.agno_execution import approval_can_run_as_job
+from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
+from mindroom.tool_jobs.notices import install_job_notice_hook
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ensure_tool_registry_loaded,
     get_tool_by_name,
 )
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
     ToolFileAccess,
 )
 from mindroom.tool_system.dynamic_toolkits import (
+    DeferredToolkit,
     VisibleToolSurface,
-    deferred_tool_catalog_entries,
-    get_loaded_tools_for_session,
-    has_deferred_tools,
-    suppress_fully_deferred_toolkit_instructions,
+    defer_toolkit,
+    drop_shadowed_deferred_functions,
     visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
@@ -90,7 +103,7 @@ from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from contextlib import AbstractContextManager
 
     from agno.db.base import BaseDb
@@ -110,6 +123,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.tool_system.skills import RefusedWorkspaceSkill
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
@@ -145,31 +159,15 @@ class _AdditionalContextChunk:
 
 
 @dataclass(frozen=True)
-class _NativeDeferredToolkit:
-    """One authored native-search domain and its projected toolkit owner."""
-
-    domain_name: str
-    toolkit: Toolkit
-
-    @property
-    def wire_function_names(self) -> tuple[str, ...]:
-        """Return the owner's functions that survive final surface projection."""
-        return (*self.toolkit.get_functions(), *self.toolkit.get_async_functions())
-
-
-@dataclass(frozen=True)
 class _AgentToolAssembly:
     """Toolkits and dynamic-tool visibility assembled for one agent instance."""
 
     tools: list[Toolkit]
-    loaded_tools: tuple[str, ...]
-    hidden_toolkits: frozenset[str]
-    selected_dynamic_tools: tuple[str, ...]
-    # Toolkits whose surviving functions should use native deferred loading.
+    # Toolkits whose surviving functions stay off the provider request until tool search finds them.
     # Keep the owners rather than a pre-projection name snapshot because final
     # MCP collision projection may remove a deferred function while preserving
     # an eager local function with the same wire name.
-    deferred_toolkits: tuple[_NativeDeferredToolkit, ...]
+    deferred_toolkits: tuple[DeferredToolkit, ...]
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
     cli_deferred: tuple[DeferredAgentToolkit, ...]
@@ -177,7 +175,7 @@ class _AgentToolAssembly:
 
     @property
     def deferred_tool_names(self) -> tuple[str, ...]:
-        """Return authored native-search domains with a surviving function surface."""
+        """Return authored deferred-tool domains with a surviving function surface."""
         return tuple(
             dict.fromkeys(deferred.domain_name for deferred in self.deferred_toolkits if deferred.wire_function_names),
         )
@@ -688,6 +686,8 @@ def _agent_tool_output_file_policy(
 def _wrap_direct_agent_toolkit_for_output_files(
     toolkit: Toolkit,
     *,
+    tool_name: str,
+    tool_config_overrides: dict[str, object] | None,
     agent_runtime: ResolvedAgentRuntime,
     runtime_paths: constants.RuntimePaths,
     tool_output_auto_save_threshold_bytes: int,
@@ -698,7 +698,10 @@ def _wrap_direct_agent_toolkit_for_output_files(
         runtime_paths,
         tool_output_auto_save_threshold_bytes,
     )
-    return wrap_toolkit_for_output_files(toolkit, policy)
+    return bind_toolkit_construction(
+        wrap_toolkit_for_output_files(toolkit, policy),
+        ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
+    )
 
 
 @timed("system_prompt_assembly.agent_create.model_instance")
@@ -729,11 +732,10 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     agent_runtime: ResolvedAgentRuntime | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     execution_identity: ToolExecutionIdentity | None,
-    session_id: str | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    dynamic_tool_continuation: bool = False,
     persona: SubagentPersona | None = None,
+    deferred_toolkits: Sequence[DeferredToolkit] = (),
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
@@ -744,10 +746,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     Returns ``None`` when the configured tool should be skipped, such as an
     explicit ``delegate`` entry without valid delegation targets.
 
-    ``dynamic_tool_continuation`` is only set by callers that resume the turn
-    after a load/unload (the standalone agent envelope and materialized team
-    members). It stops the dynamic tools manager's provider loop so the rebuilt
-    agent sees the new schema.
+    ``deferred_toolkits`` are the wire-deferred toolkits that ``dynamic_tools`` searches.
     """
     agent_config = config.get_agent(agent_name)
     if agent_runtime is None:
@@ -761,6 +760,15 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     storage_path = runtime_paths.storage_root
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     shared_storage_path = shared_storage_root(storage_path)
+    # Every MindRoom-owned direct toolkit gets the same output-file wrapping and construction identity.
+    wrap_direct = partial(
+        _wrap_direct_agent_toolkit_for_output_files,
+        tool_name=tool_name,
+        tool_config_overrides=tool_config_overrides,
+        agent_runtime=agent_runtime,
+        runtime_paths=runtime_paths,
+        tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+    )
 
     if tool_name == "memory":
         if config.resolve_entity(agent_name).memory_backend == "none":
@@ -770,7 +778,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
 
         # MemoryTools resolves the canonical per-agent storage roots internally via the
         # shared memory facade, so it should receive the caller-visible runtime root here.
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             MemoryTools(
                 agent_name=agent_name,
                 storage_path=storage_path,
@@ -778,10 +786,15 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             ),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
+
+    if tool_name == "knowledge_graph":
+        if not config.agent_uses_knowledge_graph(agent_name):
+            return None
+
+        from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools  # noqa: PLC0415
+
+        return wrap_direct(KnowledgeGraphTools(agent_name, config, runtime_paths, execution_identity))
 
     if tool_name == "delegate":
         # Imported lazily to avoid a circular import through DelegateTools -> create_agent.
@@ -802,7 +815,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 max_delegation_depth=MAX_DELEGATION_DEPTH,
             )
             return None
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             delegate.DelegateTools(
                 agent_name=agent_name,
                 delegate_to=agent_config.delegate_to,
@@ -814,110 +827,68 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
                 persona=persona,
             ),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "self_config":
         from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "skill_manage":
         from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415
 
-        return SkillManageTools(
-            agent_name,
-            config,
-            runtime_paths,
-            agent_workspace_skills_root(
-                runtime_paths,
+        # It keeps its own output handling, but background tool jobs still need its construction identity.
+        return bind_toolkit_construction(
+            SkillManageTools(
                 agent_name,
-                workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
+                config,
+                runtime_paths,
+                agent_workspace_skills_root(
+                    runtime_paths,
+                    agent_name,
+                    workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
+                ),
             ),
+            ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
         )
 
     if tool_name == "compact_context":
         from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             CompactContextTools(
                 agent_name=agent_name,
                 config=config,
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             ),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "dynamic_workflow":
         from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             DynamicWorkflowTools(),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "report_publishing":
         from mindroom.custom_tools.report_publishing import ReportPublishingTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             ReportPublishingTools(),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "dynamic_tools":
         from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit  # noqa: PLC0415
 
-        if not has_deferred_tools(config, agent_name):
-            logger.warning(
-                "Skipping 'dynamic_tools' tool for agent '%s': no deferred tools are configured",
-                agent_name,
-            )
+        if not deferred_toolkits:
             return None
-        hidden_tool_names = _context_hidden_toolkits(execution_identity)
-        if not _visible_deferred_tool_names(config, agent_name, hidden_tool_names=hidden_tool_names):
-            logger.warning(
-                "Skipping 'dynamic_tools' tool for agent '%s': no compatible deferred tools are available",
-                agent_name,
-            )
-            return None
-        if session_id is None:
-            logger.warning(
-                "Skipping 'dynamic_tools' tool for agent '%s': no stable session_id is available",
-                agent_name,
-            )
-            return None
-        return _wrap_direct_agent_toolkit_for_output_files(
-            DynamicToolsToolkit(
-                agent_name=agent_name,
-                config=config,
-                session_id=session_id,
-                worker_target=build_agent_toolkit_worker_target(
-                    agent_runtime.execution.execution_scope,
-                    agent_name,
-                    is_private=agent_runtime.execution.is_private,
-                    execution_identity=execution_identity,
-                    runtime_paths=runtime_paths,
-                ),
-                stop_after_tool_call=dynamic_tool_continuation,
-                hidden_tool_names=hidden_tool_names,
-            ),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+        # Search results must reach the model inline, so they skip output-file redirection.
+        return bind_toolkit_construction(
+            DynamicToolsToolkit(deferred_toolkits=deferred_toolkits),
+            ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
         )
 
     return _build_registered_agent_tool(
@@ -944,18 +915,15 @@ def get_agent_toolkit_names(
     agent_name: str,
     config: Config,
     *,
-    session_id: str | None = None,
     delegation_depth: int = 0,
 ) -> list[str]:
-    """Return the provider-visible toolkit list for a new agent runtime."""
+    """Return every toolkit a new agent runtime can call, deferred ones included."""
     return [
         entry.name
         for entry in visible_tool_surface(
             agent_name=agent_name,
             config=config,
-            session_id=session_id,
             delegation_depth=delegation_depth,
-            enable_dynamic_tools_manager=session_id is not None,
         ).runtime_tool_configs
     ]
 
@@ -991,6 +959,7 @@ def _render_tool_execution_environment(
     file_access: FileAccess,
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
+    shared_directories: tuple[str, ...],
 ) -> str:
     """Describe effective per-tool execution routing and file access to the model."""
 
@@ -1005,6 +974,8 @@ def _render_tool_execution_environment(
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
+    if shared_directories:
+        file_access_lines.append(f"- Shared directories: {', '.join(shared_directories)}.")
     if unconfined_tool_names:
         file_access_lines.append(
             f"- Not confined by file_access (only a worker isolates them): {tool_list(unconfined_tool_names)}.",
@@ -1104,19 +1075,6 @@ def _context_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -
     return frozenset(tool_name for tool_name, metadata in TOOL_METADATA.items() if metadata.requires_room_context)
 
 
-def _visible_deferred_tool_names(
-    config: Config,
-    agent_name: str,
-    *,
-    hidden_tool_names: frozenset[str] = frozenset(),
-) -> list[str]:
-    return [
-        entry.name
-        for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs
-        if entry.name not in hidden_tool_names
-    ]
-
-
 def _resolve_agent_learning(
     agent_config: AgentConfig,
     defaults: DefaultsConfig,
@@ -1138,34 +1096,21 @@ def _resolve_agent_learning(
 
 def _build_dynamic_tooling_instruction_block(
     config: Config,
-    agent_name: str,
-    *,
-    enable_dynamic_tools_manager: bool,
-    hidden_tool_names: frozenset[str] = frozenset(),
+    deferred_toolkits: Sequence[DeferredToolkit],
 ) -> str | None:
-    """Return static prompt guidance for per-tool dynamic loading."""
-    if not enable_dynamic_tools_manager or not has_deferred_tools(config, agent_name):
+    """Return the static deferred-tool catalog for portable tool search."""
+    catalog = {
+        deferred.domain_name: deferred.description.strip()
+        for deferred in deferred_toolkits
+        if deferred.wire_function_names
+    }
+    if not catalog:
         return None
-
-    catalog_lines: list[str] = []
-    deferred_entries = [
-        entry
-        for entry in deferred_tool_catalog_entries(agent_name=agent_name, config=config, loaded_tools=[])
-        if entry.name not in hidden_tool_names
-    ]
-    if not deferred_entries:
-        return None
-
-    for entry in deferred_entries:
-        description = entry.description.strip()
-        if description:
-            catalog_lines.append(f"{entry.name} - {description}")
-        else:
-            catalog_lines.append(entry.name)
-
     return config.render_prompt(
         "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
-        tool_catalog="\n".join(catalog_lines),
+        tool_catalog="\n".join(
+            f"{name} - {description}" if description else name for name, description in catalog.items()
+        ),
     )
 
 
@@ -1180,36 +1125,6 @@ def _build_native_tool_search_instruction_blocks(
         config.render_prompt(
             "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE",
             tool_domains=", ".join(deferred_tool_names),
-        ),
-    )
-
-
-def _build_dynamic_tooling_state_suffix(
-    config: Config,
-    agent_name: str,
-    *,
-    loaded_tools: tuple[str, ...],
-    enable_dynamic_tools_manager: bool,
-    hidden_tool_names: frozenset[str] = frozenset(),
-) -> str | None:
-    """Return the small volatile dynamic-tool state suffix for the final instruction slot."""
-    if not enable_dynamic_tools_manager or not has_deferred_tools(config, agent_name):
-        return None
-    if not _visible_deferred_tool_names(config, agent_name, hidden_tool_names=hidden_tool_names):
-        return None
-
-    initial_tools = [
-        entry.name
-        for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs
-        if entry.initial and entry.name not in hidden_tool_names
-    ]
-    visible_loaded_tools = tuple(tool_name for tool_name in loaded_tools if tool_name not in hidden_tool_names)
-    current_tools = ", ".join(visible_loaded_tools) if visible_loaded_tools else "(none)"
-    sticky_tools = ", ".join(initial_tools) if initial_tools else "(none)"
-    return "\n".join(
-        (
-            "Dynamic tools currently loaded for this session: " + current_tools,
-            "Sticky initial dynamic tools that cannot be unloaded: " + sticky_tools,
         ),
     )
 
@@ -1270,8 +1185,13 @@ def apply_tool_approval_capability(
     *,
     supports_native_tool_approval: bool,
     registered_tool_name: str | None = None,
+    approvals_as_jobs: bool = False,
 ) -> Toolkit | None:
-    """Expose gated functions only where an Agno paused run can be resumed."""
+    """Expose gated functions only where an Agno paused run can be resumed, or where their call's job asks first.
+
+    With ``approvals_as_jobs``, a gated function whose call can become a managed job asks for its approval as that
+    job's first phase instead of pausing the run.
+    """
     if toolkit is None:
         return None
 
@@ -1298,6 +1218,9 @@ def apply_tool_approval_capability(
                 function.requires_confirmation = False
                 continue
             if function_may_require_approval(function) and function.requires_confirmation is not True:
+                if approvals_as_jobs and approval_can_run_as_job(function, toolkit):
+                    function.approval_type = JOB_APPROVAL_TYPE
+                    continue
                 function.requires_confirmation = True
                 function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
         return toolkit
@@ -1319,38 +1242,23 @@ def _resolve_agent_dynamic_tool_selection(
     *,
     agent_name: str,
     config: Config,
-    session_id: str | None,
     delegation_depth: int,
-    native_deferred_tools: bool,
+    minimal_mode: bool,
     eager_deferred_tools: bool,
+    portable_deferred_tools: bool,
     include_matrix_room_runtime_tools: bool,
     required_tool_names: tuple[str, ...],
 ) -> VisibleToolSurface:
-    if native_deferred_tools or eager_deferred_tools:
-        # Attach every authored deferred tool and skip the dynamic-tools
-        # manager when the consuming runtime cannot rebuild its tool schema.
-        return visible_tool_surface(
-            agent_name=agent_name,
-            config=config,
-            loaded_tools=_visible_deferred_tool_names(config, agent_name),
-            delegation_depth=delegation_depth,
-            enable_dynamic_tools_manager=False,
-            include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
-        )
-    loaded_tools = (
-        [
-            *get_loaded_tools_for_session(agent_name=agent_name, config=config, session_id=session_id),
-            *required_tool_names,
-        ]
-        if required_tool_names
-        else None
-    )
+    # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
+    # saved approval needs; every other runtime attaches them all. Native tool search sends deferred ones marked as
+    # deferred, portable tool search keeps them off the wire, and personas with their own tool list, plus voice calls
+    # on models without native tool search, send them as ordinary tools.
     return visible_tool_surface(
         agent_name=agent_name,
         config=config,
-        session_id=session_id,
-        loaded_tools=loaded_tools,
+        deferred_tools=required_tool_names if minimal_mode and not eager_deferred_tools else None,
         delegation_depth=delegation_depth,
+        enable_dynamic_tools_manager=portable_deferred_tools,
         include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
     )
 
@@ -1410,6 +1318,7 @@ def _load_agent_skills(
     workspace_root: Path | None = None,
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: tuple[str, ...] | None = None,
+    refused: list[RefusedWorkspaceSkill] | None = None,
 ) -> Skills | None:
     return build_agent_skills(
         agent_name,
@@ -1418,6 +1327,7 @@ def _load_agent_skills(
         workspace_root=workspace_root,
         output_file_policy=output_file_policy,
         only=only,
+        refused=refused,
     )
 
 
@@ -1470,29 +1380,31 @@ def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
         function.owning_toolkit = authored_name
 
 
-def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools share one construction path
+def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferred tools share one construction path
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
     agent_runtime: ResolvedAgentRuntime,
     *,
     execution_identity: ToolExecutionIdentity | None,
-    session_id: str | None,
     hook_registry: HookRegistry | None,
     disable_runtime_capabilities: bool,
     disabled_tool_names: frozenset[str],
     tool_function_filter: Callable[[Function], bool] | None,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    dynamic_tool_continuation: bool,
     supports_native_tool_approval: bool,
-    native_deferred_tools: bool,
+    wire_deferred_tools: bool,
+    portable_deferred_tools: bool,
     eager_deferred_tools: bool,
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
     persona: SubagentPersona | None,
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
+    approvals_as_jobs = (
+        background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
+    )
     persona_tools = persona.tools if persona is not None else None
     plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
@@ -1506,8 +1418,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         config=config,
         runtime_paths=runtime_paths,
     )
-    # Dynamic tool state is keyed by agent and session scope, so team members
-    # sharing one Matrix thread do not leak loaded tools across agents.
     include_matrix_room_runtime_tools = (
         execution_identity is not None
         and execution_identity.channel == "matrix"
@@ -1516,10 +1426,10 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
-        session_id=session_id,
         delegation_depth=delegation_depth,
-        native_deferred_tools=native_deferred_tools,
+        minimal_mode=minimal_mode,
         eager_deferred_tools=eager_deferred_tools,
+        portable_deferred_tools=portable_deferred_tools,
         include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
         required_tool_names=required_tool_names,
     )
@@ -1537,24 +1447,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         resolved_tool_configs = {
             tool_name: entry for tool_name, entry in resolved_tool_configs.items() if tool_name not in hidden_toolkits
         }
-    loaded_tools = (
-        ()
-        if disable_runtime_capabilities
-        else tuple(
-            tool_name
-            for tool_name in dynamic_tool_selection.loaded_tools
-            if tool_name not in disabled_tool_names and tool_name not in hidden_toolkits
-        )
-    )
     deferred_configs = {}
     if minimal_mode:
         complete = visible_tool_surface(
             agent_name=agent_name,
             config=config,
-            session_id=session_id,
-            loaded_tools=_visible_deferred_tool_names(config, agent_name),
             delegation_depth=delegation_depth,
-            enable_dynamic_tools_manager=session_id is not None,
             include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
         )
         deferred_configs = {
@@ -1576,7 +1474,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
     tools: list[Toolkit] = []
     local_tool_names: list[str] = []
     worker_routed_tool_names: list[str] = []
-    deferred_toolkits: list[_NativeDeferredToolkit] = []
+    deferred_toolkits: list[DeferredToolkit] = []
     persona_built: dict[str, frozenset[str]] = {}
 
     def build_entry(tool_entry: EffectiveToolConfig) -> Toolkit | None:
@@ -1592,12 +1490,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 runtime_overrides=runtime_overrides,
                 agent_runtime=agent_runtime,
                 tool_config_overrides=tool_entry.tool_config_overrides,
-                session_id=session_id,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
-                dynamic_tool_continuation=dynamic_tool_continuation,
                 persona=persona,
+                deferred_toolkits=tuple(deferred_toolkits),
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
@@ -1615,6 +1512,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
             config,
             supports_native_tool_approval=supports_native_tool_approval,
             registered_tool_name=tool_name,
+            # Only a top-level agent's own calls ask as their job; the same setting installs the job executor.
+            approvals_as_jobs=approvals_as_jobs
+            and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
         )
         if toolkit:
             toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
@@ -1625,6 +1525,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 config=config,
                 runtime_paths=runtime_paths,
             )
+            bind_toolkit_authority(toolkit, authored_name=tool_entry.authored_name or tool_name)
         return toolkit
 
     cli_deferred = []
@@ -1640,7 +1541,16 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         metadata = TOOL_METADATA.get(entry.name)
         cli_deferred.append(DeferredAgentToolkit(entry.name, metadata.description if metadata else "", materialize))
 
-    for tool_name, tool_entry in resolved_tool_configs.items():
+    dynamic_tools_entry = resolved_tool_configs.pop("dynamic_tools", None)
+
+    def tool_entries() -> Iterator[tuple[str, EffectiveToolConfig]]:
+        yield from resolved_tool_configs.items()
+        # The search toolkit comes after every deferred toolkit it searches, and only portable tool search rewrites
+        # call_tool, so an authored dynamic_tools entry is ignored everywhere else.
+        if dynamic_tools_entry is not None and portable_deferred_tools and deferred_toolkits:
+            yield dynamic_tools_entry.name, dynamic_tools_entry
+
+    for tool_name, tool_entry in tool_entries():
         try:
             toolkit = build_entry(tool_entry)
             if toolkit:
@@ -1655,15 +1565,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                     else local_tool_names
                 )
                 target_names.append(tool_name)
-                # initial deferred tools were always loaded, so they stay in
-                # the rendered prompt prefix as plain non-deferred tools.
-                if native_deferred_tools and tool_entry.defer and not tool_entry.initial:
-                    suppress_fully_deferred_toolkit_instructions(toolkit)
+                # initial deferred tools stay in the rendered prompt prefix as plain non-deferred tools.
+                if wire_deferred_tools and tool_entry.defer and not tool_entry.initial:
+                    domain_name = tool_entry.authored_name or tool_name
+                    metadata = TOOL_METADATA.get(domain_name)
                     deferred_toolkits.append(
-                        _NativeDeferredToolkit(
-                            domain_name=tool_entry.authored_name or tool_name,
-                            toolkit=toolkit,
-                        ),
+                        defer_toolkit(domain_name, metadata.description if metadata else "", toolkit),
                     )
         except _MatrixRoomRuntimeToolCollisionError:
             raise
@@ -1680,14 +1587,27 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 error=str(exc),
                 exc_info=not isinstance(exc, ValueError | ImportError),
             )
+    controls = _job_controls(
+        tools,
+        runtime_paths,
+        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
+        depth=delegation_depth,
+        enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
+        tool_hook_bridge=tool_hook_bridge,
+        output_file_policy=_agent_tool_output_file_policy(
+            agent_runtime,
+            runtime_paths,
+            config.defaults.tool_output_auto_save_threshold_bytes,
+        ),
+    )
+    if controls is not None:
+        tools.append(controls)
     hidden_mcp_functions = _hide_session_mcp_function_collisions(tools, agent_name=agent_name)
+    drop_shadowed_deferred_functions(tools, deferred_toolkits)
     if persona_tools is not None:
         require_built_persona_tools(persona_tools, persona_built, hidden_mcp_functions)
     return _AgentToolAssembly(
         tools=tools,
-        loaded_tools=loaded_tools,
-        hidden_toolkits=hidden_toolkits,
-        selected_dynamic_tools=dynamic_tool_selection.loaded_tools,
         deferred_toolkits=tuple(deferred_toolkits),
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
@@ -1753,6 +1673,7 @@ def _build_agent_role_context(
                 (*local_tool_names, *worker_routed_tool_names),
                 requires_primary_runtime=True,
             ),
+            shared_directories=describe_agent_shared_directories(config, runtime_paths, agent_name),
         )
     if not include_identity:
         return _AgentRoleContext(model_name=model_name, role=runtime_facts.lstrip(), context_documents=())
@@ -1803,13 +1724,27 @@ def _build_agent_role_context(
     )
 
 
-def _skill_usage_instructions(config: Config, skills: Skills | None, hidden_functions: frozenset[str]) -> list[str]:
-    """Return the skill-function guidance for an agent offered skills, naming any skill function approval hides."""
-    if skills is None or not skills.get_skill_names():
+def _skill_usage_instructions(
+    config: Config,
+    skills: Skills | None,
+    hidden_functions: frozenset[str],
+    refused: Sequence[RefusedWorkspaceSkill],
+) -> list[str]:
+    """Return the skill-function guidance for an agent offered skills, naming any skill function approval hides.
+
+    Each workspace skill in ``refused`` gets a line saying why it did not load, also when no skill loads.
+    """
+    if hidden_functions == SKILL_FUNCTION_NAMES:
         return []
+    refusals = [
+        f"Workspace skill `{skill.path}` did not load. {skill.reason}. Fix the file and it loads on your next run."
+        for skill in refused
+    ]
+    if skills is None or not skills.get_skill_names():
+        return refusals
     # This guidance and Agno's skills prompt both name every skill function, so name the ones the agent lacks.
     hidden = f"These skill functions are not available to you: {', '.join(sorted(hidden_functions))}."
-    return [config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"), *((hidden,) if hidden_functions else ())]
+    return [config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"), *((hidden,) if hidden_functions else ()), *refusals]
 
 
 def _build_agent_instructions(
@@ -1819,13 +1754,10 @@ def _build_agent_instructions(
     agent_runtime: ResolvedAgentRuntime,
     *,
     skill_instructions: Sequence[str],
-    session_id: str | None,
     include_interactive_questions: bool,
     disable_runtime_capabilities: bool,
-    hidden_toolkits: frozenset[str],
-    loaded_tools: tuple[str, ...],
     native_deferred_tool_names: tuple[str, ...],
-    all_deferred_tools_eager: bool,
+    portable_deferred_toolkits: Sequence[DeferredToolkit],
     skill_authoring: bool,
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance.
@@ -1841,17 +1773,7 @@ def _build_agent_instructions(
         ),
     )
 
-    # Native server-side tool search replaces the load_tool catalog and
-    # loaded-state prompt blocks, so the native path emits neither.
-    enable_dynamic_tools_manager = session_id is not None and not all_deferred_tools_eager
-    dynamic_tooling_block = None
-    if not disable_runtime_capabilities:
-        dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
-            config,
-            agent_name,
-            enable_dynamic_tools_manager=enable_dynamic_tools_manager,
-            hidden_tool_names=hidden_toolkits,
-        )
+    dynamic_tooling_block = _build_dynamic_tooling_instruction_block(config, portable_deferred_toolkits)
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
 
@@ -1875,29 +1797,86 @@ def _build_agent_instructions(
     if include_interactive_questions:
         instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
 
-    dynamic_tooling_state_suffix = None
-    if not disable_runtime_capabilities:
-        dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(
-            config,
-            agent_name,
-            loaded_tools=loaded_tools,
-            enable_dynamic_tools_manager=enable_dynamic_tools_manager,
-            hidden_tool_names=hidden_toolkits,
-        )
-    if dynamic_tooling_state_suffix is not None:
-        instructions.append(dynamic_tooling_state_suffix)
-
     return instructions
 
 
+def _job_controls(
+    tools: Sequence[Toolkit],
+    runtime_paths: constants.RuntimePaths,
+    owner: ToolExecutionIdentity | None,
+    *,
+    depth: int,
+    enabled: bool,
+    tool_hook_bridge: Callable[..., Any] | None,
+    output_file_policy: ToolOutputFilePolicy | None = None,
+) -> Toolkit | None:
+    """Build the reserved job toolkit behind its caller's tool hooks.
+
+    It never asks for approval: it acts only on the caller's own jobs, each of which passed its own.
+    """
+    controls = JobTools.build(
+        list(tools),
+        runtime_paths,
+        owner,
+        depth=depth,
+        enabled=enabled,
+        output_file_policy=output_file_policy,
+    )
+    return None if controls is None else prepend_tool_hook_bridge(controls, tool_hook_bridge)
+
+
+def team_background_jobs(
+    model: Model,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    owner: ToolExecutionIdentity | None,
+) -> Toolkit | None:
+    """Let a team's calls run as background jobs, and return its leader's job controls.
+
+    The team owns the jobs its members start for it: its leader hears when they end and collects them.
+    """
+    if not background_tool_jobs_enabled(config, runtime_paths):
+        return None
+    install_tool_job_execution(model)
+    if owner is None:
+        return None
+    install_job_notice_hook(model, entity_name=owner.recipient)
+    bridge = _build_agent_tool_hook_bridge(
+        hook_registry=None,
+        plugins=_load_agent_plugins(config, runtime_paths),
+        agent_name=owner.recipient,
+        dispatch_context=ToolDispatchContext(execution_identity=owner),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    return _job_controls((), runtime_paths, owner, depth=0, enabled=True, tool_hook_bridge=bridge)
+
+
+def _install_background_jobs(
+    agent: Agent,
+    agent_name: str,
+    model: Model,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    depth: int,
+) -> None:
+    """Let the agent's calls run as background jobs when the instance runs them, granted as the agent is now."""
+    if background_tool_jobs_enabled(config, runtime_paths):
+        bind_actor_authority(agent, authority_snapshot(config, agent_name))
+        install_tool_job_execution(model, agent.fallback_config, depth=depth)
+        if depth == 0:
+            # A delegated child cannot collect jobs; its caller hears when they end.
+            install_job_notice_hook(model, entity_name=agent_name)
+
+
 @timed("system_prompt_assembly.agent_create")
-def create_agent(
+def create_agent(  # noqa: PLR0915
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     *,
-    session_id: str | None = None,
     hook_registry: HookRegistry | None = None,
     knowledge: KnowledgeProtocol | None = None,
     history_storage: BaseDb | None = None,
@@ -1910,7 +1889,6 @@ def create_agent(
     tool_function_filter: Callable[[Function], bool] | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    dynamic_tool_continuation: bool = False,
     supports_native_tool_approval: bool = False,
     eager_deferred_tools: bool = False,
     required_tool_names: tuple[str, ...] = (),
@@ -1926,8 +1904,6 @@ def create_agent(
         runtime_paths: Explicit runtime context for paths, env, and credentials.
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
-        session_id: Stable Agno session id used to resolve session-scoped
-            dynamic tool state.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents; for a persona, callers resolve
@@ -1950,22 +1926,17 @@ def create_agent(
             infinite recursion when agents delegate to each other.
         refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
             passed through to delegated child agents.
-        dynamic_tool_continuation: Whether this agent runs under a response-turn
-            loop that resumes after a dynamic load/unload (the standalone agent
-            envelope and materialized team members both do). Embedded agents
-            without such a loop leave it False so a load/unload takes effect on
-            the next request instead of truncating the run.
         supports_native_tool_approval: Whether the caller can persist and resume
             Agno confirmation pauses. Gated functions are hidden when false.
-        eager_deferred_tools: Whether to materialize every deferred toolkit and
-            omit the dynamic-tools manager for a runtime with an immutable tool
-            schema.
+        eager_deferred_tools: Whether to send deferred toolkits as ordinary tools instead of through `call_tool`,
+            for a runtime that exposes every tool from the start; models with native tool search keep native
+            deferral.
         agent_mode: Operating mode frozen by the response owner; standard by default.
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
         persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool, skill, and knowledge base subsets.
-        required_tool_names: Authored toolkits needed by a saved approval. These
-            augment this instance without changing the session's tool selection.
+        required_tool_names: Authored toolkits needed by a saved approval, which a minimal-mode agent
+            attaches directly instead of through mindroom-agent.
 
     Returns:
         Configured Agent instance
@@ -2016,6 +1987,7 @@ def create_agent(
             )
         )
     )
+    portable_deferred_tools = agent_mode == "standard" and not eager_deferred_tools and not native_deferred_tools
 
     tool_function_filter, disabled_tool_names = persona_tool_policy(
         persona_tools,
@@ -2029,16 +2001,15 @@ def create_agent(
         runtime_paths,
         agent_runtime,
         execution_identity=execution_identity,
-        session_id=session_id,
         hook_registry=hook_registry,
         disable_runtime_capabilities=disable_runtime_capabilities,
         disabled_tool_names=disabled_tool_names,
         tool_function_filter=tool_function_filter,
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
-        dynamic_tool_continuation=dynamic_tool_continuation,
         supports_native_tool_approval=supports_native_tool_approval,
-        native_deferred_tools=native_deferred_tools,
+        wire_deferred_tools=native_deferred_tools or portable_deferred_tools,
+        portable_deferred_tools=portable_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
@@ -2083,8 +2054,9 @@ def create_agent(
         role_context.model_name,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
     )
-    install_model_call_cap(model, entity_name=agent_name)
-    if tool_assembly.deferred_wire_tool_names:
+    if portable_deferred_tools:
+        install_portable_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
+    elif tool_assembly.deferred_wire_tool_names:
         # Each installer no-ops on the other provider family's model class.
         install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
         install_openai_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)
@@ -2093,13 +2065,17 @@ def create_agent(
         agent=agent_name,
         model_class=model.__class__.__name__,
         model_id=model.id,
-        native_deferred_tools=sorted(tool_assembly.deferred_wire_tool_names),
+        deferred_tool_search=("portable" if portable_deferred_tools else "native")
+        if tool_assembly.deferred_wire_tool_names
+        else None,
+        deferred_tools=sorted(tool_assembly.deferred_wire_tool_names),
     )
 
     workspace = agent_runtime.workspace
     # Approval rules hide generated functions, so skill guidance names the skill functions they hide
     # and is left out when they hide all of them.
     hidden_skill_functions = frozenset(name for name in SKILL_FUNCTION_NAMES if tool_may_require_approval(config, name))
+    refused_skills: list[RefusedWorkspaceSkill] = []
     skills = (
         None
         if disable_runtime_capabilities
@@ -2114,6 +2090,7 @@ def create_agent(
                 config.defaults.tool_output_auto_save_threshold_bytes,
             ),
             only=persona.kept_skills if persona is not None else None,
+            refused=refused_skills,
         )
     )
     prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
@@ -2122,22 +2099,27 @@ def create_agent(
         agent_config.instructions if persona is None else (),
         config,
         agent_runtime,
-        skill_instructions=_skill_usage_instructions(config, prompt_skills, hidden_skill_functions),
-        session_id=session_id,
+        # Only the agent that owns the workspace is told which of its skills did not load, not a persona borrowing them.
+        skill_instructions=_skill_usage_instructions(
+            config,
+            prompt_skills,
+            hidden_skill_functions,
+            refused_skills if persona is None else (),
+        ),
         include_interactive_questions=include_interactive_questions,
         disable_runtime_capabilities=disable_runtime_capabilities,
-        hidden_toolkits=tool_assembly.hidden_toolkits,
-        loaded_tools=tool_assembly.loaded_tools,
-        native_deferred_tool_names=tool_assembly.deferred_tool_names,
-        all_deferred_tools_eager=native_deferred_tools or eager_deferred_tools,
+        native_deferred_tool_names=() if portable_deferred_tools else tool_assembly.deferred_tool_names,
+        portable_deferred_toolkits=tool_assembly.deferred_toolkits if portable_deferred_tools else (),
         skill_authoring=persona is None,
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
+    # A subagent runs inside its caller's response, whose CLI belongs to the caller, so its shell gets none.
     cli_shell = (
         agent_cli_in_shell
         and agent_mode == "standard"
+        and delegation_depth == 0
         and not disable_runtime_capabilities
         and standard_cli_eligible(config, runtime_paths, agent_name, execution_identity)
         and wrap_native_shell_window(tool_assembly.tools)
@@ -2171,7 +2153,8 @@ def create_agent(
         cli_shell=cli_shell,
         name=agent_config.display_name,
         id=agent_name,
-        # An authored prompt leads the system message in place of the agent's identity, never substituted.
+        # An authored prompt leads the system message in place of the agent's identity, never substituted:
+        # its braces stay literal rather than resolving as session-state variables.
         description=persona_prompt,
         resolve_in_context=persona is None,
         role=role_context.role,
@@ -2195,7 +2178,8 @@ def create_agent(
         tool_hook_bridge=tool_assembly.tool_hook_bridge,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
-        add_session_summary_to_context=persist_runtime_state,
+        # The summary replays as a history message instead (history/agno_compat_message_builder.py).
+        add_session_summary_to_context=False,
         num_history_runs=history_policy.num_history_runs,
         num_history_messages=history_policy.num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
@@ -2205,6 +2189,15 @@ def create_agent(
         tool_call_limit=entity_view.max_tool_calls_per_turn,
         telemetry=False,
     )
+    install_mid_turn_compaction(
+        agent,
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name=agent_name,
+        model_name=role_context.model_name,
+    )
+    # Installed after mid-turn compaction, so a refused request never spends a summary call.
+    install_model_call_cap(model, entity_name=agent_name)
     if isinstance(agent, MinimalAgent):
         agent.configure_minimal(
             instructions=instructions,
@@ -2244,13 +2237,13 @@ def create_agent(
         agent.refresh_scheduler = refresh_scheduler
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
+    _install_background_jobs(agent, agent_name, model, config, runtime_paths, depth=delegation_depth)
 
     logger.info(
         "Created agent",
         agent=agent_name,
         display_name=agent_config.display_name,
         tool_count=len(tool_assembly.tools),
-        loaded_dynamic_tools=list(tool_assembly.selected_dynamic_tools),
     )
 
     return agent
@@ -2267,4 +2260,5 @@ __all__ = [
     "get_agent_toolkit_names",
     "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",
+    "team_background_jobs",
 ]

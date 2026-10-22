@@ -489,7 +489,7 @@ describe("AgentEditor", () => {
       screen.queryByRole("button", { name: "Dynamic Tools" }),
     ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Calculator" }));
-    expect(screen.getByLabelText("Load lazily")).toBeInTheDocument();
+    expect(screen.getByLabelText("Defer until searched")).toBeInTheDocument();
   });
 
   it("shows customized indicators and opens the inline tool settings panel for checked tools", () => {

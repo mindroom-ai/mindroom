@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
+from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
 from mindroom.matrix_identifiers import (
     room_alias_identifier_candidates,
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.state import MatrixState
 
 
 class MissingManagedEntityAccountError(RuntimeError):
@@ -275,23 +276,40 @@ def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> Ent
 
 def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID:
     """Return one persisted Matrix ID without resolving unrelated configured entities."""
-    return _persisted_entity_matrix_id(entity_name, runtime_matrix_domain(runtime_paths), runtime_paths)
+    return _persisted_entity_matrix_id(
+        entity_name,
+        runtime_matrix_domain(runtime_paths),
+        matrix_state.matrix_state_for_runtime(runtime_paths),
+    )
+
+
+def prepared_entity_names_by_user_id(config: Config, runtime_paths: RuntimePaths) -> dict[str, str]:
+    """Return the configured entities whose Matrix accounts are prepared, keyed by their current user ID."""
+    domain = runtime_matrix_domain(runtime_paths)
+    state = matrix_state.matrix_state_for_runtime(runtime_paths)
+    names: dict[str, str] = {}
+    for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+        account = state.get_account(managed_account_key(entity_name))
+        if account is not None:
+            names[matrix_account_user_id(account, domain)] = entity_name
+    return names
 
 
 def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
     domain = runtime_matrix_domain(runtime_paths)
+    state = matrix_state.matrix_state_for_runtime(runtime_paths)
     return {
-        entity_name: _persisted_entity_matrix_id(entity_name, domain, runtime_paths)
+        entity_name: _persisted_entity_matrix_id(entity_name, domain, state)
         for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]
     }
 
 
-def _persisted_entity_matrix_id(entity_name: str, domain: str, runtime_paths: RuntimePaths) -> MatrixID:
-    persisted_user_id = managed_account_user_id(managed_account_key(entity_name), domain, runtime_paths)
-    if persisted_user_id is None:
+def _persisted_entity_matrix_id(entity_name: str, domain: str, state: MatrixState) -> MatrixID:
+    account = state.get_account(managed_account_key(entity_name))
+    if account is None:
         msg = f"Matrix account for configured entity {entity_name!r} has not been prepared"
         raise MissingManagedEntityAccountError(msg)
-    return MatrixID.parse(persisted_user_id)
+    return MatrixID.parse(matrix_account_user_id(account, domain))
 
 
 def _validate_unique_entity_ids(current_ids: dict[str, MatrixID]) -> None:
@@ -346,7 +364,7 @@ def persisted_bot_user_ids(runtime_paths: RuntimePaths) -> frozenset[str]:
     domain = runtime_matrix_domain(runtime_paths)
     internal_user_account_key = managed_account_key(INTERNAL_USER_ENTITY_NAME)
     return frozenset(
-        MatrixID.from_username(account.username, account.domain or domain).full_id
+        matrix_account_user_id(account, domain)
         for account_key, account in matrix_state.matrix_state_for_runtime(runtime_paths).accounts.items()
         if account_key.startswith("agent_") and account_key != internal_user_account_key
     )

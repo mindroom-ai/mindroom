@@ -1,0 +1,419 @@
+"""Portable deferred tool search: fixed wire tools, call_tool rewrite, and history projection."""
+# ruff: noqa: D103
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING, Any
+
+import pytest
+from agno.agent import Agent
+from agno.exceptions import RetryableModelProviderError
+from agno.models.message import Message
+from agno.models.response import ModelResponse
+from agno.run.agent import RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.tools.function import Function
+
+from mindroom.agent_cli.agno_compat_cli_checkpoint import _install_capture
+from mindroom.providers.portable_tool_search import (
+    install_portable_deferred_tool_search,
+    portable_deferred_tool_names,
+    project_portable_request,
+    resolve_call_tool_calls,
+)
+from mindroom.providers.synthetic_model import SyntheticModel
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+DEFERRED = frozenset({"crm_lookup"})
+
+
+def _tool(name: str) -> dict[str, Any]:
+    return {"type": "function", "function": {"name": name, "description": name, "parameters": {"type": "object"}}}
+
+
+def _name(tool: dict[str, Any]) -> str:
+    return tool["function"]["name"]
+
+
+def _call(call_id: str, name: str, arguments: str) -> dict[str, Any]:
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
+def test_projection_strips_deferred_schemas_and_keeps_order() -> None:
+    tools = [_tool("call_tool"), _tool("crm_lookup"), _tool("shell"), _tool("tool_search")]
+
+    _, wire_tools = project_portable_request([], tools, DEFERRED)
+
+    assert wire_tools is not None
+    assert [_name(tool) for tool in wire_tools] == ["call_tool", "shell", "tool_search"]
+
+
+def test_projection_wraps_deferred_history_without_mutating_it() -> None:
+    deferred_call = _call("c1", "crm_lookup", '{"id": 7}')
+    eager_call = _call("c2", "shell", "{}")
+    assistant = Message(role="assistant", tool_calls=[deferred_call, eager_call])
+    result = Message(role="tool", tool_call_id="c1", tool_name="crm_lookup", content="ok")
+    user = Message(role="user", content="hi")
+
+    projected, _ = project_portable_request([user, assistant, result], None, DEFERRED)
+
+    assert projected[0] is user
+    wrapped = projected[1].tool_calls[0]
+    assert wrapped["id"] == "c1"
+    assert wrapped["function"]["name"] == "call_tool"
+    assert json.loads(wrapped["function"]["arguments"]) == {"name": "crm_lookup", "arguments": {"id": 7}}
+    assert projected[1].tool_calls[1] is assistant.tool_calls[1]
+    assert projected[2].tool_name == "call_tool"
+    assert projected[2].tool_call_id == "c1"
+    assert assistant.tool_calls[0]["function"]["name"] == "crm_lookup"
+    assert result.tool_name == "crm_lookup"
+
+
+def test_projection_renames_results_in_combined_tool_messages() -> None:
+    # Older Gemini history stores several results in one tool message, each entry naming its function.
+    combined = Message(
+        role="tool",
+        tool_calls=[
+            {"tool_call_id": "c1", "tool_name": "crm_lookup", "content": "ok"},
+            {"tool_call_id": "c2", "tool_name": "shell", "content": "ls"},
+        ],
+    )
+
+    [projected], _ = project_portable_request([combined], None, DEFERRED)
+
+    assert [entry["tool_name"] for entry in projected.tool_calls] == ["call_tool", "shell"]
+    assert combined.tool_calls[0]["tool_name"] == "crm_lookup"
+
+
+def test_projection_is_byte_stable() -> None:
+    assistant = Message(role="assistant", tool_calls=[_call("c1", "crm_lookup", '{"id": 7, "note": "é"}')])
+
+    first, _ = project_portable_request([assistant], None, DEFERRED)
+    second, _ = project_portable_request([assistant], None, DEFERRED)
+
+    assert first[0].tool_calls == second[0].tool_calls
+
+
+def test_projection_leaves_unknown_legacy_calls() -> None:
+    legacy_call = _call("c1", "load_tool", '{"tool_name": "crm"}')
+    assistant = Message(role="assistant", tool_calls=[legacy_call])
+
+    projected, _ = project_portable_request([assistant], None, DEFERRED)
+
+    assert projected[0] is assistant
+
+
+def test_resolve_call_tool_to_real_function_preserving_extra_keys() -> None:
+    call = {
+        **_call("c1", "call_tool", '{"name": "crm_lookup", "arguments": {"id": 7}}'),
+        "thought_signature": "sig",
+    }
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup", "call_tool"})
+
+    assert resolved["function"] == {"name": "crm_lookup", "arguments": '{"id": 7}'}
+    assert resolved["id"] == "c1"
+    assert resolved["thought_signature"] == "sig"
+
+
+def test_resolve_accepts_json_string_arguments() -> None:
+    call = _call("c1", "call_tool", json.dumps({"name": "crm_lookup", "arguments": '{"id": 7}'}))
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert json.loads(resolved["function"]["arguments"]) == {"id": 7}
+
+
+def test_resolve_missing_arguments_means_empty_object() -> None:
+    call = _call("c1", "call_tool", '{"name": "crm_lookup"}')
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert resolved["function"] == {"name": "crm_lookup", "arguments": "{}"}
+
+
+@pytest.mark.parametrize("arguments", [[], "[]"])
+def test_resolve_treats_an_empty_list_as_no_arguments(arguments: object) -> None:
+    # Agno runs a direct call whose arguments are [] as a call without arguments, so the wrapper does too.
+    call = _call("c1", "call_tool", json.dumps({"name": "crm_lookup", "arguments": arguments}))
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert resolved["function"] == {"name": "crm_lookup", "arguments": "{}"}
+
+
+def test_resolve_treats_empty_string_arguments_as_no_arguments() -> None:
+    call = _call("c1", "call_tool", '{"name": "crm_lookup", "arguments": ""}')
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert resolved["function"] == {"name": "crm_lookup", "arguments": "{}"}
+
+
+def test_resolve_accepts_python_literal_arguments_like_agno() -> None:
+    call = _call("c1", "call_tool", "{'name': 'crm_lookup', 'arguments': {'id': 7}}")
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert json.loads(resolved["function"]["arguments"]) == {"id": 7}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{{"name": "crm_lookup"}}',
+        "{'name': 'crm_lookup', 'arguments': {'id': {1, 2}}}",
+        "[" * 100_000 + "]" * 100_000,
+    ],
+)
+def test_resolve_leaves_unparseable_or_non_json_arguments_for_the_fallback(arguments: str) -> None:
+    # Weak models emit these; they must reach the guidance fallback instead of failing the run.
+    call = _call("c1", "call_tool", arguments)
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert resolved is call
+
+
+def test_projection_wraps_unparseable_stored_arguments_as_empty() -> None:
+    # A stored call with malformed arguments must not break every later request in its thread.
+    assistant = Message(role="assistant", tool_calls=[_call("c1", "crm_lookup", '{{"id": 1}}')])
+
+    projected, _ = project_portable_request([assistant], None, DEFERRED)
+
+    assert json.loads(projected[0].tool_calls[0]["function"]["arguments"]) == {"name": "crm_lookup", "arguments": {}}
+
+
+def test_resolve_merges_top_level_extras_into_arguments() -> None:
+    # Covers background_after on the wrapper and arguments a weaker model flattened beside the name.
+    call = _call("c1", "call_tool", '{"name": "crm_lookup", "customer_id": 7, "background_after": 0}')
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert json.loads(resolved["function"]["arguments"]) == {"customer_id": 7, "background_after": 0}
+
+
+def test_resolve_drops_null_top_level_extras() -> None:
+    # A null background_after means the same as omitting it, and inline-only functions reject the key.
+    call = _call("c1", "call_tool", '{"name": "crm_lookup", "arguments": {"id": 7}, "background_after": null}')
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert json.loads(resolved["function"]["arguments"]) == {"id": 7}
+
+
+def test_resolve_prefers_nested_arguments_over_top_level_extras() -> None:
+    call = _call("c1", "call_tool", '{"name": "crm_lookup", "customer_id": 1, "arguments": {"customer_id": 7}}')
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert json.loads(resolved["function"]["arguments"]) == {"customer_id": 7}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"name": "nope"}',
+        '{"name": "crm_lookup", "arguments": [1]}',
+        '{"name": "crm_lookup", "arguments": "not json"}',
+        "not json",
+        '{"name": "call_tool"}',
+        '{"arguments": {}}',
+    ],
+)
+def test_resolve_leaves_unresolvable_calls(arguments: str) -> None:
+    call = _call("c1", "call_tool", arguments)
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup", "call_tool"})
+
+    assert resolved is call
+
+
+def test_resolve_mixed_batch_rewrites_only_the_wrapper() -> None:
+    eager_call = _call("c2", "shell", '{"command": "ls"}')
+    calls = [_call("c1", "call_tool", '{"name": "crm_lookup", "arguments": {"id": 7}}'), eager_call]
+
+    resolved = resolve_call_tool_calls(calls, {"crm_lookup", "shell"})
+
+    assert [call["function"]["name"] for call in resolved] == ["crm_lookup", "shell"]
+    assert resolved[1] is eager_call
+
+
+class _ScriptedModel(SyntheticModel):
+    """Answer each provider request from a script and record what the request carried."""
+
+    def __init__(self, responses: list[ModelResponse]) -> None:
+        super().__init__(id="test", name="test", provider="test")
+        self.responses = responses
+        self.requests: list[tuple[list[Message], list[dict[str, Any]] | None]] = []
+
+    async def ainvoke(self, messages: list[Message], **kwargs: Any) -> ModelResponse:  # noqa: ANN401
+        self.requests.append((list(messages), kwargs.get("tools")))
+        return self.responses[len(self.requests) - 1]
+
+    async def ainvoke_stream(self, messages: list[Message], **kwargs: Any) -> AsyncIterator[ModelResponse]:  # noqa: ANN401
+        yield await self.ainvoke(messages, **kwargs)
+
+
+class _GuidanceRetryModel(_ScriptedModel):
+    """Fail the first request like Gemini's malformed function call, then drop the retry guidance it was sent."""
+
+    async def ainvoke(self, messages: list[Message], **kwargs: Any) -> ModelResponse:  # noqa: ANN401
+        if not self.requests:
+            self.requests.append((list(messages), kwargs.get("tools")))
+            raise RetryableModelProviderError(
+                retry_guidance_message="Retry with valid JSON.",
+                original_error="malformed",
+            )
+        response = await super().ainvoke(messages, **kwargs)
+        if kwargs.get("retry_with_guidance") is True:
+            self._remove_temporary_messages(messages)
+        return response
+
+
+async def _run(agent: Agent, *, stream: bool) -> RunOutput:
+    if not stream:
+        output = await agent.arun("Look up customers 7 and 8")
+        assert isinstance(output, RunOutput)
+        return output
+    final: RunOutput | None = None
+    async for event in agent.arun("Look up customers 7 and 8", stream=True, yield_run_output=True):
+        if isinstance(event, RunOutput):
+            final = event
+    assert final is not None
+    return final
+
+
+def _call_names(messages: list[Message]) -> list[str]:
+    return [call["function"]["name"] for message in messages if message.tool_calls for call in message.tool_calls]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_installed_model_routes_call_tool_and_keeps_real_names_in_history(*, stream: bool) -> None:
+    looked_up: list[int] = []
+
+    def crm_lookup(customer_id: int) -> str:
+        looked_up.append(customer_id)
+        return f"customer {customer_id}"
+
+    def call_tool(name: str, arguments: dict[str, Any] | None = None) -> str:
+        return f"fallback {name} {arguments}"
+
+    model = _ScriptedModel(
+        [
+            ModelResponse(
+                tool_calls=[_call("c1", "call_tool", '{"name": "crm_lookup", "arguments": {"customer_id": 7}}')],
+            ),
+            # An unconstrained server may let the model call a discovered function by its real name.
+            ModelResponse(tool_calls=[_call("c2", "crm_lookup", '{"customer_id": 8}')]),
+            ModelResponse(content="done"),
+        ],
+    )
+    install_portable_deferred_tool_search(model, deferred_tool_names=frozenset({"crm_lookup"}))
+    agent = Agent(name="Assistant", model=model, tools=[crm_lookup, call_tool], telemetry=False)
+
+    output = await _run(agent, stream=stream)
+
+    assert output.content == "done"
+    assert looked_up == [7, 8]
+    assert portable_deferred_tool_names(model) == {"crm_lookup"}
+    for _messages, tools in model.requests:
+        assert sorted(_name(tool) for tool in tools or []) == ["call_tool"]
+    assert _call_names(model.requests[1][0]) == ["call_tool"]
+    assert _call_names(model.requests[2][0]) == ["call_tool", "call_tool"]
+    assert {message.tool_name for message in model.requests[2][0] if message.role == "tool"} == {"call_tool"}
+    assert _call_names(output.messages or []) == ["crm_lookup", "crm_lookup"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_retry_guidance_the_provider_drops_stays_out_of_history(*, stream: bool) -> None:
+    def crm_lookup(customer_id: int) -> str:
+        return f"customer {customer_id}"
+
+    model = _GuidanceRetryModel([ModelResponse(), ModelResponse(content="done")])
+    install_portable_deferred_tool_search(model, deferred_tool_names=frozenset({"crm_lookup"}))
+    agent = Agent(name="Assistant", model=model, tools=[crm_lookup], telemetry=False)
+
+    output = await _run(agent, stream=stream)
+
+    assert output.content == "done"
+    assert [message.content for message in model.requests[1][0] if message.temporary] == ["Retry with valid JSON."]
+    assert [message.content for message in output.messages or [] if message.role == "user"] == [
+        "Look up customers 7 and 8",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streamed_tool_events_name_the_deferred_function() -> None:
+    """The chat display renders tool events, so a call_tool call shows as a call of the function it names."""
+
+    def crm_lookup(customer_id: int) -> str:
+        return f"customer {customer_id}"
+
+    model = _ScriptedModel(
+        [
+            ModelResponse(
+                tool_calls=[_call("c1", "call_tool", '{"name": "crm_lookup", "arguments": {"customer_id": 7}}')],
+            ),
+            ModelResponse(content="done"),
+        ],
+    )
+    install_portable_deferred_tool_search(model, deferred_tool_names=frozenset({"crm_lookup"}))
+    agent = Agent(name="Assistant", model=model, tools=[crm_lookup], telemetry=False)
+
+    events = [
+        (type(event).__name__, event.tool.tool_name, event.tool.tool_args)
+        async for event in agent.arun("Look up customer 7", stream=True, stream_events=True)
+        if isinstance(event, ToolCallStartedEvent | ToolCallCompletedEvent) and event.tool is not None
+    ]
+
+    assert events == [
+        ("ToolCallStartedEvent", "crm_lookup", {"customer_id": 7}),
+        ("ToolCallCompletedEvent", "crm_lookup", {"customer_id": 7}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_approval_gated_deferred_call_pauses_under_its_real_name() -> None:
+    def crm_delete(customer_id: int) -> str:
+        return f"deleted {customer_id}"
+
+    def call_tool(name: str, arguments: dict[str, Any] | None = None) -> str:
+        return f"fallback {name} {arguments}"
+
+    model = _ScriptedModel(
+        [
+            ModelResponse(
+                tool_calls=[_call("c1", "call_tool", '{"name": "crm_delete", "arguments": {"customer_id": 7}}')],
+            ),
+        ],
+    )
+    install_portable_deferred_tool_search(model, deferred_tool_names=frozenset({"crm_delete"}))
+    gated = Function.from_callable(crm_delete)
+    gated.requires_confirmation = True
+    agent = Agent(name="Assistant", model=model, tools=[gated, call_tool], telemetry=False)
+
+    output = await agent.arun("Delete customer 7")
+
+    assert output.is_paused
+    assert [(tool.tool_name, tool.tool_args) for tool in output.tools or []] == [("crm_delete", {"customer_id": 7})]
+
+
+def test_rewrite_keeps_the_bound_method_shape_other_bindings_wrap() -> None:
+    # The CLI checkpoint capture unwraps get_function_calls_to_run via __func__, so the rewrite must stay a bound method.
+    model = _ScriptedModel([])
+    install_portable_deferred_tool_search(model, deferred_tool_names=frozenset({"crm_lookup"}))
+
+    _install_capture(model)
+
+    message = Message(role="assistant", tool_calls=[_call("c1", "call_tool", '{"name": "crm_lookup"}')])
+    [call] = model.get_function_calls_to_run(
+        assistant_message=message,
+        messages=[],
+        functions={"crm_lookup": Function(name="crm_lookup", entrypoint=lambda: "ok")},
+    )
+    assert call.function.name == "crm_lookup"

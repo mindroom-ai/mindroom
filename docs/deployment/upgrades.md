@@ -138,12 +138,12 @@ Smaller changes that need operator action:
 - **MCP gateway and shared agents**: the [MCP gateway](mcp-gateway.md#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
   To restore an agent, set `mcp_gateway_shared_credentials: true` on it or give it `worker_scope: user` or `user_agent`.
 
-### Compaction Archive
+### Compaction History
 
-Downgrading to a release without the [compaction archive](../configuration/history.md#agent-compaction-settings) is unsupported: older releases neither maintain nor redact the archive, and compaction state they write is never adopted again.
+Downgrading below the release that keeps [compacted runs](../configuration/history.md#agent-compaction-settings) in the conversation database beside their summaries is unsupported: older releases replay every compacted run again, and compaction state they write is never adopted again.
 
 When upgrading from v2026.9.314 or earlier, runs that those releases deleted during compaction are not recoverable.
-Summaries compacted by those releases record no per-run provenance, so redacting an event they may contain still clears that conversation's summaries, the runs archived after them, and its live runs.
+Summaries compacted by those releases record no per-run provenance, so redacting an event they may contain still clears that conversation's summaries and all of its runs.
 
 ### Workspace-only worker mounts
 

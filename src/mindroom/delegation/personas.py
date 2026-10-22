@@ -260,7 +260,7 @@ def render_profile_listing(entries: Sequence[_PersonaProfile | _InvalidPersonaPr
 
 
 def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: int) -> list[str]:
-    """Return every toolkit this agent may use, including deferred toolkits it loads on demand.
+    """Return every toolkit this agent may use, deferred toolkits included.
 
     Matrix room tools are listed too; a child naming one outside a Matrix room refuses to start.
     The deferred-tool manager is not, since an explicit tool list loads every toolkit it names.
@@ -268,13 +268,10 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
     if agent_name not in config.agents:
         # A reload can remove the caller mid-response; its copies then have no tools to inherit.
         return []
-    deferred = [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs]
     surface = visible_tool_surface(
         agent_name=agent_name,
         config=config,
-        loaded_tools=deferred,
         delegation_depth=delegation_depth,
-        enable_dynamic_tools_manager=False,
         include_matrix_room_runtime_tools=True,
     )
     # A preset has no functions of its own; its member toolkits are listed by their own names.

@@ -19,7 +19,7 @@ from mindroom.event_journal.history_recovery import (
     HistoryRecoveryOutcome,
     RoomHistoryRecovery,
 )
-from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation  # noqa: TC001
+from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation, ApprovalGrantScope  # noqa: TC001
 
 from . import (
     approval_continuations,
@@ -36,6 +36,7 @@ from . import (
     reply_messages,
     reply_spans,
     scheduled_approvals,
+    tool_jobs,
     turn_records,
 )
 from .approval_card_state import (  # noqa: TC001 - part of this module's runtime return types
@@ -88,6 +89,7 @@ from .scheduled_approvals import (  # noqa: TC001
     ScheduledCallOutcome,
     ScheduledCallRefusal,
 )
+from .tool_jobs import SavedToolJob  # noqa: TC001 - part of this module's runtime return types
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -1125,8 +1127,9 @@ class PrincipalStore:
         call_id: str,
         expires_at_ns: int,
         card: ApprovalCardReservation,
+        grant_scope: ApprovalGrantScope | None = None,
     ) -> bool:
-        """Atomically reserve one exact background-call approval card."""
+        """Atomically reserve one exact background-call approval card, or apply an active grant in its place."""
         return await self._backend.write(
             lambda transaction: background_approvals.reserve_script_delivery(
                 transaction,
@@ -1137,6 +1140,7 @@ class PrincipalStore:
                 call_id=call_id,
                 expires_at_ns=expires_at_ns,
                 card=card,
+                grant_scope=grant_scope,
             ),
         )
 
@@ -2377,6 +2381,15 @@ class EventJournalStore:
             raise ValueError(msg)
         return TurnRecordStore(_backend=self.backend, _agent_name=agent_name)
 
+    def tool_jobs(self, runtime_generation: str) -> ToolJobStore:
+        """Return the background tool jobs as one runtime generation saves them.
+
+        Jobs belong to the install, not to a bot, so this is not a principal view
+        either. The generation fences writes: whichever runtime last took
+        ownership is the only one whose saves land.
+        """
+        return ToolJobStore(_backend=self.backend, _runtime_generation=runtime_generation)
+
     async def close(self) -> None:
         """Release every connection the backend owns."""
         await self.backend.close()
@@ -2477,4 +2490,60 @@ class TurnRecordStore:
                 self._agent_name,
                 index_event_ids=index_event_ids,
             ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ToolJobStore:
+    """The install's background tool jobs, written only by the runtime generation that last took them over.
+
+    A snapshot and its outcome payload commit together, so a reader never sees
+    one without the other, and a crash leaves no payload that nothing references.
+    """
+
+    _backend: Backend
+    _runtime_generation: str
+
+    async def take_ownership(self) -> None:
+        """Become the only writer of every job; an older runtime's later saves are refused."""
+        await self._backend.write(
+            lambda transaction: tool_jobs.take_ownership(transaction, self._runtime_generation),
+        )
+
+    async def require_ownership(self) -> None:
+        """Raise ``ToolJobOwnershipLostError`` unless this generation still owns every job."""
+        await self._backend.write(
+            lambda transaction: tool_jobs.require_ownership(transaction, self._runtime_generation),
+        )
+
+    async def load_all(self) -> tuple[SavedToolJob, ...]:
+        """Return every saved job."""
+        return await self._backend.read(tool_jobs.load_all)
+
+    async def accept(self, job_id: str, job_json: str) -> None:
+        """Save a newly accepted job, refusing an ID that is still saved."""
+        await self._backend.write(
+            lambda transaction: tool_jobs.accept(transaction, self._runtime_generation, job_id, job_json),
+        )
+
+    async def save(self, job_id: str, job_json: str, result_payload_json: str | None = None) -> None:
+        """Replace a job's snapshot, together with its outcome payload when one is given."""
+        await self._backend.write(
+            lambda transaction: tool_jobs.save(
+                transaction,
+                self._runtime_generation,
+                job_id,
+                job_json,
+                result_payload_json,
+            ),
+        )
+
+    async def load_payload(self, job_id: str) -> str | None:
+        """Return a job's outcome payload, or ``None`` when it has none or no longer exists."""
+        return await self._backend.read(lambda transaction: tool_jobs.load_payload(transaction, job_id))
+
+    async def delete(self, job_id: str) -> None:
+        """Forget a job together with its payload."""
+        await self._backend.write(
+            lambda transaction: tool_jobs.delete(transaction, self._runtime_generation, job_id),
         )

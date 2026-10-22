@@ -5,6 +5,7 @@ import asyncio
 import html
 import importlib
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass, field, replace
@@ -21,6 +22,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
+from mindroom.api.connections_session_cookie import connections_session_cookie, read_connections_session
 from mindroom.api.open_access import open_access_rejection
 from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (
@@ -28,10 +30,16 @@ from mindroom.matrix.identity import (
     try_parse_historical_matrix_user_id,
     validate_email_to_matrix_mapping,
 )
-from mindroom.origins import normalized_origin
-from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
+from mindroom.origins import deployment_origin, normalized_origin
+from mindroom.tool_system.dependencies import (
+    auto_install_enabled,
+    auto_install_optional_extra_for_import_retry,
+    optional_dependency_environment,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(tags=["auth"])
@@ -57,9 +65,16 @@ _PLATFORM_SSO_CLOCK_SKEW_SECONDS = 10
 # Ticket IDs already exchanged by this runtime, mapped to their expiry.
 _used_platform_sso_ticket_ids: dict[str, int] = {}
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
+# Set only by server code; ASGI scope keys cannot come from the client.
+_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY = "mindroom.connections_session_callback"
+# Each Connections page names the account it shows, so a stale tab cannot act as the browser's new account.
+_CONNECTIONS_USER_HEADER = "X-MindRoom-Connections-User"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
-_TRUSTED_UPSTREAM_JWT_MAX_BYTES = 16 * 1024
+_JWT_MAX_BYTES = 16 * 1024
+_SUPABASE_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+# Each Supabase token check is a blocking network call in a worker thread; cap how many run at once.
+_supabase_token_checks = asyncio.Semaphore(4)
 _REDIRECT_TARGET_DECODE_PASSES = 5
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
@@ -260,7 +275,8 @@ def _init_supabase_auth(
         return None
 
     try:
-        create_client = importlib.import_module("supabase").create_client
+        with optional_dependency_environment():
+            create_client = importlib.import_module("supabase").create_client
     except ModuleNotFoundError:
         disabled_hint = ""
         if not auto_install_enabled(runtime_paths):
@@ -271,7 +287,8 @@ def _init_supabase_auth(
                 f"{disabled_hint} Install it with: pip install 'mindroom[supabase]'"
             )
             raise ImportError(msg) from None
-        create_client = importlib.import_module("supabase").create_client
+        with optional_dependency_environment():
+            create_client = importlib.import_module("supabase").create_client
 
     return cast("_SupabaseClientProtocol", create_client(*credentials))
 
@@ -371,7 +388,7 @@ async def _verified_trusted_upstream_jwt_claims(
     token = _get_configured_header(request, header)
     if token is None:
         raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
-    if len(token.encode("utf-8")) > _TRUSTED_UPSTREAM_JWT_MAX_BYTES:
+    if len(token.encode("utf-8")) > _JWT_MAX_BYTES:
         raise HTTPException(status_code=401, detail=invalid_detail)
 
     try:
@@ -578,13 +595,17 @@ def _supabase_auth_error_class() -> type[Exception]:
     return cast("type[Exception]", importlib.import_module("supabase_auth.errors").AuthError)
 
 
-def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseUserProtocol | None:
+async def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseUserProtocol | None:
     """Validate a Supabase access token and return the authenticated user."""
     if auth_state.supabase_auth is None:
         return None
+    # Supabase access tokens are JWTs, so any other bearer value is rejected without a network call.
+    if len(token) > _JWT_MAX_BYTES or _SUPABASE_TOKEN_SHAPE.fullmatch(token) is None:
+        return None
 
     try:
-        response = auth_state.supabase_auth.auth.get_user(token)
+        async with _supabase_token_checks:
+            response = await asyncio.to_thread(auth_state.supabase_auth.auth.get_user, token)
     except _supabase_auth_error_class():
         return None
 
@@ -592,11 +613,6 @@ def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseU
         return None
 
     return response.user
-
-
-def _dashboard_origin(request: Request, settings: _ApiAuthSettings) -> str | None:
-    """Return this dashboard's public origin, which platform logins and browser mutations must name."""
-    return normalized_origin(settings.public_url or str(request.base_url))
 
 
 def _verified_platform_sso_claims(
@@ -608,7 +624,7 @@ def _verified_platform_sso_claims(
     required_claims: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Verify a platform login ticket or session signed with this instance's own SSO key."""
-    audience = _dashboard_origin(request, settings)
+    audience = deployment_origin(settings.public_url, str(request.base_url))
     if settings.platform_sso_secret is None or audience is None:
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
     try:
@@ -634,7 +650,7 @@ def _verified_platform_sso_claims(
     return claims
 
 
-def _platform_user_identity(
+async def _platform_user_identity(
     request: Request,
     authorization: str | None,
     auth_state: ApiAuthState,
@@ -642,7 +658,7 @@ def _platform_user_identity(
     """Return the user from a Supabase bearer token or this instance's platform session cookie."""
     bearer_token = _extract_bearer_token(authorization)
     if bearer_token is not None:
-        user = _validate_supabase_token(bearer_token, auth_state)
+        user = await _validate_supabase_token(bearer_token, auth_state)
         if user is None:
             raise HTTPException(status_code=401, detail="Invalid token")
         return user.id, user.email
@@ -715,10 +731,8 @@ async def request_has_frontend_access(request: Request) -> bool:
     authorization = request.headers.get("authorization")
     snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
-    if _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") and _is_connections_path(
-        request.scope["path"],
-    ):
-        await require_connections_user(request)
+    if _is_connections_path(request.scope["path"]):
+        # The portal page is a static shell that signs itself in; its APIs authenticate every request.
         return True
     try:
         auth_user = await authenticate_user(request, authorization, allow_public_paths=False)
@@ -766,6 +780,49 @@ def _request_path_with_query(request: Request) -> str:
     path = request.url.path
     query = request.url.query
     return f"{path}?{query}" if query else path
+
+
+_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
+_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
+_DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
+    "http://localhost:3003",
+    "http://localhost:5173",
+    "http://127.0.0.1:3003",
+    "http://127.0.0.1:5173",
+)
+
+
+def _hosted_browser_origins(runtime_paths: RuntimePaths) -> list[str]:
+    """Return hosted browser origins allowed to make credentialed API calls."""
+    return list(
+        dict.fromkeys(
+            origin
+            for origin in (
+                normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
+                normalized_origin(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+            )
+            if origin is not None
+        ),
+    )
+
+
+def dashboard_cors_origins(runtime_paths: RuntimePaths) -> tuple[str, ...]:
+    """Return the browser origins the dashboard API serves cross-origin; `("*",)` when every origin is allowed.
+
+    `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` allows every origin. Otherwise
+    `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` lists them; unset, a hosted instance allows its own origins and any
+    other instance the local development servers.
+    """
+    if runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
+        return ("*",)
+    configured_origins = runtime_paths.env_value(_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV)
+    if configured_origins is None:
+        hosted_origins = tuple(_hosted_browser_origins(runtime_paths))
+        if hosted_origins:
+            return hosted_origins
+        return _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+    origins = tuple(origin for origin in (part.strip() for part in configured_origins.split(",")) if origin)
+    return origins or _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
 
 
 def _platform_redirect_target(request: Request, auth_settings: _ApiAuthSettings, next_path: str | None) -> str:
@@ -913,34 +970,131 @@ def _is_connections_path(path: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in ("/connections", "/api/connections"))
 
 
+def _is_oauth_popup_path(path: str, actions: frozenset[str]) -> bool:
+    """Recognize exactly `/api/oauth/{provider}/{action}` for one of `actions`."""
+    parts = path.split("/")
+    return len(parts) == 5 and parts[1:3] == ["api", "oauth"] and bool(parts[3]) and parts[4] in actions
+
+
+def allow_connections_session_for_oauth_callback(request: Request) -> None:
+    """Let this OAuth callback authenticate with the Connections session, because a session started its flow."""
+    request.scope[_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY] = True
+
+
+def _connections_session_path_honored(request: Request) -> bool:
+    """Honor sessions on portal paths and OAuth success pages, and on callbacks only for session-started flows."""
+    path = request.scope["path"]
+    if _is_oauth_popup_path(path, frozenset({"callback"})):
+        return request.scope.get(_CONNECTIONS_SESSION_CALLBACK_SCOPE_KEY) is True
+    return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"}))
+
+
+def _connections_session_auth_user(request: Request) -> dict[str, Any] | None:
+    """Return the Connections session identity.
+
+    It is honored on portal paths, and on dashboard routes for an administrator whose sign-in the homeserver bound
+    to this deployment, outside hosted platform mode and never on OAuth callbacks.
+    """
+    snapshot = _bind_authenticated_request_snapshot(request)
+    public_url = cast("ApiAuthState", snapshot.auth_state).settings.public_url
+    cookie = connections_session_cookie(deployment_origin(public_url, str(request.base_url)))
+    token = request.cookies.get(cookie)
+    session = read_connections_session(token, now=time.time()) if token else None
+    if session is None:
+        return None
+    if not _connections_session_path_honored(request) and not (
+        session.dashboard
+        and not _is_oauth_popup_path(request.scope["path"], frozenset({"callback"}))
+        and cast("ApiAuthState", snapshot.auth_state).supabase_auth is None
+        and is_administrator(session.matrix_user_id, snapshot)
+    ):
+        return None
+    matrix_user_id = session.matrix_user_id
+    return {"user_id": matrix_user_id, "email": None, "matrix_user_id": matrix_user_id, "auth_source": "matrix_openid"}
+
+
+def is_administrator(matrix_user_id: object, snapshot: ApiSnapshot) -> bool:
+    """Return whether a signed Matrix user is a platform administrator in the snapshot's config."""
+    return (
+        isinstance(matrix_user_id, str)
+        and snapshot.runtime_config is not None
+        and is_platform_administrator(matrix_user_id, snapshot.runtime_config, snapshot.runtime_paths)
+    )
+
+
 def _require_connections_route_authorized(
     request: Request,
     auth_user: dict[str, Any],
     snapshot: ApiSnapshot,
 ) -> None:
-    """Keep trusted personal users outside administrator routes when the portal is enabled."""
+    """Keep trusted personal users outside administrator routes while `MINDROOM_CONNECTIONS_AGENT` is set."""
     if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
         return
     path = request.scope["path"]
     if _is_connections_path(path):
         return
-    parts = path.split("/")
-    if len(parts) == 5 and parts[1:3] == ["api", "oauth"] and parts[3] and parts[4] in {"callback", "success", "reset"}:
+    if _is_oauth_popup_path(path, frozenset({"callback", "success", "reset"})):
         # These handlers independently validate their state or reset capability.
         return
-    matrix_user_id = auth_user.get("matrix_user_id")
-    if (
-        isinstance(matrix_user_id, str)
-        and snapshot.runtime_config is not None
-        and is_platform_administrator(matrix_user_id, snapshot.runtime_config, snapshot.runtime_paths)
-    ):
+    if is_administrator(auth_user.get("matrix_user_id"), snapshot):
         return
+    if _is_browser_page_request(request):
+        # A user who opens a dashboard page lands on their own page, which says why, instead of a JSON refusal.
+        raise HTTPException(
+            status_code=303,
+            detail="Administrator access required",
+            headers={"Location": "/connections?notice=admin-only"},
+        )
     raise HTTPException(status_code=403, detail="Administrator access required")
 
 
+def _is_browser_page_request(request: Request) -> bool:
+    """Recognize a browser loading a page: a GET that accepts HTML, outside the API."""
+    path = request.scope["path"]
+    return (
+        request.method == "GET"
+        and "text/html" in request.headers.get("accept", "").lower()
+        and path != "/api"
+        and not path.startswith("/api/")
+    )
+
+
 async def require_connections_user(request: Request) -> dict[str, Any]:
-    """Authenticate a Connections user through a signed upstream Matrix identity."""
-    return await _require_signed_matrix_user(request, label="Connections")
+    """Authenticate a Connections user through a portal session or a signed upstream Matrix identity."""
+    auth_user = _connections_session_auth_user(request)
+    if auth_user is not None:
+        request.scope["auth_user"] = auth_user
+    else:
+        settings = _request_auth_state(request).settings.trusted_upstream
+        if not settings.enabled or not settings.jwt.require_jwt:
+            # Without a signed upstream identity, only a portal session can authenticate, so ask the page to sign in.
+            raise HTTPException(status_code=401, detail="Connections sign-in required")
+        auth_user = await _require_signed_matrix_user(request, label="Connections")
+    page_user = request.headers.get(_CONNECTIONS_USER_HEADER)
+    if page_user is not None and page_user != auth_user["matrix_user_id"]:
+        # Sessions and upstream identities are browser-wide, so a page showing another account must reload.
+        raise HTTPException(status_code=401, detail="This page shows another account. Reload this page.")
+    return auth_user
+
+
+def trusted_upstream_email_to_matrix_user_id(request: Request) -> Callable[[str], str | None] | None:
+    """Return how a signed upstream login turns an email into its Matrix user, or None when the email does not decide it."""
+    settings = _request_auth_state(request).settings.trusted_upstream
+    # In `_verified_trusted_upstream_matrix_user_id`, a signed Matrix claim wins over the email template, which then
+    # names no one; a Matrix header must agree with the template under strict JWT.
+    if not settings.enabled or not settings.jwt.require_jwt or settings.jwt.matrix_user_id_claim is not None:
+        return None
+    template = _validated_trusted_upstream_email_to_matrix_template(settings, require_email_header=False)
+    if template is None:
+        return None
+
+    def matrix_user_id(email: str) -> str | None:
+        try:
+            return matrix_user_id_from_email(email, template, settings.email_domain)
+        except ValueError:
+            return None
+
+    return matrix_user_id
 
 
 async def require_personal_user(request: Request) -> dict[str, Any]:
@@ -1053,7 +1207,7 @@ def _require_browser_mutation_origin(
         or _extract_bearer_token(validated_authorization) is not None
     ):
         return
-    origin = _dashboard_origin(request, settings)
+    origin = deployment_origin(settings.public_url, str(request.base_url))
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
     require_same_origin(request, origin)
@@ -1068,6 +1222,12 @@ async def authenticate_user(
     """Authenticate the request, enforcing account ownership and browser mutation origin."""
     snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
+    session_user = _connections_session_auth_user(request)
+    if session_user is not None:
+        _require_browser_mutation_origin(request, auth_state.settings)
+        request.scope["auth_user"] = session_user
+        return session_user
+
     mindroom_api_key = auth_state.settings.mindroom_api_key
     trusted_auth_user = await _trusted_upstream_auth_user(
         request,
@@ -1101,7 +1261,7 @@ async def authenticate_user(
         request.scope["auth_user"] = auth_user
         return auth_user
 
-    user_id, email = _platform_user_identity(request, authorization, auth_state)
+    user_id, email = await _platform_user_identity(request, authorization, auth_state)
     if auth_state.settings.account_id and user_id != auth_state.settings.account_id:
         raise HTTPException(status_code=403, detail="Forbidden")
 

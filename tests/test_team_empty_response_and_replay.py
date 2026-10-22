@@ -18,15 +18,15 @@ from agno.run.team import TeamRunOutput
 
 from mindroom import ai_runtime, teams
 from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.teams import TeamMode, team_response, team_response_stream
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
-from tests.test_team_dynamic_continuation import _dynamic_tool_team_output
 from tests.test_team_response import _build_test_config, _make_test_agent, _make_test_team
+from tests.test_team_turn_continuation import _continuing_team_output
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -321,14 +321,14 @@ async def test_team_response_ignores_history_messages_for_empty_detection() -> N
 
 
 @pytest.mark.asyncio
-async def test_team_empty_retry_shares_budget_with_dynamic_continuations() -> None:
-    """One empty retry plus dynamic-tool continuations stay within the shared budget."""
+async def test_team_empty_retry_shares_budget_with_continuations() -> None:
+    """One empty retry plus model-switch continuations stay within the shared budget."""
     orchestrator, _config = _make_orchestrator()
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(
         side_effect=[
             _empty_team_run("team-run-1"),
-            *[_dynamic_tool_team_output() for _ in range(DYNAMIC_TOOL_CONTINUATION_LIMIT)],
+            *[_continuing_team_output() for _ in range(TURN_CONTINUATION_LIMIT)],
         ],
     )
 
@@ -337,16 +337,16 @@ async def test_team_empty_retry_shares_budget_with_dynamic_continuations() -> No
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
-            message="Keep loading tools.",
-            turn_recorder=TurnRecorder(user_message="Keep loading tools."),
+            message="Keep switching models.",
+            turn_recorder=TurnRecorder(user_message="Keep switching models."),
             orchestrator=orchestrator,
             execution_identity=None,
             ctx=make_turn_context(session_id="session-1"),
         )
 
     # The empty retry borrows one continuation slot: 1 discarded empty run
-    # plus LIMIT dynamic-tool runs, settling on the limit message.
-    assert mock_team.arun.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
+    # plus LIMIT model-switch runs, settling on the limit message.
+    assert mock_team.arun.await_count == TURN_CONTINUATION_LIMIT + 1
     assert "did not produce a final answer" in response
 
 

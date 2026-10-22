@@ -1,7 +1,8 @@
 """Pytest configuration and fixtures for dashboard backend tests."""
 
 # Import the app after we can mock the config path
-from collections.abc import Generator
+import asyncio
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,12 @@ from mindroom.api import config_lifecycle
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+
+
+@pytest.fixture(autouse=True)
+def _single_line_execute_responses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a quick /execute call to its one result line, however slowly a loaded machine runs it."""
+    monkeypatch.setattr("mindroom.api.sandbox_runner.EXECUTE_KEEPALIVE_SECONDS", 3600.0)
 
 
 def trusted_upstream_headers(
@@ -86,7 +93,7 @@ def test_client(temp_config_file: Path) -> TestClient:
 
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=temp_config_file,
-        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org", "MATRIX_HOMESERVER": "http://localhost:8008"},
     )
     main.initialize_api_app(main.app, runtime_paths)
 
@@ -107,3 +114,26 @@ def sample_agent_data() -> dict[str, Any]:
         "instructions": ["Do something", "Do something else"],
         "rooms": ["lobby", "dev"],
     }
+
+
+@pytest.fixture
+def calls_on_event_loop(monkeypatch: pytest.MonkeyPatch) -> Callable[[object, str], list[bool]]:
+    """Return ``record(module, name)``: wrap ``module.name`` and log, for each call, whether it ran on the event loop."""
+
+    def record(module: object, name: str) -> list[bool]:
+        real = getattr(module, name)
+        on_loop: list[bool] = []
+
+        def recorded(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                on_loop.append(False)
+            else:
+                on_loop.append(True)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, recorded)
+        return on_loop
+
+    return record

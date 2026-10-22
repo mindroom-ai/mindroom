@@ -326,8 +326,7 @@ def test_mode_command_refusal_and_recovery_controls(tmp_path: Path) -> None:
     "restriction",
     [
         {"enable_run_shell_command": False},
-        {"include_tools": ["run_shell_command"]},
-        {"exclude_tools": ["kill_shell_command"]},
+        {"exclude_tools": ["run_shell_command"]},
     ],
 )
 @pytest.mark.parametrize("worker_tools", [None, []])
@@ -343,7 +342,7 @@ def test_selection_checks_effective_shell_permissions(
     context.config.administrators = [context.requester_id]
     restored = {
         "enable_run_shell_command": True,
-        "include_tools": ["run_shell_command", "check_shell_command", "kill_shell_command"],
+        "include_tools": ["run_shell_command"],
         "exclude_tools": [],
     }
     context.config.agents["helper"] = AgentConfig(
@@ -403,7 +402,6 @@ def test_selection_checks_effective_shell_permissions(
         context.config,
         paths,
         identity,
-        session_id=context.session_id,
         persist_runtime_state=False,
     )
     assert isinstance(canonical.tools, list)
@@ -413,9 +411,8 @@ def test_selection_checks_effective_shell_permissions(
         if isinstance(tool, Toolkit) and tool.name == "shell_tools"
         for name in tool.get_async_functions()
     }
-    required = {"run_shell_command", "check_shell_command", "kill_shell_command"}
-    assert required.issubset(shell_functions) is permitted
-    assert ("uses `minimal`" if permitted else "run, check, and kill") in result
+    assert ("run_shell_command" in shell_functions) is permitted
+    assert ("uses `minimal`" if permitted else "Allow the `run_shell_command` shell function") in result
     assert resolve_agent_mode(paths, storage.state_root, "helper", context.session_id) == (
         "minimal" if permitted else "standard"
     )

@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING
 from mindroom.credentials.manager import get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.credentials.policy import credential_service_policy
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
+from mindroom.tool_system.worker_routing import (
+    resolved_worker_key_scope,
+    worker_dir_name,
+    worker_id_for_key,
+    worker_log_id,
+)
 from mindroom.workers.backend import (
     WorkerBackendError,
     effective_idle_status,
@@ -22,6 +27,7 @@ from mindroom.workers.backend import (
 )
 from mindroom.workers.backends._dedicated_worker_common import (
     ScopedWorkspaceMount,
+    SharedDirectoryMount,
     plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
 )
@@ -78,6 +84,7 @@ class _ReadyWorkerCacheEntry:
     handle: WorkerHandle
     validated_at: float
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]
+    shared_directory_mounts: tuple[SharedDirectoryMount, ...]
 
 
 def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> None:
@@ -273,7 +280,7 @@ def _build_progress_reporter(
             "worker_key": worker_key,
             "backend_name": backend_name,
         },
-        name=f"kubernetes-worker-progress:{worker_key}",
+        name=f"kubernetes-worker-progress:{worker_log_id(worker_key)}",
         daemon=True,
     )
     thread.start()
@@ -516,6 +523,7 @@ class KubernetesWorkerBackend:
                     # kubelet creates missing subPath sources as root, so shared workspaces exist first;
                     # the cache keeps these mounts to notice a workspace that appears after planning.
                     workspace_mounts = self._plan_workspace_mounts(spec, create_shared=True)
+                    shared_directory_mounts = self._plan_shared_directory_mounts(spec)
                     self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
                     auth_secret_applied = True
                     deployment_apply = self._resources.apply_deployment(
@@ -592,7 +600,13 @@ class KubernetesWorkerBackend:
                     now=timestamp,
                     annotations_override=final_deployment_annotations,
                 )
-                self._store_ready_worker(spec, handle, validated_at=timestamp, workspace_mounts=workspace_mounts)
+                self._store_ready_worker(
+                    spec,
+                    handle,
+                    validated_at=timestamp,
+                    workspace_mounts=workspace_mounts,
+                    shared_directory_mounts=shared_directory_mounts,
+                )
                 return handle
         finally:
             if progress_sink is not None:
@@ -652,10 +666,10 @@ class KubernetesWorkerBackend:
             if deployment is not None:
                 annotations = dict(deployment.metadata.annotations or {})
                 if annotations.get(resources.ANNOTATION_WORKER_KEY) != worker_key:
-                    msg = f"Kubernetes worker Deployment does not match retirement key '{worker_key}'."
+                    msg = f"Kubernetes worker Deployment does not match retirement key '{worker_log_id(worker_key)}'."
                     raise WorkerBackendError(msg)
                 if annotations.get(resources.ANNOTATION_STATE_SUBPATH) != state_subpath:
-                    msg = f"Kubernetes worker Deployment does not match retirement state for '{worker_key}'."
+                    msg = f"Kubernetes worker Deployment does not match retirement state for '{worker_log_id(worker_key)}'."
                     raise WorkerBackendError(msg)
             try:
                 with open_worker_state_root(
@@ -681,7 +695,7 @@ class KubernetesWorkerBackend:
             except WorkerBackendError:
                 raise
             except (OSError, RecursionError, TypeError, ValueError) as exc:
-                msg = f"Failed to retire Kubernetes worker '{worker_key}': {exc}"
+                msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
                 raise WorkerBackendError(msg) from exc
 
     def _cleanup_idle_deployments(
@@ -793,8 +807,8 @@ class KubernetesWorkerBackend:
             # Deployments created before visibility persistence cannot be rebuilt
             # deterministically; the ensure-time hash check recreates them on next use.
             logger.debug(
-                "Deferring pod-template reconciliation for worker %r: no persisted private-agent visibility",
-                handle.worker_key,
+                "Deferring pod-template reconciliation for worker %s: no persisted private-agent visibility",
+                worker_log_id(handle.worker_key),
             )
             return False
         try:
@@ -808,7 +822,11 @@ class KubernetesWorkerBackend:
                 resource_profile=resource_profile,
             )
         except WorkerBackendError:
-            logger.warning("Skipping pod-template reconciliation for worker %r", handle.worker_key, exc_info=True)
+            logger.warning(
+                "Skipping pod-template reconciliation for worker %s",
+                worker_log_id(handle.worker_key),
+                exc_info=True,
+            )
             return False
 
     def _reconcile_worker_deployment(self, handle: WorkerHandle, *, now: float) -> WorkerHandle | None:
@@ -836,7 +854,11 @@ class KubernetesWorkerBackend:
                 resource_profile=resources.parse_resource_profile_annotation(annotations),
             )
         except WorkerBackendError:
-            logger.warning("Skipping pod-template reconciliation for worker %r", live_handle.worker_key, exc_info=True)
+            logger.warning(
+                "Skipping pod-template reconciliation for worker %s",
+                worker_log_id(live_handle.worker_key),
+                exc_info=True,
+            )
             return None
         # The recreate keeps the lifecycle annotations and zero replicas, so the
         # handle projected from the live read still describes the reconciled worker.
@@ -875,7 +897,7 @@ class KubernetesWorkerBackend:
         worker_id = self._worker_id(worker_key)
         deployment = self._resources.read_deployment(worker_id)
         if deployment is None:
-            msg = f"Unknown worker '{worker_key}' for Kubernetes failure recording."
+            msg = f"Unknown worker '{worker_log_id(worker_key)}' for Kubernetes failure recording."
             raise WorkerBackendError(msg)
         current = self._handle_from_deployment(deployment, now=now)
         if startup_count is not None and current.startup_count != startup_count:
@@ -930,6 +952,12 @@ class KubernetesWorkerBackend:
             create_shared=create_shared,
         )
 
+    def _plan_shared_directory_mounts(self, spec: WorkerSpec) -> tuple[SharedDirectoryMount, ...]:
+        return self._resources.plan_shared_directory_mounts(
+            spec.worker_key,
+            state_scope_worker_key=spec.state_scope_worker_key,
+        )
+
     def _reuse_cached_ready_worker(self, spec: WorkerSpec, *, now: float) -> WorkerHandle | None:
         entry = self._cached_ready_worker(spec.worker_key, spec=spec, now=now)
         if entry is None:
@@ -938,6 +966,10 @@ class KubernetesWorkerBackend:
         state_scope_worker_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
         may_gain_workspace = not entry.workspace_mounts or resolved_worker_key_scope(state_scope_worker_key) == "user"
         if may_gain_workspace and entry.workspace_mounts != self._plan_workspace_mounts(spec, create_shared=False):
+            self._invalidate_ready_worker(spec.worker_key)
+            return None
+        # Shared directories change at runtime, so the Deployment is re-applied whenever their mounts differ.
+        if entry.shared_directory_mounts != self._plan_shared_directory_mounts(spec):
             self._invalidate_ready_worker(spec.worker_key)
             return None
         try:
@@ -963,12 +995,14 @@ class KubernetesWorkerBackend:
         *,
         validated_at: float,
         workspace_mounts: tuple[ScopedWorkspaceMount, ...],
+        shared_directory_mounts: tuple[SharedDirectoryMount, ...],
     ) -> None:
         entry = _ReadyWorkerCacheEntry(
             spec=spec,
             handle=handle,
             validated_at=validated_at,
             workspace_mounts=workspace_mounts,
+            shared_directory_mounts=shared_directory_mounts,
         )
         with self._ready_workers_lock:
             self._ready_workers[spec.worker_key] = entry
@@ -1022,6 +1056,7 @@ class KubernetesWorkerBackend:
             handle,
             validated_at=entry.validated_at,
             workspace_mounts=entry.workspace_mounts,
+            shared_directory_mounts=entry.shared_directory_mounts,
         )
         return handle
 

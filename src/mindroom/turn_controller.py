@@ -881,7 +881,12 @@ class TurnController:
         prechecked_event: _PrecheckedEvent[nio.RoomMessageFormatted],
         event_info: EventInfo,
     ) -> bool | None:
-        """Hand one edited user turn to the edit regenerator."""
+        """Apply a person's edit to their message still waiting in a queue, or hand it to the edit regenerator.
+
+        An entity's edit changes neither, so a queued message from an entity answers the text it was queued with.
+        """
+        if self.deps.ingress.managed_entity_name_for_sender(prechecked_event.event.sender) is not None:
+            return None
         async with admitted_response_decision(
             self.deps.runtime.response_admission_gate,
             self.deps.response_runner.wait_for_admission_or_shutdown,
@@ -1784,7 +1789,7 @@ class TurnController:
             selection_handled_turn,
             target=response_target,
             response_text=(
-                f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
+                f"You selected: {selection.selection_key} {selection.selected_label}\n\nProcessing your response..."
             ),
             delivery_turn_id=source_event_id,
         )

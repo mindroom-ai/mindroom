@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -82,7 +83,7 @@ def _policy_for(config: Config, agent_name: str) -> TurnPolicy:
     registry = entity_identity_registry(config, runtime_paths)
     return TurnPolicy(
         make_test_turn_policy_deps(
-            runtime=_RuntimeStub(client=None, config=config),
+            runtime=_RuntimeStub(client=make_matrix_client_mock(), config=config),
             logger=get_logger("test_turn_policy"),
             runtime_paths=runtime_paths,
             agent_name=agent_name,
@@ -161,14 +162,12 @@ async def _plan(
     room: nio.MatrixRoom,
     dispatch: PreparedDispatch,
     *,
-    is_dm: bool = False,
     has_active_response: bool = False,
 ) -> object:
     return await policy.plan_turn(
         room,
         _text_event("hello agents"),
         dispatch,
-        is_dm=is_dm,
         has_active_response_for_target=lambda _target: has_active_response,
     )
 
@@ -417,19 +416,38 @@ async def test_mentioning_two_agents_forms_explicit_team_for_owner_only(config: 
 @pytest.mark.asyncio
 async def test_dm_room_with_multiple_agents_forms_auto_team(config: Config) -> None:
     """Untagged DM-room messages auto-team all visible agents."""
+    policy = _policy_for(config, "general")
     room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
 
-    plan = await _plan(
-        _policy_for(config, "general"),
-        room,
-        _dispatch(_context(), agent_name="general"),
-        is_dm=True,
-    )
+    with patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=True)) as is_dm_room:
+        plan = await _plan(policy, room, _dispatch(_context(), agent_name="general"))
 
+    is_dm_room.assert_awaited_once_with(policy.deps.runtime.client, _ROOM_ID)
     assert plan.kind == "respond"
     assert plan.response_action.kind == "team"
     assert plan.response_action.form_team.intent is TeamIntent.DM_AUTO_TEAM
     assert plan.response_action.form_team.mode is TeamMode.COLLABORATE
+
+
+@pytest.mark.asyncio
+async def test_dm_room_lookup_is_skipped_when_no_dm_auto_team_can_form(config: Config) -> None:
+    """Thread messages and single-responder rooms plan without asking the homeserver about DM status."""
+    policy = _policy_for(config, "general")
+    general_id = _entity_id(config, "general").full_id
+    two_agent_room = _room_with_members(_SENDER, general_id, _entity_id(config, "research").full_id)
+    single_agent_room = _room_with_members(_SENDER, general_id)
+
+    with patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=True)) as is_dm_room:
+        thread_plan = await _plan(
+            policy,
+            two_agent_room,
+            _dispatch(_context(thread_id="$thread:localhost"), agent_name="general"),
+        )
+        single_plan = await _plan(policy, single_agent_room, _dispatch(_context(), agent_name="general"))
+
+    is_dm_room.assert_not_awaited()
+    assert thread_plan.kind == "ignore"
+    assert single_plan.response_action.kind == "individual"
 
 
 @pytest.mark.asyncio

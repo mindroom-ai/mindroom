@@ -247,7 +247,8 @@ _NOT_PAIRED_LINE = "Not paired yet: `mindroom run` will print a link to approve 
 @pytest.mark.parametrize(
     ("env_file", "expected", "line"),
     [
-        ("", (0, 0, 0), None),
+        ("", (1, 0, 0), _NOT_PAIRED_LINE),
+        ("MATRIX_HOMESERVER=http://localhost:8008\n", (0, 0, 0), None),
         ("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", (1, 0, 0), _NOT_PAIRED_LINE),
         (
             "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n"

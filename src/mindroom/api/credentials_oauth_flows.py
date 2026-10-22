@@ -45,9 +45,16 @@ def issue_pending_oauth_state(
     code_verifier: str | None = None,
     token_url: str | None = None,
     browser_user_required: bool = True,
+    opener_origin: str | None = None,
 ) -> str:
-    """Create opaque OAuth state bound to a browser user or conversation capability."""
+    """Create opaque OAuth state bound to a browser user or conversation capability.
+
+    `opener_origin` is the already validated origin of the page that started the flow, which the popup's last page
+    tells how the flow ended.
+    """
     user_id = require_auth_user_id(request) if browser_user_required else ""
+    auth_user = request.scope.get("auth_user")
+    auth_source = auth_user.get("auth_source") if browser_user_required and isinstance(auth_user, dict) else None
     if browser_user_required:
         execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(
             request,
@@ -62,6 +69,7 @@ def issue_pending_oauth_state(
         data={
             "service": service,
             "user_id": user_id,
+            "auth_source": auth_source if isinstance(auth_source, str) else "",
             "browser_user_required": browser_user_required,
             "agent_name": agent_name or "",
             "execution_scope_override_provided": execution_scope_override_provided,
@@ -69,6 +77,7 @@ def issue_pending_oauth_state(
             "payload": payload or {},
             "code_verifier": code_verifier or "",
             "token_url": token_url or "",
+            "opener_origin": opener_origin or "",
         },
     )
 
@@ -85,10 +94,25 @@ def _read_pending_oauth_request(request: Request, service: str, state: str) -> d
     return data
 
 
-def pending_oauth_state_requires_browser_user(request: Request, service: str, state: str) -> bool:
-    """Return whether pending OAuth state must match an authenticated browser user."""
+def pending_oauth_state_browser_auth_source(request: Request, service: str, state: str) -> str | None:
+    """Return how the browser user that issued pending OAuth state authenticated, or None when none is bound."""
     data = _read_pending_oauth_request(request, service, state)
-    return data.get("browser_user_required") is not False
+    if data.get("browser_user_required") is False:
+        return None
+    auth_source = data.get("auth_source")
+    return auth_source if isinstance(auth_source, str) else ""
+
+
+def pending_oauth_opener_origin(request: Request, service: str, state: str | None) -> str | None:
+    """Return the opener origin a pending OAuth state recorded, without consuming it; None for any unusable state."""
+    if not state:
+        return None
+    try:
+        data = _read_pending_oauth_request(request, service, state)
+    except HTTPException:
+        return None
+    origin = data.get("opener_origin")
+    return origin if isinstance(origin, str) and origin else None
 
 
 def consume_pending_oauth_request(request: Request, service: str, state: str) -> _PendingOAuthState:

@@ -14,7 +14,9 @@ import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom import reply_scope
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.participation import ParticipationConfig
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
@@ -701,6 +703,14 @@ async def test_selection_answer_adopts_the_span_its_acknowledgement_created(tmp_
     assert bot._reply_runtime.spans.claimed_span_ids() == frozenset()
 
 
+async def test_a_selection_acknowledgement_wakes_no_agent_it_mentions(tmp_path: Path) -> None:
+    """The acknowledgement echoes the member's selected value, so agents ignore any mention in it."""
+    bot = await _streaming_bot(tmp_path)
+    await _acknowledge_selection(bot)
+
+    assert bot.client.room_send.await_args.kwargs["content"][SKIP_MENTIONS_KEY] is True
+
+
 async def test_a_retried_acknowledgement_finds_the_reply_its_first_attempt_created(tmp_path: Path) -> None:
     """Sending the acknowledgement again resolves the first attempt's row; no second reply or message appears."""
     bot = await _streaming_bot(tmp_path)
@@ -1080,9 +1090,19 @@ async def test_a_stop_reaction_reaches_a_running_reply_only_in_its_room(tmp_path
         patch.object(bot._journal_dispatcher, "receipt_order", new=AsyncMock(return_value=7)),
     ):
         elsewhere = MagicMock(room_id="!elsewhere:localhost")
-        assert not await dispatcher._maybe_handle_stop_reaction(elsewhere, _stop_reaction(reply.event_id), None)
+        assert not await dispatcher._maybe_handle_stop_reaction(
+            elsewhere,
+            _stop_reaction(reply.event_id),
+            None,
+            "@user:localhost",
+        )
         here = MagicMock(room_id=_target().room_id)
-        assert await dispatcher._maybe_handle_stop_reaction(here, _stop_reaction(reply.event_id), None)
+        assert await dispatcher._maybe_handle_stop_reaction(
+            here,
+            _stop_reaction(reply.event_id),
+            None,
+            "@user:localhost",
+        )
 
     await asyncio.wait_for(response, timeout=5)
     assert (await _reply(bot)).state is rl.ReplyState.CANCELLED
@@ -1632,6 +1652,8 @@ async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tm
         ),
     ):
         await runner.generate_response(_plain_request(_target()))
+    # A reply whose row resolves after the button was recorded redacts the button in a settlement task.
+    assert await wait_for_background_tasks(timeout=5.0, owner=bot._runtime_view)
 
     sends = bot.client.room_send.await_args_list
     buttons = [
@@ -1648,6 +1670,36 @@ async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tm
     assert reply.stop_button_event_id is None
     assert reply.redaction_pending == ()
     assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [button_id]
+
+
+async def test_a_stop_button_decided_after_its_reply_ended_is_never_sent(tmp_path: Path) -> None:
+    """A presence check that outlasts a short answer leaves no button to send and then redact."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    async def online_once_answered(*_args: object, **_kwargs: object) -> bool:
+        # The answer's final edit goes out while the presence check runs.
+        while "An answer." not in _sent_bodies(bot):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+        return True
+
+    with (
+        patch("mindroom.response_attempt.is_user_online", new=online_once_answered),
+        patch_response_runner_module(
+            ai_response=AsyncMock(return_value="An answer."),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await runner.generate_response(_plain_request(_target()))
+    assert await wait_for_background_tasks(timeout=5.0, owner=bot._runtime_view)
+
+    reply = await _reply(bot)
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert _sent_bodies(bot) == ["Thinking...", "An answer."]
+    assert reply.stop_button_event_id is None
+    assert reply.redaction_pending == ()
+    bot.client.room_redact.assert_not_awaited()
 
 
 async def test_a_stopped_regeneration_that_wrote_nothing_removes_its_button_as_it_ends(tmp_path: Path) -> None:

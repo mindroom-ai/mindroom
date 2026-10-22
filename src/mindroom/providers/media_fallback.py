@@ -402,16 +402,21 @@ def _call_without_media_kinds(
     retry_messages = [_without_inline_media(message, removed_kinds) for message in messages]
     if "image" in removed_kinds:
         _mark_stripped_view_receipts(messages, retry_messages)
-    retry_messages.append(
-        Message(
-            role="user",
-            content=f"{_FALLBACK_MARKER}\n{fallback_prompt}",
-            temporary=True,
-        ),
-    )
+    # The note stays on the message that lost media. Appended after the latest tool result, it read
+    # as a new user turn on every call of a tool loop, and models chased attachments that never came.
+    note = f"{_FALLBACK_MARKER}\n{fallback_prompt}"
+    for message, retry_message in zip(messages, retry_messages, strict=True):
+        if removed_kinds & _media_kinds([message]):
+            retry_message.content = _with_fallback_note(retry_message.content, note)
     if "messages" in kwargs:
         return args, {**kwargs, "messages": retry_messages}
     return (retry_messages, *args[1:]), kwargs
+
+
+def _with_fallback_note(content: str | list[Any] | None, note: str) -> str | list[Any]:
+    if isinstance(content, list):
+        return [*content, {"type": "text", "text": note}]
+    return f"{content}\n\n{note}" if content else note
 
 
 def _mark_stripped_view_receipts(source: list[Message], stripped: list[Message]) -> None:

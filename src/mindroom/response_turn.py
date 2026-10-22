@@ -2,7 +2,7 @@
 
 One inbound response turn has the same lifecycle regardless of which entity
 answers it: open the scope session, run prepared attempts, decide whether the
-turn continues after a dynamic-tool call or a discarded empty run, record the
+turn continues after a model switch or a discarded empty run, record the
 outcome on the turn recorder, and persist an interrupted replay when the turn
 is cancelled without a recorder.
 This module owns that lifecycle exactly once; ``mindroom.ai`` and
@@ -44,12 +44,14 @@ from mindroom.constants import (
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.delegation.state import DelegationState
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
+from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT, continuation_decision_from_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -77,7 +79,6 @@ __all__ = [
     "BlockingTurnAdapter",
     "CompletedApprovalRun",
     "CompletedAttempt",
-    "DynamicContinuationRunState",
     "EmptyRunDiscard",
     "ExcludedAttempt",
     "HandledAttempt",
@@ -90,6 +91,7 @@ __all__ = [
     "StandaloneReplaySnapshot",
     "StreamAttemptResolution",
     "StreamingTurnAdapter",
+    "TurnContinuationRunState",
     "TurnPartialSnapshot",
     "TurnRunState",
     "TurnSinks",
@@ -170,7 +172,6 @@ def build_matrix_run_metadata(
     thread_id: str | None = None,
     requester_id: str | None = None,
     correlation_id: str | None = None,
-    tools_schema: list[dict[str, object]] | None = None,
     model_params: dict[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
@@ -186,10 +187,6 @@ def build_matrix_run_metadata(
         metadata["requester_id"] = requester_id
     if correlation_id is not None:
         metadata["correlation_id"] = correlation_id
-    if tools_schema is not None:
-        metadata["tools_schema"] = tools_schema
-    else:
-        metadata.setdefault("tools_schema", [])
     if model_params is not None:
         metadata["model_params"] = model_params
     else:
@@ -217,8 +214,8 @@ def build_matrix_run_metadata(
 
 
 @dataclass(frozen=True)
-class DynamicContinuationRunState:
-    """Prompt and run identity for a dynamic-tool continuation sequence."""
+class TurnContinuationRunState:
+    """Prompt and run identity for a same-turn continuation sequence."""
 
     original_prompt: str
     active_prompt: str
@@ -244,7 +241,7 @@ class DynamicContinuationRunState:
         continuation_model_prompt_tail: str,
         active_model_name: str | None = None,
         apply_model_to_team_members: bool = False,
-    ) -> DynamicContinuationRunState:
+    ) -> TurnContinuationRunState:
         """Build the continuation state for one turn's first attempt."""
         return cls(
             original_prompt=prompt,
@@ -266,7 +263,7 @@ class DynamicContinuationRunState:
         previous_run_id: str | None,
         active_model_name: str | None,
         apply_model_to_team_members: bool,
-    ) -> DynamicContinuationRunState:
+    ) -> TurnContinuationRunState:
         """Return the continuation state for one more same-turn attempt."""
         return replace(
             self,
@@ -310,6 +307,9 @@ class ResponseTurnContext:
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     allow_no_report_response: bool = False
+    background_tool_jobs: bool = False
+    # Set for a voice call's turn: no reply owns its calls' outcomes afterwards, so they finish inside it.
+    inline_tools: bool = False
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
@@ -659,7 +659,7 @@ class BlockingTurnAdapter:
 
     open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]]
     run_attempt: Callable[
-        [TurnRunState, DynamicContinuationRunState],
+        [TurnRunState, TurnContinuationRunState],
         Awaitable[BlockingAttemptResolution],
     ]
     snapshot_partial: Callable[[], TurnPartialSnapshot]
@@ -678,7 +678,7 @@ class StreamingTurnAdapter[ChunkT]:
 
     open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]]
     run_attempt: Callable[
-        [TurnRunState, DynamicContinuationRunState],
+        [TurnRunState, TurnContinuationRunState],
         AsyncIterator[ChunkT | AttemptResolved],
     ]
     snapshot_partial: Callable[[], TurnPartialSnapshot]
@@ -695,7 +695,7 @@ class StreamingTurnAdapter[ChunkT]:
 def _raise_continuation_budget_exhausted() -> NoReturn:
     # The continuation loop always settles on its final iteration: at the limit
     # the decision carries a limit_message and never asks to continue.
-    msg = "dynamic tool continuation loop must return within its iteration budget"
+    msg = "turn continuation loop must return within its iteration budget"
     raise AssertionError(msg)
 
 
@@ -706,7 +706,7 @@ def _raise_missing_stream_resolution(entity_label: str) -> NoReturn:
     raise RuntimeError(msg)
 
 
-def _reset_turn_state_for_dynamic_continuation(
+def _reset_turn_state_for_continuation(
     *,
     turn_recorder: TurnRecorder | None,
     run_metadata: dict[str, Any] | None,
@@ -854,7 +854,7 @@ def _settle_empty_run(
             output_tokens=resolution.output_tokens,
         ),
     )
-    if run.empty_response_retried or continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
+    if run.empty_response_retried or continuation_count >= TURN_CONTINUATION_LIMIT:
         return False
     run.empty_response_retried = True
     release_attempt_entity(run.scope_context)
@@ -866,12 +866,12 @@ def _advance_turn_continuation(
     release_attempt_entity: Callable[[ScopeSessionContext | None], None],
     run: TurnRunState,
     resolution: CompletedAttempt,
-    continuation: DynamicContinuationRunState,
+    continuation: TurnContinuationRunState,
     *,
     next_prompt: str | None,
     active_model_name: str | None,
     apply_model_to_team_members: bool,
-) -> DynamicContinuationRunState:
+) -> TurnContinuationRunState:
     """Close the spent attempt entity and prepare run state for one more continuation."""
     completed_tools_for_turn = run.turn_state.completed_tools_for(resolution.completed_tools)
     release_attempt_entity(run.scope_context)
@@ -881,7 +881,7 @@ def _advance_turn_continuation(
         active_model_name=active_model_name,
         apply_model_to_team_members=apply_model_to_team_members,
     )
-    run.turn_state = _reset_turn_state_for_dynamic_continuation(
+    run.turn_state = _reset_turn_state_for_continuation(
         turn_recorder=sinks.turn_recorder,
         run_metadata=run.run_metadata,
         completed_tools_for_turn=completed_tools_for_turn,
@@ -960,12 +960,13 @@ async def _open_scope_off_event_loop(
         await run_blocking_until_complete(manager.__exit__, None, None, None)
 
 
+@owned_tool_execution(enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
 async def run_blocking_response_turn(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
     sinks: TurnSinks,
     *,
-    continuation: DynamicContinuationRunState,
+    continuation: TurnContinuationRunState,
 ) -> str:
     """Run one blocking response turn to a final user-visible text."""
     run = TurnRunState()
@@ -976,13 +977,15 @@ async def run_blocking_response_turn(
         ):
             await _remove_history_of_redacted_events(ctx, scope_context)
             run.scope_context = scope_context
+            set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
-            for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+            for continuation_count in range(TURN_CONTINUATION_LIMIT + 1):
                 cli_lifetime.continuation_count = continuation_count
                 try:
                     with helper_usage_context(scope_context):
                         resolution = await adapter.run_attempt(run, continuation)
+                    await finalize_consumption()
                     settled = _settle_blocking_attempt(
                         ctx,
                         adapter,
@@ -996,6 +999,7 @@ async def run_blocking_response_turn(
                     await cli_lifetime.retire_attempt()
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)
+                    await finalize_consumption()
                 if isinstance(settled, str):
                     return settled
                 continuation = settled
@@ -1085,10 +1089,10 @@ def _settle_blocking_attempt(
     sinks: TurnSinks,
     run: TurnRunState,
     resolution: BlockingAttemptResolution,
-    continuation: DynamicContinuationRunState,
+    continuation: TurnContinuationRunState,
     *,
     continuation_count: int,
-) -> str | DynamicContinuationRunState:
+) -> str | TurnContinuationRunState:
     """Settle one blocking attempt: return final text or the advanced continuation."""
     # The blocking envelope publishes run metadata before recording, and only
     # for attempts that end the turn: a discarded empty run's or a superseded
@@ -1157,7 +1161,7 @@ class _CompletionSettle:
     """Driver-internal plan for finishing one completed attempt."""
 
     keep_going: bool
-    continuation: DynamicContinuationRunState
+    continuation: TurnContinuationRunState
     # What the recorder persists as the turn's replayable assistant text; it
     # can differ from response_text (e.g. tool-rendered visible output).
     recorded_text: str
@@ -1174,7 +1178,7 @@ def _settle_completed_attempt(
     sinks: TurnSinks,
     run: TurnRunState,
     resolution: CompletedAttempt,
-    continuation: DynamicContinuationRunState,
+    continuation: TurnContinuationRunState,
     *,
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None],
     release_attempt_entity: Callable[[ScopeSessionContext | None], None],
@@ -1246,14 +1250,6 @@ def _settle_completed_attempt(
     recorded_text = resolution.replayable_text
     response_text = resolution.response_text
     if decision.limit_message is not None:
-        if decision.continuation is not None:
-            logger.warning(
-                "Dynamic tool continuation limit reached",
-                entity=ctx.entity_label,
-                function_name=decision.continuation.function_name,
-                tool_name=decision.continuation.tool_name,
-                status=decision.continuation.status,
-            )
         if not resolution.has_visible_content:
             recorded_text = decision.limit_message
             response_text = decision.limit_message
@@ -1271,12 +1267,13 @@ def _settle_completed_attempt(
     )
 
 
+@owned_tool_execution(enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
 async def stream_response_turn[ChunkT](
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],
     sinks: TurnSinks,
     *,
-    continuation: DynamicContinuationRunState,
+    continuation: TurnContinuationRunState,
     resumed_attempt: ResumedAttempt | None = None,
     initial_continuation_count: int = 0,
 ) -> AsyncGenerator[ChunkT, None]:
@@ -1307,7 +1304,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     adapter: StreamingTurnAdapter[ChunkT],
     sinks: TurnSinks,
     *,
-    continuation: DynamicContinuationRunState,
+    continuation: TurnContinuationRunState,
     cli_lifetime: CliTurnLifetime,
     resumed_attempt: ResumedAttempt | None = None,
     initial_continuation_count: int = 0,
@@ -1318,12 +1315,13 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             await _remove_history_of_redacted_events(ctx, scope_context)
             run.scope_context = scope_context
+            set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
             initial_count = (
                 resumed_attempt.continuation_count if resumed_attempt is not None else initial_continuation_count
             )
-            for continuation_count in range(initial_count, DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+            for continuation_count in range(initial_count, TURN_CONTINUATION_LIMIT + 1):
                 cli_lifetime.continuation_count = continuation_count
                 resolution: StreamAttemptResolution | None = None
                 keep_going = False
@@ -1343,6 +1341,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                     resolution = item.resolution
                                     continue
                                 yield item
+                    await finalize_consumption()
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
                     if isinstance(resolution, SkippedAttempt):
@@ -1416,6 +1415,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     await cli_lifetime.retire_attempt()
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)
+                    await finalize_consumption()
                 if not keep_going:
                     return
             _raise_continuation_budget_exhausted()

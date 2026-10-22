@@ -1,6 +1,6 @@
 """A turn that runs the model more than once still owes the room one answer.
 
-A dynamic-tool call makes the turn continue: the model runs again with a
+A next-turn model switch makes the turn continue: the model runs again with a
 continuation prompt, and only the last attempt has an answer worth showing.
 The outbox is where that has to hold, and it holds asymmetrically. An
 unattempted ``FINAL`` row is overwritten by whatever comes next, so an early
@@ -34,10 +34,10 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.ai import _PreparedAgentRun
 from mindroom.budgets.monitor import BudgetMonitor
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.event_journal import DeliveryStage
 from mindroom.history.types import PreparedHistoryState
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import fixture_entity_matrix_id
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -65,17 +65,19 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 _SOURCE = "$event"
-_INTERMEDIATE = "Loading the tool now."
+_INTERMEDIATE = "Switching models now."
 _ANSWER = "The real answer."
 
 
-def _load_tool_execution() -> ToolExecution:
-    """Return the dynamic-tool call that forces one more attempt."""
+def _continuing_tool_execution() -> ToolExecution:
+    """Return a next-turn model switch, which forces one more attempt."""
     return ToolExecution(
-        tool_call_id="call-load",
-        tool_name="load_tool",
-        tool_args={"tool_name": "sleep"},
-        result=json.dumps({"status": "loaded", "tool": "dynamic_tools", "tool_name": "sleep"}),
+        tool_call_id="call-switch-next-turn",
+        tool_name="switch_thread_model",
+        tool_args={"model_name": "large", "when": "next-turn"},
+        result=json.dumps(
+            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
+        ),
         stop_after_tool_call=True,
     )
 
@@ -414,14 +416,14 @@ async def _run_blocking_agent_turn(tmp_path: Path, outputs: list[RunOutput]) -> 
 
 
 def _one_continuation() -> list[RunOutput]:
-    """Return a dynamic-tool attempt, then the attempt that actually answers.
+    """Return a model-switch attempt, then the attempt that actually answers.
 
     The first attempt says something of its own, so a driver that delivered it
     would produce a plausible-looking answer rather than an obvious blank --
     the failure a weaker assertion would let through.
     """
     return [
-        RunOutput(run_id="run-1", content=_INTERMEDIATE, tools=[_load_tool_execution()]),
+        RunOutput(run_id="run-1", content=_INTERMEDIATE, tools=[_continuing_tool_execution()]),
         RunOutput(run_id="run-2", content=_ANSWER),
     ]
 
@@ -433,7 +435,7 @@ class TestAgentContinuation:
         """Two attempts, one `FINAL`, and it holds what the second attempt said."""
         turn = await _run_blocking_agent_turn(tmp_path, _one_continuation())
 
-        assert turn.attempts == 2, "the dynamic-tool call did not force a second attempt"
+        assert turn.attempts == 2, "the model switch did not force a second attempt"
         assert turn.timeline.count("enqueue:final") == 1
         assert turn.timeline.count("claim:final") == 1
         assert _last_answer(await turn.final()) == _ANSWER
@@ -463,13 +465,13 @@ class TestAgentContinuation:
         an earlier attempt -- would be easiest to miss.
         """
         never_converges = [
-            RunOutput(run_id=f"run-{index}", content="", tools=[_load_tool_execution()])
-            for index in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1)
+            RunOutput(run_id=f"run-{index}", content="", tools=[_continuing_tool_execution()])
+            for index in range(TURN_CONTINUATION_LIMIT + 1)
         ]
 
         turn = await _run_blocking_agent_turn(tmp_path, never_converges)
 
-        assert turn.attempts == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
+        assert turn.attempts == TURN_CONTINUATION_LIMIT + 1
         assert turn.timeline.count("enqueue:final") == 1
         assert turn.timeline.count("claim:final") == 1
         assert turn.final_claim_follows_every_attempt
@@ -481,12 +483,12 @@ class TestStreamedAgentContinuation:
 
     @staticmethod
     def _streams(timeline: list[str]) -> MagicMock:
-        """Return an `arun` stand-in: narrate, load a tool, then answer."""
+        """Return an `arun` stand-in: narrate, switch models, then answer."""
 
         async def first() -> AsyncIterator[object]:
             timeline.append("attempt")
             yield RunContentEvent(content=_INTERMEDIATE)
-            yield ToolCallCompletedEvent(tool=_load_tool_execution())
+            yield ToolCallCompletedEvent(tool=_continuing_tool_execution())
 
         async def second() -> AsyncIterator[object]:
             timeline.append("attempt")
@@ -511,7 +513,7 @@ class TestStreamedAgentContinuation:
         with patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared(agent))):
             await turn.runner.generate_response(_plain_request(_target()))
 
-        assert turn.attempts == 2, "the dynamic-tool call did not force a second attempt"
+        assert turn.attempts == 2, "the model switch did not force a second attempt"
         assert turn.timeline.count("enqueue:final") == 1
         assert turn.timeline.count("claim:final") == 1
         assert turn.final_claim_follows_every_attempt
@@ -537,12 +539,14 @@ class TestTeamContinuation:
 
     @staticmethod
     def _team(timeline: list[str]) -> AgnoTeam:
-        """Return a team stand-in: one member dynamic-tool load, then the answer."""
+        """Return a team stand-in: one member model switch, then the answer."""
         remaining = iter(
             [
                 TeamRunOutput(
                     content=_INTERMEDIATE,
-                    member_responses=[RunOutput(agent_name="GeneralAgent", content="", tools=[_load_tool_execution()])],
+                    member_responses=[
+                        RunOutput(agent_name="GeneralAgent", content="", tools=[_continuing_tool_execution()]),
+                    ],
                 ),
                 TeamRunOutput(content=_ANSWER),
             ],
@@ -575,7 +579,7 @@ class TestTeamContinuation:
                 team_mode="coordinate",
             )
 
-        assert turn.attempts == 2, "the member dynamic-tool call did not force a second attempt"
+        assert turn.attempts == 2, "the member model switch did not force a second attempt"
         assert turn.timeline.count("enqueue:final") == 1
         assert turn.timeline.count("claim:final") == 1
         assert turn.final_claim_follows_every_attempt

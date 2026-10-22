@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno resolves tool annotations
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -27,9 +29,11 @@ from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget
+from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
+from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
@@ -97,6 +101,54 @@ async def _events(
 ) -> list[agent_tool_calls.AgentToolCallEvent]:
     binding = await catalog.bind(ToolKey(toolkit, function))
     return [event async for event in agent_tool_calls.execute_agent_tool_call(binding, "inner-id", arguments or {})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_job", [False, True])
+async def test_a_cli_call_inside_a_job_blocks_on_its_own_thread(tmp_path: Path, *, in_job: bool) -> None:
+    """A job's CLI call has no time limit, so what it offloads, like a worker request, gets its own thread."""
+    shared = ThreadPoolExecutor(thread_name_prefix="shared-pool")
+    threads: list[str] = []
+
+    def blocking() -> str:
+        threads.append(threading.current_thread().name)
+        return "done"
+
+    async def offloading() -> str:
+        return await run_async_entrypoint_blocking_call(blocking, executor=shared)
+
+    catalog = await _catalog(tmp_path, [Toolkit(name="threads", tools=[offloading])])
+    try:
+        with job_control_context(JobControl()) if in_job else nullcontext():
+            events = await _events(catalog, "threads", "offloading")
+        assert events[-1].execution.result == "done"
+        [thread] = threads
+        assert thread.startswith("mindroom-job-call" if in_job else "shared-pool")
+    finally:
+        shared.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_job", [False, True])
+async def test_a_failed_offloaded_cli_call_ends_as_that_calls_failure(tmp_path: Path, *, in_job: bool) -> None:
+    """A worker request that raises fails only its own call, so the shell command that made it keeps its output."""
+    shared = ThreadPoolExecutor(thread_name_prefix="shared-pool")
+
+    def blocking() -> str:
+        message = "runner refused the call"
+        raise RuntimeError(message)
+
+    async def offloading() -> str:
+        return await run_async_entrypoint_blocking_call(blocking, executor=shared)
+
+    catalog = await _catalog(tmp_path, [Toolkit(name="threads", tools=[offloading])])
+    try:
+        with job_control_context(JobControl()) if in_job else nullcontext():
+            events = await _events(catalog, "threads", "offloading")
+        assert events[-1].kind == "failed"
+        assert "runner refused the call" in str(events[-1].execution.result)
+    finally:
+        shared.shutdown(wait=False)
 
 
 @pytest.mark.asyncio

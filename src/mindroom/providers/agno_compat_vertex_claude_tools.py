@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from agno.utils.models.claude import format_tools_for_model
-
 # AGNO_COMPAT: Vertex Claude tool definitions contain unsupported strict fields.
 # Reason: Agno 3.0.9 emits provider-level strict fields that Vertex Claude
 # rejects, while nested JSON-schema properties named strict remain valid.
@@ -45,9 +43,3 @@ def strip_vertex_claude_tool_strict(
         sanitized.append(next_tool)
 
     return sanitized if changed else tools
-
-
-def format_tools_for_vertex_claude(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
-    """Format sanitized tools through Agno's shared Claude formatter."""
-    sanitized = strip_vertex_claude_tool_strict(tools)
-    return format_tools_for_model(sanitized) if sanitized else None

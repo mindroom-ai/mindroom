@@ -7,20 +7,18 @@ import json
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.db.sqlite import SqliteDb
 from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
+from agno.models.message import Message
 from agno.models.response import ModelResponse
 from sqlalchemy import create_engine, event
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.history.compaction import (
-    SummaryModel,
-    _generate_compaction_summary_with_retry,
-    compact_scope_history,
-)
+from mindroom.history.compaction import _summarize_chunk, compact_scope_history, scope_usage_recorder
 from mindroom.history.storage import record_summary_usage
 from mindroom.history.summary_call import _CompactionSummaryTimeoutError, generate_compaction_summary
 from mindroom.history.types import HistoryScopeState
@@ -31,12 +29,15 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
+from tests.conftest import prepare_history_for_run_for_test
 from tests.history_helpers import (
-    _ALL_HISTORY_SETTINGS,
     RecordingModel,
+    _agent,
     _completed_run,
     _forced_compaction_context,
+    _reported,
     _session,
+    _summarizer,
 )
 
 if TYPE_CHECKING:
@@ -101,13 +102,22 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
                 session=session,
                 scope=scope,
                 state=HistoryScopeState(force_compact_before_next_run=True),
-                history_settings=_ALL_HISTORY_SETTINGS,
+                summarizer=_summarizer(
+                    model,
+                    10_000,
+                    name="summary",
+                    timeout_seconds=10,
+                    scope=scope,
+                    prompt="Summarize.",
+                    on_usage=scope_usage_recorder(storage, session.session_id),
+                ),
                 available_history_budget=None,
-                summary_model=SummaryModel(model=model, name="summary", input_budget_tokens=10_000),
                 replay_window_tokens=None,
                 threshold_tokens=None,
-                summary_prompt="Summarize.",
-                summary_timeout_seconds=10,
+                before_tokens=0,
+                progress=None,
+                complete=_reported,
+                replay_model=None,
             )
             if content:
                 assert await operation is not None
@@ -185,7 +195,7 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
 async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
     """An OpenAI-compatible request has no Matrix conversation, so its summary is charged to the API requester."""
     session = _session("session", runs=[_completed_run("original")])
-    config, paths, storage, scope, _context = _forced_compaction_context(tmp_path, session=session)
+    config, paths, storage, _scope, _context = _forced_compaction_context(tmp_path, session=session)
     model = _SummaryModel(
         id="summary-model",
         provider="test-provider",
@@ -205,23 +215,23 @@ async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
         budget_monitor=None,
     )
     try:
-        with detached_requester_context(authority):
-            assert (
-                await compact_scope_history(
-                    storage=storage,
-                    session=session,
-                    scope=scope,
-                    state=HistoryScopeState(force_compact_before_next_run=True),
-                    history_settings=_ALL_HISTORY_SETTINGS,
-                    available_history_budget=None,
-                    summary_model=SummaryModel(model=model, name="summary", input_budget_tokens=10_000),
-                    replay_window_tokens=None,
-                    threshold_tokens=None,
-                    summary_prompt="Summarize.",
-                    summary_timeout_seconds=10,
-                )
-                is not None
+        # Through the production preparation path, which wires the summary's usage recorder.
+        with (
+            detached_requester_context(authority),
+            patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        ):
+            prepared = await prepare_history_for_run_for_test(
+                agent=_agent(db=storage),
+                agent_name="test_agent",
+                full_prompt="Current prompt",
+                session_id="session",
+                runtime_paths=paths,
+                config=config,
+                execution_identity=None,
+                storage=storage,
+                session=session,
             )
+        assert prepared.compaction_reply_outcome == "success"
 
         report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
         assert report.request_breakdown is not None
@@ -235,7 +245,8 @@ async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_retry_keeps_cost_of_rejected_attempt(tmp_path: Path) -> None:
     """A successful retry adds its cost without replacing the earlier paid response."""
-    run = _completed_run("original")
+    # Large enough that the retry after the empty result can send a smaller input.
+    run = _completed_run("original", messages=[Message(role="user", content="Long input. " * 30_000)])
     session = _session("session", runs=[run])
     config, paths, storage, scope, _context = _forced_compaction_context(tmp_path, session=session)
     assert isinstance(storage, SqliteDb)
@@ -254,18 +265,19 @@ async def test_retry_keeps_cost_of_rejected_attempt(tmp_path: Path) -> None:
         ],
     )
     try:
-        result = await _generate_compaction_summary_with_retry(
-            summary_model=SummaryModel(model=model, name="summary", input_budget_tokens=100_000),
-            previous_summary=None,
-            compactable_runs=[run],
-            initial_summary_input="Long input. " * 30_000,
-            initial_included_runs=[run],
-            session_id="session",
-            scope=scope,
-            history_settings=_ALL_HISTORY_SETTINGS,
-            summary_prompt="Summarize.",
-            timeout_seconds=10,
-            on_response=partial(record_summary_usage, storage=storage, session_id="session", requester_id=None),
+        result = await _summarize_chunk(
+            _summarizer(
+                model,
+                100_000,
+                name="summary",
+                timeout_seconds=10,
+                session_id="session",
+                scope=scope,
+                on_usage=partial(record_summary_usage, storage=storage, session_id="session", requester_id=None),
+                prompt="Summarize.",
+            ),
+            None,
+            [run],
         )
         assert result.summary.summary == "Complete."
         report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True)
@@ -302,18 +314,19 @@ async def test_usage_pool_timeout_cannot_issue_another_paid_summary(tmp_path: Pa
     )
     try:
         with storage.db_engine.connect(), pytest.raises(RuntimeError, match="Could not persist") as error:
-            await _generate_compaction_summary_with_retry(
-                summary_model=SummaryModel(model=model, name="summary", input_budget_tokens=100_000),
-                previous_summary=None,
-                compactable_runs=[run],
-                initial_summary_input="Long input. " * 30_000,
-                initial_included_runs=[run],
-                session_id="session",
-                scope=scope,
-                history_settings=_ALL_HISTORY_SETTINGS,
-                summary_prompt="Summarize.",
-                timeout_seconds=10,
-                on_response=partial(record_summary_usage, storage=storage, session_id="session", requester_id=None),
+            await _summarize_chunk(
+                _summarizer(
+                    model,
+                    100_000,
+                    name="summary",
+                    timeout_seconds=10,
+                    session_id="session",
+                    scope=scope,
+                    on_usage=partial(record_summary_usage, storage=storage, session_id="session", requester_id=None),
+                    prompt="Summarize.",
+                ),
+                None,
+                [run],
             )
         assert isinstance(error.value.__cause__, SqlAlchemyTimeoutError)
         assert len(model.responses) == 1
@@ -343,10 +356,10 @@ async def test_summary_waits_for_locked_usage_storage_without_provider_timeout(
         ],
     )
 
-    async def record(response: ModelResponse) -> None:
+    async def record(usage: MessageMetrics) -> None:
         recording.set()
         try:
-            await record_summary_usage(model, response, storage=storage, session_id="session", requester_id=None)
+            await record_summary_usage(model, usage, storage=storage, session_id="session", requester_id=None)
         finally:
             recorded.set()
 
@@ -358,7 +371,7 @@ async def test_summary_waits_for_locked_usage_storage_without_provider_timeout(
                 summary_input="Input.",
                 summary_prompt="Summarize.",
                 timeout_seconds=0.01,
-                on_response=record,
+                on_usage=record,
             ),
         )
         try:
@@ -409,8 +422,8 @@ async def test_late_summary_response_still_records_usage_after_timeout(tmp_path:
 
     model = _LateModel(id="summary-model", provider="test-provider")
 
-    async def record(response: ModelResponse) -> None:
-        await record_summary_usage(model, response, storage=storage, session_id="session", requester_id=None)
+    async def record(usage: MessageMetrics) -> None:
+        await record_summary_usage(model, usage, storage=storage, session_id="session", requester_id=None)
         recorded.set()
 
     try:
@@ -420,7 +433,7 @@ async def test_late_summary_response_still_records_usage_after_timeout(tmp_path:
                 summary_input="Input.",
                 summary_prompt="Summarize.",
                 timeout_seconds=0.01,
-                on_response=record,
+                on_usage=record,
             )
         await asyncio.wait_for(recorded.wait(), timeout=2)
         report = collect_admin_usage(config=config, runtime_paths=paths)
@@ -428,3 +441,25 @@ async def test_late_summary_response_still_records_usage_after_timeout(tmp_path:
         assert report.model_breakdown[0].run_count == 0
     finally:
         storage.close()
+
+
+@pytest.mark.asyncio
+async def test_summary_response_without_usage_records_nothing() -> None:
+    """A provider that reports no usage leaves the usage storage untouched, so its failures cannot fail the summary."""
+    model = _SummaryModel(
+        id="summary-model",
+        provider="test-provider",
+        responses=[ModelResponse(content="A complete summary.")],
+    )
+    on_usage = AsyncMock()
+
+    summary = await generate_compaction_summary(
+        model=model,
+        summary_input="Input.",
+        summary_prompt="Summarize.",
+        timeout_seconds=10,
+        on_usage=on_usage,
+    )
+
+    assert summary.summary == "A complete summary."
+    on_usage.assert_not_awaited()

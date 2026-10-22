@@ -92,3 +92,8 @@ class ParticipationGate:
             if self.decision is None:
                 self._settle(await decide())
             return self.approved
+
+    async def wait_for_approval(self) -> bool:
+        """Wait until the turn is decided and return whether it may become visible."""
+        await self.decided.wait()
+        return self.approved

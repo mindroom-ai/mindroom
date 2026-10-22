@@ -35,6 +35,7 @@ from mindroom.custom_tools.browser import (
     _BrowserProfileState,
     _BrowserTabState,
     _clean_str,
+    _goto,
     _persistent_launch_kwargs,
     _profile_dir,
 )
@@ -66,10 +67,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from playwright.async_api import Download as PlaywrightDownload
+    from playwright.async_api import Page
 
     from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
+# A load the relay or egress proxy refuses keeps Chromium's error and says the destination may not be allowed.
+_PROXY_FAILURE_HINTED = r"ERR_SOCKS_CONNECTION_FAILED[\s\S]*outbound access to its host or port may not be allowed"
 DESKTOP_MEDIA = EncryptedDesktopMedia(
     url="mxc://example.org/browser",
     key="key",
@@ -1259,7 +1263,7 @@ async def test_local_preview_requires_computer_binding(
             assert result["title"] == "Preview loaded"
             assert result["url"] == f"http://{host}:{port}/preview"
             assert "/app.js" in hits
-            with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+            with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
                 await tool.browser(action="open", targetUrl=f"http://{host}:{port}/private-redirect")
             assert "/private-redirect" in hits
             assert "/blocked" not in hits
@@ -1291,12 +1295,14 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(
         result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/preview"))
         assert result["title"] == "Forwarded HTTP"
         assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in requests
-        with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+        with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
             await tool.browser(action="open", targetUrl="https://9.9.9.9/denied")
+        with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
+            await tool.browser(action="navigate", targetUrl="https://9.9.9.9/denied")
         assert b"CONNECT 9.9.9.9:443 HTTP/1.1" in requests
         # Redirects the page route never sees are still refused at dial time, before any proxy.
         for redirect in ["metadata-redirect", "alias-redirect", "private-redirect"]:
-            with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+            with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
                 await tool.browser(action="open", targetUrl=f"http://localhost:{port}/{redirect}")
         assert not any(b"169.254.169.254" in request or b"localhost.localdomain" in request for request in requests)
         assert "/blocked" not in hits
@@ -1327,7 +1333,7 @@ async def test_worker_browser_plain_http_needs_egress_proxy_connect_to_port_80(
                 result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/plain"))
                 assert result["title"] == "Via egress proxy"
             else:
-                with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+                with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
                     await tool.browser(action="open", targetUrl="http://8.8.8.8/plain")
         assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in squid.requests
         refusals = [entry for entry in logs if entry["event"] == "browser_egress_proxy_refused_tunnel"]
@@ -1369,7 +1375,7 @@ async def test_hostname_allowlist_proxies_serve_worker_browsers_but_not_the_prim
                 assert result["title"] == "Via egress proxy"
                 assert b"CONNECT allowed.example:80 HTTP/1.1" in squid.requests
             else:
-                with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+                with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
                     await tool.browser(action="open", targetUrl="http://allowed.example/page")
                 assert b"CONNECT 93.184.216.34:80 HTTP/1.1" in squid.requests
         refusals = [entry for entry in logs if entry["event"] == "browser_egress_proxy_refused_tunnel"]
@@ -1382,6 +1388,16 @@ async def test_hostname_allowlist_proxies_serve_worker_browsers_but_not_the_prim
     finally:
         await tool.aclose()
         await squid.close()
+
+
+@pytest.mark.asyncio
+async def test_other_load_failures_keep_playwright_error_without_the_proxy_hint() -> None:
+    """A timeout is not a refused destination, so it stays exactly as Playwright raised it."""
+    timeout = PlaywrightError("Timeout 30000ms exceeded.")
+    page = cast("Page", SimpleNamespace(goto=AsyncMock(side_effect=timeout)))
+    with pytest.raises(PlaywrightError) as failure:
+        await _goto(page, "https://public.example/")
+    assert failure.value is timeout
 
 
 def _install_fake_persistent_playwright(
@@ -1610,7 +1626,7 @@ async def test_headless_host_browser_dials_only_validated_addresses(
     )
     tool = BrowserTools(paths)
     try:
-        with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+        with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
             await tool.browser(action="open", targetUrl=f"http://{_REBINDING_HOST}:{port}/secret")
         assert hits == []
     finally:
@@ -1885,7 +1901,7 @@ async def test_egress_proxy_cannot_rebind_a_validated_hostname_to_loopback(
     forwarder = _LocalForwardingProxy(port, frozenset({_REBINDING_HOST}))
     monkeypatch.setenv("ALL_PROXY", await forwarder.start())
     try:
-        with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+        with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
             await tool.browser(action="open", targetUrl=f"http://{_REBINDING_HOST}:{port}/secret")
         assert hits == []
         # Chromium's own background connections share the proxy; the page's tunnels name only the pinned address.

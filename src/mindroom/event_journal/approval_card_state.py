@@ -18,6 +18,7 @@ from .identity import decode_thread_id
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
 
 __all__ = [
+    "DETACHED_GENERATION",
     "TIMEOUT_REASON",
     "ApprovalCardReservation",
     "ApprovalDecisionMetadata",
@@ -31,6 +32,8 @@ __all__ = [
 ]
 
 TIMEOUT_REASON = "Tool approval request timed out."
+# A detached call's card names its run where a paused reply's names its continuation, without a generation.
+DETACHED_GENERATION = -1
 
 
 @dataclass(frozen=True, slots=True)

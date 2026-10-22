@@ -33,26 +33,36 @@ Every command also prints its options with `--help`.
 │                                 customize the installation.                            │
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ check-active-responses   Check live work; exit 0 idle, 1 busy, or 2 unavailable.       │
-│ debug-report             Collect everything the backend stored about a reported        │
-│                          conversation, as JSON.                                        │
-│ version                  Show the current version of Mindroom.                         │
-│ run                      Run the mindroom multi-agent system.                          │
-│ doctor                   Check your environment for common issues.                     │
-│ connect                  Connect this local MindRoom to your MindRoom Chat account by  │
-│                          approving a link.                                             │
-│ local-stack-setup        Start local Synapse + MindRoom Chat using Docker only.        │
-│ config                   Manage MindRoom configuration files.                          │
-│ plugins                  Validate and vendor external MindRoom plugins.                │
-│ desktop                  Connect allowlisted local apps, read-only folders, and        │
-│                          locally approved shell commands to cloud MindRoom over Matrix │
-│                          E2EE.                                                         │
-│ avatars                  Generate and sync managed avatar assets.                      │
-│ threads                  Export Matrix threads to local files.                         │
+╭─ Get started ──────────────────────────────────────────────────────────────────────────╮
+│ run                      Set up on first run, pair, and start MindRoom.                │
+│ connect                  Pair this machine with your MindRoom Chat account.            │
+│ doctor                   Check your setup for common problems.                         │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Configure ────────────────────────────────────────────────────────────────────────────╮
+│ config                   Create, edit, and validate config.yaml.                       │
+│ plugins                  Check, install, and update MindRoom plugins.                  │
+│ avatars                  Generate and sync agent, room, and space avatars.             │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Keep running ─────────────────────────────────────────────────────────────────────────╮
+│ service                  Run MindRoom in the background, starting at login.            │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Desktop ──────────────────────────────────────────────────────────────────────────────╮
+│ desktop                  Share local apps, folders, and shell commands with cloud      │
+│                          MindRoom.                                                     │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Troubleshoot ─────────────────────────────────────────────────────────────────────────╮
+│ debug-report             Collect what MindRoom stored about a reported conversation,   │
+│                          as JSON.                                                      │
+│ version                  Show the MindRoom version.                                    │
+│ threads                  Export Matrix threads to searchable files.                    │
 │ journal                  Inspect and rebind the durable event journal.                 │
-│ service                  Install and manage MindRoom as a background user service.     │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Automation ───────────────────────────────────────────────────────────────────────────╮
+│ check-active-responses   Check whether MindRoom has live work.                         │
 │ trigger                  Send signed external triggers.                                │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Development ──────────────────────────────────────────────────────────────────────────╮
+│ local-stack-setup        Start local Synapse + MindRoom Chat using Docker only.        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -85,67 +95,63 @@ On a hosted install, the dashboard becomes available after pairing is approved.
 
  Usage: root run [OPTIONS]
 
- Run the mindroom multi-agent system.
+ Set up on first run, pair, and start MindRoom.
 
- This command starts the multi-agent bot system which automatically:
- - Creates a hosted starter config on first run in a terminal, or with --provider
- - Pairs hosted installs with your MindRoom Chat account on first run
- - Offers on first run to keep running as a background service that starts at login
- (--service/--no-service)
- - Creates all necessary user and agent accounts
- - Creates all rooms defined in config.yaml
- - Manages agent room memberships
- - Starts the bundled dashboard/API server (disable with --no-api)
+ When no config exists, MindRoom creates a starter config for MindRoom Chat, asking for
+ the model provider in a terminal or taking it from --provider.
+ An install on MindRoom Chat that is not paired yet pairs this machine with your account,
+ and a first run in a terminal offers to keep running in the background at login (see
+ --service).
+ MindRoom then creates the agent accounts and rooms from config.yaml, keeps room
+ memberships in sync, and starts the dashboard and API (disable with --no-api).
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level                   -l                  TEXT     Set the logging level       │
-│                                                            (DEBUG, INFO, WARNING,      │
-│                                                            ERROR)                      │
-│                                                            [env var: LOG_LEVEL]        │
-│                                                            [default: INFO]             │
-│ --config                      -c                  PATH     Use this config file path.  │
-│                                                            Defaults the storage        │
-│                                                            location to the selected    │
-│                                                            config directory unless     │
-│                                                            --storage-path is set.      │
-│ --storage-path                -s                  PATH     Base directory for          │
-│                                                            persistent MindRoom data    │
-│                                                            (state, sessions, tracking) │
-│ --bootstrap-config-bundle                         PATH     Initialize the selected     │
-│                                                            config directory from this  │
-│                                                            bundle only when the        │
-│                                                            directory is absent.        │
-│ --bootstrap-config-bundle-r…                      TEXT     Install a changed bootstrap │
-│                                                            revision through native     │
-│                                                            validation; preserve a      │
-│                                                            matching active revision.   │
-│ --api                             --no-api                 Start the bundled           │
-│                                                            dashboard/API server        │
-│                                                            alongside the bot           │
-│                                                            [default: api]              │
-│ --api-port                                        INTEGER  Port for the bundled        │
-│                                                            dashboard/API server        │
-│                                                            [default: 8765]             │
-│ --api-host                                        TEXT     Host for the bundled        │
-│                                                            dashboard/API server        │
-│                                                            [default: 0.0.0.0]          │
-│ --provider                                        TEXT     Model provider preset for   │
-│                                                            the starter config when     │
-│                                                            none exists, with the       │
-│                                                            choices of `config init     │
-│                                                            --provider`. It also lets   │
-│                                                            setup run without a         │
-│                                                            terminal, taking the API    │
-│                                                            key from the environment.   │
-│ --service                         --no-service             After setup and pairing,    │
-│                                                            install and start MindRoom  │
-│                                                            as a login service (systemd │
-│                                                            or launchd) instead of      │
-│                                                            running it here, or never   │
-│                                                            offer to. A first run in a  │
-│                                                            terminal asks.              │
-│ --help                        -h                           Show this message and exit. │
+│ --provider                       TEXT  Model provider preset for the starter config    │
+│                                        when none exists, with the choices of `config   │
+│                                        init --provider`. It also lets setup run        │
+│                                        without a terminal, taking the API key from the │
+│                                        environment.                                    │
+│ --service        --no-service          After setup and pairing, install and start      │
+│                                        MindRoom as a login service (systemd or         │
+│                                        launchd) instead of running it here, or never   │
+│                                        offer to. A first run in a terminal asks.       │
+│ --log-level  -l                  TEXT  Set the logging level (DEBUG, INFO, WARNING,    │
+│                                        ERROR)                                          │
+│                                        [env var: LOG_LEVEL]                            │
+│                                        [default: INFO]                                 │
+│ --help       -h                        Show this message and exit.                     │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Paths ────────────────────────────────────────────────────────────────────────────────╮
+│ --config        -c      PATH  Use this config file path. Defaults the storage location │
+│                               to the selected config directory unless --storage-path   │
+│                               is set.                                                  │
+│ --storage-path  -s      PATH  Base directory for persistent MindRoom data (state,      │
+│                               sessions, tracking)                                      │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Dashboard ────────────────────────────────────────────────────────────────────────────╮
+│ --api         --no-api             Start the bundled dashboard/API server alongside    │
+│                                    the bot                                             │
+│                                    [default: api]                                      │
+│ --api-port                INTEGER  Port for the bundled dashboard/API server           │
+│                                    [default: 8765]                                     │
+│ --api-host                TEXT     Host for the bundled dashboard/API server           │
+│                                    [default: 0.0.0.0]                                  │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Deployment ───────────────────────────────────────────────────────────────────────────╮
+│ --bootstrap-config-bundle                 PATH  Initialize the selected config         │
+│                                                 directory from this bundle only when   │
+│                                                 the directory is absent.               │
+│ --bootstrap-config-bundle-revision        TEXT  Install a changed bootstrap revision   │
+│                                                 through native validation; preserve a  │
+│                                                 matching active revision.              │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+ Examples
+ mindroom run                       Set up on first run, pair, and start
+ mindroom run --provider anthropic  Skip the provider question on first run
+ mindroom run --service             Run in the background at login
+ mindroom run --no-api              Start without the dashboard
+
 
 
 ```
@@ -186,31 +192,30 @@ Create, view, edit, and validate `config.yaml`.
 
  Usage: root config [OPTIONS] COMMAND [ARGS]...
 
- Manage MindRoom configuration files.
+ Create, edit, and validate config.yaml.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+╭─ Create and edit ──────────────────────────────────────────────────────────────────────╮
 │ init              Create a starter config.yaml with a personal agent and model.        │
-│ show              Display the current config file with syntax highlighting.            │
 │ edit              Open config.yaml in your default editor.                             │
+│ use-local-model   Make a local model the default, keeping agents' explicit model       │
+│                   choices.                                                             │
+│ migrate           Migrate config.yaml to membership access settings.                   │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Inspect ──────────────────────────────────────────────────────────────────────────────╮
+│ show              Display the current config file with syntax highlighting.            │
 │ validate          Validate config.yaml and check for common issues.                    │
 │ resolve           Print the fully merged config YAML with all !include tags resolved.  │
 │ path              Show the resolved config file path and search locations.             │
-│ use-local-model   Use a local model as the default, keeping explicitly selected agent  │
-│                   models.                                                              │
-│ migrate           Migrate config.yaml to membership access settings.                   │
-│ fingerprint       Print the config source SHA-256, including all transitively included │
-│                   files.                                                               │
-│ install-bundle    Validate and install a complete tree; use check-applied to confirm   │
-│                   runtime reload.                                                      │
-│ classify-change   Classify tree differences; exit 0 YAML/include sources only, 1 other │
-│                   changes, 2 error.                                                    │
-│ apply-bundle      Hot-apply a source-only tree change; exit 0 applied, 1 pending, 2    │
-│                   failed, 3 rolled back, 4 unconfirmed, 5 restart.                     │
-│ check-applied     Confirm config application; exit 0 applied, 1 pending/mismatch, 2    │
-│                   failed/restart-required/unavailable.                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Deployment ───────────────────────────────────────────────────────────────────────────╮
+│ fingerprint       Print the SHA-256 of the config and every file it includes.          │
+│ install-bundle    Validate and install a complete config tree.                         │
+│ classify-change   Classify the differences between two config trees.                   │
+│ apply-bundle      Hot-apply a config tree change limited to YAML or include sources.   │
+│ check-applied     Confirm that the runtime applied a config.                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -331,7 +336,7 @@ It checks, in one pass:
 
  Usage: root doctor [OPTIONS]
 
- Check your environment for common issues.
+ Check your setup for common problems.
 
  Runs connectivity, configuration, and credential checks in a single pass
  so you can fix everything before running `mindroom run`.
@@ -392,7 +397,7 @@ To install later, run `mindroom service install` or `mindroom run --service`.
 
  Usage: root service [OPTIONS] COMMAND [ARGS]...
 
- Install and manage MindRoom as a background user service.
+ Run MindRoom in the background, starting at login.
 
  MindRoom runs the version installed by this command through `uv tool run` and starts
  automatically at login.
@@ -449,6 +454,12 @@ Use `--no-confirm` for non-interactive setup.
 │ --no-confirm  -y        Skip confirmation prompts.                                     │
 │ --help        -h        Show this message and exit.                                    │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+ Examples
+ mindroom service install  Install and start the service
+ mindroom service status   Check that it runs and show recent logs
+ mindroom service restart  Pick up changes to .env
+
 
 
 ```
@@ -587,7 +598,7 @@ Show the installed MindRoom version.
 
  Usage: root version [OPTIONS]
 
- Show the current version of Mindroom.
+ Show the MindRoom version.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
@@ -704,21 +715,23 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 
  Usage: root desktop [OPTIONS] COMMAND [ARGS]...
 
- Connect allowlisted local apps, read-only folders, and locally approved shell commands
- to cloud MindRoom over Matrix E2EE.
+ Share local apps, folders, and shell commands with cloud MindRoom.
+
+ Agents reach only allowlisted apps, read-only folders, and shell commands approved here,
+ over Matrix E2EE.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ app      Run the native app's private structured helper over inherited standard I/O.   │
+╭─ Set up and run ───────────────────────────────────────────────────────────────────────╮
+│ setup    Pair and save the connection shared with the macOS app.                       │
+│ access   Save the read-only folders and shell access shared with the macOS app.        │
+│ run      Run the bridge with the saved app, folder, and shell setup.                   │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Advanced ─────────────────────────────────────────────────────────────────────────────╮
+│ app      Serve the macOS app's private helper over standard input and output.          │
 │ login    Log in once, create an Olm device, and save its access token privately.       │
 │ pair     Claim one requester-agent pairing through authenticated Matrix E2EE.          │
-│ setup    Pair and save the connection shared with the macOS app.                       │
-│ access   Save read-only folders and shell requests shared with the macOS app; omitted  │
-│          options keep saved values.                                                    │
-│ run      Run the bridge with the saved app, folder, and shell setup; flags override    │
-│          this run only.                                                                │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -749,35 +762,37 @@ Use `--allow-app` to save app choices at the same time.
  Pair and save the connection shared with the macOS app.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --code                              TEXT  Short-lived code returned by !desktop     │
-│                                              setup.                                    │
-│                                              [required]                                │
-│ *  --controller-user-id                TEXT  Pinned cloud controller Matrix user.      │
-│                                              [required]                                │
-│ *  --controller-device-id              TEXT  Pinned cloud controller device.           │
-│                                              [required]                                │
-│ *  --controller-ed25519                TEXT  Pinned controller fingerprint. [required] │
-│    --allow-agent                       TEXT  Agent name from the setup message;        │
-│                                              prompts if omitted. Repeat as needed.     │
-│    --allow-app                         TEXT  Save allowed app IDs, or choose apps      │
-│                                              later in the macOS app.                   │
-│    --user-id                           TEXT  Expected Matrix user ID; required for     │
-│                                              password login and optional for SSO.      │
-│    --homeserver                        TEXT  Matrix homeserver URL; defaults to the    │
-│                                              configured MindRoom homeserver.           │
-│    --cloudflare-access                       Authenticate Matrix requests              │
-│                                              interactively with the local cloudflared  │
-│                                              CLI.                                      │
-│                                              [env var:                                 │
-│                                              MINDROOM_DESKTOP_CLOUDFLARE_ACCESS]       │
-│    --matrix-http-headers-file          PATH  Owner-only JSON file of HTTP headers      │
-│                                              added to every Matrix request.            │
-│                                              [env var:                                 │
-│                                              MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FIL… │
-│    --config                    -c      PATH  MindRoom config path used for runtime     │
-│                                              env.                                      │
-│    --storage-path              -s      PATH  Desktop bridge state directory.           │
-│    --help                      -h            Show this message and exit.               │
+│ --config        -c      PATH  MindRoom config path used for runtime env.               │
+│ --storage-path  -s      PATH  Desktop bridge state directory.                          │
+│ --help          -h            Show this message and exit.                              │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Pairing ──────────────────────────────────────────────────────────────────────────────╮
+│ *  --code                        TEXT  Short-lived code returned by !desktop setup.    │
+│                                        [required]                                      │
+│ *  --controller-user-id          TEXT  Pinned cloud controller Matrix user. [required] │
+│ *  --controller-device-id        TEXT  Pinned cloud controller device. [required]      │
+│ *  --controller-ed25519          TEXT  Pinned controller fingerprint. [required]       │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Access ───────────────────────────────────────────────────────────────────────────────╮
+│ --allow-requester        TEXT  Chat user from the setup message; defaults to the       │
+│                                logged-in account. Repeat as needed.                    │
+│ --allow-agent            TEXT  Agent name from the setup message; prompts if omitted.  │
+│                                Repeat as needed.                                       │
+│ --allow-app              TEXT  Save allowed app IDs, or choose apps later in the macOS │
+│                                app.                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Matrix connection ────────────────────────────────────────────────────────────────────╮
+│ --user-id                         TEXT  Expected Matrix user ID; required for password │
+│                                         login and optional for SSO.                    │
+│ --homeserver                      TEXT  Matrix homeserver URL; defaults to the         │
+│                                         configured MindRoom homeserver.                │
+│ --cloudflare-access                     Authenticate Matrix requests interactively     │
+│                                         with the local cloudflared CLI.                │
+│                                         [env var: MINDROOM_DESKTOP_CLOUDFLARE_ACCESS]  │
+│ --matrix-http-headers-file        PATH  Owner-only JSON file of HTTP headers added to  │
+│                                         every Matrix request.                          │
+│                                         [env var:                                      │
+│                                         MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE]     │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -805,8 +820,9 @@ Shell commands run with your full account access; see [Shell Commands](https://d
 
  Usage: root desktop access [OPTIONS]
 
- Save read-only folders and shell requests shared with the macOS app; omitted options
- keep saved values.
+ Save the read-only folders and shell access shared with the macOS app.
+
+ Options you leave out keep their saved values.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --allow-folder                     PATH  Add a folder agents may list and read, never  │
@@ -847,58 +863,41 @@ Create and privately save the dedicated local desktop Matrix device.
  Log in once, create an Olm device, and save its access token privately.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --user-id                                     TEXT                 Expected Matrix     │
-│                                                                    user ID; required   │
-│                                                                    for password login  │
-│                                                                    and optional for    │
-│                                                                    SSO.                │
-│ --homeserver                                  TEXT                 Matrix homeserver   │
-│                                                                    URL; defaults to    │
-│                                                                    the configured      │
-│                                                                    MindRoom            │
-│                                                                    homeserver.         │
-│ --login-method                                [auto|password|sso]  Matrix login        │
-│                                                                    method. Auto uses   │
-│                                                                    browser SSO when    │
-│                                                                    advertised,         │
-│                                                                    otherwise password. │
-│                                                                    [default: auto]     │
-│ --sso-idp                                     TEXT                 Matrix SSO          │
-│                                                                    identity-provider   │
-│                                                                    ID. Selects SSO     │
-│                                                                    when login method   │
-│                                                                    is auto.            │
-│ --open-browser           --no-open-browser                         Open Matrix SSO in  │
-│                                                                    the default         │
-│                                                                    browser; otherwise  │
-│                                                                    print the URL.      │
-│                                                                    [default:           │
-│                                                                    open-browser]       │
-│ --cloudflare-access                                                Authenticate Matrix │
-│                                                                    requests            │
-│                                                                    interactively with  │
-│                                                                    the local           │
-│                                                                    cloudflared CLI.    │
-│                                                                    [env var:           │
-│                                                                    MINDROOM_DESKTOP_C… │
-│ --replace                                                          Replace the saved   │
-│                                                                    session with a      │
-│                                                                    fresh Matrix        │
-│                                                                    device.             │
-│ --matrix-http-head…                           PATH                 Owner-only JSON     │
-│                                                                    file of HTTP        │
-│                                                                    headers added to    │
-│                                                                    every Matrix        │
-│                                                                    request.            │
-│                                                                    [env var:           │
-│                                                                    MINDROOM_DESKTOP_M… │
-│ --config             -c                       PATH                 MindRoom config     │
-│                                                                    path used for       │
-│                                                                    runtime env.        │
-│ --storage-path       -s                       PATH                 Desktop bridge      │
-│                                                                    state directory.    │
-│ --help               -h                                            Show this message   │
-│                                                                    and exit.           │
+│ --login-method                           [auto|password|sso]  Matrix login method.     │
+│                                                               Auto uses browser SSO    │
+│                                                               when advertised,         │
+│                                                               otherwise password.      │
+│                                                               [default: auto]          │
+│ --sso-idp                                TEXT                 Matrix SSO               │
+│                                                               identity-provider ID.    │
+│                                                               Selects SSO when login   │
+│                                                               method is auto.          │
+│ --open-browser      --no-open-browser                         Open Matrix SSO in the   │
+│                                                               default browser;         │
+│                                                               otherwise print the URL. │
+│                                                               [default: open-browser]  │
+│ --replace                                                     Replace the saved        │
+│                                                               session with a fresh     │
+│                                                               Matrix device.           │
+│ --config        -c                       PATH                 MindRoom config path     │
+│                                                               used for runtime env.    │
+│ --storage-path  -s                       PATH                 Desktop bridge state     │
+│                                                               directory.               │
+│ --help          -h                                            Show this message and    │
+│                                                               exit.                    │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Matrix connection ────────────────────────────────────────────────────────────────────╮
+│ --user-id                         TEXT  Expected Matrix user ID; required for password │
+│                                         login and optional for SSO.                    │
+│ --homeserver                      TEXT  Matrix homeserver URL; defaults to the         │
+│                                         configured MindRoom homeserver.                │
+│ --cloudflare-access                     Authenticate Matrix requests interactively     │
+│                                         with the local cloudflared CLI.                │
+│                                         [env var: MINDROOM_DESKTOP_CLOUDFLARE_ACCESS]  │
+│ --matrix-http-headers-file        PATH  Owner-only JSON file of HTTP headers added to  │
+│                                         every Matrix request.                          │
+│                                         [env var:                                      │
+│                                         MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE]     │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -930,91 +929,76 @@ Applications stay observe-only unless `--allow-control` grants a short lease, an
 
  Usage: root desktop run [OPTIONS]
 
- Run the bridge with the saved app, folder, and shell setup; flags override this run only.
+ Run the bridge with the saved app, folder, and shell setup.
+
+ Flags override the saved setup for this run only.
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────╮
-│ --controller-user-id                              TEXT                  Pinned cloud         │
-│                                                                         controller Matrix    │
-│                                                                         user.                │
-│ --controller-device-…                             TEXT                  Pinned cloud         │
-│                                                                         controller device.   │
-│ --controller-ed25519                              TEXT                  Pinned controller    │
-│                                                                         fingerprint.         │
-│ --allow-requester                                 TEXT                  Human Matrix         │
-│                                                                         requester allowed to │
-│                                                                         operate this         │
-│                                                                         desktop; repeat as   │
-│                                                                         needed.              │
-│ --allow-agent                                     TEXT                  MindRoom agent name  │
-│                                                                         allowed to operate   │
-│                                                                         this desktop; repeat │
-│                                                                         as needed.           │
-│ --allow-app                                       TEXT                  Exact local          │
-│                                                                         application ID       │
-│                                                                         exposed to the       │
-│                                                                         agent; repeat as     │
-│                                                                         needed.              │
-│ --allow-control                                                         Enable semantic and  │
-│                                                                         fallback app input   │
-│                                                                         for a short local    │
-│                                                                         lease. Default: apps │
-│                                                                         are observe-only.    │
-│ --lease-minutes                                   INTEGER RANGE         Local control lease  │
-│                                                   [1<=x<=60]            duration.            │
-│                                                                         [default: 15]        │
-│ --shell-auto-approve…                             INTEGER RANGE         Approve shell        │
-│                                                   [1<=x<=60]            commands from every  │
-│                                                                         allowed requester    │
-│                                                                         and agent            │
-│                                                                         automatically for    │
-│                                                                         this many minutes of │
-│                                                                         this run; never      │
-│                                                                         saved.               │
-│ --max-screenshot-wid…                             INTEGER RANGE                              │
-│                                                   [320<=x<=3840]                             │
-│ --jpeg-quality                                    INTEGER RANGE                              │
-│                                                   [40<=x<=95]                                │
-│ --browser-extension        --no-browser-exten…                          Expose Playwright    │
-│                                                                         MCP control of an    │
-│                                                                         existing browser     │
-│                                                                         profile when its     │
-│                                                                         extension is         │
-│                                                                         installed.           │
-│ --browser-executable                              PATH                  Chrome-family        │
-│                                                                         executable to open   │
-│                                                                         the Playwright       │
-│                                                                         extension connection │
-│                                                                         page, including      │
-│                                                                         Brave.               │
-│ --browser-user-data-…                             PATH                  Existing browser     │
-│                                                                         user-data root       │
-│                                                                         containing the       │
-│                                                                         profile where the    │
-│                                                                         extension is         │
-│                                                                         installed.           │
-│ --browser-timeout-se…                             INTEGER RANGE         Local Playwright MCP │
-│                                                   [1<=x<=120]           call timeout.        │
-│ --log-level            -l                         TEXT                  [default: INFO]      │
-│ --cloudflare-access                                                     Authenticate Matrix  │
-│                                                                         requests             │
-│                                                                         interactively with   │
-│                                                                         the local            │
-│                                                                         cloudflared CLI.     │
-│                                                                         [env var:            │
-│                                                                         MINDROOM_DESKTOP_CL… │
-│ --matrix-http-header…                             PATH                  Owner-only JSON file │
-│                                                                         of HTTP headers      │
-│                                                                         added to every       │
-│                                                                         Matrix request.      │
-│                                                                         [env var:            │
-│                                                                         MINDROOM_DESKTOP_MA… │
-│ --config               -c                         PATH                  MindRoom config path │
-│                                                                         used for runtime     │
-│                                                                         env.                 │
-│ --storage-path         -s                         PATH                  Desktop bridge state │
-│                                                                         directory.           │
-│ --help                 -h                                               Show this message    │
-│                                                                         and exit.            │
+│ --log-level     -l      TEXT  Set the logging level (DEBUG, INFO, WARNING, ERROR)            │
+│                               [default: INFO]                                                │
+│ --config        -c      PATH  MindRoom config path used for runtime env.                     │
+│ --storage-path  -s      PATH  Desktop bridge state directory.                                │
+│ --help          -h            Show this message and exit.                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Access ─────────────────────────────────────────────────────────────────────────────────────╮
+│ --allow-requester                   TEXT                      Human Matrix requester allowed │
+│                                                               to operate this desktop;       │
+│                                                               repeat as needed.              │
+│ --allow-agent                       TEXT                      MindRoom agent name allowed to │
+│                                                               operate this desktop; repeat   │
+│                                                               as needed.                     │
+│ --allow-app                         TEXT                      Exact local application ID     │
+│                                                               exposed to the agent; repeat   │
+│                                                               as needed.                     │
+│ --allow-control                                               Enable semantic and fallback   │
+│                                                               app input for a short local    │
+│                                                               lease. Default: apps are       │
+│                                                               observe-only.                  │
+│ --lease-minutes                     INTEGER RANGE [1<=x<=60]  Local control lease duration.  │
+│                                                               [default: 15]                  │
+│ --shell-auto-approve-minutes        INTEGER RANGE [1<=x<=60]  Approve shell commands from    │
+│                                                               every allowed requester and    │
+│                                                               agent automatically for this   │
+│                                                               many minutes of this run;      │
+│                                                               never saved.                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Screenshots ────────────────────────────────────────────────────────────────────────────────╮
+│ --max-screenshot-width        INTEGER RANGE [320<=x<=3840]  Widest screenshot sent to        │
+│                                                             agents, in pixels; defaults to   │
+│                                                             the saved setup (1568 unless     │
+│                                                             changed).                        │
+│ --jpeg-quality                INTEGER RANGE [40<=x<=95]     JPEG quality of screenshots sent │
+│                                                             to agents; defaults to the saved │
+│                                                             setup (80 unless changed).       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Browser ────────────────────────────────────────────────────────────────────────────────────╮
+│ --browser-extension    --no-browser-extension      Expose Playwright MCP control of an       │
+│                                                    existing browser profile when its         │
+│                                                    extension is installed.                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Browser extension ──────────────────────────────────────────────────────────────────────────╮
+│ --browser-executable             PATH                       Chrome-family executable to open │
+│                                                             the Playwright extension         │
+│                                                             connection page, including       │
+│                                                             Brave.                           │
+│ --browser-user-data-dir          PATH                       Existing browser user-data root  │
+│                                                             containing the profile where the │
+│                                                             extension is installed.          │
+│ --browser-timeout-seconds        INTEGER RANGE [1<=x<=120]  Local Playwright MCP call        │
+│                                                             timeout.                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Controller ─────────────────────────────────────────────────────────────────────────────────╮
+│ --controller-user-id          TEXT  Pinned cloud controller Matrix user.                     │
+│ --controller-device-id        TEXT  Pinned cloud controller device.                          │
+│ --controller-ed25519          TEXT  Pinned controller fingerprint.                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Matrix connection ──────────────────────────────────────────────────────────────────────────╮
+│ --cloudflare-access                     Authenticate Matrix requests interactively with the  │
+│                                         local cloudflared CLI.                               │
+│                                         [env var: MINDROOM_DESKTOP_CLOUDFLARE_ACCESS]        │
+│ --matrix-http-headers-file        PATH  Owner-only JSON file of HTTP headers added to every  │
+│                                         Matrix request.                                      │
+│                                         [env var: MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE] │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1041,15 +1025,14 @@ Generate and sync managed avatars; see [Managed Avatars](https://docs.mindroom.c
 
  Usage: root avatars [OPTIONS] COMMAND [ARGS]...
 
- Generate and sync managed avatar assets.
+ Generate and sync agent, room, and space avatars.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ generate   Generate missing managed avatar files in the workspace.                     │
-│ sync       Sync configured room and root-space avatars to Matrix using the initialized │
-│            router account.                                                             │
+│ sync       Sync room and root-space avatars to Matrix.                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1109,8 +1092,9 @@ Existing Matrix avatars are kept unless you pass `--force`.
 
  Usage: root avatars sync [OPTIONS]
 
- Sync configured room and root-space avatars to Matrix using the initialized router
- account.
+ Sync room and root-space avatars to Matrix.
+
+ Uses the router account that `mindroom run` initialized.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --force            Replace existing Matrix room and root-space avatars.                │
@@ -1141,14 +1125,13 @@ Export Matrix threads to local YAML files.
 
  Usage: root threads [OPTIONS] COMMAND [ARGS]...
 
- Export Matrix threads to local files.
+ Export Matrix threads to searchable files.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ export   Export Matrix threads through a running MindRoom instance to searchable YAML  │
-│          files.                                                                        │
+│ export   Export Matrix threads from a running MindRoom to searchable YAML files.       │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1175,24 +1158,20 @@ See [threads export](https://docs.mindroom.chat/thread-exports/#threads-export) 
 
  Usage: root threads export [OPTIONS]
 
- Export Matrix threads through a running MindRoom instance to searchable YAML files.
+ Export Matrix threads from a running MindRoom to searchable YAML files.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --url                                         TEXT     Running MindRoom URL; defaults  │
-│                                                        to MINDROOM_URL or              │
-│                                                        localhost:8765.                 │
-│ --config            -c                        PATH     Use this config file path.      │
-│ --storage-path      -s                        PATH     Base directory for persistent   │
-│                                                        MindRoom data.                  │
-│ --output            -o                        PATH     Output directory. Defaults to   │
-│                                                        <storage>/thread_exports.       │
+│ --url                   TEXT  Running MindRoom URL; defaults to MINDROOM_URL or        │
+│                               localhost:8765.                                          │
+│ --config        -c      PATH  Use this config file path.                               │
+│ --storage-path  -s      PATH  Base directory for persistent MindRoom data.             │
+│ --output        -o      PATH  Output directory. Defaults to <storage>/thread_exports.  │
+│ --help          -h            Show this message and exit.                              │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Filter ───────────────────────────────────────────────────────────────────────────────╮
 │ --room              -r                        TEXT     Filter exported rooms by a      │
 │                                                        substring of the room key,      │
 │                                                        alias, name, or Matrix room ID. │
-│ --watch                                                Repeat the export forever on a  │
-│                                                        fixed interval.                 │
-│ --interval                                    INTEGER  Watch interval in seconds.      │
-│                                                        [default: 300]                  │
 │ --max-thread-roots                            INTEGER  Maximum thread roots to         │
 │                                                        enumerate per room.             │
 │                                                        [default: 2000]                 │
@@ -1200,8 +1179,17 @@ See [threads export](https://docs.mindroom.chat/thread-exports/#threads-export) 
 │                                                        authorized invites              │
 │                                                        (user-created rooms).           │
 │                                                        [default: invited-rooms]        │
-│ --help              -h                                 Show this message and exit.     │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Watch ────────────────────────────────────────────────────────────────────────────────╮
+│ --watch                    Repeat the export forever on a fixed interval.              │
+│ --interval        INTEGER  Watch interval in seconds. [default: 300]                   │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+ Examples
+ mindroom threads export                         Export every room once
+ mindroom threads export --room lobby            Only rooms matching lobby
+ mindroom threads export --watch --interval 600  Export again every 10 minutes
+
 
 
 ```
@@ -1325,7 +1313,7 @@ The command never writes the config and reads only its `event_journal` and `debu
 
  Usage: root debug-report [OPTIONS] [REPORT]
 
- Collect everything the backend stored about a reported conversation, as JSON.
+ Collect what MindRoom stored about a reported conversation, as JSON.
 
 ╭─ Arguments ────────────────────────────────────────────────────────────────────────────╮
 │   report      [REPORT]  MindRoom Chat bug report JSON, as attached to a Report a bug   │
@@ -1444,26 +1432,27 @@ Send one signed trigger request to MindRoom.
 │ *    trigger_id      TEXT  Configured external trigger id. [required]                  │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --key-file                           FILE   Base64 raw Ed25519 private key file.    │
-│                                                [required]                              │
-│ *  --kind                               TEXT   Trigger payload kind. [required]        │
-│ *  --message                            TEXT   Trigger payload message. [required]     │
-│    --event-id                           TEXT   Optional idempotency event id.          │
-│    --title                              TEXT   Optional trigger title.                 │
-│    --thread-key                         TEXT   Optional key; deliveries sharing it     │
-│                                                land in one Matrix thread on new_thread │
-│                                                triggers.                               │
-│    --data-json                          TEXT   Optional JSON object for trigger data.  │
-│    --timeout                            FLOAT  HTTP request timeout in seconds.        │
-│                                                [default: 10.0]                         │
-│    --verify-tls      --no-verify-tls           Verify TLS certificates.                │
-│                                                [default: verify-tls]                   │
-│    --url                                TEXT   MindRoom base URL.                      │
-│                                                [env var: MINDROOM_URL]                 │
-│                                                [default: http://127.0.0.1:8765]        │
-│    --key-id                             TEXT   Trigger signing key id.                 │
-│                                                [default: default]                      │
-│    --help        -h                            Show this message and exit.             │
+│ *  --key-file          FILE  Base64 raw Ed25519 private key file. [required]           │
+│    --key-id            TEXT  Trigger signing key id. [default: default]                │
+│    --help      -h            Show this message and exit.                               │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Payload ──────────────────────────────────────────────────────────────────────────────╮
+│ *  --kind              TEXT  Trigger payload kind. [required]                          │
+│ *  --message           TEXT  Trigger payload message. [required]                       │
+│    --event-id          TEXT  Optional idempotency event id.                            │
+│    --title             TEXT  Optional trigger title.                                   │
+│    --thread-key        TEXT  Optional key; deliveries sharing it land in one Matrix    │
+│                              thread on new_thread triggers.                            │
+│    --data-json         TEXT  Optional JSON object for trigger data.                    │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Connection ───────────────────────────────────────────────────────────────────────────╮
+│ --timeout                          FLOAT  HTTP request timeout in seconds.             │
+│                                           [default: 10.0]                              │
+│ --verify-tls    --no-verify-tls           Verify TLS certificates.                     │
+│                                           [default: verify-tls]                        │
+│ --url                              TEXT   MindRoom base URL.                           │
+│                                           [env var: MINDROOM_URL]                      │
+│                                           [default: http://127.0.0.1:8765]             │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

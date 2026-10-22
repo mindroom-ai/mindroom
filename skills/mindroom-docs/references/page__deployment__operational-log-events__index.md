@@ -88,6 +88,10 @@ Compare the frequency of `event_loop_gc_collection` records, which report garbag
 Repeated `large_streaming_edit_preview_prepared` records with a growing `original_size_bytes` in one room point at one long streaming response.
 Setting `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` to `0` or a negative value disables stall detection and this summary.
 
+Once agents are ready, and then every `MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS` (default `3600`, `0` disables, any other value below `60` fails startup), MindRoom collects garbage once and excludes the surviving objects from later collections, logging `runtime_heap_refrozen`.
+This keeps routine collections short on large processes at the cost of one full collection per interval.
+Memory held by objects that become garbage while frozen, such as agents a config reload replaced, is reclaimed only at the next refreeze, so resident memory can stay higher for up to one interval.
+
 ### `matrix_sync_stall_diagnostics`
 
 Logged when one agent, team, or router goes 90 seconds without Matrix sync progress, and repeated at most every 90 seconds while the stall lasts.
@@ -148,7 +152,7 @@ debug:
 - `llm_request_log_dir` (string, default `null`, meaning `<storage>/logs/llm_requests`): directory for the request logs.
 
 Request logs include prompts, messages, the tools sent to the provider, model parameters, and requester and source Matrix event metadata.
-Credentials such as tokens, cookies, passwords, API keys, and authorization headers are redacted, but these files can still contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
+Credentials such as tokens, cookies, passwords, API keys, authorization headers, and PEM private keys are redacted, but these files can still contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
 
 Export `MINDROOM_TIMING=1` before startup to log timing for tool calls and one INFO-level `Dispatch pipeline timing` summary per turn, including `time_to_model_request_ms` and context, queue, payload, agent-build, and model spans.
 
@@ -162,6 +166,6 @@ To find what grows the primary process's memory, set `MINDROOM_HEAP_PROBE_INTERV
 MindRoom then logs one `heap_type_probe` event per interval with the 25 most common object types and their counts, resident memory (`rss_bytes`), allocator totals (`arena_bytes`, `arena_in_use_bytes`, `arena_free_bytes`, `mmap_bytes`), and `python_allocated_blocks`.
 Resident memory that grows while `arena_in_use_bytes` plus `mmap_bytes` and `python_allocated_blocks` stay flat suggests freed memory the allocator keeps.
 Growth in those suggests live objects, which the type histogram may not show because it does not count strings, bytes, or numbers.
-The histogram leaves out the objects that exist before agents start and reports only their count as `frozen_objects`, so it shows what the running agents created.
+The histogram leaves out frozen objects and reports only their count as `frozen_objects`, so it shows what the runtime created since the last heap refreeze; set `MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS=0` to see growth over the whole process lifetime.
 Each probe briefly pauses the event loop, so prefer intervals of several minutes on large processes.
 Unset or `0` disables the probe (the default), and any other value below `60` fails startup.

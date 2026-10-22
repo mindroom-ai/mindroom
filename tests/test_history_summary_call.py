@@ -410,7 +410,6 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
     assert persisted.summary is None
     assert len(persisted.runs) == 4
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_outcomes == []
     assert prepared.compaction_reply_outcome == "timeout"
     events = [entry["event"] for entry in logs]
     assert "Compaction failed; continuing without compaction" in events
@@ -561,7 +560,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     assert AI_RUN_METADATA_KEY not in summary_input
     assert MINDROOM_COMPACTION_METADATA_KEY not in summary_input
     assert MINDROOM_MATRIX_HISTORY_METADATA_KEY not in summary_input
-    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY in summary_input
+    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY not in summary_input
     assert "$request" in summary_input
     assert "2026-07-17T20:00:00Z" in summary_input
     assert "durable_outcome" in summary_input
@@ -651,6 +650,32 @@ def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> N
     ]
 
 
+def test_build_summary_input_skips_replayed_history_copies() -> None:
+    """A run that stored the history its request replayed is summarized from its own turn only."""
+    run = _completed_run(
+        "run-2",
+        messages=[
+            Message(role="user", content="earlier question", from_history=True),
+            Message(role="assistant", content="earlier answer", from_history=True),
+            Message(role="tool", content="earlier tool output", from_history=True),
+            Message(role="user", content="current question"),
+            Message(role="assistant", content="current answer"),
+        ],
+    )
+
+    summary_input, included_runs = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        max_input_tokens=1_000,
+    )
+
+    assert included_runs == [run]
+    assert "earlier" not in summary_input
+    assert "current question" in summary_input
+    assert "current answer" in summary_input
+
+
 def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
     run = _completed_run(
         "run-1",
@@ -726,3 +751,88 @@ def test_owned_timeout_classification_does_not_depend_on_message_text() -> None:
     error = _CompactionSummaryTimeoutError("deadline expired")
     assert SummaryRetryPolicy().should_shrink(error)
     assert _compaction_failure_status(error) == "timeout"
+
+
+def test_build_summary_input_oversized_run_keeps_the_call_its_result_answers() -> None:
+    """A tool result cut short still names the call and arguments that produced it."""
+    run = _completed_run(
+        "run-big-result",
+        messages=[
+            Message(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path": "big_a.py"}'},
+                    },
+                ],
+            ),
+            Message(role="tool", tool_call_id="c1", content="x" * 4_000),
+        ],
+    )
+
+    summary_input, included_runs = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=300,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert [included_run.run_id for included_run in included_runs] == ["run-big-result"]
+    assert "Run truncated to fit compaction budget." in summary_input
+    assert "big_a.py" in summary_input
+    # A mid-turn fold summarizes a result apart from its call message; its own arguments still name the file.
+    result_only = _completed_run(
+        "run-big-lone-result",
+        messages=[
+            Message(role="tool", tool_name="read_file", tool_args={"path": "big_b.py"}, content="y" * 4_000),
+        ],
+    )
+
+    summary_input, _included = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[result_only],
+        max_input_tokens=300,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert "Run truncated to fit compaction budget." in summary_input
+    assert "big_b.py" in summary_input
+
+
+def test_each_tool_result_names_its_own_call_in_the_summary_input() -> None:
+    """Results read correctly apart from their call message, even without call ids or in a different order."""
+    run = _completed_run(
+        "run-batch",
+        messages=[
+            Message(
+                role="assistant",
+                tool_calls=[
+                    {"type": "function", "function": {"name": "write_file", "arguments": '{"path": "a.txt"}'}},
+                    {"type": "function", "function": {"name": "missing_tool", "arguments": '{"path": "b.txt"}'}},
+                ],
+            ),
+            # Agno appends the error for an unavailable tool before the results of the calls it runs.
+            Message(role="tool", tool_name="missing_tool", content="Error: The requested tool does not exist."),
+            Message(
+                role="tool",
+                tool_name="write_file",
+                tool_args={"content": "x" * 2_000, "path": "a.txt"},
+                content="Wrote a.txt",
+            ),
+        ],
+    )
+
+    summary_input, _included = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=100_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert '<message role="tool" tool_name="missing_tool">\nError: The requested tool does not exist.' in summary_input
+    write_result = summary_input.index('<message role="tool" tool_name="write_file">\nWrote a.txt')
+    args = summary_input[summary_input.rindex("<tool_args>", 0, write_result) : write_result]
+    assert "a.txt" in args
+    assert "x" * 300 not in args

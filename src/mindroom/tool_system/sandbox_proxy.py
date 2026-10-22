@@ -11,7 +11,6 @@ import inspect
 import json
 import os
 import secrets
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -22,8 +21,11 @@ import httpx
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
+from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
+from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -75,8 +77,6 @@ INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
 _SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
 _SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
 _UNSAFE_LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
-# Process-lifetime pool: threads start lazily and ThreadPoolExecutor joins them at interpreter shutdown.
-_WORKER_PROXY_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="mindroom-worker-proxy")
 
 
 class _AttachmentSavePayloadFields(TypedDict):
@@ -313,11 +313,14 @@ def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
 def _worker_proxy_client_config(
     proxy_config: _SandboxProxyConfig,
     runtime_paths: RuntimePaths,
+    *,
+    request_budget_seconds: float = 0.0,
 ) -> WorkerProxyClientConfig:
     return WorkerProxyClientConfig(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
-        proxy_timeout_seconds=proxy_config.proxy_timeout_seconds,
+        # A call the runner lets run longer than the proxy timeout keeps the primary waiting for its answer.
+        proxy_timeout_seconds=max(proxy_config.proxy_timeout_seconds, request_budget_seconds),
         credential_lease_ttl_seconds=proxy_config.credential_lease_ttl_seconds,
         credential_policy=proxy_config.credential_policy,
         lease_tool_credentials=primary_worker_backend_name(runtime_paths) == "static_runner",
@@ -347,8 +350,7 @@ def _build_worker_routing_payload(
                 payload["execution_identity"] = to_json_compatible(asdict(execution_identity))
             return payload, None
 
-        effective_agent_name = routing_agent_name
-        if effective_agent_name is None:
+        if worker_target is None or routing_agent_name is None:
             msg = (
                 f"Unscoped worker-routed tool '{tool_name}.{function_name}' requires an agent name "
                 "when using a dedicated worker backend."
@@ -356,10 +358,9 @@ def _build_worker_routing_payload(
             raise RuntimeError(msg)
 
         worker_key = resolve_unscoped_worker_key(
-            agent_name=effective_agent_name,
-            execution_identity=execution_identity,
-            tenant_id=worker_target.tenant_id if worker_target is not None else None,
-            account_id=worker_target.account_id if worker_target is not None else None,
+            agent_name=routing_agent_name,
+            tenant_id=worker_target.tenant_id,
+            account_id=worker_target.account_id,
         )
         worker_handle = resolved_worker_manager.ensure_worker(
             WorkerSpec(worker_key),
@@ -367,7 +368,7 @@ def _build_worker_routing_payload(
         )
         return (
             {
-                "routing_agent_name": effective_agent_name,
+                "routing_agent_name": routing_agent_name,
                 "worker_key": worker_key,
             },
             worker_handle,
@@ -377,7 +378,6 @@ def _build_worker_routing_payload(
         msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
         raise RuntimeError(msg)
 
-    effective_agent_name = routing_agent_name
     if worker_scope == "user_agent":
         worker_key, resolved_private_agent_names = _resolve_user_agent_worker_payload(
             tool_name=tool_name,
@@ -400,7 +400,7 @@ def _build_worker_routing_payload(
     return (
         {
             "worker_scope": worker_scope,
-            "routing_agent_name": effective_agent_name,
+            "routing_agent_name": routing_agent_name,
             "worker_key": worker_key,
             "execution_identity": to_json_compatible(asdict(execution_identity)),
             "private_agent_names": (
@@ -987,6 +987,29 @@ def _call_proxy_sync(
         if tool_name == "shell" and (cli_env := current_agent_cli_shell_env()) is not None:
             # A minimal response's grant travels with each command to the agent's own worker.
             execution_env = {**(execution_env or {}), **cli_env.env()}
+        runtime_config = manager_context.runtime_config
+        agent_name = worker_target.routing_agent_name if worker_target is not None else None
+        # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.
+        if (
+            tool_name in EXECUTION_ENV_TOOL_NAMES
+            and egress_broker_enabled(runtime_paths)
+            and runtime_config is not None
+            and agent_name is not None
+            and egress_agent_scope(runtime_config, agent_name) is not None
+        ):
+            # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
+            from mindroom.egress_broker.service import execution_env_for_worker  # noqa: PLC0415
+
+            execution_env = {
+                **(execution_env or {}),
+                **execution_env_for_worker(
+                    runtime_paths,
+                    config=runtime_config,
+                    worker_target=worker_target,
+                    routed_worker_key=worker_payload.get("worker_key"),
+                    call_env=execution_env,
+                ),
+            }
         if execution_env:
             payload["execution_env"] = execution_env
         if extra_env_passthrough is not None:
@@ -1002,7 +1025,11 @@ def _call_proxy_sync(
         if portable_tool_init_overrides:
             payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
         result = execute_worker_proxy_request(
-            config=_worker_proxy_client_config(proxy_config, runtime_paths),
+            config=_worker_proxy_client_config(
+                proxy_config,
+                runtime_paths,
+                request_budget_seconds=shell_request_budget_seconds(tool_name, function_name, wire_kwargs),
+            ),
             payload=payload,
             credentials_manager=credentials_manager,
             tool_name=tool_name,
@@ -1040,7 +1067,7 @@ async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
     # Deferred: the tool hook bridge loads Agno, which the slim tool registry must not import.
     from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call  # noqa: PLC0415
 
-    return await run_async_entrypoint_blocking_call(call, executor=_WORKER_PROXY_EXECUTOR)
+    return await run_async_entrypoint_blocking_call(call, executor=WORKER_PROXY_CALL_EXECUTOR)
 
 
 def _wrap_sync_function(

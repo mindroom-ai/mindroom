@@ -29,9 +29,9 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
 </div>
 
 <div class="mr-video">
-<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%" poster="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" data-poster-light="https://github.com/user-attachments/assets/6f59f173-dab8-4af7-8c0a-55747a9d8d5b" data-poster-dark="https://github.com/user-attachments/assets/e126d12b-5609-4c97-b69f-e2f9289a0008">
-  <source src="https://github.com/user-attachments/assets/6ec88440-9b9a-4319-b4e9-88d452819bb6" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/af51cf1e-840a-415e-ae97-df453d2afdda" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%" poster="https://github.com/user-attachments/assets/578109b5-9129-412b-b5ab-8bdb10da2e22" data-poster-light="https://github.com/user-attachments/assets/578109b5-9129-412b-b5ab-8bdb10da2e22" data-poster-dark="https://github.com/user-attachments/assets/e1ff7e10-bf9a-46a8-bf18-6f142130246a">
+  <source src="https://github.com/user-attachments/assets/9c68a218-da26-47a5-a46f-7f0d4a2607fb" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/dfeece3b-ff67-4412-83fb-b02b6c531814" type="video/mp4">
 </video>
 </div>
 
@@ -85,6 +85,7 @@ You can run all of it yourself: the chat app, the server, and the AI backend.
     Agents keep what is worth remembering from every conversation without being asked, and look it up again when it becomes relevant ([Memory](memory.md)).
     A shared agent gets better as more people use it: what it learns while helping one person helps the next.
     With skill learning on, an agent also turns work it repeats into reusable skills, following the self-improvement loop of Hermes Agent ([Automatic Skill Learning](skills.md#automatic-skill-learning)).
+    With a knowledge graph on, it builds a map of the people, projects, and documents its conversations and tools reveal, with when each fact held and where it came from, and can explore its sources on a schedule to fill it in ([Knowledge Graph](knowledge-graph.md)).
     You can teach it directly too: tell it a preference or a correction, and it is remembered.
 
 -   ### :lucide-calendar-clock:{ .lg } They work while you don't

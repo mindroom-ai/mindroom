@@ -190,6 +190,21 @@ def event_ids_of_spans(
     return frozenset(str(row["event_id"]) for row in rows)
 
 
+def open_event_id(transaction: Transaction, principal_id: str, room_id: str, thread_id: str | None) -> str | None:
+    """Return the bound event of the newest unfinished reply in one conversation."""
+    row = transaction.fetchone(
+        """
+        SELECT event_id FROM reply_messages
+        WHERE principal_id = ? AND room_id = ? AND thread_id IS NOT DISTINCT FROM ?
+          AND event_id IS NOT NULL AND state IN (?, ?)
+        ORDER BY created_at_ns DESC, reply_id DESC
+        LIMIT 1
+        """,
+        (principal_id, room_id, thread_id, ReplyState.ACTIVE.value, ReplyState.PAUSED.value),
+    )
+    return None if row is None else str(row["event_id"])
+
+
 def depart_room(transaction: Transaction, principal_id: str, room_id: str, *, now_ns: int) -> None:
     """End the room's replies as its membership ends, without touching Matrix.
 

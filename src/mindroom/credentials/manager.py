@@ -35,6 +35,7 @@ from mindroom.path_confinement import open_directory_within_root, open_regular_f
 from mindroom.tool_system.worker_routing import (
     WORKER_CREDENTIALS_DIRNAME,
     WORKER_SHARED_CREDENTIALS_DIRNAME,
+    worker_log_id,
     worker_root_path,
 )
 
@@ -1020,7 +1021,7 @@ def sync_shared_credentials_to_worker(
     copied_services: set[str] = set()
     logger.debug(
         "Starting worker shared credential sync",
-        worker_key=worker_key,
+        worker=worker_log_id(worker_key),
         allowed_services=sorted(allowed_services),
     )
 
@@ -1040,7 +1041,7 @@ def sync_shared_credentials_to_worker(
                 if service not in allowed_services:
                     logger.debug(
                         "Skipping non-grantable shared credentials during worker sync",
-                        worker_key=worker_key,
+                        worker=worker_log_id(worker_key),
                         service=service,
                     )
                 continue

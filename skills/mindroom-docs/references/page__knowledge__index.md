@@ -74,7 +74,8 @@ knowledge_bases:
 | `description` | string | `""` | What the base contains; shown to agents in the `search_knowledge_base` tool description and in files-mode instructions so they know when to use it |
 | `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to workspace-aware agents |
 | `path` | string | `./knowledge_docs` | Folder path, relative to the config file directory or absolute |
-| `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex; dashboard/API uploads and deletes still trigger a refresh |
+| `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex unless `poll_interval_seconds` is set; dashboard/API uploads and deletes still trigger a refresh |
+| `poll_interval_seconds` | int | `null` | Schedule a background refresh of the local folder this often (minimum `5`), for folders that another host writes to; see [Folders Written by Another Host](#folders-written-by-another-host). Unset means no polling. Semantic mode only, so `mode: files` bases reject it. Git-backed bases use `git.poll_interval_seconds` instead, and setting both is rejected |
 | `require_content_before_publish` | bool | `false` | Keep a new semantic index in the initializing state until at least one source file exists, instead of publishing an empty index |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
@@ -104,6 +105,24 @@ Temporary embedding failures (timeouts, connection errors, HTTP 408, 429, and 5x
 Knowledge base configuration hot-reloads.
 After a `chunk_size` or `chunk_overlap` change, agents keep searching the previous index until the rebuild succeeds.
 After a change to `path`, `mode`, the embedder, the Git source, or any file filter, the base is not searchable until its new index is built.
+
+### Folders Written by Another Host
+
+Writes from another host, such as a job writing to an NFS share, produce no filesystem events.
+With `watch: true`, MindRoom notices them only when an agent searches the base, at most every five minutes, and that search still uses the previous index.
+With `watch: false`, MindRoom never notices them.
+Set `poll_interval_seconds` on the base to refresh on a timer instead.
+
+```yaml
+knowledge_bases:
+  synced_docs:
+    path: /mnt/shared/synced_docs
+    poll_interval_seconds: 300
+```
+
+The first poll runs one interval after startup and after each config reload.
+Each poll reads every file to detect changes, so choose an interval suited to the folder size.
+Polling works with `watch` on or off, and private agent knowledge is not polled.
 
 ### Indexing Performance
 
@@ -424,6 +443,9 @@ Semantic knowledge and file-memory indexes support the `openai`, `ollama`, and `
 | `openai` | `text-embedding-3-small` | Also works with keyless OpenAI-compatible local endpoints |
 | `ollama` | `nomic-embed-text` | Self-hosted; set `host` or `OLLAMA_HOST` |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Runs locally in MindRoom; the optional extra installs on first use |
+
+For multilingual text and code, use `google/embeddinggemma-2` with `sentence_transformers`; its first use downloads about 1.4 GB.
+MindRoom applies the query and document prompts that a `sentence_transformers` model defines, so knowledge and file-memory searches need no manual task prefixes.
 
 See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder fields, API key resolution, and how embedder failures are reported.
 

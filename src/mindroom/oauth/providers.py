@@ -32,6 +32,7 @@ from mindroom.credentials.policy import (
     is_oauth_token_service,
 )
 from mindroom.logging_config import get_logger
+from mindroom.origins import local_api_origin
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 # Silences the OAuth clients, which are imported where a client is built because they pull in requests and joserfc.
@@ -330,6 +331,7 @@ _OAuthTokenExchanger = Callable[
     OAuthTokenResult | Awaitable[OAuthTokenResult],
 ]
 _OAuthClaimValidator = Callable[[_OAuthClaimValidationContext], None]
+_OAuthAccountClaimsReader = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 _OAuthRuntimeBootstrapper = Callable[["OAuthProvider", "RuntimePaths"], Awaitable[OAuthRuntimeEndpoints]]
 
 
@@ -353,10 +355,6 @@ def _runtime_env_value(runtime_paths: RuntimePaths, names: tuple[str, ...]) -> s
         if value:
             return value.strip()
     return None
-
-
-def _runtime_port(runtime_paths: RuntimePaths) -> str:
-    return runtime_paths.env_value("MINDROOM_PORT", default="8765") or "8765"
 
 
 def _decode_jwt_claims_unverified(token: str) -> dict[str, Any]:
@@ -597,6 +595,11 @@ class OAuthProvider:
     token_exchanger: _OAuthTokenExchanger | None = None
     claim_validator: _OAuthClaimValidator | None = None
     runtime_bootstrapper: _OAuthRuntimeBootstrapper | None = None
+    # Reads verified account claims with the token a standard code exchange just returned, for a provider whose
+    # token response carries none (GitHub's login). It runs once per connection and never on refresh, which keeps
+    # the claims already stored. It is best effort: it may return no claims or raise, and a failed read (an
+    # exception is caught and logged by its type only) leaves the connection without them.
+    account_claims_reader: _OAuthAccountClaimsReader | None = None
 
     def __post_init__(self) -> None:
         """Validate provider identifiers and redirect path shape."""
@@ -807,7 +810,7 @@ class OAuthProvider:
         )
         if configured_origin:
             return f"{configured_origin.rstrip('/')}{self.redirect_path}"
-        return f"http://localhost:{_runtime_port(runtime_paths)}{self.redirect_path}"
+        return f"{local_api_origin(runtime_paths)}{self.redirect_path}"
 
     def issue_pkce_code_verifier(self) -> str | None:
         """Return a new PKCE verifier when this provider requires PKCE."""
@@ -923,12 +926,32 @@ class OAuthProvider:
         parser = self.token_parser or _default_token_parser
         token_response = dict(token_response)
         result = await asyncio.to_thread(parser, self, token_response, client_config, runtime_paths)
+        if self.account_claims_reader is not None and not result.claims:
+            account_claims = await self._read_account_claims(self.account_claims_reader, result.token_data)
+            if account_claims:
+                result = OAuthTokenResult(
+                    token_data=result.token_data,
+                    claims=dict(account_claims),
+                    claims_verified=True,
+                )
         return _token_result_with_core_metadata(
             self,
             result,
             client_id=client_config.client_id,
             token_url=token_url,
         )
+
+    async def _read_account_claims(
+        self,
+        reader: _OAuthAccountClaimsReader,
+        token_data: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Run the best-effort claims reader; a reader that raises costs the connection its claims, never the connection."""
+        try:
+            return await asyncio.to_thread(reader, token_data)
+        except Exception as exc:
+            logger.warning("oauth_account_claims_read_failed", provider_id=self.id, error_type=type(exc).__name__)
+            return {}
 
     async def _request_refresh_grant(self, request_refresh: Callable[[], Awaitable[object]]) -> object:
         """Send one refresh grant, repeating it once within a shared deadline when its response is lost."""

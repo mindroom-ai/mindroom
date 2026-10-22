@@ -1148,6 +1148,30 @@ async def test_startup_interrupts_recovery_contract_mismatch(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_startup_interrupts_a_run_from_script_protocol_1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run launched under protocol 1 is interrupted instead of adopted, because its worker lacks the status route."""
+    with monkeypatch.context() as protocol_1:
+        protocol_1.setattr("mindroom.script_runs.recovery.SCRIPT_PROTOCOL_VERSION", 1)
+        runtime, run, backend, client = _recovery_scenario(tmp_path)
+
+    async def missing_status_route(_worker: WorkerHandle, *, run_id: str) -> WorkerScriptStatus:
+        del run_id
+        message = "Not Found"
+        raise ScriptWorkerError(message, failure_kind="worker")
+
+    monkeypatch.setattr(client, "status", missing_status_route)
+    try:
+        await runtime.start()
+        assert runtime.store.get_run(run.run_id).state is ScriptRunState.INTERRUPTED
+        assert f"retire:{run.worker_key}" in backend.actions
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_startup_records_missing_recoverable_worker_as_interrupted(tmp_path: Path) -> None:
     """Worker loss never causes script source to be automatically relaunched."""
     runtime, run, backend, _client = _recovery_scenario(tmp_path)

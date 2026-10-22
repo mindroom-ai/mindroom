@@ -96,6 +96,23 @@ def test_cli_setup_is_visible_to_an_already_open_app(
     assert "private-token" not in repr(host.status())
 
 
+def test_setup_allows_the_chat_requester_when_the_bridge_uses_a_dedicated_account(
+    shared_setup: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The requester who ran `!desktop setup` is allowed, not the bridge's own Matrix account."""
+    monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(return_value="verification"))
+
+    result = CliRunner().invoke(
+        desktop_cli.desktop_app,
+        [*_setup_args(), "--allow-requester", "@alice:example.org"],
+    )
+
+    assert result.exit_code == 0, result.output
+    saved = load_native_config(native_config_path(shared_setup.storage_root))
+    assert saved.allowed_requester_ids == ("@alice:example.org",)
+
+
 def test_repairing_preserves_saved_app_choices(shared_setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     """Pairing the same controller again keeps the app's explicit local choices."""
     path = native_config_path(shared_setup.storage_root)

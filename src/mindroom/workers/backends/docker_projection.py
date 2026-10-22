@@ -27,6 +27,7 @@ from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     shared_storage_root,
     worker_key_agent_name,
+    worker_log_id,
     written_by_other_workers,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -560,7 +561,7 @@ class DockerProjectionManager:
 
         worker_scope = resolved_worker_key_scope(worker_key)
         if worker_scope is None:
-            msg = f"Unsupported worker key for projected agent selection: {worker_key}"
+            msg = f"Unsupported worker key for projected agent selection: {worker_log_id(worker_key)}"
             raise WorkerBackendError(msg)
         if worker_scope == "user":
             user_scoped_agent_names = tuple(
@@ -572,7 +573,7 @@ class DockerProjectionManager:
                 return user_scoped_agent_names
             if not resolved_agent_policies:
                 return None
-            msg = f"Worker key does not match any configured agent policy: {worker_key}"
+            msg = f"Worker key does not match any configured agent policy: {worker_log_id(worker_key)}"
             raise WorkerBackendError(msg)
 
         matching_agent_names = tuple(
@@ -585,13 +586,13 @@ class DockerProjectionManager:
             )
         )
         if len(matching_agent_names) > 1:
-            msg = f"Worker key '{worker_key}' has an ambiguous normalized agent name."
+            msg = f"Worker '{worker_log_id(worker_key)}' has an ambiguous normalized agent name."
             raise WorkerBackendError(msg)
         if matching_agent_names:
             return (matching_agent_names[0],)
         if not resolved_agent_policies:
             return None
-        msg = f"Worker key does not match any configured agent policy: {worker_key}"
+        msg = f"Worker key does not match any configured agent policy: {worker_log_id(worker_key)}"
         raise WorkerBackendError(msg)
 
     def _projected_knowledge_base_ids(

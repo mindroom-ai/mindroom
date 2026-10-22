@@ -28,7 +28,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, config_relative_path
+from mindroom.constants import RuntimePaths, config_relative_path, runtime_paths_with_storage_root
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.runtime_env_policy import (
@@ -44,14 +44,15 @@ from mindroom.runtime_env_policy import (
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
     descriptive_worker_id_for_key,
-    normalize_worker_key_part,
-    resolved_worker_key_scope,
-    worker_key_agent_name,
+    worker_log_id,
     written_by_other_workers,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
+    SharedDirectoryMount,
+    agent_names_addressed_by_worker_key,
     plan_scoped_workspace_mounts,
+    plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
     resolved_agent_policies_from_config_data,
     validate_unique_worker_visible_paths,
@@ -74,7 +75,6 @@ from mindroom.workers.backends.kubernetes_pod_names import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.workers.models import WorkerStatus
 
     from .kubernetes_config import KubernetesAgentVaultConfig, KubernetesWorkerBackendConfig
@@ -657,7 +657,7 @@ def _plan_knowledge_storage_mounts(
         mount_path = mounted_storage_root / relative_path
         if collision := _first_overlapping_path(mount_path, other_mount_paths):
             msg = (
-                f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
+                f"Kubernetes knowledge mount overlaps existing mountPath for worker {worker_log_id(worker_key)}: "
                 f"{mount_path} and {collision}"
             )
             raise WorkerBackendError(msg)
@@ -667,13 +667,13 @@ def _plan_knowledge_storage_mounts(
             # kubelet follows links inside the volume when it mounts, so another worker could redirect it.
             logger.error(
                 "Refusing to mount knowledge inside a directory other sandbox workers write",
-                worker_key=worker_key,
+                worker=worker_log_id(worker_key),
                 path=str(relative_path),
             )
             continue
         if collision := _first_overlapping_path(mount_path, storage_mount_paths):
             msg = (
-                f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
+                f"Kubernetes knowledge mount overlaps existing mountPath for worker {worker_log_id(worker_key)}: "
                 f"{mount_path} and {collision}"
             )
             raise WorkerBackendError(msg)
@@ -681,45 +681,10 @@ def _plan_knowledge_storage_mounts(
             mount_path,
             tuple(plan.mount_path for plan in plans),
         ):
-            msg = f"Kubernetes knowledge mount paths overlap for worker key {worker_key}: {mount_path} and {collision}"
+            msg = f"Kubernetes knowledge mount paths overlap for worker {worker_log_id(worker_key)}: {mount_path} and {collision}"
             raise WorkerBackendError(msg)
         plans.append(_KnowledgeStorageMountPlan(relative_path=relative_path, mount_path=mount_path))
     return tuple(plans)
-
-
-def _agent_names_addressed_by_worker_key(
-    worker_key: str,
-    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
-) -> tuple[str, ...]:
-    scope = resolved_worker_key_scope(worker_key)
-    if scope == "user":
-        return tuple(
-            agent_name
-            for agent_name, policy in resolved_agent_policies.items()
-            if policy.effective_execution_scope == "user"
-        )
-
-    encoded_agent_name = worker_key_agent_name(worker_key)
-    if encoded_agent_name is None:
-        return ()
-    if scope == "user_agent":
-        matches = tuple(
-            agent_name
-            for agent_name in resolved_agent_policies
-            if normalize_worker_key_part(agent_name) == encoded_agent_name
-        )
-    else:
-        expected_scope = None if scope == "unscoped" else scope
-        matches = tuple(
-            agent_name
-            for agent_name, policy in resolved_agent_policies.items()
-            if policy.effective_execution_scope == expected_scope
-            and normalize_worker_key_part(agent_name) == encoded_agent_name
-        )
-    if len(matches) > 1:
-        msg = f"Worker key '{worker_key}' has an ambiguous normalized agent name."
-        raise WorkerBackendError(msg)
-    return matches
 
 
 class KubernetesResourceManager:
@@ -1059,7 +1024,9 @@ class KubernetesResourceManager:
             return []
         vault = self._agent_vault_vault_name(worker_key)
         if vault is None:
-            msg = f"Agent Vault main env requested without a worker vault name for worker_key={worker_key!r}."
+            msg = (
+                f"Agent Vault main env requested without a worker vault name for worker={worker_log_id(worker_key)!r}."
+            )
             raise WorkerBackendError(msg)
         env: list[dict[str, object]] = [
             {"name": _WORKER_EGRESS_PROXY_URL_ENV, "value": cfg.proxy_url},
@@ -1383,7 +1350,9 @@ class KubernetesResourceManager:
                     "name": _CONTAINER_NAME,
                     "image": self.config.image,
                     "imagePullPolicy": self.config.image_pull_policy,
-                    "command": ["/app/run-sandbox-runner.sh"],
+                    # A container command replaces the image's tini entrypoint, so name tini here:
+                    # PID 1 must reap the children a killed command's process group leaves behind.
+                    "command": ["tini", "--", "/app/run-sandbox-runner.sh"],
                     "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
                     "env": self._worker_env(
                         worker_key=worker_key,
@@ -1690,6 +1659,18 @@ class KubernetesResourceManager:
             private_agent_names=private_agent_names,
             state_scope_worker_key=state_scope_worker_key,
         )
+        mounts.extend(
+            {
+                "name": WORKER_STORAGE_VOLUME_NAME,
+                "mountPath": str(shared_mount.worker_visible_path),
+                "subPath": str(shared_mount.local_path.relative_to(self.storage_root)),
+                **({"readOnly": True} if shared_mount.read_only else {}),
+            }
+            for shared_mount in self.plan_shared_directory_mounts(
+                worker_key,
+                state_scope_worker_key=state_scope_worker_key,
+            )
+        )
         mounts.append({"name": WORKER_TMP_VOLUME_NAME, "mountPath": "/tmp"})  # noqa: S108
         if include_agent_vault:
             mounts.append(
@@ -1858,6 +1839,20 @@ class KubernetesResourceManager:
         )
         return mounts
 
+    def plan_shared_directory_mounts(
+        self,
+        worker_key: str,
+        *,
+        state_scope_worker_key: str | None,
+    ) -> tuple[SharedDirectoryMount, ...]:
+        """Return the shared directories one worker mounts from the storage volume."""
+        return plan_shared_directory_mounts(
+            worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
+            runtime_paths=runtime_paths_with_storage_root(self.runtime_paths, self.storage_root),
+            worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+            resolved_agent_policies=self.resolved_agent_policies,
+        )
+
     def _workspace_storage_mounts(
         self,
         worker_key: str,
@@ -1913,7 +1908,7 @@ class KubernetesResourceManager:
         knowledge_base_configs = cast("Mapping[str, object]", raw_knowledge_bases)
 
         base_ids: set[str] = set()
-        for agent_name in _agent_names_addressed_by_worker_key(worker_key, self.resolved_agent_policies):
+        for agent_name in agent_names_addressed_by_worker_key(worker_key, self.resolved_agent_policies):
             raw_agent = agent_configs.get(agent_name)
             if not isinstance(raw_agent, Mapping):
                 continue

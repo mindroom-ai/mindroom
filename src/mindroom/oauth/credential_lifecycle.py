@@ -978,6 +978,11 @@ def oauth_verified_claim(credentials: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def oauth_account_label(credentials: dict[str, Any]) -> str | None:
+    """Return how a connected account is shown: its verified email, else its verified login (GitHub)."""
+    return oauth_verified_claim(credentials, "email") or oauth_verified_claim(credentials, "login")
+
+
 def _same_external_identity(existing_credentials: dict[str, Any] | None, token_data: dict[str, Any]) -> bool:
     existing_sub = oauth_verified_claim(existing_credentials or {}, "sub")
     new_sub = oauth_verified_claim(token_data, "sub")

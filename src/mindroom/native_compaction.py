@@ -11,11 +11,15 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.logging_config import get_logger
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from agno.models.message import Message
     from agno.models.response import ModelResponse
+
+logger = get_logger(__name__)
 
 _NATIVE_CHECKPOINT_KEY = "mindroom_native_compaction"
 
@@ -104,7 +108,8 @@ def record_native_checkpoint(
 
     Every completed response records its route, including explicit native-off
     state. Approval rebuilds and signed-thinking replay need this even when the
-    provider did not compact on this request.
+    provider did not compact on this request. A checkpoint in the output means the
+    provider compacted on this request, which no other MindRoom log reports.
     """
     state: dict[str, Any] | None = None
     if settings is not None:
@@ -116,6 +121,11 @@ def record_native_checkpoint(
         state["checkpoint_prefix"] = last is not None
         if last is not None:
             state["items"] = list(items[last:])
+            logger.info(
+                "Native compaction checkpoint",
+                threshold_tokens=settings.threshold,
+                checkpoint_tokens=checkpoint_estimated_tokens([items[last]]),
+            )
     response.provider_data = {
         **(response.provider_data or {}),
         _NATIVE_CHECKPOINT_KEY: state,
@@ -177,6 +187,14 @@ def checkpoint_items(message: Message, route: str | None) -> list[dict[str, Any]
     if not isinstance(items, list) or not items or not all(isinstance(item, dict) for item in items):
         return []
     return items if _is_checkpoint(items[0]) else []
+
+
+def native_checkpoint_id(message: Message) -> str | None:
+    """Return the message's id when the provider compacted on it, whatever its route, else None."""
+    state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
+    if not isinstance(state, dict) or not checkpoint_items(message, state.get("route")):
+        return None
+    return message.id
 
 
 def native_replay_messages(messages: Sequence[Message], route: str | None) -> list[Message]:

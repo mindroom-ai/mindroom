@@ -38,7 +38,6 @@ from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.state import DelegationState
-from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
@@ -53,12 +52,14 @@ from mindroom.response_turn import (
     paused_attempt_from_response,
 )
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, execute_agent_tool_call
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import shell_tools
+from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import bind_runtime_paths
@@ -557,7 +558,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
     arguments = {"agent_name": "code", "task": "work"}
     if mode in {"recover", "recover_again"}:
         shell_toolkit = shell_tools()(runtime_paths=runtime.runtime_paths)
-        agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+        bind_toolkit_authority(shell_toolkit, authored_name="shell")
         catalog.agent = MinimalAgent(
             id="helper",
             model=catalog.agent.model,

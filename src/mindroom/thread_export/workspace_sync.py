@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
+from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.runtime_shutdown import gather_shutdown_phase
 from mindroom.thread_export.models import ThreadExportRoom, ThreadExportSource, ThreadExportTarget
 from mindroom.thread_export.projected_history import export_conversation_reader
@@ -468,8 +469,13 @@ def _private_targets(
                 instance_root=str(instance.state_root),
             )
             continue
-        if instance.requester_id is None:
-            # Instances from before owner records moved below tracking/ wait here for their requester's next turn.
+        if instance.requester_id is None or not is_access_checked_requester_id(
+            instance.requester_id,
+            config,
+            runtime_paths,
+        ):
+            # Instances from before owner records moved below tracking/ wait here for their requester's next turn,
+            # and an instance one of MindRoom's own accounts came to own never gets one.
             # Every pass clears them again, so only a pass that removed something logs.
             if _clear_export_tree(runtime_paths, output_dir):
                 logger.info(

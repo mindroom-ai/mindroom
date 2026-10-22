@@ -22,8 +22,9 @@ from .models import DeliveryStage
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.tool_approval_grants import ApprovalGrantScope
+
     from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
-    from .approval_continuations import ApprovalContinuation
     from .backend import Row, Transaction
 
 
@@ -50,38 +51,41 @@ def _epoch(transaction: Transaction, principal_id: str, room_id: str) -> int | N
 def reserve_identity(
     transaction: Transaction,
     principal_id: str,
-    continuation_principal_id: str,
-    continuation: ApprovalContinuation,
     card: ApprovalCardReservation,
+    scope: ApprovalGrantScope,
+    *,
     membership_epoch: int,
+    target: tuple[str, int],
 ) -> ApprovalCardReservation:
-    """Persist eligible card scope independently of its eventual retirement."""
-    if card.grant_operation is None or not continuation.thread_id:
+    """Persist eligible card scope independently of its eventual retirement.
+
+    ``target`` names the card's call owner: a paused reply's continuation and generation, or a detached call's run.
+    """
+    if card.grant_operation is None or not scope.thread_id:
         return card
-    call = next(call for call in continuation.calls if call.tool_call_id == card.tool_call_id)
-    responder_epoch = _epoch(transaction, continuation_principal_id, continuation.room_id)
+    responder_epoch = _epoch(transaction, scope.responder_principal_id, scope.room_id)
     if responder_epoch is None:
         payload = dict(card.payload)
         payload.pop("approval_scope", None)
         payload.pop("auto_approve_options", None)
         return replace(card, payload=payload, grant_operation=None)
-    scope = json.dumps(
+    scope_key = json.dumps(
         [
-            continuation.room_id,
-            continuation.thread_id,
-            continuation.requester_id,
-            call.invoking_agent,
+            scope.room_id,
+            scope.thread_id,
+            scope.requester_id,
+            scope.invoking_agent,
             card.grant_operation.key,
             membership_epoch,
-            continuation_principal_id,
+            scope.responder_principal_id,
             responder_epoch,
         ],
         separators=(",", ":"),
     )
-    scope_id = hashlib.sha256(scope.encode()).hexdigest()
-    scope_wire = card.grant_operation.scope_wire(scope_id, continuation.entity_name, call.invoking_agent)
+    scope_id = hashlib.sha256(scope_key.encode()).hexdigest()
+    scope_wire = card.grant_operation.scope_wire(scope_id, scope.entity_name, scope.invoking_agent)
     if card.payload.get("approval_scope") != {**scope_wire, "id": "0" * 64}:
-        msg = "Prepared approval scope does not match its continuation"
+        msg = "Prepared approval scope does not match its call owner"
         raise ValueError(msg)
     transaction.execute(
         """
@@ -95,17 +99,16 @@ def reserve_identity(
             principal_id,
             card.delivery_id,
             scope_id,
-            continuation.room_id,
-            continuation.thread_id,
-            continuation.requester_id,
-            continuation.entity_name,
-            call.invoking_agent,
+            scope.room_id,
+            scope.thread_id,
+            scope.requester_id,
+            scope.entity_name,
+            scope.invoking_agent,
             card.grant_operation.key,
-            continuation_principal_id,
+            scope.responder_principal_id,
             responder_epoch,
             membership_epoch,
-            continuation.approval_id,
-            continuation.generation,
+            *target,
             card.tool_call_id,
         ),
     )
@@ -192,6 +195,36 @@ _CARD_SELECT = """
 """
 
 
+def _approve_call(transaction: Transaction, principal_id: str, row: Row, now: int) -> bool:
+    """Approve the undecided, unexpired call one scoped card names, a detached call's or a paused reply's."""
+    if int(row["continuation_generation"]) == approval_card_state.DETACHED_GENERATION:
+        decided = transaction.fetchone(
+            """
+            UPDATE background_approval_calls SET decision = 'approved'
+            WHERE principal_id = ? AND delivery_id = ? AND decision IS NULL AND expires_at_ns > ?
+            RETURNING delivery_id
+            """,
+            (principal_id, row["delivery_id"], now),
+        )
+    else:
+        decided = transaction.fetchone(
+            """
+            UPDATE approval_continuation_calls SET decision = 'approved'
+            WHERE principal_id = ? AND approval_id = ? AND generation = ? AND tool_call_id = ?
+              AND decision IS NULL AND expires_at_ns > ?
+            RETURNING tool_call_id
+            """,
+            (
+                row["responder_principal_id"],
+                row["continuation_id"],
+                row["continuation_generation"],
+                row["tool_call_id"],
+                now,
+            ),
+        )
+    return decided is not None
+
+
 def apply_active(transaction: Transaction, principal_id: str, *, card: ApprovalCardReservation) -> bool:
     """Approve a new call and atomically reserve its terminal-only receipt."""
     delivery_id = card.delivery_id
@@ -212,22 +245,7 @@ def apply_active(transaction: Transaction, principal_id: str, *, card: ApprovalC
     )
     if grant_row is None or not _current(transaction, principal_id, grant_row):
         return False
-    decided = transaction.fetchone(
-        """
-        UPDATE approval_continuation_calls SET decision = 'approved'
-        WHERE principal_id = ? AND approval_id = ? AND generation = ? AND tool_call_id = ?
-          AND decision IS NULL AND expires_at_ns > ?
-        RETURNING tool_call_id
-        """,
-        (
-            row["responder_principal_id"],
-            row["continuation_id"],
-            row["continuation_generation"],
-            row["tool_call_id"],
-            now,
-        ),
-    )
-    if decided is None:
+    if not _approve_call(transaction, principal_id, row, now):
         return False
     transaction.execute(
         "UPDATE approval_grant_cards SET grant_id = ? WHERE principal_id = ? AND delivery_id = ?",

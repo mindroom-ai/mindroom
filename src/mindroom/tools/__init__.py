@@ -22,6 +22,7 @@ from mindroom.tools import (
     delegate,  # noqa: F401
     dynamic_tools,  # noqa: F401
     dynamic_workflow,  # noqa: F401
+    knowledge_graph,  # noqa: F401
     memory,  # noqa: F401
     report_publishing,  # noqa: F401
     self_config,  # noqa: F401
@@ -99,6 +100,13 @@ from mindroom.tools.matrix_message import matrix_message_tools
 from mindroom.tools.matrix_room import matrix_room_tools
 from mindroom.tools.matrix_voice_message import matrix_voice_message_tools
 from mindroom.tools.mem0 import mem0_tools
+from mindroom.tools.microsoft_files import microsoft_files_tools
+from mindroom.tools.microsoft_meetings import microsoft_meetings_tools
+from mindroom.tools.microsoft_onenote import microsoft_onenote_tools
+from mindroom.tools.microsoft_people import microsoft_people_tools
+from mindroom.tools.microsoft_sharepoint import microsoft_sharepoint_tools
+from mindroom.tools.microsoft_teams import microsoft_teams_tools
+from mindroom.tools.microsoft_todo import microsoft_todo_tools
 from mindroom.tools.modelslabs import modelslabs_tools
 from mindroom.tools.moviepy_video_tools import moviepy_video_tools
 from mindroom.tools.neo4j import neo4j_tools
@@ -108,6 +116,8 @@ from mindroom.tools.oauth_connections import oauth_connections_tools
 from mindroom.tools.openai import openai_tools
 from mindroom.tools.openbb import openbb_tools
 from mindroom.tools.openweather import openweather_tools
+from mindroom.tools.outlook_calendar import outlook_calendar_tools
+from mindroom.tools.outlook_mail import outlook_mail_tools
 from mindroom.tools.oxylabs import oxylabs_tools
 from mindroom.tools.pandas import pandas_tools
 from mindroom.tools.postgres import postgres_tools
@@ -124,6 +134,7 @@ from mindroom.tools.script import script_tools
 from mindroom.tools.searxng import searxng_tools
 from mindroom.tools.serpapi import serpapi_tools
 from mindroom.tools.serper import serper_tools
+from mindroom.tools.shared_directories import shared_directories_tools
 from mindroom.tools.shell import shell_tools
 from mindroom.tools.shopify import shopify_tools
 from mindroom.tools.slack import slack_tools
@@ -131,6 +142,7 @@ from mindroom.tools.sleep import sleep_tools
 from mindroom.tools.spider import spider_tools
 from mindroom.tools.spotify import spotify_tools
 from mindroom.tools.sql import sql_tools
+from mindroom.tools.stop_reply import stop_reply_tools
 from mindroom.tools.tavily import tavily_tools
 from mindroom.tools.telegram import telegram_tools
 from mindroom.tools.thread_model import thread_model_tools
@@ -236,6 +248,13 @@ __all__ = [
     "matrix_room_tools",
     "matrix_voice_message_tools",
     "mem0_tools",
+    "microsoft_files_tools",
+    "microsoft_meetings_tools",
+    "microsoft_onenote_tools",
+    "microsoft_people_tools",
+    "microsoft_sharepoint_tools",
+    "microsoft_teams_tools",
+    "microsoft_todo_tools",
     "modelslabs_tools",
     "moviepy_video_tools",
     "neo4j_tools",
@@ -245,6 +264,8 @@ __all__ = [
     "openai_tools",
     "openbb_tools",
     "openweather_tools",
+    "outlook_calendar_tools",
+    "outlook_mail_tools",
     "oxylabs_tools",
     "pandas_tools",
     "postgres_tools",
@@ -262,6 +283,7 @@ __all__ = [
     "searxng_tools",
     "serpapi_tools",
     "serper_tools",
+    "shared_directories_tools",
     "shell_tools",
     "shopify_tools",
     "slack_tools",
@@ -269,6 +291,7 @@ __all__ = [
     "spider_tools",
     "spotify_tools",
     "sql_tools",
+    "stop_reply_tools",
     "tavily_tools",
     "telegram_tools",
     "thread_model_tools",
@@ -468,3 +491,28 @@ def _agent_vault_access_tools() -> type[Toolkit]:
     from mindroom.custom_tools.agent_vault_access import AgentVaultAccessTools
 
     return AgentVaultAccessTools
+
+
+@register_tool_with_metadata(
+    name="egress_credentials",
+    file_access=ToolFileAccess.NONE,
+    requires_primary_runtime=True,
+    display_name="Egress Credentials",
+    description="Opt this agent's shell and python calls into Agent Keys and see which keys and accounts it can use",
+    category=ToolCategory.INTEGRATIONS,
+    icon="KeyRound",
+    icon_color="text-amber-600",
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.WORKER_TARGET,
+    ),
+    config_fields=[],
+    function_names=("list_egress_credentials",),
+)
+def _egress_credentials_tools() -> type[Toolkit]:
+    """Return the egress broker credential status tool."""
+    from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
+
+    return EgressCredentialsTools

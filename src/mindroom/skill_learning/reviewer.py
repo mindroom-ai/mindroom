@@ -22,6 +22,7 @@ from agno.tools.function import Function
 from pydantic import validate_call
 
 from mindroom.agno_compat_model_hooks import install_response_request_gate
+from mindroom.approval.tool_approval import approval_gated
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
@@ -122,7 +123,7 @@ def _review_tools(
         for tool in schemas
         if isinstance(tool, Function)
         and tool.name in entrypoints
-        and not (tool.requires_confirmation or tool.external_execution)
+        and not (approval_gated(tool) or tool.external_execution)
     ]
 
     async def deny(**_arguments: object) -> str:
@@ -133,7 +134,8 @@ def _review_tools(
     for tool in schemas:
         if not isinstance(tool, Function):
             review_tools.append(tool)
-        elif tool.requires_confirmation or tool.external_execution:
+        elif approval_gated(tool) or tool.external_execution:
+            # A gated call, whether it pauses its run or asks as its job, cannot be approved during a review.
             review_tools.append({"type": "function", "function": tool.to_dict()})
         else:
             entrypoint = entrypoints.get(tool.name, deny)
@@ -261,9 +263,10 @@ async def _replay(
     )
     if session is None:
         return None
+    messages = await asyncio.to_thread(conversation_messages, session)
     transcript = await asyncio.to_thread(
         render_transcript,
-        conversation_messages(session),
+        messages,
         summary=session.summary.summary if session.summary is not None else None,
         budget_chars=_review_input_budget_tokens(config, model_name) * _CHARS_PER_TOKEN // _CONVERSATION_BUDGET_SHARE,
     )

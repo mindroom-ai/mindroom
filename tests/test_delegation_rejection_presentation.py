@@ -13,18 +13,19 @@ from agno.run.base import RunStatus
 
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
 from mindroom.delegation.state import DelegationState
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.identity_helpers import fixture_entity_matrix_id
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call
 from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
@@ -40,9 +41,10 @@ if TYPE_CHECKING:
         ("authorization", "Cannot delegate to 'child'"),
         ("policy", "denied by requester"),
         ("plugin", "Subagents disabled by plugin"),
+        ("private", "Cannot delegate to 'child': a private agent runs only for a person or bot account."),
     ],
 )
-async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901
+async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR0915
     tmp_path: Path,
     rejection: str,
     expected_result: str,
@@ -51,7 +53,10 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901
     config = Config(
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
-            "child": AgentConfig(display_name="Child"),
+            "child": AgentConfig(
+                display_name="Child",
+                private=AgentPrivateConfig(per="user") if rejection == "private" else None,
+            ),
         },
         defaults={"tools": []},
         memory={"backend": "none"},
@@ -61,6 +66,10 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901
     )
     paths = _runtime_paths(tmp_path)
     identity = _identity()
+    if rejection == "private":
+        # A shared agent's turn without a human requester, such as its automation, runs as the agent's own account.
+        leader_id = fixture_entity_matrix_id("leader", config.get_domain(paths), paths).full_id
+        identity = replace(identity, requester_id=leader_id)
 
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def before(context: ToolBeforeCallContext) -> None:
@@ -132,5 +141,6 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901
         assert trace.type == "tool_call_completed"
         assert expected_result in trace.result_preview
         assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
+        assert private_instances_for_agent(paths.storage_root, "child", "user") == ()
     finally:
         storage.close()

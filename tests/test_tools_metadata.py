@@ -1988,6 +1988,8 @@ def test_path_tools_follow_agent_file_access_and_receive_it() -> None:
         "matrix_message",
         "gmail",
         "google_drive",
+        "microsoft_files",
+        "outlook_mail",
         "browser",
         "e2b",
         "airflow",

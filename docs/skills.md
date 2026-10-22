@@ -48,8 +48,8 @@ metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
 A skill without any frontmatter still loads with the name and description fallbacks, but frontmatter gives clearer listings.
 Keep each skill focused on one capability, give it a descriptive name such as `code-review`, and declare its dependencies with `metadata.openclaw.requires`.
 
-Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures.
-A workspace skill that breaks these limits is skipped with a warning, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
+Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
+A workspace skill whose frontmatter is not valid YAML, for example because an unquoted `description` contains `: `, or breaks these limits is skipped with a warning.
 
 ## Installing and managing skills
 
@@ -101,6 +101,7 @@ Being able to write workspace skills does not make an agent create them.
 To have agents save reusable workflows on their own, add that guidance to the agent's instructions, or enable [automatic skill learning](#automatic-skill-learning).
 
 MindRoom loads at most 256 workspace skills per agent, skips a skill whose `SKILL.md` exceeds 1 MiB or whose name exceeds 64 characters, and truncates descriptions to 1,024 characters, logging a warning in each case.
+Until the file is fixed, the owning agent's system prompt names each workspace skill skipped for its frontmatter or name, and why.
 
 ## Eligibility gating (OpenClaw metadata)
 
@@ -121,10 +122,10 @@ Agents see their available skills in the system prompt and load details with the
 
 - `get_skill_instructions(skill_name)` loads the full instructions for a skill
 - `get_skill_reference(skill_name, reference_path)` reads a reference document
-- `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` reads or executes a script
+- `get_skill_script(skill_name, script_path)` reads a script
 
-Workspace skill scripts can be read with `get_skill_script`, but not executed through it.
-Agents with shell or file execution tools can still run workspace files through those tools.
+`get_skill_script` never runs a script, whichever skill it comes from.
+Agents with a shell tool run scripts with it, where their shell commands run.
 
 Added, removed, or edited `SKILL.md` files take effect on the agent's next request, within about a second.
 A workspace skill created during a turn becomes available on the next agent run, not in the same response.
@@ -148,8 +149,7 @@ agents:
       archive_after_days: 30
 ```
 
-Hosted MindRoom instances enable it for the agents of a newly provisioned instance; set `agents.<name>.skill_learning.enabled: false` to turn it off.
-Self-hosted configurations from `mindroom config init` leave it off.
+`mindroom config init` and newly provisioned hosted instances enable it for the starter Mind agent; set `agents.<name>.skill_learning.enabled: false` to turn it off.
 Reviews incur additional model usage, reported under `kind: skill_learning` in [usage tracking](usage.md#token-usage).
 Learned skills are generated from conversation content, so review them before relying on them for sensitive work.
 

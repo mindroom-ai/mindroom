@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # 2: workers mount only agent workspaces and never write private-instance identity records.
-WORKER_PROTOCOL_VERSION = 2
+# 3: /execute streams progress and keep-alive lines before its result line, and job calls have no time limit.
+WORKER_PROTOCOL_VERSION = 3
 
 
 @dataclass(frozen=True)

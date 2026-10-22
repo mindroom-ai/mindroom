@@ -112,8 +112,35 @@ class DreamingAutomation(_ScheduledAutomation):
     cron: str = Field(default="15 3 * * *", description="When to check, in the configured timezone")
 
 
+class ExplorationAutomation(_ScheduledAutomation):
+    """A scheduled prompt asking the agent to explore the sources its tools reach, feeding its knowledge graph."""
+
+    # Exploration feeds the knowledge graph, which every memory backend can use.
+    requires_file_memory: ClassVar[bool] = False
+
+    name: Literal["exploration"] = Field(default="exploration", description="Built-in automation name")
+    cron: str = Field(default="30 2 * * *", description="When to check, in the configured timezone")
+    max_tool_calls: int = Field(
+        default=40,
+        ge=1,
+        le=1000,
+        description="Tool calls the exploration prompt asks the agent to stay within",
+    )
+    max_leads: int = Field(
+        default=20,
+        ge=0,
+        le=200,
+        description="Most tool calls seen in conversations that one exploration prompt lists",
+    )
+    revisit_days: int = Field(
+        default=7,
+        ge=1,
+        description="Explore without new leads once this many days have passed since the last run",
+    )
+
+
 # Reserved for the built-ins, so every entry matches one kind of automation.
-BUILTIN_AUTOMATION_NAMES = ("prompt_curation", "dreaming")
+BUILTIN_AUTOMATION_NAMES = ("prompt_curation", "dreaming", "exploration")
 
 
 class PluginAutomation(_ScheduledAutomation):
@@ -155,7 +182,7 @@ class PluginAutomation(_ScheduledAutomation):
 
 def _automation_kind(value: object) -> str:
     """Pick the entry's model: a built-in name selects that built-in, any other name a plugin automation."""
-    if isinstance(value, PromptCurationAutomation | DreamingAutomation | PluginAutomation):
+    if isinstance(value, PromptCurationAutomation | DreamingAutomation | ExplorationAutomation | PluginAutomation):
         return value.name if value.name in BUILTIN_AUTOMATION_NAMES else "plugin"
     name = cast("Mapping[str, object]", value).get("name") if isinstance(value, Mapping) else None
     return name if isinstance(name, str) and name in BUILTIN_AUTOMATION_NAMES else "plugin"
@@ -164,6 +191,7 @@ def _automation_kind(value: object) -> str:
 Automation = Annotated[
     Annotated[PromptCurationAutomation, Tag("prompt_curation")]
     | Annotated[DreamingAutomation, Tag("dreaming")]
+    | Annotated[ExplorationAutomation, Tag("exploration")]
     | Annotated[PluginAutomation, Tag("plugin")],
     Discriminator(_automation_kind),
 ]

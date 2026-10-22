@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import pytest
 from agno.db.base import SessionType
 from agno.session.team import TeamSession
 
@@ -66,7 +68,6 @@ def _make_execution_plan(**overrides: object) -> ResolvedHistoryExecutionPlan:
         "text_compaction_available": True,
         "explicit_compaction_model": False,
         "compaction_model_name": "summary-model",
-        "compaction_context_window": 64_000,
         "replay_window_tokens": 64_000,
         "trigger_threshold_tokens": 12_000,
         "reserve_tokens": 4_096,
@@ -86,7 +87,6 @@ def _make_policy_plan() -> ResolvedHistoryExecutionPlan:
         text_compaction_available=True,
         explicit_compaction_model=False,
         compaction_model_name="summary-model",
-        compaction_context_window=64_000,
         replay_window_tokens=64_000,
         trigger_threshold_tokens=12_000,
         reserve_tokens=4_096,
@@ -118,32 +118,44 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     return config, runtime_paths
 
 
-def test_compaction_policy_classifies_trigger_and_required_modes() -> None:
-    """The policy surface should classify no-op and foreground compaction modes."""
-    plan = _make_policy_plan()
+@pytest.mark.parametrize(
+    ("plan_changes", "force", "history_tokens", "allow_native", "expected"),
+    [
+        ({}, True, 70_000, True, ("required", "forced", 59_904)),
+        ({}, True, None, True, ("required", "forced", 0)),
+        ({"text_compaction_available": False}, True, 5_000, True, ("none", "forced_unavailable", None)),
+        ({"authored_compaction_enabled": False}, False, 60_000, True, ("none", "auto_disabled", None)),
+        ({"text_compaction_available": False}, False, 60_000, True, ("none", "compaction_unavailable", None)),
+        ({"replay_budget_tokens": None}, False, 60_000, True, ("none", "missing_budget", None)),
+        ({}, False, None, True, ("none", "missing_budget", None)),
+        ({}, False, 10_000, True, ("none", "under_trigger", 10_000)),
+        ({}, False, 60_000, True, ("required", "history_exceeds_hard_budget", 59_904)),
+        ({}, False, 12_001, False, ("required", "over_trigger_native_disabled", 10_000)),
+        ({}, False, 12_001, True, ("none", "within_hard_budget", 12_001)),
+    ],
+)
+def test_compaction_policy_classifies_every_branch(
+    plan_changes: dict[str, object],
+    *,
+    force: bool,
+    history_tokens: int | None,
+    allow_native: bool,
+    expected: tuple[str, str, int | None],
+) -> None:
+    """Each decision keeps its precedence, reason, and fitted replay size, and reports the plan's budgets."""
+    plan = replace(_make_policy_plan(), **plan_changes)
 
-    within_hard_budget = classify_compaction_decision(
+    decision = classify_compaction_decision(
         plan=plan,
-        force_compact_before_next_run=False,
-        current_history_tokens=12_001,
-    )
-    required = classify_compaction_decision(
-        plan=plan,
-        force_compact_before_next_run=False,
-        current_history_tokens=60_000,
-    )
-    forced = classify_compaction_decision(
-        plan=plan,
-        force_compact_before_next_run=True,
-        current_history_tokens=5_000,
+        force_compact_before_next_run=force,
+        current_history_tokens=history_tokens,
+        allow_native_compaction=allow_native,
     )
 
-    assert within_hard_budget.mode == "none"
-    assert within_hard_budget.reason == "within_hard_budget"
-    assert required.mode == "required"
-    assert required.reason == "history_exceeds_hard_budget"
-    assert forced.mode == "required"
-    assert forced.reason == "forced"
+    assert (decision.mode, decision.reason, decision.fitted_replay_tokens) == expected
+    assert decision.current_history_tokens == history_tokens
+    assert decision.trigger_budget_tokens == plan.replay_budget_tokens
+    assert decision.hard_budget_tokens == plan.hard_replay_budget_tokens
 
 
 # ---------------------------------------------------------------------------

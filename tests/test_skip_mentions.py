@@ -409,12 +409,10 @@ async def test_delivery_gateway_send_text_builds_threaded_relation_from_the_reso
             SendTextRequest(
                 target=target,
                 response_text="formatted response",
-                retry_sync_recovery=True,
             ),
         )
 
     assert event_id == "$response"
-    assert send.await_args.kwargs["retry_sync_recovery"] is True
     sent_content = send.await_args.args[2]
     assert sent_content["m.relates_to"]["event_id"] == "$thread"
     assert sent_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
@@ -443,12 +441,10 @@ async def test_delivery_gateway_edit_text_sends_a_relation_free_replacement(tmp_
                 target=target,
                 event_id="$original",
                 new_text="updated response",
-                retry_sync_recovery=True,
             ),
         )
 
     assert edited is True
-    assert edit.await_args.kwargs["retry_sync_recovery"] is True
     assert "m.relates_to" not in edit.await_args.args[3]
     # The fallback the lookup would resolve is popped by the edit envelope, asserted above,
     # so the threaded edit path must not pay for a wait_for_thread_idle to compute it.
@@ -589,7 +585,6 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(
             )
 
     mock_send_text.assert_awaited_once()
-    assert mock_send_text.await_args.args[0].retry_sync_recovery is True
     after_hooks.assert_not_awaited()
     assert result.event_id == "$response"
     assert result.delivery_kind == "sent"
@@ -639,7 +634,6 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
             )
 
     mock_edit_text.assert_awaited_once()
-    assert mock_edit_text.await_args.args[0].retry_sync_recovery is True
     after_hooks.assert_not_awaited()
     assert result.event_id == "$existing"
     assert result.delivery_kind == "edited"

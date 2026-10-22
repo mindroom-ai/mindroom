@@ -9,6 +9,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
+from pathlib import Path
 from typing import TYPE_CHECKING, Never, cast
 
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS
@@ -16,19 +17,19 @@ from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.backends.docker_config import (
+    DockerWorkerBackendConfig,
     docker_backend_cleanup_signature,
     docker_backend_config_signature,
 )
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend
 from mindroom.workers.backends.kubernetes_config import (
+    KubernetesWorkerBackendConfig,
     kubernetes_backend_cleanup_signature,
     kubernetes_backend_config_signature,
 )
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.workers.backend import WorkerBackend
@@ -47,6 +48,7 @@ __all__ = [
     "serialized_dedicated_worker_validation_snapshot",
     "serialized_kubernetes_worker_config_snapshot",
     "shutdown_primary_worker_manager",
+    "worker_visible_storage_root",
 ]
 
 _PRIMARY_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
@@ -221,6 +223,16 @@ def primary_worker_backend_name(runtime_paths: RuntimePaths) -> str:
 def primary_worker_backend_is_dedicated(runtime_paths: RuntimePaths) -> bool:
     """Return whether the configured backend provisions dedicated worker runtimes."""
     return primary_worker_backend_name(runtime_paths) in _DEDICATED_WORKER_BACKENDS
+
+
+def worker_visible_storage_root(runtime_paths: RuntimePaths) -> Path | None:
+    """Return where dedicated workers mount the shared storage root, or ``None`` without dedicated workers."""
+    backend_name = primary_worker_backend_name(runtime_paths)
+    if backend_name == "kubernetes":
+        return Path(KubernetesWorkerBackendConfig.from_runtime(runtime_paths).storage_mount_path)
+    if backend_name == "docker":
+        return Path(DockerWorkerBackendConfig.from_runtime(runtime_paths).storage_mount_path)
+    return None
 
 
 def primary_worker_backend_available(

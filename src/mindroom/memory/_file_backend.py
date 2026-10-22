@@ -30,6 +30,7 @@ from ._policy import (
     resolve_file_memory_resolution,
     storage_paths_for_scope_user_id,
 )
+from ._prompting import redact_memory_text
 from ._semantic_file_search import (
     SemanticFileMemoryIndexUnavailableError,
     schedule_semantic_file_memory_refresh,
@@ -537,9 +538,25 @@ def _schedule_semantic_refresh_at(
     )
 
 
-def refresh_agent_memory_search(agent_name: str, root: Path, config: Config, runtime_paths: RuntimePaths) -> None:
-    """Re-index a shared agent's file memory at ``root`` after its files changed outside the memory tool."""
-    _schedule_semantic_refresh_at(agent_name, agent_scope_user_id(agent_name), root, config, runtime_paths, None)
+def refresh_agent_memory_search(
+    agent_name: str,
+    root: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    """Re-index an agent's file memory at ``root`` after its files changed outside the memory tool.
+
+    A private agent's memory is one requester's, so ``execution_identity`` names that requester.
+    """
+    _schedule_semantic_refresh_at(
+        agent_name,
+        agent_scope_user_id(agent_name),
+        root,
+        config,
+        runtime_paths,
+        execution_identity,
+    )
 
 
 def _schedule_scope_semantic_refresh(
@@ -1000,8 +1017,6 @@ def append_agent_daily_file_memory(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ) -> MemoryResult:
     """Append one memory entry to the agent's daily file."""
     resolution = resolve_file_memory_resolution(
@@ -1009,7 +1024,6 @@ def append_agent_daily_file_memory(
         config,
         runtime_paths,
         agent_name=agent_name,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
         execution_identity=execution_identity,
     )
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
@@ -1248,7 +1262,6 @@ class FileMemoryBackend:
         config: Config,
         *,
         limit: int,
-        preserve_resolved_storage_path: bool = False,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> list[MemoryResult]:
         """List file-backed memories stored for an agent."""
@@ -1258,7 +1271,6 @@ class FileMemoryBackend:
             config,
             self.runtime_paths,
             agent_name=agent_name,
-            preserve_resolved_storage_path=preserve_resolved_storage_path,
             execution_identity=execution_identity,
         )
         results, _ = await asyncio.to_thread(
@@ -1419,7 +1431,7 @@ class FileMemoryBackend:
     ) -> None:
         """Persist condensed conversation text to file-backed memory scopes."""
         del session_id, thread_history, user_id  # File conversation memory stores condensed text only.
-        condensed_prompt = " ".join(prompt.strip().split())
+        condensed_prompt = " ".join(redact_memory_text(prompt).split())
         if not condensed_prompt:
             return
 

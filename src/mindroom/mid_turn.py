@@ -3,27 +3,31 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeGuard
 
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage, JudgmentQuestion, build_judgment_request
+from mindroom.judgment.state import (
+    MAX_REQUEST_BYTES,
+    JudgmentMessage,
+    JudgmentQuestion,
+    clip_is_unredacted,
+    clip_judgment_text,
+    fit_judgment_request,
+    is_unredacted,
+)
 from mindroom.logging_config import get_logger
-from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.events import body_with_tool_tags
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.hooks import MessageEnvelope
     from mindroom.judgment.state import JudgmentRequest
+    from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 
-# A long earlier message or reply snapshot reaches the judge as its start and end, so one big reply cannot disable judgment.
-_CLIPPED_TEXT_CHARS = 2_000
-# Credentials are shorter than this, so scanning this far past each cut finds one that clipping splits.
-_CLIP_SCAN_MARGIN_CHARS = 4_000
 _MAX_CONTEXT_MESSAGES = 63
 
 MID_TURN_QUESTION = JudgmentQuestion(
@@ -43,25 +47,6 @@ MID_TURN_QUESTION = JudgmentQuestion(
 )
 
 
-def _clip(text: str) -> str:
-    if len(text) <= _CLIPPED_TEXT_CHARS:
-        return text
-    half = _CLIPPED_TEXT_CHARS // 2
-    return f"{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n{text[-half:]}"
-
-
-def _is_unredacted(text: str) -> bool:
-    return redact_sensitive_text(text) == text
-
-
-def _clip_is_unredacted(text: str) -> bool:
-    """Scan what the clip keeps and the margin past each cut, never the omitted middle of a long text."""
-    reach = _CLIPPED_TEXT_CHARS // 2 + _CLIP_SCAN_MARGIN_CHARS
-    if len(text) <= 2 * reach:
-        return _is_unredacted(text)
-    return _is_unredacted(text[:reach]) and _is_unredacted(text[-reach:])
-
-
 def _is_plain_text(text: str | None) -> TypeGuard[str]:
     return (
         text is not None
@@ -72,7 +57,7 @@ def _is_plain_text(text: str | None) -> TypeGuard[str]:
 
 
 def _is_whole_text(text: str | None) -> TypeGuard[str]:
-    return _is_plain_text(text) and len(text) <= MAX_REQUEST_BYTES and _is_unredacted(text)
+    return _is_plain_text(text) and len(text) <= MAX_REQUEST_BYTES and is_unredacted(text)
 
 
 def message_text_for_judgment(envelope: MessageEnvelope) -> str | None:
@@ -89,6 +74,7 @@ class QueuedMessage:
     event_id: str
     text: str | None
     visible_response: str | None = ""
+    requester_id: str | None = None
 
 
 @dataclass
@@ -112,18 +98,38 @@ class MidTurnGate:
         self._checked = None
         self._finish = False
 
-    def record_visible_response(self, text: str) -> None:
-        """Keep the latest Matrix-acknowledged text for subsequent queue snapshots."""
-        self.visible_response_text = text
+    def record_visible_response(self, text: str, tool_trace: Sequence[ToolTraceEntry]) -> None:
+        """Keep the latest Matrix-acknowledged text, with its tool calls as tags, for later queue snapshots."""
+        # Without a trace, marker-shaped lines are the agent's own text.
+        self.visible_response_text = body_with_tool_tags(text, tool_trace) if tool_trace else text
 
-    async def acknowledge_deferred(self, message: QueuedMessage) -> None:
+    async def _acknowledge_deferred(self, message: QueuedMessage) -> None:
         """Attempt one acknowledgement per message after the caller accepts the decision."""
         if self.on_defer is None or message.event_id in self._acknowledged:
             return
         self._acknowledged.add(message.event_id)
         await self.on_defer(message.event_id)
 
-    async def should_finish(self, pending: tuple[QueuedMessage, ...]) -> bool:
+    async def defers(self, pending: tuple[QueuedMessage, ...], *, current: Callable[[], bool]) -> bool:
+        """Return whether ``pending`` can wait for the active reply, acknowledging each message while ``current`` holds."""
+        try:
+            finish = await self._should_finish(pending)
+        except Exception:
+            # Callers hand off as on a failed judgment; Agno logs and ignores post-tool callback failures.
+            finish = False
+        if not finish:
+            return False
+        for message in pending:
+            # Matrix delivery can yield to a newer correction or a concurrent handoff.
+            if not current():
+                return False
+            try:
+                await self._acknowledge_deferred(message)
+            except Exception:
+                logger.warning("mid_turn_reaction_failed")
+        return current()
+
+    async def _should_finish(self, pending: tuple[QueuedMessage, ...]) -> bool:
         """Continue only with sufficient confidence that no interruption is needed."""
         async with self._lock:
             if self._checked == pending:
@@ -145,7 +151,7 @@ class MidTurnGate:
             self._checked, self._finish = pending, finish
             return finish
 
-    def _request(self, pending: tuple[QueuedMessage, ...]) -> JudgmentRequest | str:  # noqa: PLR0911
+    def _request(self, pending: tuple[QueuedMessage, ...]) -> JudgmentRequest | str:
         """Build the judge's request, or name why the queue cannot be judged."""
         if self.conversation_context is None:
             return "history_unavailable"
@@ -158,26 +164,19 @@ class MidTurnGate:
         for message in pending:
             if not _is_whole_text(message.text):
                 return "queued_message_unjudgeable"
-            if message.visible_response is None or not _clip_is_unredacted(message.visible_response):
+            if message.visible_response is None or not clip_is_unredacted(message.visible_response):
                 return "visible_response_unavailable"
-            queued.append({"text": message.text, "visible_response": _clip(message.visible_response)})
-        history = self.conversation_context[-_MAX_CONTEXT_MESSAGES:]
-        evidence = json.dumps({"active_request": self.active_text, "queued_messages": queued}, ensure_ascii=False)
-        context = [JudgmentMessage(message.sender, _clip(message.text)) for message in history]
-        while True:
-            request = build_judgment_request(
-                MID_TURN_QUESTION,
-                (*context, JudgmentMessage("user", evidence)),
-                max_context_messages=_MAX_CONTEXT_MESSAGES + 1,
-                instructions=self.instructions,
+            queued.append(
+                f"<queued_message>\n{message.text}\n</queued_message>\n"
+                f"<visible_response>\n{clip_judgment_text(message.visible_response)}\n</visible_response>",
             )
-            if request.incomplete_reason != "essential_input_too_large" or not context:
-                break
-            # The oldest conversation gives way first.
-            del context[0]
-        # Only the newest messages that fit reach the judge, so older ones are never scanned.
-        kept = history[len(history) - len(context) :]
-        # Earlier messages may name attachments the judge cannot open, as agents echo their attachment annotations.
-        if not all(_clip_is_unredacted(message.text) for message in kept):
-            return "history_unjudgeable"
-        return request
+        # Plain tags, not JSON: escaping changes redacted text, and the redaction check would refuse it.
+        evidence = "\n".join([f"<active_request>\n{self.active_text}\n</active_request>", *queued])
+        request = fit_judgment_request(
+            MID_TURN_QUESTION,
+            self.conversation_context,
+            JudgmentMessage("user", evidence),
+            instructions=self.instructions,
+            max_context_messages=_MAX_CONTEXT_MESSAGES,
+        )
+        return "history_unjudgeable" if request is None else request

@@ -49,6 +49,7 @@ from mindroom.dynamic_workflows.validation import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
+from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
@@ -518,7 +519,7 @@ def _participant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> P
         step_outputs: dict[str, object],
     ) -> ParticipantOutput:
         del input_data, step_outputs
-        return asyncio.run(_aexecute_participant(context, participant, prompt, state))
+        return asyncio.run(closing_model_connections(_aexecute_participant(context, participant, prompt, state)))
 
     return execute
 
@@ -577,7 +578,6 @@ async def _aexecute_room_agent_participant(
         context.config,
         context.runtime_paths,
         execution_identity=execution_identity,
-        session_id=session_id,
         hook_registry=context.hook_registry,
         knowledge=None,
         active_model_name=active_model_name,
@@ -884,7 +884,6 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
             runtime_overrides=entity_view.tool_runtime_overrides(tool_name),
             tool_config_overrides=authored_overrides.get(tool_name),
             execution_identity=execution_identity,
-            session_id=context.session_id,
         )
         if toolkit is None:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not available in this runtime."
@@ -913,7 +912,7 @@ def _participant_run_config(
     """Return the participant policy: approval by default, with the caller's allowed tools pre-approved.
 
     A participant may read the skills it names whenever its caller could without approval;
-    reading or running a skill's scripts still needs an operator rule.
+    reading a skill's scripts still needs an operator rule.
     """
     return build_automation_approval_config(
         context.config,

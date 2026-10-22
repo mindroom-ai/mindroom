@@ -77,7 +77,8 @@ from .scheduled_approvals import (
     ScheduledCallRefusal,
     scheduled_call_run_id,
 )
-from .store import EventJournalStore, PrincipalStore, TurnRecordStore
+from .store import EventJournalStore, PrincipalStore, ToolJobStore, TurnRecordStore
+from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError
 from .views import (
     AdmissionView,
     ApprovalDeliveryView,
@@ -148,6 +149,7 @@ __all__ = [
     "ReplayView",
     "RoomHistoryRecovery",
     "RoomMembershipPosition",
+    "SavedToolJob",
     "ScheduledApprovalArmState",
     "ScheduledCall",
     "ScheduledCallBinding",
@@ -157,6 +159,9 @@ __all__ = [
     "SemanticConsumer",
     "StoredApprovalCard",
     "TerminalTurnWrite",
+    "ToolJobExistsError",
+    "ToolJobOwnershipLostError",
+    "ToolJobStore",
     "TurnRecordStore",
     "UnreadableApprovalCard",
     "UnreadableMatrixDelivery",

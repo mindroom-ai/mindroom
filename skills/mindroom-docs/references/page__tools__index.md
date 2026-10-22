@@ -134,16 +134,17 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Google Scholar, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, moves, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, moves, summaries, stopping other agents' replies, model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Matrix Message Tool](https://docs.mindroom.chat/tools/matrix-message/) - Send, read, edit, and react to messages with `matrix_message`.
 - [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](https://docs.mindroom.chat/canvases/) in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
+- [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, SharePoint lists and pages, Outlook mail and calendars, To Do tasks, Teams channels and chats, Teams meeting transcripts, OneNote pages, and the people directory through Microsoft Graph.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Mem0 and Zep external memory services; the built-in [`memory`](https://docs.mindroom.chat/memory/#memory) tool is documented with the memory system.
 - [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, Dynamic Workflows, report publishing, config tools, and Claude Agent sessions.
-- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
+- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Keep rarely used tools out of the model's context until the agent searches for them.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
 

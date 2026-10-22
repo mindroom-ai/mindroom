@@ -64,7 +64,6 @@ from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_loop import bot_ingestion_config, sliding_sync_room_subscriptions
 from mindroom.matrix.users import AgentMatrixUser, login_agent_owned_session
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
-from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.model_catalog_receiver import register_model_catalog_receiver
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
@@ -82,7 +81,6 @@ from mindroom.runtime_shutdown import (
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
-from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants
 from .agents import create_agent, show_tool_calls_for_agent
@@ -106,6 +104,7 @@ from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
     EventJournalStore,
     EventKind,
+    HistoryRecoveryState,
     PrincipalStore,
     SemanticConsumer,
 )
@@ -140,7 +139,6 @@ from .response_runner import (
     ResponseRequest,
     ResponseRunner,
     ResponseRunnerDeps,
-    prepare_memory_and_model_context,
 )
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .scheduling.tasks import (
@@ -154,6 +152,9 @@ from .scheduling.tasks import (
     set_scheduled_task_runner_owner,
 )
 from .startup_errors import PermanentStartupError
+from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
+from .tool_jobs.follow_ups import follow_up_event
+from .tool_jobs.runtime import get_background_runtime
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -184,6 +185,7 @@ if TYPE_CHECKING:
     from mindroom.reply_lifecycle import Reply
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
+    from mindroom.tool_jobs.conversation import ConversationKey
 
 
 class _ProcessShutdownMatrixClient(Protocol):
@@ -528,6 +530,7 @@ class AgentBot:
                     self.wait_for_admission_or_shutdown,
                 ),
                 on_configured_room_joined=self._post_join_room_setup,
+                get_conversation_reader=lambda: self._conversation_reader,
             ),
         )
         self._init_runtime_components()
@@ -535,6 +538,17 @@ class AgentBot:
     def journal_principal(self) -> PrincipalStore:
         """Return this bot's principal-bound projection view, once the journal is open."""
         return self._journal_store.principal(self._journal_principal_id)
+
+    async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+        """Return which of a room's events this bot saw redacted, for readers of its stored conversations.
+
+        Redactions inside a gap its sync skipped reach the journal only when the room is repaired, so the lookup runs
+        that repair first, as a strict read of the room would.
+        """
+        recovery = await self.journal_principal().room_history_recovery(room_id)
+        if recovery is not None and recovery.state is HistoryRecoveryState.REPAIRABLE:
+            await self._conversation_reader.hydrator.ensure_hydrated(room_id=room_id, thread_id=None)
+        return await self._turn_store.redacted_event_ids(room_id, event_ids)
 
     def _open_own_journal(self) -> OpenEventJournal:
         """Open the durable store this bot's journal, projection, and outbox share.
@@ -707,6 +721,7 @@ class AgentBot:
                 on_media=self._on_media_message,
                 on_reaction=self._on_reaction,
                 on_approval=self._on_unknown_event,
+                on_job_cancel=self._on_job_cancel,
                 on_room_lifecycle=self._on_room_member,
                 on_rtc=self._on_rtc_event,
                 on_redaction=self._on_redaction,
@@ -717,6 +732,7 @@ class AgentBot:
                 ),
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
                 replies_ended=self._replies_ended,
+                on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
             ),
             room_for_id=self._room_for_journal_event,
             schedule_trigger_sender_is_managed=lambda sender: (
@@ -1125,6 +1141,14 @@ class AgentBot:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
+
+    async def admit_job_follow_up(self, key: ConversationKey, follow_up_id: str) -> None:
+        """Admit a follow-up for jobs that ended in one of this bot's conversations, and wake the journal worker."""
+        now_ms = int(time.time() * 1000)
+        await self.journal_principal().admit(
+            follow_up_event(key, follow_up_id, sender_id=self.matrix_id.full_id, now_ms=now_ms),
+        )
+        self._journal_dispatcher.wake()
 
     def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None:
         """Wake response-local CLI waits, then release unowned sources to the journal."""
@@ -1706,6 +1730,9 @@ class AgentBot:
                 self._request_call_reconciliation(room_id)
         if not joined and admission.previous_membership == "join":
             await self._reply_runtime.departed(room_id)
+            if (runtime := get_background_runtime(self.runtime_paths)) is not None:
+                # Nobody here can see or cancel the work this entity leaves behind.
+                await cancel_room_jobs(runtime, agent_name=self.agent_name, room_id=room_id)
             # The departure ended the room's approvals without their settlement.
             self._response_runner.release_approval_holds_in_room(room_id)
             await self._room_lifecycle.forget_invited_room(room_id)
@@ -1724,9 +1751,9 @@ class AgentBot:
                 sliding_sync_room_subscriptions(self.rooms, self.config.matrix_sync.sliding_timeline_limit),
             )
 
-    def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
+    async def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""
-        self._call_manager = maybe_build_call_manager(
+        self._call_manager = await maybe_build_call_manager(
             agent_name=self.agent_name,
             config=self.config,
             client=client,
@@ -1892,7 +1919,7 @@ class AgentBot:
                 self._on_invite_before_sync_certification,  # ty: ignore[invalid-argument-type]
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
-            self._register_call_manager_callbacks(client)
+            await self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(
                 self.config,
                 client=client,
@@ -2816,6 +2843,25 @@ class AgentBot:
         record = self._turn_store.get_turn_record(turn_id)
         return record.indexed_event_ids if record is not None else (turn_id,)
 
+    async def _on_job_cancel(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Cancel this entity's background jobs a person asked to stop from their client."""
+        runtime = get_background_runtime(self.runtime_paths)
+        sender = event.source.get("sender")
+        if runtime is None or not isinstance(sender, str):
+            return
+        await handle_job_cancel_event(
+            runtime,
+            agent_name=self.agent_name,
+            room_id=room.room_id,
+            content=event.source.get("content") or {},
+            sender_may_cancel=person_may_cancel(
+                sender,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                may_talk=lambda sender_id: self._turn_policy.can_reply_to_sender_in_room(sender_id, room.room_id),
+            ),
+        )
+
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""
         if event.type != "io.mindroom.tool_approval_response":
@@ -2966,16 +3012,6 @@ class TeamBot(AgentBot):
                 response_kind="team",
             )
         assert self.client is not None
-        memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
-            prepare_memory_and_model_context(
-                request.prompt,
-                request.thread_history,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                model_prompt=request.model_prompt,
-            )
-        )
-
         team_config = self.config.teams[self.agent_name]
         configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
         availability = self._turn_policy.responder_availability()
@@ -2997,39 +3033,9 @@ class TeamBot(AgentBot):
             )
         assert team_resolution.mode is not None
 
-        registry = entity_identity_registry(self.config, self.runtime_paths)
-        agent_names = [
-            registry.current_entity_name_for_user_id(mid.full_id, include_router=False) or mid.username
-            for mid in team_resolution.eligible_members
-        ]
-        session_id = target.session_id
-        execution_identity = self._tool_runtime_support.build_execution_identity(
-            target=target,
-            user_id=request.user_id,
-        )
-        with tool_execution_identity(execution_identity):
-            create_background_task(
-                store_conversation_memory(
-                    memory_prompt,
-                    agent_names,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    self.runtime_paths,
-                    memory_thread_history,
-                    request.user_id,
-                    execution_identity=execution_identity,
-                ),
-                name=f"memory_save_team_{session_id}",
-                owner=self._runtime_view,
-            )
-
         return await self._response_runner.generate_team_response_helper(
             replace(
                 request,
-                prompt=memory_prompt,
-                model_prompt=model_prompt_text,
-                thread_history=model_thread_history,
                 media=request.media or MediaInputs(),
                 user_id=request.user_id or "",
                 correlation_id=request.correlation_id or target.reply_to_event_id,

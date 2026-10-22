@@ -90,11 +90,9 @@ def _entries(context: AgentToolContext) -> dict[str, EffectiveToolConfig]:
         for entry in visible_tool_surface(
             agent_name=context.agent_name,
             config=context.config,
-            loaded_tools=[entry.name for entry in entity.authored_deferred_tool_configs],
-            enable_dynamic_tools_manager=False,
         ).runtime_tool_configs
         if entry.authored_name in authored
-        and ((metadata := TOOL_METADATA.get(entry.name)) is None or not metadata.requires_room_context)
+        and ((metadata := TOOL_METADATA.get(entry.name)) is None or metadata.mcp_available)
     }
 
 

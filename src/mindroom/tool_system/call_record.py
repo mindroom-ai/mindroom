@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
 
 
 class _ToolCallRecorder(Protocol):
@@ -37,6 +37,32 @@ def tool_call_recorder() -> _ToolCallRecorder | None:
 def recording_tool_calls(recorder: _ToolCallRecorder) -> Iterator[None]:
     """Record every tool call made in this context, child tasks included."""
     token = _recorder.set(recorder)
+    try:
+        yield
+    finally:
+        _recorder.reset(token)
+
+
+async def record_call(tool_name: str, args: Mapping[str, object]) -> Callable[[object], Awaitable[None]]:
+    """Record a call whose tool then runs outside this work's recording, as a background job does; return its finish.
+
+    The work's record then names the call, and, as for any recorded call, a Stop committed first raises
+    ``asyncio.CancelledError`` here so the call never starts.
+    """
+    recorder = _recorder.get()
+    record_id = None if recorder is None else await recorder.started(tool_name, args)
+
+    async def finished(result: object) -> None:
+        if recorder is not None and record_id is not None:
+            await recorder.finished(record_id, tool_name, args, result)
+
+    return finished
+
+
+@contextmanager
+def without_tool_call_recording() -> Iterator[None]:
+    """Run tools outside the work that started them, as a background job does: the job keeps its own outcome."""
+    token = _recorder.set(None)
     try:
         yield
     finally:

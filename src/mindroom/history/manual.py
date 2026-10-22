@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
-from mindroom.history.session_context import open_scope_session_context
+from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
+from mindroom.history.session_context import open_resolved_scope_session_context, resolve_history_scope
 from mindroom.history.storage import add_pending_force_compaction_scope, read_scope_state, set_force_compaction_state
 from mindroom.logging_config import get_logger
 
@@ -35,7 +35,7 @@ def request_compaction_before_next_reply(
     *,
     agent: Agent,
     agent_name: str,
-    session_id: str | None,
+    session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
@@ -45,11 +45,8 @@ def request_compaction_before_next_reply(
     record_pending_scope_in_session_state: bool = False,
 ) -> _ManualCompactionRequestResult:
     """Schedule text compaction before the next reply in the current history scope."""
-    if session_id is None:
-        return _ManualCompactionRequestResult("Error: No active session available. Cannot determine session.")
-
-    with open_scope_session_context(
-        agent=agent,
+    with open_resolved_scope_session_context(
+        scope=resolve_history_scope(agent),
         agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
@@ -59,8 +56,6 @@ def request_compaction_before_next_reply(
     ) as scope_context:
         if scope_context is None:
             return _ManualCompactionRequestResult("Error: Current agent has no history scope. Cannot compact context.")
-        if scope_context.session is None:
-            return _ManualCompactionRequestResult("Error: No stored session available. Cannot compact context.")
 
         runtime_model, compaction_config = _resolve_active_compaction_settings(
             agent=agent,
@@ -70,16 +65,24 @@ def request_compaction_before_next_reply(
             active_model_name=active_model_name,
             room_id=room_id,
         )
-        budget_error = _validate_compaction_budget(
+        execution_plan = resolve_history_execution_plan(
             config=config,
+            compaction_config=compaction_config,
+            has_authored_compaction_config=True,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
-            compaction_config=compaction_config,
+            static_prompt_tokens=None,
         )
-        if budget_error is not None:
-            return _ManualCompactionRequestResult(budget_error, session_state=session_state)
+        unavailable = describe_compaction_unavailability(execution_plan)
+        if unavailable is not None:
+            return _ManualCompactionRequestResult(
+                f"Error: Compaction is unavailable for this scope because {unavailable}.",
+                session_state=session_state,
+            )
 
         session = scope_context.session
+        # create_session_if_missing opens a new session when none is stored yet.
+        assert session is not None
         current_state = read_scope_state(session, scope_context.scope)
         set_force_compaction_state(session, scope_context.scope, current_state, force=True)
         scope_context.storage.upsert_session(session)
@@ -131,22 +134,3 @@ def _resolve_active_compaction_settings(
         runtime_paths=runtime_paths,
     )
     return runtime_model, config.resolve_entity(agent.team_id).compaction_config
-
-
-def _validate_compaction_budget(
-    *,
-    config: Config,
-    active_model_name: str,
-    active_context_window: int | None,
-    compaction_config: CompactionConfig,
-) -> str | None:
-    """Return a user-facing error when text compaction is unavailable."""
-    execution_plan = resolve_history_execution_plan(
-        config=config,
-        compaction_config=compaction_config,
-        has_authored_compaction_config=True,
-        active_model_name=active_model_name,
-        active_context_window=active_context_window,
-        static_prompt_tokens=None,
-    )
-    return manual_compaction_unavailable_message(execution_plan)

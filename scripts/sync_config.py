@@ -55,12 +55,18 @@ def saas_config() -> dict:
         },
     }
 
+    # Tenants have no shell to log in to matrix-mcp, and `script` cannot run in a sandbox
+    # worker, so it would run tenant Python in the primary pod beside tenant credentials.
+    config.pop("mcp_servers")
     # The platform upgrades hosted instances, so tenants cannot act on update notices.
     config["defaults"]["tools"].remove("update_awareness")
+    hosted_excluded_tools = {"update_awareness", "script", "mcp_matrix_mcp"}
     for agent in config["agents"].values():
-        agent["tools"].remove("update_awareness")
-        # Hosted agents learn workspace skills from their conversations.
-        agent["skill_learning"] = {"enabled": True}
+        agent["tools"] = [
+            tool
+            for tool in agent["tools"]
+            if (tool["name"] if isinstance(tool, dict) else tool) not in hosted_excluded_tools
+        ]
     return config
 
 

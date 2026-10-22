@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
@@ -10,8 +11,10 @@ from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
+from mindroom.memory._mem0_usage import install_mem0_usage_capture
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.timing import timed
+from mindroom.tool_system.dependencies import optional_dependency_environment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,6 +31,8 @@ _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
 
 class _StrictOpenAIEmbedder(Protocol):
     def get_embedding(self, text: str) -> list[float]: ...
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]: ...
 
     def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]: ...
 
@@ -59,9 +64,12 @@ class _Mem0StrictOpenAIEmbedder:
         text: str,
         memory_action: Literal["add", "search", "update"] | None = None,
     ) -> list[float]:
-        del memory_action
+        text = text.replace("\n", " ")
         try:
-            return self.embedder.get_embedding(text.replace("\n", " "))
+            # Stored memories are documents; anything else is a search query.
+            if memory_action in {"add", "update"}:
+                return self.embedder.get_embedding_and_usage(text)[0]
+            return self.embedder.get_embedding(text)
         except Exception as exc:
             self._remember_operation_failure(exc)
             raise
@@ -134,6 +142,8 @@ def _memory_collection_name(config: Config) -> str:
             embedder_config.model,
             host=embedder_config.host,
             dimensions=embedder_config.dimensions,
+            query_prefix=embedder_config.query_prefix,
+            document_prefix=embedder_config.document_prefix,
         ),
     )
     digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:8]
@@ -261,17 +271,26 @@ async def create_memory_instance(
     from mem0 import AsyncMemory  # noqa: PLC0415
 
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
-    if config.memory.embedder.provider == "sentence_transformers":
-        ensure_sentence_transformers_dependencies(runtime_paths)
-
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
-    memory = AsyncMemory.from_config(config_dict)
+    if config_dict["embedder"]["provider"] == "huggingface":
+        # Mem0's huggingface embedder builds its own SentenceTransformer, which imports optional local packages.
+        # Install and wait for running installs in a worker thread so the event loop keeps serving other tasks.
+        def from_config_with_local_embedder() -> AsyncMemory:
+            if config.memory.embedder.provider == "sentence_transformers":
+                ensure_sentence_transformers_dependencies(runtime_paths)
+            with optional_dependency_environment():
+                return AsyncMemory.from_config(config_dict)
+
+        memory = await asyncio.to_thread(from_config_with_local_embedder)
+    else:
+        memory = AsyncMemory.from_config(config_dict)
     memory_llm = config.memory.llm
     if memory_llm is not None and memory_llm.provider == "openai":
         from mindroom.memory._mem0_openai import install_mem0_openai_compatibility  # noqa: PLC0415
 
         install_mem0_openai_compatibility(cast("OpenAILLM", memory.llm))
+    install_mem0_usage_capture(memory.llm, memory_llm.provider if memory_llm is not None else "ollama")
     if config.memory.embedder.provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
         # and can expose raw provider errors. Reuse MindRoom's strict boundary.

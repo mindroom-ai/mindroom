@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import mindroomLogo from "../../../assets/logo/logo-mark-animated.svgz?url";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConnectedClients } from "./ConnectedClients";
+import { ConnectionsHeader } from "./ConnectionsHeader";
 import { AgentTable } from "./AgentTable";
-import { requestConnection } from "./request";
+import { errorText, requestConnection } from "./request";
 import { useMcpSelection } from "./useMcpSelection";
 import type { ConnectionList } from "./types";
 
@@ -14,8 +14,10 @@ export function Connections() {
   const mcp = useMcpSelection();
   const [connections, setConnections] = useState<ConnectionList | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // An account change reloads the catalog, whose API key counts can depend on
+  // the same account, and the tool statuses together.
   const [refreshVersion, setRefreshVersion] = useState(0);
-  const refreshConnections = () => setRefreshVersion((version) => version + 1);
+  const refresh = () => setRefreshVersion((version) => version + 1);
   useEffect(() => {
     const controller = new AbortController();
     void requestConnection<ConnectionList>(
@@ -28,28 +30,21 @@ export function Connections() {
       .catch((cause) => {
         if (!controller.signal.aborted)
           setError(
-            cause instanceof Error
-              ? cause.message
-              : "Could not load connections. Reload this page to try again.",
+            errorText(
+              cause,
+              "Could not load connections. Reload this page to try again.",
+            ),
           );
       });
     return () => controller.abort();
-  }, []);
+  }, [refreshVersion]);
 
   return (
     <main className="min-h-screen bg-muted/20 px-4 py-8 sm:px-6 sm:py-12">
       <div className="mx-auto max-w-6xl space-y-6">
-        <header className="flex items-start gap-4">
-          <img src={mindroomLogo} alt="" className="h-12 w-12 shrink-0" />
-          <div className="space-y-1.5">
-            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-              Your MindRoom connections
-            </h1>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              See each agent’s tools and connect the accounts they need.
-            </p>
-          </div>
-        </header>
+        <ConnectionsHeader current="agents" title="Your MindRoom connections">
+          See each agent’s tools and connect the accounts they need.
+        </ConnectionsHeader>
         {mcp.selection?.enabled && (
           <p className="text-sm text-muted-foreground">
             The MCP gateway column controls access from external apps. It does
@@ -97,7 +92,7 @@ export function Connections() {
             agents={connections.agents}
             mcp={mcp}
             refreshVersion={refreshVersion}
-            onConnectionChange={refreshConnections}
+            onConnectionChange={refresh}
           />
         )}
         <ConnectedClients />

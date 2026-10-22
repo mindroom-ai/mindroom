@@ -105,7 +105,7 @@ class ResolvedEntityView:
 
     @property
     def available_tools(self) -> list[str]:
-        """All tools this agent may use after dynamic loading."""
+        """All tools this agent may use, initial and deferred."""
         return self._config._agent_available_tools(self._agent_name())
 
     @property

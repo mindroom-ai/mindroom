@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { ConnectionServiceRows } from "./ConnectionServiceRows";
+import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
 import { ToolExposure, ToolName } from "./ToolRow";
-import type { AgentConnections } from "./types";
+import type { AgentConnections, ConnectionStatus } from "./types";
 import type { McpSelectionState } from "./useMcpSelection";
 
 export function AgentTools({
@@ -10,11 +11,18 @@ export function AgentTools({
   mcp,
   refreshVersion,
   onConnectionChange,
+  onAccountStatus,
 }: {
   agent: AgentConnections;
   mcp: McpSelectionState;
   refreshVersion: number;
   onConnectionChange: () => void;
+  /** Told each time one of the agent's account statuses loads. */
+  onAccountStatus?: (
+    agentName: string,
+    provider: string,
+    status: ConnectionStatus,
+  ) => void;
 }) {
   const [otherOpen, setOtherOpen] = useState(false);
   const otherTools = agent.tools.filter((tool) => tool.provider === null);
@@ -28,14 +36,17 @@ export function AgentTools({
     <div className="overflow-x-auto">
       <table
         aria-label={`${agent.agent_display_name} tools`}
-        className="w-full min-w-[640px] text-sm"
+        className={`w-full text-sm sm:min-w-[640px] ${STACKED.table}`}
       >
-        <thead className="text-left text-xs text-muted-foreground">
+        <thead
+          className={`text-left text-xs text-muted-foreground ${STACKED.head}`}
+        >
           <tr>
             <th scope="col" className="w-[44%] px-5 py-3 font-medium">
               Tool
             </th>
-            <th scope="col" className="w-[25%] px-4 py-3 font-medium">
+            {/* Inset like the agent table's cells, so Connection lines up with Tools & connections above it. */}
+            <th scope="col" className="w-[25%] px-5 py-3 font-medium">
               Connection
             </th>
             <th scope="col" className="w-[15%] px-4 py-3 font-medium">
@@ -46,7 +57,7 @@ export function AgentTools({
             </th>
           </tr>
         </thead>
-        <tbody>
+        <tbody className={STACKED.body}>
           {agent.services.map((service) => (
             <ConnectionServiceRows
               key={service.provider}
@@ -55,12 +66,13 @@ export function AgentTools({
               mcp={mcp}
               refreshVersion={refreshVersion}
               onConnectionChange={onConnectionChange}
+              onStatus={onAccountStatus}
             />
           ))}
           {otherTools.length > 0 && (
             <>
-              <tr className="border-t border-border/60">
-                <td colSpan={4}>
+              <tr className={`border-t border-border/60 ${STACKED.row}`}>
+                <td colSpan={4} className={STACKED_CELL}>
                   <button
                     type="button"
                     className="flex w-full items-center gap-2 px-5 py-3 text-left text-sm hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
@@ -85,17 +97,29 @@ export function AgentTools({
               </tr>
               {otherOpen &&
                 otherTools.map((tool) => (
-                  <tr key={tool.name} className="border-t border-border/60">
-                    <th scope="row" className="px-5 py-3 text-left font-normal">
+                  <tr
+                    key={tool.name}
+                    className={`border-t border-border/60 ${STACKED.row} max-sm:py-2`}
+                  >
+                    <th
+                      scope="row"
+                      className={`px-5 py-3 text-left font-normal ${STACKED_CELL} max-sm:px-4 max-sm:py-1`}
+                    >
                       <ToolName tool={tool} />
                     </th>
-                    <td className="px-4 py-3 text-xs text-muted-foreground">
+                    <td
+                      data-label="Connection"
+                      className={`px-5 py-3 text-xs text-muted-foreground ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1`}
+                    >
                       No setup needed
                     </td>
-                    <td className="px-4 py-3">
+                    <td
+                      data-label="MCP gateway"
+                      className={`px-4 py-3 ${STACKED_CELL} ${STACKED_LABEL} max-sm:py-1`}
+                    >
                       <ToolExposure agent={agent} tool={tool} mcp={mcp} />
                     </td>
-                    <td />
+                    <td className="max-sm:hidden" />
                   </tr>
                 ))}
             </>

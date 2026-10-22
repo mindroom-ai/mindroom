@@ -58,8 +58,8 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
-from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging
-from mindroom.history.replay import apply_replay_plan
+from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, without_fold_records
+from mindroom.history.replay import apply_replay_plan, compaction_marker
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -83,7 +83,13 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
-from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
+from mindroom.memory import (
+    ConversationRef,
+    MemoryPromptParts,
+    build_memory_prompt_parts,
+    conversation_entrypoint_preamble,
+    strip_user_turn_time_prefix,
+)
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import (
     build_agent_off_loop,
@@ -97,12 +103,12 @@ from mindroom.response_turn import (
     BlockingAttemptResolution,
     BlockingTurnAdapter,
     CompletedAttempt,
-    DynamicContinuationRunState,
     ExcludedAttempt,
     HandledAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
     StreamingTurnAdapter,
+    TurnContinuationRunState,
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
@@ -115,6 +121,9 @@ from mindroom.response_turn import (
 from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.skill_learning.capture import observe_final_request
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
+from mindroom.tool_jobs.notices import append_turn_start_job_note
+from mindroom.tool_jobs.resources import defer_execution_cleanup
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
     AuditedToolExecution,
@@ -124,6 +133,7 @@ from mindroom.tool_system.events import (
     format_tool_combined,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
@@ -219,9 +229,9 @@ def _initial_agent_continuation(
     current_prompt_is_structured: bool,
     current_event_id: str | None,
     run_id: str | None,
-) -> DynamicContinuationRunState:
+) -> TurnContinuationRunState:
     """Build the initial continuation state for one agent response turn."""
-    return DynamicContinuationRunState.initial(
+    return TurnContinuationRunState.initial(
         prompt=prompt,
         model_prompt=model_prompt,
         current_timestamp_ms=current_timestamp_ms,
@@ -381,7 +391,12 @@ async def _finalize_agent_turn_model(
     if model is None and holder.agent is not None:
         model = holder.agent.model
     if model is not None:
-        await run_coroutine_until_complete(aclose_anthropic_async_client(model))
+
+        async def close() -> None:
+            await aclose_anthropic_async_client(model)
+
+        if not defer_execution_cleanup(close, resource=model):
+            await run_coroutine_until_complete(close())
 
 
 def _build_agent_turn_callbacks(
@@ -1012,6 +1027,19 @@ async def _close_agent_on_preparation_failure(
         raise
 
 
+def _install_system_context(
+    agent: Agent,
+    ctx: ResponseTurnContext,
+    base_context: str | None,
+    session_preamble: str,
+) -> None:
+    """Set the agent's system context to its base context, the memory preamble, and the turn's system enrichment."""
+    agent.additional_context = base_context
+    _append_additional_context(agent, session_preamble)
+    if ctx.system_enrichment_items:
+        _append_additional_context(agent, _render_system_enrichment_context(ctx.system_enrichment_items))
+
+
 def _standard_turn_enrichment(
     agent: Agent,
     ctx: ResponseTurnContext,
@@ -1021,9 +1049,7 @@ def _standard_turn_enrichment(
     """Put enrichment in the prompt and bind the turn for an agent whose shell can call its other tools."""
     if isinstance(agent, CliShellAgent):
         agent.response_context = ctx
-    _append_additional_context(agent, session_preamble)
-    if ctx.system_enrichment_items:
-        _append_additional_context(agent, _render_system_enrichment_context(ctx.system_enrichment_items))
+    _install_system_context(agent, ctx, agent.additional_context, session_preamble)
     return render_transient_context(
         (transient_memory, render_enrichment_block(list(ctx.transient_enrichment_items))),
     )
@@ -1045,7 +1071,48 @@ def _minimal_turn_enrichment(
     agent.system_message = agent.bootstrap_message
     if required_system:
         agent.system_message += "\n" + _render_system_enrichment_context(required_system)
-    return render_enrichment_block([item for item in ctx.transient_enrichment_items if item.minimal_required])
+    return render_transient_context(
+        (render_enrichment_block([item for item in ctx.transient_enrichment_items if item.minimal_required]),),
+    )
+
+
+def _memory_conversation(
+    ctx: ResponseTurnContext,
+    config: Config,
+    scope_context: ScopeSessionContext | None,
+) -> ConversationRef | None:
+    """Name the conversation whose cached system prompt the turn's inlined MEMORY.md should keep unchanged.
+
+    Only file memory inlines a MEMORY.md. An authored persona recalls no memory, a minimal agent reads its memory on
+    demand rather than in its system prompt, and a replay limit, configured or scheduled, moves the history after the
+    system prompt every turn and can drop the agent's own memory writes, so none of them has a cache to keep.
+    Without automatic compaction, fitting a long conversation into the context window is such a limit.
+    """
+    if (
+        ctx.persona is not None
+        or ctx.agent_mode == "minimal"
+        or ctx.scheduled_history_budget is not None
+        or scope_context is None
+        or scope_context.session_id is None
+    ):
+        return None
+    entity = config.resolve_entity(ctx.entity_label)
+    if (
+        entity.memory_backend != "file"
+        or not entity.history_settings.replays_whole_history
+        or not (entity.has_authored_compaction_config and entity.compaction_config.enabled)
+    ):
+        return None
+    session = scope_context.session
+    compaction = compaction_marker(session, scope_context.scope) if session is not None else (None, None)
+    return ConversationRef(scope_context.session_id, compaction)
+
+
+def _turn_enrichment(agent: Agent, ctx: ResponseTurnContext, prompt_parts: MemoryPromptParts) -> str:
+    """Install the turn's memory and enrichment on the agent, and return its transient turn context."""
+    if isinstance(agent, MinimalAgent):
+        return _minimal_turn_enrichment(agent, ctx, prompt_parts.session_preamble, prompt_parts.transient_turn_context)
+    return _standard_turn_enrichment(agent, ctx, prompt_parts.session_preamble, prompt_parts.transient_turn_context)
 
 
 async def _prepare_turn_memory(
@@ -1054,6 +1121,7 @@ async def _prepare_turn_memory(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
+    conversation: ConversationRef | None,
 ) -> MemoryPromptParts:
     """Recall memories for a configured agent turn; an authored persona recalls none."""
     if ctx.persona is not None:
@@ -1065,7 +1133,37 @@ async def _prepare_turn_memory(
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        conversation=conversation,
     )
+
+
+async def _reload_memory_with_compaction(
+    agent: Agent,
+    ctx: ResponseTurnContext,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    scope_context: ScopeSessionContext | None,
+    conversation: ConversationRef | None,
+    base_context: str | None,
+) -> None:
+    """Rebuild the agent's system context with the current MEMORY.md when this turn's history preparation compacted.
+
+    That compaction already changes the request after the system prompt, so reloading here costs nothing, while
+    waiting for the next turn would make it miss the cache on the whole compacted history.
+    """
+    compacted = _memory_conversation(ctx, config, scope_context)
+    if compacted is None or compacted == conversation:
+        return
+    fresh = await conversation_entrypoint_preamble(
+        ctx.entity_label,
+        runtime_paths.storage_root,
+        config,
+        runtime_paths,
+        execution_identity,
+        conversation=compacted,
+    )
+    _install_system_context(agent, ctx, base_context, fresh)
 
 
 @timed("system_prompt_assembly")
@@ -1121,7 +1219,6 @@ async def _prepare_agent_and_prompt(
                 agent_name,
                 config,
                 runtime_paths,
-                session_id=ctx.session_id,
                 history_storage=scope_context.storage if scope_context is not None else None,
                 active_model_name=runtime_model.model_name,
                 knowledge=knowledge,
@@ -1131,7 +1228,6 @@ async def _prepare_agent_and_prompt(
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
-                dynamic_tool_continuation=True,
                 supports_native_tool_approval=supports_native_tool_approval,
                 eager_deferred_tools=eager_deferred_tools,
                 agent_mode=ctx.agent_mode,
@@ -1145,6 +1241,7 @@ async def _prepare_agent_and_prompt(
         return runtime_model, agent
 
     memory_backend = config.resolve_entity(agent_name).memory_backend
+    memory_conversation = _memory_conversation(ctx, config, scope_context)
     parallel_branches = memory_backend == "mem0"
     serial_reason: str | None = None
     if memory_backend == "file":
@@ -1178,6 +1275,7 @@ async def _prepare_agent_and_prompt(
                         config,
                         runtime_paths,
                         execution_identity,
+                        memory_conversation,
                     ),
                     build_agent=_resolve_model_and_build_agent,
                     agent_name=agent_name,
@@ -1193,7 +1291,14 @@ async def _prepare_agent_and_prompt(
         )
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
-        prompt_parts = await _prepare_turn_memory(ctx, prompt, config, runtime_paths, execution_identity)
+        prompt_parts = await _prepare_turn_memory(
+            ctx,
+            prompt,
+            config,
+            runtime_paths,
+            execution_identity,
+            memory_conversation,
+        )
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
@@ -1213,20 +1318,8 @@ async def _prepare_agent_and_prompt(
         shared_scope_storage=scope_context.storage if scope_context is not None else None,
         caller_owned_agent=reusable_agent,
     ):
-        if isinstance(agent, MinimalAgent):
-            transient_turn_context = _minimal_turn_enrichment(
-                agent,
-                ctx,
-                prompt_parts.session_preamble,
-                prompt_parts.transient_turn_context,
-            )
-        else:
-            transient_turn_context = _standard_turn_enrichment(
-                agent,
-                ctx,
-                prompt_parts.session_preamble,
-                prompt_parts.transient_turn_context,
-            )
+        base_context = agent.additional_context
+        transient_turn_context = _turn_enrichment(agent, ctx, prompt_parts)
 
         prepared_execution = await prepare_agent_execution_context(
             ctx,
@@ -1256,28 +1349,36 @@ async def _prepare_agent_and_prompt(
             include_openai_compat_guidance=include_openai_compat_guidance,
             pipeline_timing=pipeline_timing,
         )
+        await _reload_memory_with_compaction(
+            agent,
+            ctx,
+            config,
+            runtime_paths,
+            execution_identity,
+            scope_context,
+            memory_conversation,
+            base_context,
+        )
         prepared_history = prepared_execution.prepared_history
         if prepared_execution.replay_plan is not None:
             apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
-        unseen_event_ids = prepared_execution.unseen_event_ids
-        run_messages = prepared_execution.messages
 
         # Routine logs stay content-safe; detailed prompt text is emitted separately only at DEBUG.
         logger.info(
             "Preparing agent and prompt",
             agent=agent_name,
-            message_count=len(run_messages),
-            unseen_event_count=len(unseen_event_ids),
+            message_count=len(prepared_execution.messages),
+            unseen_event_count=len(prepared_execution.unseen_event_ids),
         )
         logger.debug(
             "Prepared agent full prompt",
             agent=agent_name,
-            full_prompt=render_prepared_messages_text(run_messages),
+            full_prompt=render_prepared_messages_text(prepared_execution.messages),
         )
         return _PreparedAgentRun(
             agent=agent,
-            messages=run_messages,
-            unseen_event_ids=unseen_event_ids,
+            messages=prepared_execution.messages,
+            unseen_event_ids=prepared_execution.unseen_event_ids,
             prepared_history=prepared_history,
             runtime_model_name=runtime_model.model_name,
         )
@@ -1313,6 +1414,9 @@ async def _prepare_agent_run_context(
     """Prepare one agent response lifecycle through metadata assembly."""
     if pipeline_timing is not None:
         pipeline_timing.mark("ai_prepare_start", overwrite=True)
+    if delegation_depth == 0 and ctx.agent_mode != "minimal":
+        # Only a top-level standard reply can collect jobs, so only it hears which ended.
+        ctx = replace(ctx, transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items))
     prepared_run = await _prepare_agent_and_prompt(
         ctx,
         prompt=prompt,
@@ -1347,6 +1451,7 @@ async def _prepare_agent_run_context(
             note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
         agent = prepared_run.agent
+        bind_compaction_lifecycle(agent, compaction_lifecycle, turn_recorder)
         if agent.model is not None:
             ai_runtime.install_queued_message_notice_hook(
                 agent.model,
@@ -1361,9 +1466,8 @@ async def _prepare_agent_run_context(
             thread_id=ctx.thread_id,
             requester_id=ctx.requester_id,
             correlation_id=ctx.correlation_id,
-            tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
             model_params=model_params_payload(agent.model) if agent.model is not None else {},
-            extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
+            extra_metadata=deep_merge_metadata(without_fold_records(ctx.matrix_run_metadata), run_extra_content),
         )
         if ctx.agent_mode == "minimal":
             metadata = dict(metadata or {}) | {"agent_mode": "minimal"}
@@ -1436,25 +1540,42 @@ async def run_delegated_child_response(
         active_model_name=child.model_name,
         transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
     )
+    # The child's tools run as the child, whichever adapter runs it; its caller's identity stays with the caller.
     with tool_runtime_context(child_context):
-        return await ai_response(
-            turn,
-            prompt=prompt,
-            runtime_paths=runtime_paths,
-            config=active_config,
-            knowledge=knowledge.knowledge,
-            run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
-            include_interactive_questions=False,
-            include_openai_compat_guidance=identity.channel == "openai_compat",
-            tool_function_filter=context.tool_function_filter if context is not None else None,
-            execution_identity=identity,
-            delegation_depth=child.depth,
-            refresh_scheduler=refresh_scheduler,
-            attempt_model_runtime=ToolRuntimeModelBinding(),
-            supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
-            collect_streamed_response=True,
-            turn_recorder=TurnRecorder(user_message=prompt),
+        return await run_with_tool_execution_identity(
+            identity,
+            operation=lambda: ai_response(
+                turn,
+                prompt=prompt,
+                runtime_paths=runtime_paths,
+                config=active_config,
+                knowledge=knowledge.knowledge,
+                run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
+                include_interactive_questions=False,
+                include_openai_compat_guidance=identity.channel == "openai_compat",
+                tool_function_filter=context.tool_function_filter if context is not None else None,
+                execution_identity=identity,
+                delegation_depth=child.depth,
+                refresh_scheduler=refresh_scheduler,
+                attempt_model_runtime=ToolRuntimeModelBinding(),
+                supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
+                collect_streamed_response=True,
+                show_tool_calls=False,
+                turn_recorder=TurnRecorder(user_message=prompt),
+            ),
         )
+
+
+def _with_background_tool_jobs(
+    ctx: ResponseTurnContext,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> ResponseTurnContext:
+    """Run the turn's managed calls as background jobs while the instance runs them, except in a voice call."""
+    return replace(
+        ctx,
+        background_tool_jobs=not ctx.inline_tools and background_tool_jobs_enabled(config, runtime_paths),
+    )
 
 
 async def ai_response(  # noqa: C901, PLR0915
@@ -1526,7 +1647,8 @@ async def ai_response(  # noqa: C901, PLR0915
             passed through to delegated child agents.
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
-        eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        eager_deferred_tools: Whether to send deferred toolkits as ordinary tools instead of through `call_tool`;
+            models with native tool search keep native deferral.
         supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
         attempt_model_runtime: Optional composition-root boundary that exposes each attempt's model to tools.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
@@ -1536,6 +1658,7 @@ async def ai_response(  # noqa: C901, PLR0915
         Agent response string
 
     """
+    ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response or ctx.agent_mode == "minimal":
@@ -1605,7 +1728,7 @@ async def ai_response(  # noqa: C901, PLR0915
 
     async def _run_blocking_attempt(  # noqa: C901
         run: TurnRunState,
-        continuation_state: DynamicContinuationRunState,
+        continuation_state: TurnContinuationRunState,
     ) -> BlockingAttemptResolution:
         """Run one prepared agent attempt."""
         try:
@@ -2059,7 +2182,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             passed through to delegated child agents.
         turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
-        eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
+        eager_deferred_tools: Whether to send deferred toolkits as ordinary tools instead of through `call_tool`;
+            models with native tool search keep native deferral.
         supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
         attempt_model_runtime: Optional composition-root boundary that exposes each attempt's model to tools.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
@@ -2072,6 +2196,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         Streaming chunks/events as they become available
 
     """
+    ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     agent_name = ctx.entity_label
     logger.info("AI streaming request", agent=agent_name, room_id=ctx.room_id)
     session_id = _require_turn_session_id(ctx)
@@ -2120,7 +2245,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
     async def _run_streaming_attempt(  # noqa: C901, PLR0911, PLR0915
         run: TurnRunState,
-        continuation_state: DynamicContinuationRunState,
+        continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
         try:

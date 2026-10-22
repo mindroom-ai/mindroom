@@ -31,12 +31,13 @@ from mindroom.agent_modes import resolve_agent_mode, set_agent_mode
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import primary_records_dir, resolve_runtime_paths
 from mindroom.error_handling import MinimalModeUnavailableError, get_user_friendly_error_message
-from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging, estimate_agent_static_tokens
+from mindroom.history.prompt_tokens import _agent_prompt_tool_surface, agent_static_token_estimator
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.hooks import EnrichmentItem
+from mindroom.hooks.enrichment import is_transient_context
 from mindroom.memory.functions import MemoryPromptParts
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -82,6 +83,27 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
         AgentSession(session_id="budget"),
     )
     assert [name for tool in tools for name in tool.get_async_functions()] == ["bash"]
+
+
+def test_minimal_mode_with_background_jobs_keeps_its_shell_command(tmp_path: Path) -> None:
+    """Background jobs leave minimal Bash its shell's run function, timeout included."""
+    config = Config(
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+        agents={"helper": AgentConfig(display_name="Helper", tools=["shell"])},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+    )
+    runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    persist_entity_accounts(config, runtime)
+    minimal = agents.create_agent("helper", config, runtime, None, persist_runtime_state=False, agent_mode="minimal")
+
+    functions = {
+        name: function
+        for toolkit in minimal.tools or []
+        if isinstance(toolkit, Toolkit)
+        for name, function in toolkit.get_async_functions().items()
+    }
+    assert "run_shell_command" in functions
+    assert "timeout" in functions["run_shell_command"].parameters["properties"]
 
 
 @pytest.mark.parametrize("delegation_depth", [0, 1])
@@ -257,7 +279,6 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
         context.runtime_paths,
         build_execution_identity_from_runtime_context(context),
         agent_mode="minimal",
-        session_id=context.session_id,
     )
     agent.response_context = _turn_context()
     run = RunOutput(run_id="generation-1")
@@ -299,13 +320,11 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
 @pytest.mark.parametrize("rebuild", [False, True])
 @pytest.mark.parametrize("deferred", [False, True])
 @pytest.mark.parametrize(
-    "include_tools",
+    "shell_settings",
     [
-        None,
-        ["run_shell_command"],
-        ["run_shell_command", "check_shell_command"],
-        ["run_shell_command", "kill_shell_command"],
-        ["check_shell_command", "kill_shell_command"],
+        {},
+        {"include_tools": ["run_shell_command"]},
+        {"exclude_tools": ["run_shell_command"]},
     ],
 )
 async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request(
@@ -313,7 +332,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
     monkeypatch: pytest.MonkeyPatch,
     rebuild: bool,
     deferred: bool,
-    include_tools: list[str] | None,
+    shell_settings: dict[str, list[str]],
 ) -> None:
     """A saved choice cannot publish a Bash facade after losing shell operations."""
     runtime = _runtime_context(tmp_path)
@@ -344,7 +363,6 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             runtime.runtime_paths,
             identity,
             agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
-            session_id=runtime.session_id,
         )
         resources.callback(close_agent_runtime_state_dbs, agent)
         agent.response_context = _turn_context()
@@ -365,19 +383,16 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             previous_owner = lifetime.owner
             previous_shell_env = previous_owner.shell_env if previous_owner is not None else None
             prior_requests = list(provider.requests)
-            settings = {"defer": deferred}
-            if include_tools is not None:
-                settings["include_tools"] = include_tools
-            runtime.config.agents["helper"].tools = [{"shell": settings}]
+            runtime.config.agents["helper"].tools = [{"shell": {"defer": deferred, **shell_settings}}]
             agent = create()
-            if include_tools is not None:
+            if "exclude_tools" in shell_settings:
                 result = await agent.arun(
                     "Restricted request",
                     user_id=runtime.requester_id,
                     session_id=runtime.session_id,
                 )
                 assert result.status == "ERROR"
-                assert "run, check, and kill shell permissions" in result.content
+                assert "`run_shell_command` shell permission" in result.content
                 assert "!mode helper standard" in result.content
                 assert provider.requests == prior_requests
                 assert lifetime.owner is previous_owner
@@ -402,7 +417,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
                     assert lifetime.owner.catalog.agent is agent
             if lifetime.owner is not None:
                 tokens.append(lifetime.owner.shell_env.token)
-    assert len(tokens) == (1 if rebuild or include_tools is None else 0)
+    assert len(tokens) == (1 if rebuild or "exclude_tools" not in shell_settings else 0)
     for token in tokens:
         with pytest.raises(CliAuthenticationError):
             registry.resolve("Bearer " + token, now_ns=0)
@@ -430,7 +445,6 @@ async def test_unreachable_cli_offers_standard_mode_without_downgrading(
         runtime.runtime_paths,
         identity,
         agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
-        session_id=runtime.session_id,
     )
     agent.response_context = _turn_context()
     try:
@@ -506,7 +520,8 @@ async def test_prepared_minimal_prompt_moves_optional_enrichment_to_context(
         execution_identity=build_execution_identity_from_runtime_context(runtime),
     )
     assert "actual current user request" in prepared.prompt_text
-    assert "required current target" in prepared.prompt_text
+    turn_context = next(message for message in prepared.messages if "required current target" in str(message.content))
+    assert is_transient_context(turn_context.content)
     assert "optional memory" not in prepared.prompt_text
     assert "optional plugin" not in prepared.prompt_text
     assert "optional system" not in prepared.agent.system_message
@@ -542,7 +557,6 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
-        session_id=runtime.session_id,
     )
     with tool_runtime_context(runtime):
         catalog = await agent.prepare_execution_catalog(
@@ -762,11 +776,10 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
-        session_id=runtime.session_id,
     )
     agent.response_context = _turn_context()
-    assert estimate_agent_static_tokens(agent, "budget input") > 0
-    assert [item["name"] for item in agent_tool_definition_payloads_for_logging(agent)] == ["bash"]
+    assert agent_static_token_estimator(agent).estimate("budget input") > 0
+    assert [item["name"] for item in _agent_prompt_tool_surface(agent).payloads] == ["bash"]
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
             await agent.aget_tools(
@@ -784,7 +797,7 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
             shell_env = lifetime.owner.shell_env
             # The worker reaches MindRoom over the network and already has its own `mindroom-agent`.
             assert shell_env == AgentCliShellEnv("http://primary.test:8765", shell_env.token)
-            assert estimate_agent_static_tokens(agent, "budget input") > 0
+            assert agent_static_token_estimator(agent).estimate("budget input") > 0
             assert lifetime.owner.catalog is catalog
             assert lifetime.owner.shell_env is shell_env
 

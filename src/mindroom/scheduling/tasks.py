@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import humanize
 import nio
 from agno.agent import Agent
+from agno.run.base import RunStatus
 from cron_descriptor import Options, get_description
 from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
@@ -33,6 +34,7 @@ from mindroom.approval.tool_approval import (
     withdraw_scheduled_call_approval,
 )
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
+from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.helper_usage import record_system_usage
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.logging_config import bound_log_context, get_logger
@@ -1087,6 +1089,27 @@ def _serialize_scheduled_task_created_at(created_at: datetime | str | None) -> s
     return datetime.now(UTC).isoformat()
 
 
+def _scheduled_task_permission_hint(client: nio.AsyncClient, room_id: str) -> str:
+    """Tell the room admin how to let MindRoom save schedule state in a room.
+
+    Name the running router whenever there is one: it restores every schedule after a restart and backs
+    other accounts' rejected writes, so its grant is the one that unblocks scheduling for the whole room.
+    Rooms MindRoom did not create often leave it below the power level that room state needs.
+    """
+    owner = _runner_owner
+    account = client if owner is None else owner.client
+    room = account.rooms.get(room_id)
+    if room is not None:
+        required_level = room.power_levels.get_state_event_required_level(_SCHEDULED_TASK_EVENT_TYPE)
+        current_level = room.power_levels.get_user_level(account.user_id)
+        if current_level < required_level:
+            return (
+                f"Ask a room admin to raise the power level of {account.user_id} in this room "
+                f"from {current_level} to {required_level}, then retry."
+            )
+    return f"Ensure {account.user_id} is joined with permission to write room state, then retry."
+
+
 async def _put_scheduled_task_state_content(
     client: nio.AsyncClient,
     room_id: str,
@@ -1095,7 +1118,6 @@ async def _put_scheduled_task_state_content(
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
     """Write scheduled-task state, falling back to the admin-capable Matrix path on rejection."""
-    permission_hint = "Ensure the room router is joined with permission to write room state, then retry."
     active_write_failure: str | None = None
     try:
         response = await client.room_put_state(
@@ -1123,7 +1145,7 @@ async def _put_scheduled_task_state_content(
             msg = (
                 f"Failed to persist scheduled task state for task `{task_id}`: "
                 f"active write failed ({active_write_failure}); privileged fallback raised {type(exc).__name__}: {exc!s}. "
-                f"{permission_hint}"
+                f"{_scheduled_task_permission_hint(client, room_id)}"
             )
             raise ValueError(msg) from exc
         if admin_wrote:
@@ -1131,7 +1153,10 @@ async def _put_scheduled_task_state_content(
             return
         active_write_failure = f"{active_write_failure}; privileged fallback failed"
 
-    msg = f"Failed to persist scheduled task state for task `{task_id}`: {active_write_failure}. {permission_hint}"
+    msg = (
+        f"Failed to persist scheduled task state for task `{task_id}`: {active_write_failure}. "
+        f"{_scheduled_task_permission_hint(client, room_id)}"
+    )
     raise ValueError(msg)
 
 
@@ -1365,6 +1390,11 @@ async def _parse_workflow_schedule(
 
             logger.info("Successfully parsed workflow schedule", request=request, schedule_type=result.schedule_type)
             return result
+
+        # Agno returns provider failures as errored run output text, not as raised exceptions.
+        if response.status == RunStatus.error and is_model_safeguard_refusal(str(result)):
+            logger.warning("Schedule parser model refused the request", request=request)
+            return _WorkflowParseError(error=f"The schedule parser model declined this request ({result}).")
 
         logger.error("Unexpected response type from AI", response_type=type(result).__name__)
         return _WorkflowParseError(

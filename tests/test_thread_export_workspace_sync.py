@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.event_journal import EventJournalStore
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportRoom, ThreadExportTarget
@@ -26,7 +27,12 @@ from mindroom.thread_export.workspace_sync import (
     WorkspaceThreadExportRunner,
     _ThreadExportBot,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    build_requester_execution_identity,
+    private_instance_scope_root_path,
+    resolve_worker_key,
+)
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.thread_export_helpers import write_thread_export_matrix_state
 
@@ -575,6 +581,38 @@ async def test_private_agent_gets_one_owner_scoped_target_per_validated_instance
 
     assert [log for log in logs if log["event"] == clearing] == []
     assert (ghost_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME / _ROOT_MARKER_FILENAME).exists()
+
+
+async def test_private_instance_an_agent_account_owns_is_cleared_like_one_without_an_owner(tmp_path: Path) -> None:
+    """An instance the agent's own account came to own gets no target, so it never holds every room the agent serves."""
+    config = _private_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path)
+    alice_root = _materialize_private_instance(config, runtime_paths, "@alice:localhost")
+    agent_id = "@mindroom_secret:localhost"
+    identity = build_requester_execution_identity(
+        agent_name="secret",
+        runtime_paths=runtime_paths,
+        requester_id=agent_id,
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="secret")
+    assert worker_key is not None
+    ensure_private_instance_identity(runtime_paths.storage_root, worker_key=worker_key, requester_id=agent_id)
+    agent_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key) / "secret"
+    agent_thread = _write_owned_export(agent_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME)
+    runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot(agent_id)))
+    export = _export_mock()
+
+    with patch(EXPORT_PATH, new=export):
+        runner.queue_full_pass()
+        await runner._run_pass_once()
+
+    call = export.await_args
+    assert call is not None
+    assert [target.output_dir for target in call.kwargs["targets"] if target.required_member_user_ids] == [
+        alice_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME,
+    ]
+    assert not agent_thread.exists()
 
 
 async def test_private_owner_scope_requires_only_the_owner(tmp_path: Path) -> None:

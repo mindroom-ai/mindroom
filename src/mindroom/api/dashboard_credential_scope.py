@@ -16,13 +16,20 @@ from mindroom.authorization import (
 )
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, build_requester_execution_identity
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 _OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
+
+
+class AgentNotConnectableError(HTTPException):
+    """The request names an agent that is unknown or the requester may not connect accounts for.
+
+    Its detail repeats that name from the request, which browser pages never show.
+    """
 
 
 @dataclass(frozen=True)
@@ -54,7 +61,8 @@ def require_auth_user_id(request: Request) -> str:
 def _dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
     """Return the requester identity dashboard-scoped worker credentials should use."""
     auth_user = _request_auth_user(request) or {}
-    if auth_user.get("auth_source") == "trusted_upstream":
+    # Signed-in Matrix users act as themselves, never as the configured owner.
+    if auth_user.get("auth_source") in {"trusted_upstream", "matrix_openid"}:
         matrix_user_id = auth_user.get("matrix_user_id")
         return try_parse_historical_matrix_user_id(matrix_user_id) if isinstance(matrix_user_id, str) else None
     owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
@@ -96,21 +104,13 @@ def build_dashboard_execution_identity(
     and it exists solely so dashboard previews hit the same scoped-runtime seams as
     live requests once an execution scope is chosen.
     """
-    tenant_id = runtime_paths.env_value("CUSTOMER_ID")
-    account_id = runtime_paths.env_value("ACCOUNT_ID")
     requester_id = _dashboard_requester_id_for_request(request, runtime_paths)
     if requester_id is not None and config is not None:
         requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
-    return ToolExecutionIdentity(
-        channel="matrix",
+    return build_requester_execution_identity(
         agent_name=agent_name,
+        runtime_paths=runtime_paths,
         requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-        tenant_id=tenant_id,
-        account_id=account_id,
     )
 
 
@@ -175,7 +175,7 @@ def resolve_dashboard_agent_execution_scope_request(
 
     if agent_name not in config.agents:
         if not allow_draft_override:
-            raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
+            raise AgentNotConnectableError(status_code=404, detail=f"Unknown agent: {agent_name}")
         # A draft agent exists only in the dashboard's unsaved config, so resolve it
         # as an agent-less scope preview: no persisted policy, no per-agent
         # authorization, and never an authoritative credential status.
@@ -274,7 +274,7 @@ def require_agent_oauth_connection_authorized(
         config_lifecycle.app_state(request.app).agent_reply_memberships,
         requester_owned=requester_owned,
     ):
-        raise HTTPException(
+        raise AgentNotConnectableError(
             status_code=403,
             detail=f"Not authorized to manage OAuth connections for agent '{agent_name}'",
         )

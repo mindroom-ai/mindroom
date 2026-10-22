@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 import threading
 from contextlib import contextmanager
@@ -261,3 +262,9 @@ def restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
         if module_name.startswith(PLUGIN_MODULE_PREFIX) and module_name not in snapshot.plugin_modules:
             sys.modules.pop(module_name, None)
     sys.modules.update(snapshot.plugin_modules)
+
+
+def tool_registry_origin(name: str) -> list[str] | None:
+    """Return one registered factory's stable provenance without importing or constructing its tool."""
+    factory = TOOL_REGISTRY.get(name)
+    return [factory.__module__, factory.__qualname__] if inspect.isfunction(factory) else None

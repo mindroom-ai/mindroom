@@ -280,7 +280,7 @@ def test_reader_keeps_usage_when_run_timestamp_is_unusable(tmp_path: Path, creat
 
 
 def test_reader_since_skips_older_and_undated_usage_rows(tmp_path: Path) -> None:
-    """A start timestamp limits the read to runs created at or after it."""
+    """A start timestamp limits the read to runs last updated at or after it."""
     database = tmp_path / "code.db"
     september = datetime(2026, 9, 29, tzinfo=UTC).timestamp()
     october = datetime(2026, 10, 2, tzinfo=UTC).timestamp()

@@ -76,7 +76,7 @@ import {
   SiX,
   SiZoom,
 } from "react-icons/si";
-import { TbBrain } from "react-icons/tb";
+import { TbBrandTeams, TbBrain, TbBrandOnedrive } from "react-icons/tb";
 import { WiDaySunny } from "react-icons/wi";
 import { AwsRedshift } from "./awsIcons";
 import {
@@ -104,6 +104,7 @@ import {
   Mail,
   RefreshCw,
   Lock,
+  KeyRound,
   Unplug,
   Paperclip,
   Webhook,
@@ -111,10 +112,14 @@ import {
   Users,
   MonitorUp,
   Database,
+  Network,
   Brain,
-  Calendar,
-  Cpu,
   ListTodo,
+  NotebookPen,
+  CalendarDays,
+  Calendar,
+  FolderOpen,
+  Cpu,
   Search,
   Home,
 } from "lucide-react";
@@ -194,7 +199,9 @@ export const iconMap: Record<
   SiReddit,
   SiX,
   SiZoom,
+  TbBrandTeams,
   TbBrain,
+  TbBrandOnedrive,
   WiDaySunny,
   AwsRedshift,
   PanelsTopLeft,
@@ -221,6 +228,7 @@ export const iconMap: Record<
   Mail,
   RefreshCw,
   Lock,
+  KeyRound,
   Unplug,
   Paperclip,
   Webhook,
@@ -228,10 +236,14 @@ export const iconMap: Record<
   Users,
   MonitorUp,
   Database,
+  Network,
   Brain,
-  Calendar,
-  Cpu,
   ListTodo,
+  NotebookPen,
+  CalendarDays,
+  Calendar,
+  FolderOpen,
+  Cpu,
   Search,
   Home,
 };

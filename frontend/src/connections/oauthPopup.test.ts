@@ -14,6 +14,7 @@ describe("connection popup", () => {
     closed: boolean;
     close: ReturnType<typeof vi.fn>;
     location: { href: string };
+    document: Document;
   };
   let controller: AbortController;
   beforeEach(() => {
@@ -22,6 +23,7 @@ describe("connection popup", () => {
       closed: false,
       close: vi.fn(),
       location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
     };
     controller = new AbortController();
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
@@ -32,51 +34,74 @@ describe("connection popup", () => {
     vi.restoreAllMocks();
   });
 
-  function complete(overrides: MessageEventInit = {}) {
+  const say = (
+    status: unknown,
+    overrides: { provider?: unknown; type?: unknown } & MessageEventInit = {},
+  ) => {
+    const { provider = "mail", type = "mindroom-oauth", ...init } = overrides;
     window.dispatchEvent(
       new MessageEvent("message", {
         origin: authorization.completion_origin,
         source: popup as unknown as Window,
-        data: {
-          type: "mindroom:oauth-complete",
-          provider: "mail",
-          status: "connected",
-        },
-        ...overrides,
+        data: { type, provider, status },
+        ...init,
       }),
     );
-  }
-
-  it("ignores wrong origin, source, and provider before accepting completion", async () => {
+  };
+  const open = async (confirmConnected?: () => Promise<boolean>) => {
     const operation = connectWithPopup(
       "mail",
       async () => authorization,
       controller.signal,
+      confirmConnected,
     );
     await Promise.resolve();
-    complete({ origin: "https://untrusted.example.com" });
-    complete({ source: window });
-    complete({
-      data: {
-        type: "mindroom:oauth-complete",
-        provider: "other",
-        status: "connected",
-      },
-    });
+    return { operation };
+  };
+
+  it("ignores wrong origin, source, and provider before accepting completion", async () => {
+    const { operation } = await open();
+    say("connected", { origin: "https://untrusted.example.com" });
+    say("connected", { source: window });
+    say("connected", { provider: "other" });
     for (const data of [
       null,
       "connected",
       { type: "other", provider: "mail", status: "connected" },
-      { type: "mindroom:oauth-complete", provider: "mail", status: "pending" },
+      { type: "mindroom-oauth", provider: "mail", status: "pending" },
+      { type: "mindroom-oauth", provider: "mail", status: undefined },
     ]) {
-      complete({ data });
+      say("connected", { data });
     }
     expect(popup.close).not.toHaveBeenCalled();
     expect(popup.location.href).toBe(authorization.auth_url);
-    complete();
+    say("connected");
     await expect(operation).resolves.toBeUndefined();
-    expect(popup.close).toHaveBeenCalledOnce();
+    // The page that answered closes itself.
+    expect(popup.close).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("shows a themed placeholder until the authorization page replaces it", async () => {
+    document.documentElement.classList.add("dark");
+    let answer!: (value: typeof authorization) => void;
+    const operation = connectWithPopup(
+      "mail",
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      controller.signal,
+    );
+    document.documentElement.classList.remove("dark");
+    expect(popup.document.body.textContent).toBe("Opening sign-in…");
+    expect(popup.document.documentElement.style.colorScheme).toBe("dark");
+    expect(popup.location.href).toBe("about:blank");
+    answer(authorization);
+    await Promise.resolve();
+    expect(popup.location.href).toBe(authorization.auth_url);
+    say("connected");
+    await expect(operation).resolves.toBeUndefined();
   });
 
   it("rejects blocked popup without starting authorization", async () => {
@@ -98,7 +123,7 @@ describe("connection popup", () => {
         controller.signal,
       ),
     ).rejects.toThrow("Could not start connection.");
-    complete();
+    say("connected");
     expect(popup.close).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -169,7 +194,7 @@ describe("connection popup", () => {
         "abort",
         expect.any(Function),
       );
-      complete();
+      say("connected");
       controller.abort();
       expect(popup.close).toHaveBeenCalledOnce();
       expect(settled).toHaveBeenCalledOnce();
@@ -217,6 +242,9 @@ describe("connection popup", () => {
     ["http://portal.example.com", "auth_url", "http://localhost/start"],
     ["http://localhost:3000", "auth_url", "http://localhost.example.com/start"],
     ["http://localhost:3000", "auth_url", "http://127.0.0.1.example.com/start"],
+    ["http://192.168.1.10:8765", "completion_origin", "http://100.64.0.1:8765"],
+    ["http://192.168.1.10:8765", "completion_origin", "http://172.32.0.1:8765"],
+    ["https://portal.example.com", "completion_origin", "http://192.168.1.10"],
     ["http://localhost:3000", "auth_url", "javascript:alert(1)"],
     ["http://localhost:3000", "completion_origin", "data:text/html,hello"],
   ])(
@@ -246,8 +274,17 @@ describe("connection popup", () => {
     },
   );
 
-  it.each(["localhost", "127.8.2.1", "[::1]", "app.localhost"])(
-    "allows HTTP loopback targets when the portal runs on HTTP %s",
+  it.each([
+    "localhost",
+    "127.8.2.1",
+    "[::1]",
+    "app.localhost",
+    "192.168.1.10",
+    "10.0.0.2",
+    "172.16.5.4",
+    "[fd00::1]",
+  ])(
+    "allows HTTP local targets when the portal runs on HTTP %s",
     async (hostname) => {
       jsdom.reconfigure({ url: `http://${hostname}:3000/connections/` });
       const authUrl = `http://${hostname}:8765/start`;
@@ -263,10 +300,105 @@ describe("connection popup", () => {
       );
       await Promise.resolve();
       expect(popup.location.href).toBe(authUrl);
-      complete({ origin: completionOrigin });
+      say("connected", { origin: completionOrigin });
       await expect(operation).resolves.toBeUndefined();
-      expect(popup.close).toHaveBeenCalledOnce();
+      expect(popup.close).not.toHaveBeenCalled();
       expect(vi.getTimerCount()).toBe(0);
     },
   );
+
+  describe("what the popup's own page says", () => {
+    it.each([
+      [
+        "stops Connecting as soon as it says cancelled, and the popup shows its words until it closes",
+        "cancelled",
+        "Authorization was cancelled.",
+      ],
+      [
+        "stops Connecting on error with a message of its own",
+        "error",
+        "Could not connect. Try again.",
+      ],
+    ])("%s", async (_title, status, message) => {
+      const { operation } = await open();
+      const rejection = expect(operation).rejects.toThrow(message);
+      say(status);
+      await rejection;
+      expect(popup.close).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("does not mistake the popup closing itself for a second answer", async () => {
+      const { operation } = await open();
+      say("cancelled");
+      await expect(operation).rejects.toThrow(/cancelled/i);
+      popup.closed = true;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
+  describe("a popup that closes without answering", () => {
+    it("counts it as connected when the status says so, asking once", async () => {
+      const confirm = vi.fn(async () => true);
+      const { operation } = await open(confirm);
+      popup.closed = true;
+      await vi.advanceTimersByTimeAsync(3000);
+      await expect(operation).resolves.toBeUndefined();
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("says cancelled when the status says nothing was connected", async () => {
+      const confirm = vi.fn(async () => false);
+      const { operation } = await open(confirm);
+      const rejection = expect(operation).rejects.toThrow(
+        "Authorization was cancelled.",
+      );
+      popup.closed = true;
+      await vi.advanceTimersByTimeAsync(3000);
+      await rejection;
+      expect(confirm).toHaveBeenCalledTimes(1);
+    });
+
+    it("says cancelled when the status cannot be read", async () => {
+      const { operation } = await open(async () => {
+        throw new Error("Could not load connection status.");
+      });
+      const rejection = expect(operation).rejects.toThrow(
+        "Authorization was cancelled.",
+      );
+      popup.closed = true;
+      await vi.advanceTimersByTimeAsync(3000);
+      await rejection;
+    });
+
+    it("does not ask when the popup answered, or when nothing asks for it", async () => {
+      const confirm = vi.fn(async () => true);
+      const { operation } = await open(confirm);
+      say("cancelled");
+      await expect(operation).rejects.toThrow(/cancelled/i);
+      popup.closed = true;
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(confirm).not.toHaveBeenCalled();
+    });
+
+    it("lets an abort win while the status is still being read", async () => {
+      let answer!: (connected: boolean) => void;
+      const { operation } = await open(
+        () =>
+          new Promise<boolean>((resolve) => {
+            answer = resolve;
+          }),
+      );
+      const rejection = expect(operation).rejects.toThrow(/cancelled/i);
+      popup.closed = true;
+      await vi.advanceTimersByTimeAsync(1000);
+      controller.abort();
+      await rejection;
+      answer(true);
+      await Promise.resolve();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
 });

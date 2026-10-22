@@ -10,21 +10,27 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.run.agent import RunErrorEvent, RunOutput
+from agno.models.response import ModelResponse, ToolExecution
+from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallStartedEvent
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.lifecycle import observe_child_event, prepare_child_turn
+from mindroom.delegation.lifecycle import child_execution_identity, observe_child_event, prepare_child_turn
+from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_schema_cache import cached_processed_schema
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    get_tool_execution_identity,
+    tool_execution_identity,
+)
 from tests.access_schema_support import with_responder_access
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.history_helpers import RecordingModel
-from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
+from tests.test_delegate_tools import _make_config
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -114,7 +120,7 @@ async def test_direct_delegation_does_not_infer_success_from_unretained_text(tmp
             "mindroom.ai.ai_response",
             new_callable=AsyncMock,
             return_value="child answer",
-        ),
+        ) as child_response,
     ):
         result = await tools.run_subagent(agent_name="child", task="Do the work")
 
@@ -127,6 +133,8 @@ async def test_direct_delegation_does_not_infer_success_from_unretained_text(tmp
     assert "child answer" in result
     assert str(run["delegation_id"]) in result
     assert str(run["record_reference"]) in result
+    # The caller reads the child's text, so no Matrix tool display markers belong in it.
+    assert child_response.call_args.kwargs["show_tool_calls"] is False
 
 
 @pytest.mark.asyncio
@@ -304,6 +312,37 @@ async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: Path) -> None:
+    """A subagent's latest words and tool calls are its caller's progress; other runs' events are not."""
+    tools, config, runtime_paths = _tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+    reports: list[str] = []
+
+    async def talking_child(ctx: object, **kwargs: object) -> str:
+        cast("Callable[[str], None]", kwargs["run_id_callback"])("child-run")
+        await observe_child_event(RunContentEvent(run_id="child-run", session_id=ctx.session_id, content="Reading "))
+        await observe_child_event(RunContentEvent(run_id="other-run", session_id=ctx.session_id, content="noise"))
+        await observe_child_event(RunContentEvent(run_id="child-run", session_id=ctx.session_id, content="the logs."))
+        await observe_child_event(
+            ToolCallStartedEvent(
+                run_id="child-run",
+                session_id=ctx.session_id,
+                tool=ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={}),
+            ),
+        )
+        return "done"
+
+    with (
+        tool_runtime_context(context),
+        tool_progress_reporter(reports.append),
+        patch("mindroom.ai.ai_response", side_effect=talking_child),
+    ):
+        await tools.run_subagent(agent_name="child", task="Inspect the logs")
+
+    assert reports == ["Reading ", "Reading the logs.", "Reading the logs.\nCalling lookup\n"]
+
+
+@pytest.mark.asyncio
 async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: Path) -> None:
     """A failed replacement run owns its error even if an earlier attempt emitted one."""
     tools, config, runtime_paths = _tools(tmp_path)
@@ -455,3 +494,38 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
     assert result == "native child answer"
     assert response.await_args.kwargs["collect_streamed_response"] is True
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_child_runs_its_tools_as_itself(tmp_path: Path) -> None:
+    """Workflow participants run through this envelope too, so the child's identity, not its caller's, is current."""
+    _toolkit, config, runtime_paths = _tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+    seen: list[ToolExecutionIdentity | None] = []
+
+    async def respond(*_args: object, **_kwargs: object) -> str:
+        seen.append(get_tool_execution_identity())
+        return "child answer"
+
+    with tool_runtime_context(context), tool_execution_identity(_identity()), patch("mindroom.ai.ai_response", respond):
+        child = prepare_child_turn(
+            "leader",
+            "child",
+            "Do the work",
+            owner=_identity(),
+            config=config,
+            runtime_paths=runtime_paths,
+            depth=0,
+            budget_monitor=None,
+        )
+        await run_delegated_child_response(
+            child,
+            prompt=child.task,
+            config=config,
+            runtime_paths=runtime_paths,
+            refresh_scheduler=None,
+            supports_native_tool_approval=True,
+        )
+        assert get_tool_execution_identity() == _identity()
+
+    assert seen == [child_execution_identity(child)]
