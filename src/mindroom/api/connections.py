@@ -323,12 +323,14 @@ async def _service_connected(
 
 async def _egress_services(
     request: Request,
+    context: _Connections,
     agent_name: str,
-    requester_id: str,
 ) -> list[EgressCredentialService] | None:
-    """List an agent's egress rows for its state; egress state that cannot be read must not fail it."""
+    """List an agent's egress rows for its state, none while the broker is off; an unreadable store must not fail it."""
+    if not context.egress_enabled:
+        return None
     try:
-        return await egress_services_for_agent(request, agent_name, requester_id)
+        return await egress_services_for_agent(request, agent_name, context.user.owner.requester_id)
     except Exception as exc:
         logger.warning("connection_state_egress_unavailable", agent_name=agent_name, error_type=type(exc).__name__)
         return None
@@ -392,8 +394,8 @@ async def agent_state(agent_name: str, request: Request, context: _ConnectionsCo
     """Load whether each of a listed agent's services is connected, and its egress rows.
 
     `connected` is read like the status route reads it, without refreshing the token or bootstrapping an OAuth
-    client, concurrently for the agent's services; a scope that never stored a connection reads as not connected
-    without creating its store.
+    client, concurrently for the agent's services and with its egress rows; a scope that never stored a connection
+    reads as not connected without creating its store.
 
     Egress rows exist only while the egress broker is on. They follow the personal egress API's eligibility rule,
     only agents the user may use, and carry the stored OAuth state of their services. That state is read only here,
@@ -404,16 +406,13 @@ async def agent_state(agent_name: str, request: Request, context: _ConnectionsCo
     agent = next((agent for agent in context.catalog.agents if agent.agent_name == agent_name), None)
     if agent is None:
         raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
-    connected = await asyncio.gather(
-        *(_service_connected(request, context, agent_name, service) for service in agent.services),
+    egress_services, connected = await asyncio.gather(
+        _egress_services(request, context, agent_name),
+        asyncio.gather(*(_service_connected(request, context, agent_name, service) for service in agent.services)),
     )
     return AgentState(
         connected={service.provider: flag for service, flag in zip(agent.services, connected, strict=True)},
-        egress_services=(
-            await _egress_services(request, agent_name, context.user.owner.requester_id)
-            if context.egress_enabled
-            else None
-        ),
+        egress_services=egress_services,
     )
 
 
