@@ -654,18 +654,20 @@ async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_me
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [True, False], ids=["approved", "denied"])
 async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_longer_fits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    approved: bool,
 ) -> None:
     """A member that lost the approved toolkit, or a decision naming another call, leaves the paused row untouched."""
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([])
     team.models["checker-model"] = ScriptedModel([])
 
-    for approved in (True, False):
-        with pytest.raises(RuntimeError, match="no longer match the pending requirements"):
-            await team.resume(raised.paused, approved=approved, approvals=(member_approval("call-other", "dangerous"),))
+    with pytest.raises(RuntimeError, match="no longer match the pending requirements"):
+        await team.resume(raised.paused, approved=approved, approvals=(member_approval("call-other", "dangerous"),))
     team.config.agents["checker"].tools = []
     with pytest.raises(ExceptionGroup) as refused:
         await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
@@ -674,6 +676,26 @@ async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_lon
     assert str(error) == f"Saved approval toolkit {PROBE_TOOL!r} is no longer permitted; retry the request"
     assert ProbeToolkit.calls == []
     assert (team.models["default"].requests, team.models["checker-model"].requests) == ([], [])
+    record, _ = team.stored_runs()
+    assert record.status is RunStatus.paused
+
+
+@pytest.mark.asyncio
+async def test_a_saved_team_approval_that_names_no_members_is_refused_before_anything_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No member could run the approved calls, so the resume refuses at once and leaves the paused row untouched."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([])
+    members, team.member_names = team.member_names, ()
+
+    with pytest.raises(RuntimeError, match="The paused team approval names no members"):
+        await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
+
+    team.member_names = members
+    assert ProbeToolkit.calls == []
+    assert team.models["default"].requests == []
     record, _ = team.stored_runs()
     assert record.status is RunStatus.paused
 

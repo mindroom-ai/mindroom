@@ -401,6 +401,10 @@ async def continue_paused_team_run(
     the member whose account handles it. ``progress``, when given, shows the resumed document live in the reply
     being continued; the terminal delivery stays with the caller.
     """
+    if not member_names:
+        # Saved approvals name their members; without them no member could run the approved calls.
+        msg = "The paused team approval names no members"
+        raise RuntimeError(msg)
     team_name = configured_team(config, configured_team_name)
     # The entity the run's logs, notices, and delegations name, as its turn named it: the configured team, or the
     # label of an ad hoc team's members once they are known.
@@ -414,9 +418,8 @@ async def continue_paused_team_run(
         scope=_approval_history_scope(member_names, team_name, config, execution_identity, history_scope),
     ) as scope:
         try:
-            if scope is None:
-                msg = "Paused team history is no longer available"
-                raise RuntimeError(msg)
+            # Named members always resolve a team scope, and the approval names its session.
+            assert scope is not None
             set_consumption_storage(scope.storage_factory)
             persisted = _stored_paused_team_run(scope, run_id, session_id)
             delegated = has_delegation_state(persisted)
