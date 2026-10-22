@@ -75,14 +75,6 @@ if TYPE_CHECKING:
 
     from mindroom.session_storage.store import ConversationStore
 
-_NEEDS_OWNED_CLI_RECOVERY = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "F3 moves the CLI approval recovery onto the owned build: continue_cli_approval still drives the Agno minimal "
-        "agent and checks toolkit owners with the agent-list signature (B6-PLAN F3)"
-    ),
-)
-
 
 def _usage_rows(storage: ConversationStore) -> list[tuple[str, str]]:
     """Return every stored usage row as ``(session_id, usage_data)``."""
@@ -111,8 +103,8 @@ def _resumed_turn(outcome: str) -> list[ScriptStep]:
         "agent",
         "private_agent",
         "team",
-        pytest.param("cli_agent", marks=_NEEDS_OWNED_CLI_RECOVERY),
-        pytest.param("private_cli_agent", marks=_NEEDS_OWNED_CLI_RECOVERY),
+        "cli_agent",
+        "private_cli_agent",
     ],
 )
 @pytest.mark.parametrize("outcome", ["completed", "error", "cancel"])
