@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import fcntl
 import hashlib
@@ -22,8 +23,14 @@ import yaml
 from mindroom.agent_modes import set_agent_mode
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, pending_room_invites_path
-from mindroom.matrix.personal_room_store import personal_room_record_path
+from mindroom.matrix.personal_room_store import (
+    PersonalRoomRecord,
+    personal_room_digest,
+    personal_room_record_path,
+    write_personal_room,
+)
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.session_storage import agent_storage
 from mindroom.session_storage.agent_storage import create_state_storage
@@ -486,6 +493,7 @@ def test_instance_chart_signs_owners_in_through_platform_oidc_with_bound_tokens(
 
     assert tuwunel_config["server_name"] == "42.example.test"
     assert tuwunel_config["mindroom_openid_audience"] is True
+    assert tuwunel_config["mindroom_compact_edits_enabled"] is True
     assert tuwunel_config["identity_provider"] == [
         {
             "brand": "mindroom",
@@ -502,14 +510,22 @@ def test_instance_chart_signs_owners_in_through_platform_oidc_with_bound_tokens(
     assert "identity_provider" not in _tuwunel_config(_render_instance_chart(), "demo")
 
 
-def test_instance_chart_resets_synapse_matrix_state_once(tmp_path: Path) -> None:
-    """The first start on Tuwunel drops the state bound to the Synapse server; later starts keep the new state."""
+def _reset_container() -> dict[str, Any]:
     deployment = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
-    reset = next(
+    return next(
         container
         for container in deployment["spec"]["template"]["spec"]["initContainers"]
         if container["name"] == "reset-synapse-matrix-state"
     )
+
+
+def _run_reset(reset: dict[str, Any], storage: Path) -> None:
+    subprocess.run([*reset["command"], *reset["args"]], env={**os.environ, "STORAGE": str(storage)}, check=True)
+
+
+def test_instance_chart_resets_synapse_matrix_state_once(tmp_path: Path) -> None:
+    """The first start on Tuwunel drops the state bound to the Synapse server; later starts keep the new state."""
+    reset = _reset_container()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     bound = [
         personal_room_record_path(paths, "router", "@owner:1.mindroom.chat"),
@@ -528,21 +544,69 @@ def test_instance_chart_resets_synapse_matrix_state_once(tmp_path: Path) -> None
         tmp_path / "tracking" / "agents" / "router" / "agent_modes.json",
     ]
 
-    def start() -> None:
-        subprocess.run([*reset["command"], *reset["args"]], env={**os.environ, "STORAGE": str(tmp_path)}, check=True)
-
     for path in [*bound, *kept]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("synapse\n")
-    start()
+    _run_reset(reset, tmp_path)
     assert [path for path in bound if path.exists()] == []
     assert all(path.read_text() == "synapse\n" for path in kept)
     for path in bound:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("tuwunel\n")
-    start()
+    _run_reset(reset, tmp_path)
     assert all(path.read_text() == "tuwunel\n" for path in bound)
     assert [mount["mountPath"] for mount in reset["volumeMounts"]] == [_env_by_name(reset)["STORAGE"]["value"]]
+
+
+def test_instance_chart_reset_keeps_pre_move_room_records_from_coming_back(tmp_path: Path) -> None:
+    """Room records still in agents/<agent>/ would move below tracking/ at startup, so the reset drops them too."""
+    owner = "@owner:1.mindroom.chat"
+
+    def synapse_era_storage(storage: Path) -> None:
+        legacy = storage / "agents" / "router"
+        legacy.mkdir(parents=True)
+        (legacy / "invited_rooms.json").write_text('["!deleted:1.mindroom.chat"]')
+        (legacy / "pending_room_invites.json").write_text('{"!deleted:1.mindroom.chat": "@owner:1.mindroom.chat"}')
+        write_personal_room(
+            legacy / "personal_rooms" / f"{personal_room_digest(owner)}.json",
+            PersonalRoomRecord(
+                user_id=owner,
+                alias="#personal_owner:1.mindroom.chat",
+                source_room_id="!lobby:1.mindroom.chat",
+                room_id="!deleted:1.mindroom.chat",
+            ),
+        )
+
+    def migrated(storage: Path) -> list[Path]:
+        paths = resolve_runtime_paths(config_path=storage / "config.yaml", storage_path=storage, process_env={})
+        asyncio.run(migrate_state_root_records(paths))
+        return [
+            path
+            for path in (
+                personal_room_record_path(paths, "router", owner),
+                invited_rooms_path(paths, "router"),
+                pending_room_invites_path(paths, "router"),
+            )
+            if path.exists()
+        ]
+
+    control = tmp_path / "control"
+    synapse_era_storage(control)
+    assert len(migrated(control)) == 3
+
+    storage = tmp_path / "storage"
+    synapse_era_storage(storage)
+    # Tool code can write agents/: a link or a deeper file with a record's name must not redirect the deletion.
+    (storage / "credentials").mkdir()
+    (storage / "credentials" / "invited_rooms.json").write_text("kept\n")
+    (storage / "agents" / "linked").symlink_to(storage / "credentials")
+    (storage / "agents" / "router" / "notes").mkdir()
+    (storage / "agents" / "router" / "notes" / "invited_rooms.json").write_text("kept\n")
+    _run_reset(_reset_container(), storage)
+
+    assert migrated(storage) == []
+    assert (storage / "credentials" / "invited_rooms.json").read_text() == "kept\n"
+    assert (storage / "agents" / "router" / "notes" / "invited_rooms.json").read_text() == "kept\n"
 
 
 def test_instance_chart_runs_one_tuwunel_that_reads_its_rendered_config() -> None:
@@ -582,9 +646,11 @@ def test_instance_chart_runs_one_tuwunel_that_reads_its_rendered_config() -> Non
 def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None:
     """Private registry credentials should be available before pulling instance images."""
     docs = _render_chart(Path("cluster/k8s/instance"), "imagePullSecrets[0].name=ghcr-pull")
-    deployment = _resource(docs, "Deployment", "mindroom-demo")
 
-    assert deployment["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
+    for name in ("mindroom-demo", "tuwunel-demo"):
+        assert _resource(docs, "Deployment", name)["spec"]["template"]["spec"]["imagePullSecrets"] == [
+            {"name": "ghcr-pull"},
+        ]
 
 
 def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_containers(tmp_path: Path) -> None:

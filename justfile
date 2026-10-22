@@ -46,6 +46,12 @@ local-matrix-reset:
         record.unlink()
     for personal_rooms in list(tracking.rglob("personal_rooms")):
         shutil.rmtree(personal_rooms)
+    # Releases up to v2026.10.37 kept these records in agents/<agent>/, and startup would move them below tracking/.
+    agents = paths.storage_root / "agents"
+    for record in [*agents.glob("*/invited_rooms.json"), *agents.glob("*/pending_room_invites.json")]:
+        record.unlink()
+    for personal_rooms in list(agents.glob("*/personal_rooms")):
+        shutil.rmtree(personal_rooms)
     PY
     rm -rf tmp/
     echo "✅ Reset complete! Run 'just local-matrix-up' then 'mindroom run' to start fresh."

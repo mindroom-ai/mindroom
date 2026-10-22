@@ -77,6 +77,9 @@ _MATRIX_BOUND = (
     "tracking/agents/router/personal_rooms/owner.json",
     "tracking/agents/router/invited_rooms.json",
     "tracking/agents/router/pending_room_invites.json",
+    "agents/router/personal_rooms/owner.json",
+    "agents/router/invited_rooms.json",
+    "agents/router/pending_room_invites.json",
 )
 
 
