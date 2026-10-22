@@ -15,7 +15,7 @@ import hashlib
 import time
 import weakref
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
@@ -88,7 +88,6 @@ from mindroom.requester_identity import is_human_requester_id, resolve_human_req
 from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.response_turn import build_llm_request_log_context, stream_with_llm_request_log_context
 from mindroom.routing import suggest_responder
-from mindroom.teams.attempt import TeamReplyText
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
 from mindroom.teams.members import (
     BuiltTeam,
@@ -98,7 +97,7 @@ from mindroom.teams.members import (
     materialize_exact_team_members,
     team_label,
 )
-from mindroom.teams.presentation import TeamStreamPresentation
+from mindroom.teams.presentation import format_team_response
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
 from mindroom.teams.storage import TeamRunRecords
@@ -1064,35 +1063,6 @@ def _build_team(
     return team_members, built, mode
 
 
-@dataclass
-class _TeamCompletion:
-    """What one blocking team completion collected: the reply's text and the records its usage sums."""
-
-    reply: TeamReplyText
-    records: TeamRunRecords = field(default_factory=TeamRunRecords)
-
-    def apply(self, event: TeamRunEvent) -> None:
-        self.reply.apply(event)
-        self.records.collect(event)
-
-    def text(self) -> str:
-        """Return the document a blocking Matrix reply delivers, without its header.
-
-        The members come as they finished and carry no tool markers, as Agno's blocking team reply did on both surfaces;
-        API clients replay this text as history.
-        """
-        return self.reply.completed_text()
-
-
-def _team_completion(members: ResolvedExactTeamMembers) -> _TeamCompletion:
-    # The presentation only names the members here; the reply's text carries no tool markers either way.
-    return _TeamCompletion(
-        TeamReplyText(
-            TeamStreamPresentation.new(members.requested_agent_names, members.display_names, show_tool_calls=False),
-        ),
-    )
-
-
 async def _prepare_openai_team_execution(
     *,
     scope_context: ScopeSessionContext | None,
@@ -1199,7 +1169,7 @@ async def _non_stream_team_completion(
         except Exception:
             logger.exception("Team member preparation failed", team=team_name)
             return _error_response(500, "Team execution failed", error_type="server_error")
-        completion = _team_completion(members)
+        records = TeamRunRecords()
         try:
             with (
                 bind_llm_request_log_context(
@@ -1226,12 +1196,14 @@ async def _non_stream_team_completion(
                 )
                 async with closing_async_stream(events):
                     async for event in events:
-                        completion.apply(event)
+                        records.collect(event)
         except Exception:
             logger.exception("Team execution failed", team=team_name)
             return _error_response(500, "Team execution failed", error_type="server_error")
-        record = completion.records.terminal(team_name)
-        response_text = completion.text() or str(record.content or "")
+        record = records.terminal(team_name)
+        # The blocking Matrix reply without its header, as Agno's blocking team reply was on both surfaces; API clients
+        # replay this text as history.
+        response_text = format_team_response(record, records.members) or str(record.content or "")
 
         if _is_error_response(response_text):
             logger.warning("Team response returned error", team=team_name, error=response_text)
@@ -1247,7 +1219,7 @@ async def _non_stream_team_completion(
                     message=_ChatMessage(role="assistant", content=response_text),
                 ),
             ],
-            usage=_usage_from_team_output(record, completion.records.members),
+            usage=_usage_from_team_output(record, records.members),
         )
         return _OpenAIJSONResponse(content=result.model_dump())
 

@@ -4,7 +4,8 @@
 ``TeamStreamPresentation`` is the structured document a streamed or collected team run renders from and the durable
 ``team_stream`` snapshot an approval continuation restores. Member slots are keyed by ``url_safe_member_id`` of the
 member's config name, the id Agno derived for its members, which stored snapshots and reply records carry.
-``publish_team_presentation`` shows a resumed run's document live in the reply it continues.
+``publish_team_presentation`` shows a resumed run's document live in the reply it continues. ``format_team_response``
+renders a finished run from its records instead, as Agno's blocking team reply did.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from mindroom.tool_system.events import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.llm.runs import ToolExecution
+    from mindroom.llm.runs import AnyRunRecord, RunRecord, TeamRunRecord, ToolExecution
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamRunEvent
 
@@ -91,6 +92,13 @@ def _format_member_contribution(agent_name: str, content: str) -> str:
     return f"**{agent_name}**:{separator}{content}"
 
 
+def _with_consensus(contributions: list[str], consensus: str) -> list[str]:
+    """Return the contributions, then the consensus, or the no-consensus note when only members spoke."""
+    if consensus.strip():
+        return [*contributions, "\n**Team Consensus**:", consensus]
+    return [*contributions, _NO_CONSENSUS_NOTE] if contributions else contributions
+
+
 def render_team_member_slots(
     member_ids: Sequence[str],
     *,
@@ -98,17 +106,41 @@ def render_team_member_slots(
     per_member: Mapping[str, str],
     consensus: str,
 ) -> list[str]:
-    """Render stable identity slots using labels only as presentation attributes."""
-    parts = [
+    """Render stable identity slots using labels only as presentation attributes; each slot's text is stripped."""
+    contributions = [
         _format_member_contribution(display_names_by_id[member_id], per_member[member_id].strip())
         for member_id in member_ids
         if per_member[member_id].strip()
     ]
-    if consensus.strip():
-        parts.extend(("\n**Team Consensus**:", consensus.strip()))
-    elif parts:
-        parts.append(_NO_CONSENSUS_NOTE)
-    return parts
+    return _with_consensus(contributions, consensus.strip())
+
+
+def finished_run_text(record: AnyRunRecord) -> str:
+    """Return a finished run's text: its content, or else the text of its assistant messages.
+
+    A record stores only its own messages, never copies of earlier turns, so a run without content never shows an
+    earlier turn's answer.
+    """
+    if record.content:
+        return str(record.content)
+    return "\n\n".join(
+        str(message.content) for message in record.messages if message.role == "assistant" and message.content
+    )
+
+
+def format_team_response(record: TeamRunRecord, members: Sequence[RunRecord]) -> str:
+    """Return a finished team run's text as Agno's blocking team reply rendered it, without the header.
+
+    ``members`` are the member runs that ended, in the order they ended; each with text contributes it as written,
+    so a member delegated twice contributes twice and a member that failed before any text shows its error. The
+    leader's content is the consensus. A run in which nobody wrote anything renders as empty text.
+    """
+    contributions = [
+        _format_member_contribution(member.agent_name or "Team Member", text)
+        for member in members
+        if (text := finished_run_text(member)).strip()
+    ]
+    return "\n\n".join(_with_consensus(contributions, str(record.content or "")))
 
 
 def _restore_hidden_team_separators(
@@ -448,7 +480,9 @@ __all__ = [
     "NO_TEAM_RESPONSE",
     "TeamStreamPresentation",
     "apply_team_event",
+    "finished_run_text",
     "format_team_header",
+    "format_team_response",
     "publish_team_presentation",
     "render_team_member_slots",
     "strip_team_display",

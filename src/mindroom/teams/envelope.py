@@ -2,9 +2,10 @@
 
 ``team_response`` and ``team_response_stream`` are the team envelopes the response runner drives through the shared
 turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply delivers
-no tool trace, so its document carries no tool markers, and it lists the members in the order they finished, as
-Agno's blocking reply did; the streamed reply shows its trace through its chunks and keeps the configured order.
-``run_prepared_team`` runs an OpenAI-compatible API team turn under the same leader hooks and storage.
+no tool trace and renders from the finished run's records, as Agno's blocking team reply did: each member run's text
+in the order the runs ended, then the consensus. The streamed reply shows its trace through its chunks and keeps the
+configured order. ``run_prepared_team`` runs an OpenAI-compatible API team turn under the same leader hooks and
+storage.
 """
 
 from __future__ import annotations
@@ -75,7 +76,13 @@ from mindroom.teams.members import (
     resolve_team_member_model_names,
     team_label,
 )
-from mindroom.teams.presentation import NO_TEAM_RESPONSE, TeamStreamPresentation, format_team_header
+from mindroom.teams.presentation import (
+    NO_TEAM_RESPONSE,
+    TeamStreamPresentation,
+    finished_run_text,
+    format_team_header,
+    format_team_response,
+)
 from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
 from mindroom.teams.runtime import leader_tool_specs, run_team
 from mindroom.teams.spec import TeamMode
@@ -816,14 +823,32 @@ class _TeamTurn:
                 session_id=self.session_id,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
-        tool_executions = team_tool_executions(record, attempt.records.members)
-        # Neither path's document carries tool markers: a blocking reply delivers no tool trace, and a streamed reply
-        # shows its trace through its chunks. A blocking reply lists the members as they finished, as Agno's blocking
-        # reply did; a streamed one keeps the configured order.
-        body_text = attempt.reply.completed_text() if blocking else attempt.reply.canonical_text()
-        has_visible_output = bool(body_text)
+        members = attempt.records.members
+        tool_executions = team_tool_executions(record, members)
         header = format_team_header(attempt.members.display_names)
-        rendered = header + (body_text or NO_TEAM_RESPONSE)
+        # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
+        # its trace through its chunks. A blocking reply renders the finished runs, as Agno's did; a streamed one
+        # records the document its events built, in the configured member order. The "No team response generated."
+        # fallback is display chrome, not replayable assistant text.
+        if blocking:
+            leader_text = finished_run_text(record)
+            body_text = format_team_response(record, members)
+            has_visible_output = bool(body_text) or bool(leader_text.strip())
+            rendered = header + (body_text or leader_text or NO_TEAM_RESPONSE)
+            silent = (
+                self.ctx.allow_no_report_response
+                and is_silent_schedule_no_report_response(leader_text)
+                and not any(finished_run_text(member).strip() for member in members)
+            )
+            # A quiet scheduled reply delivers and records the bare token, not the team document.
+            response_text = leader_text.strip() if silent else rendered
+            replayable_text = response_text if has_visible_output else ""
+        else:
+            body_text = attempt.reply.canonical_text()
+            has_visible_output = bool(body_text)
+            rendered = header + (body_text or NO_TEAM_RESPONSE)
+            response_text = ""
+            replayable_text = rendered if has_visible_output else ""
         logger.info(
             "team_response_preview",
             agents=attempt.members.display_names,
@@ -831,20 +856,6 @@ class _TeamTurn:
         )
         if len(rendered) > _MAX_LOG_MESSAGE_LENGTH:
             logger.debug("team_response_full", agents=attempt.members.display_names, response=rendered)
-        response_text = ""
-        # The "No team response generated." fallback is display chrome, not replayable assistant text.
-        replayable_text = header + body_text if has_visible_output else ""
-        if blocking:
-            consensus = attempt.reply.consensus
-            silent = (
-                self.ctx.allow_no_report_response
-                and is_silent_schedule_no_report_response(consensus)
-                and not any(text.strip() for text in attempt.reply.per_member.values())
-            )
-            response_text = consensus.strip() if silent else rendered
-            if silent:
-                # A quiet scheduled reply records the bare token, as it delivers it, not the team document.
-                replayable_text = response_text
         metadata_content = (
             attempt.metadata_content(self.config, session_id=self.session_id, status=record.status)
             if self.run_metadata_collector is not None

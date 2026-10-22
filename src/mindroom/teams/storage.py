@@ -46,7 +46,8 @@ class TeamStorage:
 class TeamRunRecords:
     """The records one team run handed over: its terminal team record and each member run's latest record.
 
-    ``record`` comes from the run's persist callback however the run ended, and from its ``RunFinished``.
+    ``record`` comes from the run's persist callback however the run ended, and from its ``RunFinished``; ``members``
+    are in the order the member runs first ended.
     """
 
     record: TeamRunRecord | None = None
@@ -59,8 +60,13 @@ class TeamRunRecords:
             self.record = event.record
             return True
         if isinstance(event, MemberRunEnded):
-            # A member resumed within this run ends twice; its later record replaces the paused one.
-            self.members = [*(record for record in self.members if record.run_id != event.record.run_id), event.record]
+            # A member resumed within this run ends twice; its later record replaces the paused one where it stood,
+            # as Agno continued the paused member's output in place, so a blocking reply lists it there.
+            run_ids = [record.run_id for record in self.members]
+            if event.record.run_id in run_ids:
+                self.members[run_ids.index(event.record.run_id)] = event.record
+            else:
+                self.members.append(event.record)
             return True
         return False
 
