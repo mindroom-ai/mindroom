@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from mindroom.approval.inbound import handle_tool_approval_action
 from mindroom.approval.manager import get_approval_store
@@ -36,8 +37,8 @@ def _parse_duration(text: str) -> timedelta | None:
     return timedelta(hours=amount) if (match.group(2) or "").startswith("h") else timedelta(minutes=amount)
 
 
-def _until(expires_at: datetime) -> str:
-    return expires_at.strftime("%Y-%m-%d %H:%M UTC")
+def _until(expires_at: datetime, config: Config) -> str:
+    return expires_at.astimezone(ZoneInfo(config.timezone)).strftime("%Y-%m-%d %H:%M %Z")
 
 
 async def _approve_pending_cards(
@@ -91,20 +92,22 @@ async def handle_yolo_command(
     if approver_id is None:
         return "❌ Only a person can turn on YOLO mode."
     requested = args_text.strip().lower()
+    # A room without threads is one conversation, so its window covers the whole room.
+    place = "this thread" if thread_id is not None else "this room"
 
     if requested in _STATUS_ARGUMENTS:
         expires_at = yolo_expires_at(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
         return (
-            f"YOLO mode is off in this thread.\n\n{_USAGE}"
+            f"YOLO mode is off in {place}.\n\n{_USAGE}"
             if expires_at is None
-            else f"⚠️ YOLO mode is on in this thread until {_until(expires_at)}.\n\nUse `!yolo off` to end it."
+            else f"⚠️ YOLO mode is on in {place} until {_until(expires_at, config)}.\n\nUse `!yolo off` to end it."
         )
 
     if requested in _OFF_ARGUMENTS:
         return (
-            "✅ YOLO mode is off. Tool calls in this thread ask for approval again."
+            f"✅ YOLO mode is off. Tool calls in {place} ask for approval again."
             if end_yolo(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
-            else "YOLO mode is not on in this thread."
+            else f"YOLO mode is not on in {place}."
         )
 
     duration = _parse_duration(requested)
@@ -128,7 +131,7 @@ async def handle_yolo_command(
     )
     approved_text = f" Approved {approved} waiting tool call{'s' if approved != 1 else ''}." if approved else ""
     return (
-        f"⚠️ YOLO mode is on in this thread until {_until(expires_at)}: "
+        f"⚠️ YOLO mode is on in {place} until {_until(expires_at, config)}: "
         f"tool calls you request here run without asking for approval.{approved_text}\n\n"
         "Use `!yolo off` to end it."
     )

@@ -1039,24 +1039,30 @@ class ApprovalManager:
         thread_id: str | None,
         approver_user_id: str,
     ) -> tuple[str, ...]:
-        """Return the unanswered, approvable cards one approver has in one conversation, scheduled calls aside."""
+        """Return the unexpired, unanswered, approvable cards one approver has in one conversation, scheduled calls aside."""
         if self.cards is None:
             return ()
         event_ids = []
+        now = datetime.now(UTC)
         async for stored in self._pending_cards(self.cards, room_id):
             if (
-                isinstance(stored, StoredApprovalCard)
-                and stored.resolution is None
-                and stored.card_event_id is not None
-                and stored.target_kind != "scheduled_call"
+                not isinstance(stored, StoredApprovalCard)
+                or stored.resolution is not None
+                or stored.card_event_id is None
+                or stored.target_kind == "scheduled_call"
             ):
-                content = stored.card["content"]
-                if (
-                    content.get("thread_id") == thread_id
-                    and content.get("approver_user_id") == approver_user_id
-                    and content.get("approvable", True) is True
-                ):
-                    event_ids.append(stored.card_event_id)
+                continue
+            content = stored.card["content"]
+            if (
+                content.get("thread_id") != thread_id
+                or content.get("approver_user_id") != approver_user_id
+                or content.get("approvable", True) is not True
+            ):
+                continue
+            # A card past its deadline expires when answered, until the deadline sweep retires it.
+            expires_at = parse_approval_datetime(content.get("expires_at"))
+            if expires_at is not None and expires_at > now:
+                event_ids.append(stored.card_event_id)
         return tuple(event_ids)
 
     async def _expire_stored(self, room_id: str, stored: StoredApprovalCard) -> bool:

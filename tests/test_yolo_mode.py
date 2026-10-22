@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 from agno.models.response import ToolExecution
@@ -157,15 +158,17 @@ async def _send(
     *,
     requester_user_id: str = HUMAN,
     acts_for_requester: bool = False,
+    config: Config | None = None,
+    room_mode: bool = False,
 ) -> tuple[str, RuntimePaths]:
     runtime_paths = test_runtime_paths(tmp_path)
     context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=Config(),
+        config=config or Config(),
         runtime_paths=runtime_paths,
         logger=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
-        stable_target=MessageTarget.resolve(ROOM_ID, THREAD_ID, "$event"),
+        stable_target=MessageTarget.resolve(ROOM_ID, THREAD_ID, "$event", room_mode=room_mode),
         record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
@@ -203,6 +206,24 @@ async def test_yolo_command_starts_shows_and_ends_the_thread_window(tmp_path: Pa
     assert reply.startswith("YOLO mode is off in this thread.")
     reply, _ = await _send(tmp_path, "!yolo off")
     assert reply == "YOLO mode is not on in this thread."
+
+
+@pytest.mark.asyncio
+async def test_yolo_command_names_the_whole_room_in_a_room_without_threads_and_uses_local_time(tmp_path: Path) -> None:
+    """A room-mode window covers the room, and its end shows in the configured timezone."""
+    reply, runtime_paths = await _send(
+        tmp_path,
+        "!yolo 30",
+        config=Config(timezone="Europe/Amsterdam"),
+        room_mode=True,
+    )
+
+    expires_at = yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=None, requester_id=HUMAN)
+    assert expires_at is not None
+    local = expires_at.astimezone(ZoneInfo("Europe/Amsterdam"))
+    assert reply.startswith(f"⚠️ YOLO mode is on in this room until {local:%Y-%m-%d %H:%M %Z}: ")
+    reply, _ = await _send(tmp_path, "!yolo off", room_mode=True)
+    assert reply == "✅ YOLO mode is off. Tool calls in this room ask for approval again."
 
 
 @pytest.mark.asyncio
@@ -272,9 +293,16 @@ def _stored(
     resolution: dict[str, object] | None = None,
     target_kind: str = "continuation",
     approvable: bool = True,
+    expires_in: timedelta = timedelta(hours=1),
 ) -> StoredApprovalCard:
+    content = {
+        "thread_id": thread_id,
+        "approver_user_id": approver,
+        "approvable": approvable,
+        "expires_at": (datetime.now(UTC) + expires_in).isoformat(),
+    }
     return StoredApprovalCard(
-        card={"content": {"thread_id": thread_id, "approver_user_id": approver, "approvable": approvable}},
+        card={"content": content},
         resolution=resolution,
         delivery_id=f"delivery-{created_at_ns}",
         card_event_id=card_event_id,
@@ -292,7 +320,7 @@ async def test_pending_card_listing_keeps_only_the_approvers_open_cards_in_one_t
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only unanswered, approvable, published cards of the approver in the thread are listed, across pages."""
+    """Only unexpired, unanswered, approvable, published cards of the approver in the thread are listed, across pages."""
     monkeypatch.setattr("mindroom.approval.manager._STARTUP_RECOVERY_SCAN_PAGE", 3)
     pages = [
         (
@@ -310,7 +338,7 @@ async def test_pending_card_listing_keeps_only_the_approvers_open_cards_in_one_t
             UnreadableApprovalCard(delivery_id="unreadable", created_at_ns=8, continuation_id="continuation"),
             _stored("$job-card", created_at_ns=9, target_kind="background_script"),
         ),
-        (),
+        (_stored("$past-deadline", created_at_ns=10, expires_in=timedelta(seconds=-1)),),
     ]
     cards = MagicMock()
     cards.pending_approval_cards = AsyncMock(side_effect=pages)

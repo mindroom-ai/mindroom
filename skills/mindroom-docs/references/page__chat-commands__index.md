@@ -20,8 +20,8 @@ This page lists every command and fully covers `!help`, `!hi`, and `!config`; th
 | `!mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
 | `!room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
-| `!yolo [<minutes>\|<hours>h\|off]` | Run your tool calls in this thread without approval for a while, or show or end that window | [Tool Approval](https://docs.mindroom.chat/tool-approval/#yolo-mode) |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#thread_mode) |
+| `!yolo [<minutes>\|<hours>h\|off]` | Run your tool calls in this thread without approval for a while, or show or end that window | [Tool Approval](https://docs.mindroom.chat/tool-approval/#yolo-mode) |
 | `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) | [Matrix](https://docs.mindroom.chat/matrix/#encrypt) |
 | `!e2ee` | Show encryption diagnostics for this room | [Matrix](https://docs.mindroom.chat/matrix/#e2ee) |
 | `!config <operation>` | View and modify configuration (disabled by default, platform administrators only) | [`!config`](#config) |

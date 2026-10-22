@@ -66,6 +66,7 @@ The requester can stop auto-approval from the originating card, and any config c
 Send `!yolo 30` (minutes) or `!yolo 2h` in a thread to run every tool call you request there without approval cards, for 1 minute up to 24 hours.
 It covers every agent and team in that thread, script rules, tools that ask for their own confirmation, background jobs, and background scripts, and turning it on approves the cards already waiting for you there.
 Other people in the thread still approve their own calls, an agent cannot turn it on for you, and scheduled calls still ask when they are scheduled.
+In a room that uses `thread_mode: room`, the window covers the whole room.
 `!yolo` shows when the window ends and `!yolo off` ends it early; restarts and config reloads keep it.
 
 ## Approval Card Contents

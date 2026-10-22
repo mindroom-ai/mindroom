@@ -14,6 +14,7 @@ import inspect
 import json
 from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from functools import partial
 from itertools import count
 from types import SimpleNamespace
@@ -47,6 +48,7 @@ from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt as approval_receipt
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
 from mindroom.approval.tool_owners import toolkit_owners_for_agents
+from mindroom.approval.yolo import start_yolo
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -3550,6 +3552,74 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
     assert outcome.final_visible_body == paused.response_text
     assert outcome.delivery_kind == "edited"
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("yolo_thread_id", "card_expected"), [("$thread", False), ("$other", True)])
+async def test_first_pause_skips_the_card_inside_the_requesters_yolo_window_of_the_reply_thread(
+    tmp_path: Path,
+    yolo_thread_id: str,
+    card_expected: bool,
+) -> None:
+    """A reply's gated call runs unasked only when the window names the thread that reply answers in."""
+    bot = _bot(tmp_path)
+    bot.config.tool_approval = bot.config.tool_approval.model_copy(
+        update={"rules": [ApprovalRuleConfig(match="dangerous", action="require_approval")]},
+    )
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    start_yolo(
+        runner.deps.runtime_paths,
+        room_id="!room:localhost",
+        thread_id=yolo_thread_id,
+        requester_id="@user:localhost",
+        duration=timedelta(minutes=5),
+    )
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={}),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
+        ),
+    )
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+    retry_sources = Mock()
+    runner._approval_responses.retry_sources = retry_sources
+    approval_store = MagicMock(
+        prepare_detached_approval=AsyncMock(return_value=object()),
+        reserve_and_publish=AsyncMock(return_value=True),
+    )
+
+    with (
+        patch(
+            "mindroom.approval.response.resolve_tool_approval_approver",
+            return_value="@user:localhost",
+        ),
+        patch("mindroom.approval.response.approval_manager.get_approval_store", return_value=approval_store),
+    ):
+        async with _in_reply_span(runner, request):
+            outcome = await runner._suspend_for_approval(
+                paused,
+                request=request,
+                target=request.response_envelope.target,
+                execution_identity=identity,
+                entity_kind="agent",
+                history_scope=runner.deps.state_writer.history_scope(),
+                show_tool_calls=True,
+            )
+
+    if card_expected:
+        approval_store.prepare_detached_approval.assert_awaited_once()
+        assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING}
+    else:
+        approval_store.prepare_detached_approval.assert_not_awaited()
+        retry_sources.assert_called_once_with(request.room_id, ("$source",))
+        assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
 
 @pytest.mark.asyncio
