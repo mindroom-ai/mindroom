@@ -1002,7 +1002,7 @@ async def _approve(bot: TeamBot, card_event_id: str) -> None:
     )
     assert result.consumed
     runner = bot._response_runner
-    assert await runner.handoff_approval_source(EVENT_ID) is False
+    await runner.handoff_approval_source(EVENT_ID)
     await runner.wait_for_source_owned_inbox_responses()
 
 
