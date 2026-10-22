@@ -140,7 +140,6 @@ EGRESS_BROKER_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
 
 VENDOR_TELEMETRY_ENV_VALUES: Mapping[str, str] = MappingProxyType(
     {
-        "AGNO_TELEMETRY": "false",
         "ANONYMIZED_TELEMETRY": "false",
         "CHROMA_OTEL_COLLECTION_ENDPOINT": "",
         "CHROMA_OTEL_GRANULARITY": "none",

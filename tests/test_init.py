@@ -33,7 +33,7 @@ def test_package_init_disables_vendor_telemetry(monkeypatch: pytest.MonkeyPatch)
 
 def test_disable_vendor_telemetry_updates_supplied_env() -> None:
     """Telemetry opt-outs should be reusable for subprocess env construction."""
-    env = {"AGNO_TELEMETRY": "true"}
+    env = {"DO_NOT_TRACK": "0"}
 
     disable_vendor_telemetry(env)
 
