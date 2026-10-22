@@ -471,7 +471,7 @@ export function EgressServiceItem({
             )
           }
         />
-        {canEdit(serviceEditing, service) && (
+        {editable && (
           <ConfirmDialog
             open={confirm === "service"}
             title={`Delete ${service.display_name}?`}
