@@ -970,11 +970,12 @@ def _render_tool_execution_environment(
     if not worker_routed_tool_names and not local_tool_names:
         return "## Tool Execution Environment\n- No tools are available in this runtime."
 
+    without_workspace = "attachments and the shared directories below" if shared_directories else "attachments"
     file_access_description = {
         "workspace": (
             "agent workspace and attachments only"
             if has_workspace
-            else "this agent has no workspace, so path tools in the primary runtime reach only attachments"
+            else f"this agent has no workspace, so path tools in the primary runtime reach only {without_workspace}"
         ),
         "unrestricted": "any path the tool's process can reach",
     }[file_access]

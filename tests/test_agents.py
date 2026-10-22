@@ -647,7 +647,7 @@ def test_agent_role_lists_the_shared_directories_the_agent_reaches(
     _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
 ) -> None:
-    """An agent learns the path, owner, and access of each shared directory it owns or joined."""
+    """An agent without a workspace learns that its path tools reach its shared directories, and each one's access."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     create_shared_directory(runtime_paths, owner="general", name="report")
@@ -663,6 +663,12 @@ def test_agent_role_lists_the_shared_directories_the_agent_reaches(
         f"`{shares / 'general' / 'report'}` (from general, read-only)."
     ) in calculator.role
     assert f"- Shared directories: `{shares / 'general' / 'report'}` (yours, read-write)." in general.role
+    file_access_line = (
+        "- File access for path tools: `workspace` (this agent has no workspace, "
+        "so path tools in the primary runtime reach only attachments and the shared directories below)."
+    )
+    assert file_access_line in calculator.role
+    assert file_access_line in general.role
 
 
 def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
