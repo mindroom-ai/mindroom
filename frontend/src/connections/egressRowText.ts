@@ -147,16 +147,23 @@ export function serviceHosts(service: EgressCredentialService): string[] {
   return [...new Set(service.rules.map(hostPort))];
 }
 
-/** What happens to requests to its hosts while the service has no key or account; null once it has, and for a limit. */
-export function unsetNote(service: EgressCredentialService): string | null {
+/**
+ * What happens to requests to its hosts while the service has no key or
+ * account; null once it has, and for a limit. `accountAction` is the account
+ * button the row offers, which fixes it as well as a key does.
+ */
+export function unsetNote(
+  service: EgressCredentialService,
+  accountAction: "connect" | "use" | "reset" | null,
+): string | null {
   if (service.configured || service.restrict_only || service.rules.length === 0)
     return null;
-  const oauth = service.oauth;
-  // An account Agent Keys could use fixes it as well as a key does.
-  if (oauth && oauth.unavailable_reason === null && !oauth.service_account)
-    return oauth.connected && !oauth.reset_required
-      ? "Requests are refused until you use this account or set a key."
-      : "Requests are refused until you connect an account or set a key.";
+  if (accountAction === "use")
+    return "Requests are refused until you use this account or set a key.";
+  if (accountAction === "connect")
+    return "Requests are refused until you connect an account or set a key.";
+  if (accountAction === "reset")
+    return "Requests are refused until you reset the connection or set a key.";
   return "Requests are refused until a key is set.";
 }
 

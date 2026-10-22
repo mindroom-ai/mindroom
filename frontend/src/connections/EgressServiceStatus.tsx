@@ -38,7 +38,9 @@ export function ServiceStatus({
       </StatusLabel>
       {/* Also beside an account only its tools use: the one Agent Keys would use once allowed. */}
       {service.active_source !== "key" && oauth?.account_label && (
-        <span className="break-words text-xs">{oauth.account_label}</span>
+        <span className="max-w-full text-xs wrap-anywhere">
+          {oauth.account_label}
+        </span>
       )}
       {service.active_source === "oauth" && sharesAccount(agent, oauth) && (
         <span className="text-xs text-muted-foreground">

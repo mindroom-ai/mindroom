@@ -52,7 +52,7 @@ export function EgressServiceTable({
             <th scope="col" className="w-[26%] px-4 py-3 font-medium">
               Status
             </th>
-            <th scope="col" className="w-48 px-5 py-3 text-right font-medium">
+            <th scope="col" className="w-56 px-5 py-3 text-right font-medium">
               Actions
             </th>
           </tr>

@@ -163,7 +163,6 @@ export function EgressServiceItem({
   // Everyone using a shared agent acts as the account connected there.
   const asksAboutSharedAccount = sharesAccount(agent, oauth);
   const limitedText = limitedNote(service);
-  const unsetText = unsetNote(service);
   const limitActions = useLimitActions(
     limit,
     service.display_name,
@@ -281,6 +280,21 @@ export function EgressServiceItem({
     !reuseEnabled &&
     !oauth.reset_required &&
     !service.key_configured;
+  // The account button that also stops refusals, where Agent Keys can use that account.
+  const accountUsable =
+    oauth !== null &&
+    oauth.unavailable_reason === null &&
+    !oauth.service_account;
+  const unsetText = unsetNote(
+    service,
+    canUseAccount
+      ? "use"
+      : accountUsable && canConnect
+        ? "connect"
+        : accountUsable && oauth.reset_required && canResetAccount
+          ? "reset"
+          : null,
+  );
   const keyActions = canManageKey && service.key_configured && !editing;
   // A key is the main action when there is no account to connect instead.
   const setKeyFirst =
@@ -505,7 +519,7 @@ export function EgressServiceItem({
         </div>
         {canManageKey && editing && (
           <form
-            className="mt-2 flex flex-wrap items-center gap-2 sm:flex-nowrap"
+            className="mt-2 flex flex-wrap items-center gap-2 sm:justify-end"
             onSubmit={save}
           >
             <Input
@@ -514,7 +528,7 @@ export function EgressServiceItem({
               aria-label={keyLabel}
               placeholder="Paste the key"
               autoFocus
-              className="h-9 min-w-0 flex-1 max-sm:basis-full"
+              className="h-9 min-w-0 basis-full"
               value={secret}
               disabled={busy !== null}
               onChange={(event) => setSecret(event.target.value)}
