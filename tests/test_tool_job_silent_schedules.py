@@ -4,57 +4,88 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
-from agno.agent import Agent
-from agno.db.sqlite import SqliteDb
-from agno.models.message import Message
-from agno.models.response import ModelResponse
 
-from mindroom.ai import (
-    _AgentRunContext,
-    _collect_response_body_with_trace,
-    _PreparedAgentRun,
-    ai_response,
-    stream_agent_response,
-)
+from mindroom.ai import _collect_response_body_with_trace, ai_response, stream_agent_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.custom_tools.job import JobTools
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.delegation.background import delegation_child
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryScope, PreparedHistoryState
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.conversation import ConversationKey, current_conversation
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.metadata import ToolCategory
+from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.identity_helpers import entity_ids
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.tool_job_helpers import (
-    assembled_function,
     completed_delegation_job,
+    job_actor,
+    job_tool,
     pending_outcome,
     pending_outcomes,
+    run_job_turn,
     start_delegation_job,
     start_job,
     tool_job_runtime,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
-    from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_system.events import ToolTraceEntry
+
+
+class _ProbeTools(Toolkit):
+    """One read the silent turn makes, held open until the runtime shuts down when ``hold`` is set."""
+
+    hold: ClassVar[bool] = False
+
+    def __init__(self) -> None:
+        super().__init__(name="probe", tools=[self.probe_tool])
+
+    async def probe_tool(self) -> str:
+        """Read evidence using the ordinary execution path."""
+        if type(self).hold:
+            await asyncio.Event().wait()
+        return "Job evidence"
+
+
+@contextmanager
+def _registered_probe(*, hold: bool) -> Iterator[None]:
+    """Register the ``probe`` toolkit for one turn and restore the registries afterwards."""
+    snapshot = capture_tool_registry_snapshot()
+
+    @register_tool_with_metadata(
+        name="probe",
+        file_access=ToolFileAccess.NONE,
+        display_name="Probe",
+        description="Reads evidence for a silent check.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def probe_factory() -> type[_ProbeTools]:
+        return _ProbeTools
+
+    _ProbeTools.hold = hold
+    try:
+        yield
+    finally:
+        restore_tool_registry_snapshot(snapshot)
 
 
 @dataclass
@@ -67,7 +98,8 @@ class _SilentTurn:
 
 async def _run_silent_turn(
     tmp_path: Path,
-    responses: list[ModelResponse],
+    monkeypatch: pytest.MonkeyPatch,
+    turns: Sequence[Sequence[ScriptStep]],
     *,
     enabled: bool,
     collect_stream: bool,
@@ -81,39 +113,18 @@ async def _run_silent_turn(
     """
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
-        agents={"leader": AgentConfig(display_name="Leader")},
+        agents={"leader": AgentConfig(display_name="Leader", tools=["probe"])},
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
     context = replace(_delegate_runtime_context(config, paths), source_kind=SILENT_SCHEDULE_SOURCE_KIND)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    database = str(tmp_path / "silent.db")
-    storage = SqliteDb(db_file=database)
-
-    async def probe_tool() -> str:
-        """Read evidence using the ordinary disabled execution path."""
-        if hold_probe:
-            await asyncio.Event().wait()
-        return "Job evidence"
-
-    model = DelegationModel(id="test", responses=responses)
-    install_tool_job_execution(model)
-    actor = Agent(
-        id="leader",
-        model=model,
-        tools=[assembled_function(probe_tool), JobTools(paths, owner)] if enabled else [probe_tool],
-        db=storage,
-        telemetry=False,
-    )
-    scope = ScopeSessionContext(
-        HistoryScope(kind="agent", scope_id="leader"),
-        storage,
-        None,
-        session_id=context.session_id,
-        storage_factory=lambda: SqliteDb(db_file=database),
-    )
+    ScriptedAgents({"leader": ScriptedModel(list(turns))}).install(monkeypatch)
     ctx = replace(
         make_turn_context(
             entity_label="leader",
@@ -126,37 +137,10 @@ async def _run_silent_turn(
     )
     trace: list[ToolTraceEntry] = []
     recorder = TurnRecorder(user_message="Silent check") if record_turn else None
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "Job evidence")
-
-    async def prepare(turn: ResponseTurnContext, **kwargs: object) -> _AgentRunContext:
-        prompt = str(kwargs["prompt"])
-        prepared = _PreparedAgentRun(
-            agent=actor,
-            messages=(Message(role="user", content=prompt),),
-            unseen_event_ids=[],
-            prepared_history=PreparedHistoryState(),
-            runtime_model_name="default",
-        )
-        return _AgentRunContext(
-            turn=turn,
-            session_id=context.session_id,
-            prompt=prompt,
-            model_prompt=None,
-            prepared_run=prepared,
-            run_input=prepared.run_input,
-            metadata=turn.matrix_run_metadata,
-        )
-
     try:
-        with (
-            tool_runtime_context(context),
-            patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
-            patch("mindroom.ai._prepare_agent_run_context", new=prepare),
-        ):
+        with tool_runtime_context(context), _registered_probe(hold=hold_probe):
             if direct_stream:
-                answer = await _collect_response_body_with_trace(
+                answer_text = await _collect_response_body_with_trace(
                     stream_agent_response(
                         ctx,
                         prompt="Silent check",
@@ -170,7 +154,7 @@ async def _run_silent_turn(
                     tool_trace_collector=trace,
                 )
             else:
-                answer = await ai_response(
+                answer_text = await ai_response(
                     ctx,
                     prompt="Silent check",
                     runtime_paths=paths,
@@ -181,7 +165,7 @@ async def _run_silent_turn(
                     tool_trace_collector=trace,
                     turn_recorder=recorder,
                 )
-        return _SilentTurn(answer, trace, recorder, pending_outcomes(runtime))
+        return _SilentTurn(answer_text, trace, recorder, pending_outcomes(runtime))
     finally:
         await runtime.shutdown()
 
@@ -192,18 +176,20 @@ async def _run_silent_turn(
 @pytest.mark.parametrize("use_tool", [False, True])
 async def test_enabled_silent_turn_without_jobs_matches_a_disabled_turn(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     collect_stream: bool,
     final: str,
     use_tool: bool,
 ) -> None:
     """Enabling background jobs changes nothing for a quiet turn that starts none."""
-    tool_calls = [ModelResponse(tool_calls=[_call("probe_tool", "read")])] if use_tool else []
+    tool_calls = [calls(tool_call("probe_tool", "read"))] if use_tool else []
     observed = []
     for enabled in (False, True):
         turn = await _run_silent_turn(
             tmp_path / str(enabled),
-            [*tool_calls, ModelResponse(content=final)],
+            monkeypatch,
+            [*tool_calls, answer(final)],
             enabled=enabled,
             collect_stream=collect_stream,
         )
@@ -228,6 +214,7 @@ async def test_enabled_silent_turn_without_jobs_matches_a_disabled_turn(
 )
 async def test_a_turn_with_jobs_on_lets_a_managed_call_detach(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     collect_stream: bool,
     direct_stream: bool,
@@ -235,7 +222,8 @@ async def test_a_turn_with_jobs_on_lets_a_managed_call_detach(
     """Every reply entry point runs its managed calls as jobs once the instance runs them."""
     turn = await _run_silent_turn(
         tmp_path,
-        [ModelResponse(tool_calls=[_call("probe_tool", "read", background_after=0)]), ModelResponse(content="done")],
+        monkeypatch,
+        [calls(tool_call("probe_tool", "read", background_after=0)), answer("done")],
         enabled=True,
         collect_stream=collect_stream,
         direct_stream=direct_stream,
@@ -318,15 +306,8 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
     async def native_operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", await slow())
 
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("slow", "call", background_after=0)]),
-            ModelResponse(content="NO_REPLY"),
-        ],
-    )
-    install_tool_job_execution(model)
-    agent = Agent(id="general", model=model, tools=[assembled_function(slow)])
+    model = ScriptedModel([calls(tool_call("slow", "call", background_after=0)), answer("NO_REPLY")])
+    actor = job_actor(job_tool(slow), name="general")
     try:
         async with execution_resources():
             with tool_runtime_context(context):
@@ -335,8 +316,8 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
                     accepted = await start_delegation_job(runtime, child, owner=owner, operation=native_operation)
                     job_id = accepted.job_id
                 else:
-                    response = await agent.arun("Check quietly", session_id=owner.session_id)
-                    job_id = json.loads(response.tools[0].result)["job_id"]
+                    response = await run_job_turn(actor, model, "Check quietly", session_id=owner.session_id or "")
+                    job_id = json.loads(str(response.tools[0].result))["job_id"]
             release.set()
             waited = await runtime.wait(job_id, owner=owner, depth=0)
             await runtime.release_wait(job_id, waited.claim)

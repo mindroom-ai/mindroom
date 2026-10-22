@@ -5,64 +5,62 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.team import Team
-from agno.tools import Toolkit
 
+from mindroom import agents
 from mindroom.agents import team_background_jobs
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
-from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
-from mindroom.history.session_context import open_bound_scope_session_context
-from mindroom.hooks import HookRegistry
-from mindroom.teams import TeamMode, _create_team_instance
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
+from mindroom.llm.messages import Message
+from mindroom.teams import envelope
+from mindroom.teams.envelope import build_team_spec
+from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.spec import TeamMode
+from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.conversation import current_conversation
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.notices import JobNotices, job_notice_context
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
     register_background_runtime,
 )
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import ToolDispatchContext, tool_runtime_context
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
-from tests.history_helpers import FakeModel
-from tests.history_helpers import _agent as history_agent
+from tests.delegation_helpers import _delegate_runtime_context
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.history_helpers import _runtime_paths as history_runtime_paths
 from tests.tool_approval_helpers import gated_functions
 from tests.tool_job_helpers import (
     SpanRecorder,
     completed_delegation_job,
+    job_actor,
     managed_team_config,
     pending_outcome,
     pending_outcomes,
+    run_job_turn,
     saved_jobs,
     start_delegation_job,
     start_job,
     team_coordinator,
     tool_job_runtime,
+    toolkit_job_tools,
     wait_for_status,
 )
 
@@ -70,27 +68,22 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.runs import RunRecord
+    from mindroom.tool_jobs.execution import JobActor
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 
-def _calculator_agent(config: Config, paths: RuntimePaths) -> Agent:
+def _calculator_member(config: Config, paths: RuntimePaths) -> JobActor:
+    """The worker as a team runs it, granted by its own snapshot, whose one call adds 2 and 3."""
     toolkit = get_tool_by_name("calculator", paths, worker_target=None, disable_sandbox_proxy=True)
-    bind_toolkit_authority(toolkit, authored_name="calculator")
-    model = DelegationModel(
-        id="test",
-        responses=[ModelResponse(tool_calls=[_call("add", "addition", a=2, b=3)]), ModelResponse(content="done")],
-    )
-    install_tool_job_execution(model)
-    return bind_actor_authority(
-        Agent(
-            id="worker",
-            name="Worker",
-            model=model,
-            tools=[toolkit],
-        ),
-        authority_snapshot(config, "worker"),
-    )
+    tools = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "worker"))
+    return job_actor(*tools.values(), name="worker")
+
+
+async def _add(member: JobActor, session_id: str) -> RunRecord:
+    model = ScriptedModel([calls(tool_call("add", "addition", a=2, b=3)), answer("done")])
+    return await run_job_turn(member, model, "Calculate", session_id=session_id)
 
 
 @pytest.mark.asyncio
@@ -99,7 +92,7 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
     tmp_path: Path,
     configured: bool,
 ) -> None:
-    """A member's tool becomes a job, while the leader's SDK delegation runs inline, until the grant is withdrawn.
+    """A member's tool becomes a job of that member until the grant is withdrawn.
 
     A configured team's access is the grant for its exact members; an ad hoc team's member needs its own.
     """
@@ -116,22 +109,12 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(
-                tool_calls=[_call("delegate_task_to_member", "member", member_id="worker", task="Add 2 and 3")],
-            ),
-            ModelResponse(content="team done"),
-        ],
-    )
-    install_tool_job_execution(model)
-    team = Team(id="ad-hoc", model=model, members=[_calculator_agent(config, paths)])
+    member = _calculator_member(config, paths)
     try:
         await coordinator.sync()
         async with execution_resources():
             with tool_runtime_context(context), tool_execution_identity(owner):
-                await team.arun("Calculate", session_id=owner.session_id)
+                await _add(member, owner.session_id or "session")
                 member_owner = replace(owner, agent_name="worker")
                 jobs = await coordinator.runtime.list_jobs(owner=member_owner, depth=0)
                 assert len(jobs) == 1
@@ -297,7 +280,7 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
         runtime_paths=paths,
         caller_execution_identity=owner,
     )
-    agent = _calculator_agent(config, paths)
+    member = _calculator_member(config, paths)
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=owner),
         agent_name=owner.agent_name,
@@ -307,7 +290,7 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
     async def operation() -> BackgroundOutcome:
         async with child_run_context(child, config=config, runtime_paths=paths):
             with tool_execution_identity(child_owner):
-                response = await agent.arun("Calculate", session_id=child.session_id)
+                response = await _add(member, child.session_id)
                 assert response.tools is not None
                 assert not response.tools[0].tool_call_error
                 return BackgroundOutcome("completed", response.tools[0].result)
@@ -348,12 +331,18 @@ async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Pat
     try:
         await start_job(runtime, "member", tool_name="report", depth=0, adapter={}, owner=member, operation=operation)
         await wait_for_status(runtime, "member", "completed")
-        controls = team_background_jobs(DelegationModel(id="leader"), config, paths, team)
-        assert isinstance(controls, JobTools)
+        jobs = team_background_jobs(config, paths, team)
+        assert jobs is not None
+        [job] = jobs.controls.functions
         with tool_runtime_context(context):
-            collected = str(await controls.job("collect"))
-        assert "`member` (report) completed" in collected
-        assert "Member result" in collected
+            outcome = await execute_tool_call(
+                job,
+                {"action": "collect"},
+                ToolCallContext(run_id="team-run", session_id=context.session_id, call_id="collect-call"),
+                middleware=jobs.middleware,
+            )
+        assert "`member` (report) completed" in outcome.content
+        assert "Member result" in outcome.content
     finally:
         await runtime.shutdown()
 
@@ -374,22 +363,15 @@ async def test_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path: Path
     )
     recorder = SpanRecorder(stopped=False)
     try:
-        controls = team_background_jobs(DelegationModel(id="leader"), config, paths, team)
-        assert controls is not None
-        [job] = adapt_toolkit(controls).functions
-        policy = build_tool_hook_middleware(
-            HookRegistry.empty(),
-            agent_name="team",
-            dispatch_context=ToolDispatchContext(execution_identity=team),
-            config=config,
-            runtime_paths=paths,
-        )
+        jobs = team_background_jobs(config, paths, team)
+        assert jobs is not None
+        [job] = jobs.controls.functions
         with tool_runtime_context(context), recording_tool_calls(recorder):
             await execute_tool_call(
                 job,
                 {"action": "list"},
                 ToolCallContext(run_id="team-run", session_id=context.session_id),
-                middleware=(policy,),
+                middleware=jobs.middleware,
             )
         assert [(kind, name) for kind, name, _arguments, _result in recorder.records] == [
             ("started", "job"),
@@ -410,9 +392,9 @@ async def test_the_job_tool_never_asks_for_approval(tmp_path: Path) -> None:
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     try:
-        controls = team_background_jobs(DelegationModel(id="leader"), config, paths, team)
-        assert isinstance(controls, JobTools)
-        job = controls.async_functions["job"]
+        jobs = team_background_jobs(config, paths, team)
+        assert jobs is not None
+        [job] = jobs.controls.functions
         assert job.requires_confirmation is not True
         assert job.approval_type is None
     finally:
@@ -432,7 +414,10 @@ def test_a_plugin_toolkit_named_job_still_asks_for_approval(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notices(tmp_path: Path) -> None:
+async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The leader of a configured team can collect its members' jobs and hears when they end."""
     runtime_paths = history_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -458,34 +443,131 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
         session_id="session-1",
         transport_agent_name="pair",
     )
-    members = [history_agent(agent_id="alpha", name="Alpha"), history_agent(agent_id="zeta", name="Zeta")]
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    monkeypatch.setattr(envelope, "build_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    context = replace(
+        _delegate_runtime_context(config, runtime_paths, execution_identity=identity),
+        agent_name="pair",
+        transport_agent_name="pair",
+    )
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "Member result")
+
     try:
-        with (
-            open_bound_scope_session_context(
-                agents=members,
-                session_id="session-1",
-                runtime_paths=runtime_paths,
+        members = materialize_exact_team_members(
+            ["alpha", "zeta"],
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+        )
+        built = build_team_spec(
+            members=members,
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_display_name="Pair",
+            scope_context=None,
+            execution_identity=identity,
+            model_name="default",
+            configured_team_name="pair",
+        )
+        assert any(function.name == "job" for toolkit in built.spec.toolkits for function in toolkit.functions)
+        assert built.leader_jobs is not None
+        assert built.leader_jobs.team
+        hooks = envelope._leader_hooks(
+            config=config,
+            runtime_paths=runtime_paths,
+            entity_name="pair",
+            scope_id=built.spec.id,
+            spec=built.spec,
+            runtime_model_name="default",
+            storage=None,
+            scoped=False,
+            prepared_history=None,
+            prompt_id=None,
+            compaction_lifecycle=None,
+            turn_recorder=None,
+            leader_middleware=built.leader_middleware,
+            leader_jobs=built.leader_jobs,
+        )
+        await start_job(runtime, "ended", tool_name="report", depth=0, adapter={}, owner=identity, operation=operation)
+        await wait_for_status(runtime, "ended", "completed")
+        messages = [Message(role="tool", tool_call_id="call", content="delegated")]
+        with tool_runtime_context(context), job_notice_context(JobNotices()):
+            for hook in hooks.after_tool_batch:
+                await hook(messages, messages)
+        assert "`ended` (report) completed" in str(messages[0].content)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_the_member_that_posts_an_ad_hoc_teams_replies_hears_when_its_jobs_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ad hoc team answers as the member whose account posts its replies, so only that member hears the notice."""
+    runtime_paths = history_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"alpha": AgentConfig(display_name="Alpha"), "zeta": AgentConfig(display_name="Zeta")},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=2_000)},
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        ),
+        runtime_paths,
+    )
+    runtime = await tool_job_runtime(tmp_path / "jobs")
+    pin_background_tool_jobs(config, runtime_paths)
+    register_background_runtime(runtime_paths, runtime)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="alpha",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        transport_agent_name="alpha",
+    )
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    context = replace(
+        _delegate_runtime_context(config, runtime_paths, execution_identity=identity),
+        agent_name="zeta",
+        transport_agent_name="alpha",
+    )
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "Member result")
+
+    try:
+        members = materialize_exact_team_members(
+            ["alpha", "zeta"],
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+        )
+        hooks = {
+            build.spec.id: envelope._team_member(
+                build,
+                "",
                 config=config,
-                execution_identity=None,
-                team_name="pair",
-            ) as scope_context,
-            patch(
-                "mindroom.providers.model_loading.get_model_instance",
-                return_value=FakeModel(id="fake-model", provider="fake"),
-            ),
-        ):
-            team = _create_team_instance(
-                agents=members,
-                mode=TeamMode.COORDINATE,
-                config=config,
                 runtime_paths=runtime_paths,
-                team_display_name="Pair",
-                scope_context=scope_context,
-                execution_identity=identity,
                 model_name="default",
-                configured_team_name="pair",
-            )
-        assert any("job" in toolkit.get_async_functions() for toolkit in team.tools or [])
-        assert vars(team.model).get("_mindroom_job_notice_hook_installed") is True
+            ).hooks()
+            for build in members.builds
+        }
+        await start_job(runtime, "ended", tool_name="report", depth=0, adapter={}, owner=identity, operation=operation)
+        await wait_for_status(runtime, "ended", "completed")
+        heard = {}
+        with tool_runtime_context(context), job_notice_context(JobNotices()):
+            for name in ("zeta", "alpha"):
+                messages = [Message(role="tool", tool_call_id="call", content="result")]
+                for hook in hooks[name].after_tool_batch:
+                    await hook(messages, messages)
+                heard[name] = str(messages[0].content)
+        assert heard["zeta"] == "result"
+        assert "`ended` (report) completed" in heard["alpha"]
     finally:
         await runtime.shutdown()

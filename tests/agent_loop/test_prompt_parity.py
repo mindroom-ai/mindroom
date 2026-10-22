@@ -20,18 +20,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 GOLDENS = sorted(path.stem for path in FIXTURE_DIR.glob("*.json"))
-# The owner of each golden whose entry point does not run on the owned path yet.
-PENDING = {
-    "agent_minimal_mode": "F3 renders minimal mode's bootstrap prompt and Bash facade from the build's surface",
-}
 TEAM = [name for name in GOLDENS if name.startswith("team_")]
-RECORDED = [name for name in GOLDENS if name not in PENDING and name not in TEAM]
+RECORDED = [name for name in GOLDENS if name not in TEAM]
 
 
-def test_every_golden_is_compared_here_or_assigned_an_owner() -> None:
-    """Each prompt golden is compared by this module, by the team runtime, or named with the step that will."""
+def test_every_golden_is_compared_here_or_by_the_team_runtime() -> None:
+    """Each prompt golden is compared by this module or by the team runtime."""
     assert set(GOLDENS) == set(SCENARIOS)
-    assert sorted({*RECORDED, *PENDING, *TEAM}) == GOLDENS
+    assert sorted({*RECORDED, *TEAM}) == GOLDENS
 
 
 @pytest.mark.asyncio

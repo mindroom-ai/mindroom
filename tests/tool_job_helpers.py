@@ -5,27 +5,45 @@ from __future__ import annotations
 import asyncio
 import json
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-from agno.tools.function import Function
-
+from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.run import resume_agent, run_agent
+from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agents import create_agent
+from mindroom.approval.resume import ResumeRunner
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation.background import delegation_child, start_delegation
+from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.state import DelegationChild
-from mindroom.event_journal import EventJournalStore, ToolJobStore
+from mindroom.event_journal import ApprovalCall, EventJournalStore, ToolJobStore, approval_arguments_digest
 from mindroom.event_journal.offloading import ThreadOffload
 from mindroom.event_journal.opening import event_journal_sqlite_path
+from mindroom.history.request_messages import build_resume_request
+from mindroom.history.types import HistoryScope
+from mindroom.llm.events import RunFinished
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
+from mindroom.loop_hooks import agent_loop_hooks
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.store import persist_to
+from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_jobs.authorization import toolkit_authority
+from mindroom.tool_jobs.execution import JobActor, job_definitions_hook, with_job_admission
+from mindroom.tool_jobs.execution_authority import JobTool
+from mindroom.tool_jobs.notices import job_notice_hook
 from mindroom.tool_jobs.runtime import (
     TERMINAL_STATUSES,
     BackgroundJob,
@@ -33,29 +51,43 @@ from mindroom.tool_jobs.runtime import (
     ToolJobRuntime,
     _parse_saved_job,
 )
+from mindroom.tool_system.agno_toolkits import AdaptedToolkit, Toolkit, adapt_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
-from tests.delegation_helpers import _delegate_runtime_context
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
+from tests.fakes.scripted_model import ScriptedModel
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from datetime import datetime
     from pathlib import Path
 
     import pytest
 
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.run import Persist
+    from mindroom.constants import RuntimePaths
+    from mindroom.delegation.state import ChildResponseRunner
+    from mindroom.llm.provider import ModelProvider
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
+    from tests.fakes.scripted_model import ScriptStep
 
 
 # One generous bound for waits that must eventually finish; a slow CI host must not turn them into failures.
 JOB_TEST_TIMEOUT = 30
+_LEADER_SCOPE = HistoryScope(kind="agent", scope_id="leader")
 
 
 def _authorize_all(_job: BackgroundJob) -> bool:
     return True
 
 
-def _allow_execution(_owner: ToolExecutionIdentity, _function: Function, _arguments: Mapping[str, Any]) -> None:
+def _allow_execution(_owner: ToolExecutionIdentity, _tool: JobTool, _arguments: Mapping[str, Any]) -> None:
     return None
 
 
@@ -76,7 +108,7 @@ class ProcessRuntime(ToolJobRuntime):
         journal: EventJournalStore,
         *,
         authorize: Callable[[BackgroundJob], bool],
-        authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
+        authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None],
         cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]],
         denied: Callable[[BackgroundJob], bool] | None = None,
     ) -> None:
@@ -106,7 +138,7 @@ async def tool_job_runtime(
     storage_root: Path,
     *,
     authorize: Callable[[BackgroundJob], bool] = _authorize_all,
-    authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None] = _allow_execution,
+    authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None] = _allow_execution,
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] = _no_cleanup,
     denied: Callable[[BackgroundJob], bool] | None = None,
 ) -> ProcessRuntime:
@@ -230,11 +262,220 @@ def pending_outcome(runtime: ToolJobRuntime, job_id: str) -> BackgroundJob | Non
     return next((job for job in pending_outcomes(runtime) if job.job_id == job_id), None)
 
 
-def assembled_function(entrypoint: Callable[..., object]) -> Function:
-    """Build a function as MindRoom toolkit assembly binds it; only such functions may become jobs."""
-    function = Function.from_callable(entrypoint)
-    function.owning_toolkit = "application"
-    return function
+def toolkit_job_tools(
+    toolkit: Toolkit,
+    *,
+    authored_name: str = "application",
+    snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, JobTool]:
+    """Offer every function of ``toolkit`` as agent assembly does, authored as ``authored_name``.
+
+    ``snapshot`` is the actor's execution scope and file access, as ``authority_snapshot`` freezes it; only such
+    functions may become jobs.
+    """
+    authority = toolkit_authority(snapshot or {}, toolkit)
+    return {
+        function.name: JobTool(function=function, toolkit_name=authored_name, toolkit=toolkit, authority=authority)
+        for function in adapt_toolkit(toolkit).functions
+    }
+
+
+def job_tool(
+    entrypoint: Callable[..., object],
+    *,
+    authored_name: str = "application",
+    snapshot: Mapping[str, Any] | None = None,
+) -> JobTool:
+    """Offer one callable as a function of a MindRoom-assembled toolkit; see ``toolkit_job_tools``."""
+    [tool] = toolkit_job_tools(
+        Toolkit(name=authored_name, tools=[entrypoint]),
+        authored_name=authored_name,
+        snapshot=snapshot,
+    ).values()
+    return tool
+
+
+def job_actor(
+    *tools: JobTool,
+    name: str = "leader",
+    team: bool = False,
+    depth: int = 0,
+) -> JobActor:
+    """An agent, or a team, offering ``tools`` as tool jobs see it."""
+    return JobActor(name=name, team=team, depth=depth, tools={tool.function.name: tool for tool in tools})
+
+
+async def call_job_tool(
+    actor: JobActor,
+    name: str,
+    arguments: Mapping[str, Any] | None = None,
+    *,
+    call_id: str | None = "call",
+    run_id: str = "run",
+    session_id: str = "session",
+    session_state: dict[str, Any] | None = None,
+    middleware: tuple[ToolMiddleware, ...] = (),
+) -> ToolOutcome:
+    """Run one model call of the actor's function ``name`` through job admission, as the owned loop dispatches it."""
+    context = ToolCallContext(
+        run_id=run_id,
+        session_id=session_id,
+        call_id=call_id,
+        session_state={} if session_state is None else session_state,
+    )
+    return await execute_tool_call(
+        actor.tools[name].function,
+        arguments,
+        context,
+        middleware=with_job_admission(actor, middleware),
+    )
+
+
+def _job_turn(
+    actor: JobActor,
+    model: ModelProvider,
+    *,
+    session_id: str,
+    session_state: dict[str, Any] | None,
+    store: ConversationStore | None,
+    generated: tuple[ToolFunction, ...],
+    middleware: tuple[ToolMiddleware, ...],
+) -> tuple[AgentSpec, LoopHooks, ConversationSession, Persist[RunRecord] | None]:
+    functions = (*(tool.function for tool in actor.tools.values()), *generated)
+    spec = AgentSpec(
+        id=actor.name,
+        name=actor.name,
+        model=model,
+        system_message=None,
+        toolkits=(AdaptedToolkit(name="tools", functions=functions, instructions=None),),
+    )
+    hooks = LoopHooks(
+        before_request=(job_definitions_hook(actor),),
+        tool_middleware=with_job_admission(actor, middleware),
+        after_tool_batch=(job_notice_hook(actor.name),),
+    )
+    session = ConversationSession(
+        session_id=session_id,
+        kind="team" if actor.team else "agent",
+        owner_id=actor.name,
+        session_state={} if session_state is None else session_state,
+    )
+    return spec, hooks, session, None if store is None else persist_to(store, session)
+
+
+async def run_job_turn(
+    actor: JobActor,
+    model: ModelProvider,
+    prompt: str = "start",
+    *,
+    run_id: str = "run",
+    session_id: str = "session",
+    session_state: dict[str, Any] | None = None,
+    store: ConversationStore | None = None,
+    generated: tuple[ToolFunction, ...] = (),
+    middleware: tuple[ToolMiddleware, ...] = (),
+) -> RunRecord:
+    """Run one turn of the actor on the owned loop with the job hooks an agent's turn installs.
+
+    ``session_state`` is the session's state the run's tools share; ``store`` saves the run and that state as a
+    reply does. ``generated`` are functions the framework offers beside the actor's assembled ones, which never
+    become jobs.
+    """
+    spec, hooks, session, persist = _job_turn(
+        actor,
+        model,
+        session_id=session_id,
+        session_state=session_state,
+        store=store,
+        generated=generated,
+        middleware=middleware,
+    )
+    run = RunContext(run_id=run_id, session_id=session_id, session_state=session.session_state)
+    events = run_agent(spec, [Message(role="user", content=prompt)], ctx=run, hooks=hooks, persist=persist)
+    finished = [event.record async for event in events if isinstance(event, RunFinished)]
+    return finished[-1]
+
+
+async def resume_job_turn(
+    actor: JobActor,
+    model: ModelProvider,
+    paused: RunRecord,
+    *,
+    session_state: dict[str, Any] | None = None,
+    store: ConversationStore | None = None,
+    middleware: tuple[ToolMiddleware, ...] = (),
+) -> RunRecord:
+    """Resume ``paused`` with every call it waits on approved, as an approval card's decision resumes a reply."""
+    session_id = paused.session_id or "session"
+    spec, hooks, session, persist = _job_turn(
+        actor,
+        model,
+        session_id=session_id,
+        session_state=session_state,
+        store=store,
+        generated=(),
+        middleware=middleware,
+    )
+    approved = [
+        ApprovalCall(
+            tool_call_id=str(requirement.tool_execution.tool_call_id),
+            tool_name=str(requirement.tool_execution.tool_name),
+            invoking_agent=actor.name,
+            toolkit_name=actor.tools[str(requirement.tool_execution.tool_name)].toolkit_name,
+            expires_at_ns=2**62,
+            arguments_digest=approval_arguments_digest(requirement.tool_execution.tool_args),
+        )
+        for requirement in paused.requirements or ()
+    ]
+    events = resume_agent(
+        spec,
+        paused,
+        build_resume_request(paused=paused.messages, summary=None, history=[]),
+        approved=approved,
+        ctx=RunContext(run_id=paused.run_id, session_id=session_id, session_state=session.session_state),
+        hooks=hooks,
+        persist=persist,
+    )
+    finished = [event.record async for event in events if isinstance(event, RunFinished)]
+    return finished[-1]
+
+
+async def run_built_turn(
+    build: AgentBuild,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    prompt: str = "start",
+    run_id: str = "run",
+    session_id: str = "session",
+) -> RunRecord:
+    """Run one turn of an agent ``create_agent`` built, on the owned loop with the hooks every agent turn installs."""
+    name = build.spec.id
+    hooks = agent_loop_hooks(
+        build,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=name,
+        model_name="default",
+        store=None,
+        session=ConversationSession(session_id=session_id, kind="agent", owner_id=name),
+        scope=None,
+        scoped=False,
+        native_compaction=None,
+        prompt_id=None,
+    )
+    finished = [
+        event.record
+        async for event in run_agent(
+            replace(build.spec, system_message=prompt_for_turn(build)),
+            [Message(role="user", content=prompt)],
+            ctx=RunContext(run_id=run_id, session_id=session_id),
+            hooks=hooks,
+            request_template=build.request_template,
+        )
+        if isinstance(event, RunFinished)
+    ]
+    return finished[-1]
 
 
 async def start_job(runtime: ToolJobRuntime, job_id: str, **options: Any) -> BackgroundJob:  # noqa: ANN401
@@ -447,3 +688,116 @@ async def cancel_settled(
     requested = await runtime.cancel(job_id, owner=owner, depth=depth)
     drain = runtime._entries[job_id].drain
     return requested if drain is None else await asyncio.shield(drain)
+
+
+@dataclass
+class DelegatingLeader:
+    """The leader as a reply builds it, whose turns the native driver advances with a test's child runner.
+
+    Each turn builds the leader with ``create_agent`` and runs it on the owned loop with the hooks every agent turn
+    installs; ``drive`` hands its delegations to the native driver, which continues it through the production resume.
+    """
+
+    config: Config
+    paths: RuntimePaths
+    identity: ToolExecutionIdentity
+    agents: ScriptedAgents
+    depth: int = 0
+    store: ConversationStore = field(init=False)
+    session: ConversationSession = field(init=False)
+    build: AgentBuild | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        """Give the agents their Matrix identities and open the leader's conversation store."""
+        entity_ids(self.config, self.paths)
+        self.store = create_session_storage("leader", self.config, self.paths, self.identity)
+        self.session = ConversationSession(session_id=self.identity.session_id or "", kind="agent", owner_id="leader")
+
+    @property
+    def model(self) -> ScriptedModel:
+        """The leader's provider for its current turn."""
+        return self.agents.models["leader"]
+
+    async def _persist(self, record: RunRecord) -> None:
+        await persist_to(self.store, self.session)(record)
+        self.session.runs = [*(run for run in self.session.runs if run.run_id != record.run_id), record]
+
+    async def turn(self, *turns: Sequence[ScriptStep], run_id: str = "parent-run") -> RunRecord:
+        """Run the leader on ``turns`` until it completes or pauses on its delegations."""
+        self.agents.models["leader"] = ScriptedModel(list(turns))
+        self.build = build = create_agent(
+            "leader",
+            self.config,
+            self.paths,
+            self.identity,
+            history_storage=self.store,
+            delegation_depth=self.depth,
+            supports_native_tool_approval=True,
+            include_interactive_questions=False,
+        )
+        hooks = agent_loop_hooks(
+            build,
+            config=self.config,
+            runtime_paths=self.paths,
+            agent_name="leader",
+            model_name="default",
+            store=self.store,
+            session=self.session,
+            scope=_LEADER_SCOPE,
+            scoped=False,
+            native_compaction=None,
+            prompt_id=None,
+        )
+        events = run_agent(
+            replace(build.spec, system_message=prompt_for_turn(build)),
+            [Message(role="user", content="Delegate")],
+            ctx=RunContext(
+                run_id=run_id,
+                session_id=self.session.session_id,
+                user_id=self.identity.requester_id,
+                session_state=self.session.session_state,
+            ),
+            hooks=hooks,
+            persist=self._persist,
+            request_template=build.request_template,
+        )
+        finished = [event.record async for event in events if isinstance(event, RunFinished)]
+        record = finished[-1]
+        assert isinstance(record, RunRecord)
+        return record
+
+    async def drive(self, record: RunRecord, run_child: ChildResponseRunner) -> RunRecord:
+        """Advance ``record``'s delegations with ``run_child`` and continue the leader with their results."""
+        assert self.build is not None
+        runner = ResumeRunner(
+            build=self.build,
+            config=self.config,
+            runtime_paths=self.paths,
+            agent_name="leader",
+            model_name="default",
+            store=self.store,
+            session=self.session,
+            scope=_LEADER_SCOPE,
+            user_id=self.identity.requester_id,
+        )
+        return await drive_delegations(
+            record,
+            store=self.store,
+            session=self.session,
+            continue_parent=runner.continue_run,
+            agent_name="leader",
+            run_child=run_child,
+            config=self.config,
+            runtime_paths=self.paths,
+            execution_identity=self.identity,
+            delegation_depth=self.depth,
+        )
+
+    async def reply(
+        self,
+        *turns: Sequence[ScriptStep],
+        run_child: ChildResponseRunner,
+        run_id: str = "parent-run",
+    ) -> RunRecord:
+        """Run one leader reply whose delegations ``run_child`` runs."""
+        return await self.drive(await self.turn(*turns, run_id=run_id), run_child)

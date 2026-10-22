@@ -24,7 +24,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - Progress is the latest report on the runtime entry, never saved and shown only while the job runs, so a report from a thread that outlived its call cannot change a settled job.
 - A command's `mindroom-agent` calls are the agent's own actions, so the command's `timeout` stops its processes but never those calls, and its shell call waits for them; a time limit on them would cancel a call a person approves late, and nothing has to tell a stopped command from one that ended.
 - The response's `mindroom-agent` owner closes through the response's execution resources, so a shell job that outlives its reply keeps the CLI until the last job settles; cancelling one shell window stops only that window's calls.
-- Saved custom generator events replay as fixed SDK subclasses, so saved data never chooses the class or methods that run.
+- A saved job result decodes only to text, media, session-state changes, and an error under fixed wire tags, so saved data never chooses the code that runs; a streamed call's job saves the joined text the model read, not its events.
 - Recovery fails on a saved job it cannot read and names that job, instead of dropping it silently.
 
 ## Invariant purposes
@@ -67,6 +67,5 @@ A restart interrupts a job that waits for its own call's approval, so that call 
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, and team delegation run inline.
 A wait that ends while the mid-turn judge is still deciding cancels that judgment, so the post-batch check judges the same queue again.
 A primary that dies without closing its connection leaves a worker command running until the runner notices the dead connection, and a local shell job whose process is killed with SIGKILL keeps running.
-Unhooked synchronous local tools in a job run on Agno's shared thread pool, because Agno chooses that thread; worker calls and calls that async entrypoints offload get their own threads.
 A shell job's `mindroom-agent` calls fail once its response's CLI grant reaches its 24-hour cap, which bounds how long a leaked grant stays usable.
 The jobs bar does not show progress.

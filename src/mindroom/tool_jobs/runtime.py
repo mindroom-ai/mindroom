@@ -35,11 +35,10 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_too
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from agno.tools.function import Function
-
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import SavedToolJob, ToolJobStore
     from mindroom.tool_jobs.conversation import ConversationKey
+    from mindroom.tool_jobs.execution_authority import JobTool
 
 type _OutcomeStatus = Literal["completed", "failed", "cancelled", "denied", "interrupted"]
 # A running job that waits for human decisions on the approval cards it posted is `awaiting_approval`.
@@ -308,7 +307,7 @@ class ToolJobRuntime:
         store: ToolJobStore,
         *,
         authorize: Callable[[BackgroundJob], bool],
-        authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
+        authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None],
         cancel: _Cleanup,
         denied: Callable[[BackgroundJob], bool],
     ) -> None:

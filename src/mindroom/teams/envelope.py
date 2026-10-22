@@ -119,7 +119,7 @@ from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.timing import emit_timing_event
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.notices import append_turn_start_job_note
+from mindroom.tool_jobs.notices import append_turn_start_job_note, job_notice_hook
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import StructuredStreamChunk
@@ -151,6 +151,7 @@ if TYPE_CHECKING:
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.timing import DispatchPipelineTiming
+    from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_system.events import StreamingToolTracker, ToolTraceEntry
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -297,10 +298,14 @@ def _resolve_team_instance_id(
 
 @dataclass(frozen=True)
 class BuiltTeam:
-    """One team ready to run: its spec and the tool-call policy the leader's own tools run under."""
+    """One team ready to run: its spec, the tool-call policy the leader's own tools run under, and the team's jobs.
+
+    ``leader_jobs`` is the team as tool jobs see it while the instance runs them for a Matrix owner.
+    """
 
     spec: TeamSpec
     leader_middleware: tuple[ToolMiddleware, ...]
+    leader_jobs: JobActor | None = None
 
 
 def build_team_spec(
@@ -369,7 +374,9 @@ def build_team_spec(
         tool_call_limit=team_view.max_tool_calls_per_turn,
         members=team_members,
     )
-    return BuiltTeam(spec=spec, leader_middleware=() if jobs is None else (jobs.middleware,))
+    if jobs is None:
+        return BuiltTeam(spec=spec, leader_middleware=())
+    return BuiltTeam(spec=spec, leader_middleware=jobs.middleware, leader_jobs=jobs.actor)
 
 
 # ---------------------------------------------------------------------------
@@ -607,11 +614,13 @@ def _leader_hooks(
     compaction_lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
     leader_middleware: tuple[ToolMiddleware, ...],
+    leader_jobs: JobActor | None,
 ) -> LoopHooks:
     """Return the leader's hooks in the order the turn applies them: mid-turn compaction, then the approval receipt.
 
     The request cap is the loop's own; the queued-message notice follows every tool batch and a resume's entry, as
-    for an agent's turn. A fold appends a summary row to the team scope only when this request replays it.
+    for an agent's turn, and so does the notice of the team's ended jobs. A fold appends a summary row to the team
+    scope only when this request replays it.
     """
     model = spec.model
     capabilities = model.capabilities
@@ -641,7 +650,10 @@ def _leader_hooks(
         ),
         answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
         tool_middleware=leader_middleware,
-        after_tool_batch=(ai_runtime.queued_notice_after_tool_batch(notice_text),),
+        after_tool_batch=(
+            ai_runtime.queued_notice_after_tool_batch(notice_text),
+            *(() if leader_jobs is None else (job_notice_hook(leader_jobs.name),)),
+        ),
         on_resume_entry=(ai_runtime.queued_notice_on_resume_entry(notice_text),),
     )
 
@@ -715,6 +727,7 @@ def _leader_run(
             compaction_lifecycle=compaction_lifecycle,
             turn_recorder=turn_recorder,
             leader_middleware=built.leader_middleware,
+            leader_jobs=built.leader_jobs,
         ),
         request_template=ModelRequest(
             messages=(),
@@ -2098,6 +2111,7 @@ async def continue_paused_team_run(
                     compaction_lifecycle=None,
                     turn_recorder=None,
                     leader_middleware=built.leader_middleware,
+                    leader_jobs=built.leader_jobs,
                 ),
                 request_template=ModelRequest(
                     messages=(),

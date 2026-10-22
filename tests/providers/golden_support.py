@@ -14,7 +14,7 @@ import json
 import re
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,6 +27,7 @@ from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.tool_policy import without_provider_tools
+from mindroom.tool_jobs.execution import project_definitions
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
@@ -74,16 +75,6 @@ _HANDLED_INPUT_KEYS = frozenset(
 )
 # Agno's Gemini adapter forwarded a forced choice as its own ``"any"`` mode; the owned protocol says ``required``.
 _TOOL_CHOICE_ALIASES = {"any": "required"}
-# The optional waiting budget a turn that can start tool jobs adds to each managed function's schema, as
-# ``tool_jobs/agno_compat_execution.py`` projects it; the owned loop (B3a) owns the production copy.
-BACKGROUND_AFTER_SCHEMA = {
-    "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
-    "description": (
-        "Seconds to wait for this call before it continues in the background, without cancelling it. "
-        "Omit or pass null to wait until completion or a newer message you answer; "
-        "zero continues in the background at once and returns a job handle."
-    ),
-}
 
 
 class PacedBytes(httpx.AsyncByteStream):
@@ -332,19 +323,6 @@ def tool_spec_from_dict(tool: dict[str, Any]) -> ToolSpec:
     )
 
 
-def with_background_after(tools: Sequence[ToolSpec], managed: frozenset[str]) -> list[ToolSpec]:
-    """Stand in for the loop's tool-job projection: each managed function gains the optional wait parameter."""
-    projected: list[ToolSpec] = []
-    for tool in tools:
-        if tool.name not in managed:
-            projected.append(tool)
-            continue
-        parameters = deepcopy(dict(tool.parameters))
-        parameters.setdefault("properties", {})["background_after"] = deepcopy(BACKGROUND_AFTER_SCHEMA)
-        projected.append(replace(tool, parameters=parameters))
-    return projected
-
-
 def golden_request(
     case_input: dict[str, Any],
     *,
@@ -360,7 +338,7 @@ def golden_request(
     assert not unhandled, f"the harness does not know how to send golden input {sorted(unhandled)}"
     tools = [tool_spec_from_dict(tool) for tool in case_input["tools"]]
     if (tool_jobs := case_input.get("tool_jobs")) is not None:
-        tools = with_background_after(tools, frozenset(tool_jobs["managed"]))
+        tools = list(project_definitions(tools, frozenset(tool_jobs["managed"])))
     if case_input.get("provider_tools_disabled"):
         assert case_input["tool_choice"] == "none", "decision requests disable tool selection through tool_choice"
     native_compaction = None

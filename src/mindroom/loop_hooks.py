@@ -17,6 +17,8 @@ from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.participation_hook import participation_hook
 from mindroom.skill_learning.capture import capture_final_request
+from mindroom.tool_jobs.execution import job_definitions_hook
+from mindroom.tool_jobs.notices import job_notice_hook
 
 if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
@@ -57,9 +59,11 @@ def agent_loop_hooks(
     The participation gate decides first, so a reply that stays silent never compacts or requests; the request
     cap is the loop's own and refuses a request before any hook runs; mid-turn compaction rewrites the live
     messages, and folds into the scope only when ``scoped`` says the run replays the scope's stored history; the
-    approval receipt projects into the first request of a resumed run only. Queued-message notices follow every
-    tool batch and a resume's entry unless ``queued_notices`` is off, as for a team member, whose leader owns the
-    turn's notices; ``skill_review_capture`` records the final request of run ``run_id``.
+    approval receipt projects into the first request of a resumed run only; the wait budget of the agent's managed
+    calls joins their definitions last, as the request is formatted. Queued-message notices follow every tool batch
+    and a resume's entry unless ``queued_notices`` is off, as for a team member, whose leader owns the turn's
+    notices; a top-level agent hears of its ended jobs after each batch; ``skill_review_capture`` records the final
+    request of run ``run_id``.
     """
     model = build.spec.model
     capabilities = model.capabilities
@@ -87,6 +91,9 @@ def agent_loop_hooks(
         ),
     )
     before_request.append(approval_receipt_hook(capabilities))
+    jobs = build.tool_jobs
+    if jobs is not None:
+        before_request.append(job_definitions_hook(jobs))
     notice_text = config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     deferred = build.request_template.deferred_tool_names
     return LoopHooks(
@@ -94,7 +101,12 @@ def agent_loop_hooks(
         answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
         rewrite_tool_calls=resolve_call_tool_calls if deferred and not capabilities.native_tool_search else None,
         tool_middleware=build.tool_middleware,
-        after_tool_batch=(ai_runtime.queued_notice_after_tool_batch(notice_text),) if queued_notices else (),
+        after_tool_batch=(
+            *((ai_runtime.queued_notice_after_tool_batch(notice_text),) if queued_notices else ()),
+            # A delegated child cannot collect jobs; its caller hears when they end. A team member hears of its
+            # own jobs too: the notice reaches only the member whose account posts an ad hoc team's replies.
+            *((job_notice_hook(jobs.name),) if jobs is not None and jobs.depth == 0 else ()),
+        ),
         on_resume_entry=(ai_runtime.queued_notice_on_resume_entry(notice_text),) if queued_notices else (),
         on_loop_end=(
             capture_final_request(skill_review_capture, model, run_id=run_id or "", model_name=model_name)

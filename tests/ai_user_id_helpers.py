@@ -180,6 +180,7 @@ def _prepared_prompt_result(
             prepared_context_tokens=prepared_context_tokens,
         ),
         runtime_model_name=runtime_model_name,
+        cli_context={},
     )
 
 

@@ -4,24 +4,22 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
-
-from agno.exceptions import AgentRunException
-from agno.tools.function import FunctionCall, ToolResult
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.tool_jobs.agno_compat_functions import function_actor, function_agent, function_run_context
-from mindroom.tool_jobs.execution_authority import current_tool_call
+from mindroom.tool_jobs.execution_authority import current_job_call
 from mindroom.tool_jobs.results import read_result_payload
+from mindroom.tool_system.agno_toolkits import ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_jobs.execution_authority import JobCall
     from mindroom.tool_jobs.results import ToolResultPayload
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
 
@@ -141,15 +139,14 @@ def session_state_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[s
     }
 
 
-def _merge_session_state(value: Any, job: BackgroundJob, payload: ToolResultPayload, call: FunctionCall) -> Any:  # noqa: ANN401
+def _merge_session_state(value: Any, job: BackgroundJob, payload: ToolResultPayload, call: JobCall) -> Any:  # noqa: ANN401
     """Apply unconflicted state changes, reporting conflicts in a new value that leaves the payload intact."""
     if job.consumed or job.status != "completed":
         return value
-    context = function_run_context(call.function)
-    state = context.session_state if context is not None else None
+    state = call.context.session_state
     conflicts = []
     for key, change in payload.state_delta.items():
-        if state is None or (key in state) != change["before_present"] or state.get(key) != change["before"]:
+        if (key in state) != change["before_present"] or state.get(key) != change["before"]:
             conflicts.append(key)
         elif change["present"]:
             state[key] = change["value"]
@@ -157,26 +154,17 @@ def _merge_session_state(value: Any, job: BackgroundJob, payload: ToolResultPayl
             state.pop(key, None)
     if conflicts:
         warning = "Session state conflicts: " + ", ".join(sorted(conflicts))
-        metadata = {"session_state_conflicts": conflicts}
-        if isinstance(value, ToolResult):
-            return value.model_copy(
-                update={"content": f"{value.content}\n{warning}", "metadata": {**(value.metadata or {}), **metadata}},
-            )
-        return ToolResult(content=f"{value}\n{warning}", metadata=metadata)
+        if isinstance(value, ToolValue):
+            return replace(value, content=f"{value.content}\n{warning}")
+        return ToolValue(content=f"{value}\n{warning}")
     return value
-
-
-def restore_control(control: dict[str, Any]) -> AgentRunException:
-    """Rebuild the SDK control exception a job's tool raised."""
-    values = dict(control)
-    return AgentRunException(values.pop("message"), **values)
 
 
 async def _retain_claim(
     runtime: ToolJobRuntime,
     job_id: str,
     claim: JobClaim,
-    call: FunctionCall | None,
+    call: JobCall | None,
     *,
     returned_inline: bool,
 ) -> None:
@@ -185,18 +173,17 @@ async def _retain_claim(
     if call is None or owner is None:
         await runtime.release_wait(job_id, claim)
         return
-    context = function_run_context(call.function)
-    if context is None or not call.call_id or function_actor(call.function) is None:
+    if not call.context.run_id or not call.context.call_id:
         await runtime.release_wait(job_id, claim)
-        msg = "Tool result consumption requires the exact run, tool call, and concrete agent or team"
+        msg = "Tool result consumption requires the exact run and tool call"
         raise ValueError(msg)
     owner.register(
         runtime,
         job_id,
         claim,
-        run_id=context.run_id,
-        team=function_agent(call.function) is None,
-        call_id=call.call_id,
+        run_id=call.context.run_id,
+        team=call.team,
+        call_id=call.context.call_id,
         returned_inline=returned_inline,
     )
 
@@ -223,14 +210,15 @@ async def consume_tool_job(
     job: BackgroundJob,
     claim: JobClaim,
     *,
-    function_call: FunctionCall | None = None,
+    job_call: JobCall | None = None,
     returned_inline: bool = False,
 ) -> tuple[Any, ToolResultPayload]:
     """Read a claimed outcome's value and payload, retaining the claim until the parent run saves this tool call.
 
-    ``returned_inline`` says this tool call is the one that started the job.
+    ``job_call`` is the call that consumes it, the management call running now when omitted; ``returned_inline``
+    says this tool call is the one that started the job.
     """
-    call = function_call or current_tool_call()
+    call = job_call or current_job_call()
     try:
         payload = await read_result_payload(runtime, job)
         value = payload.value

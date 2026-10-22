@@ -1,8 +1,8 @@
 """Persisted CLI approval fields are decoded once before recovery."""
 
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.requirement import RunRequirement
+
+from mindroom.llm.runs import RunRequirement, ToolExecution
 
 
 def test_cli_approval_payload_requires_and_retains_delegation_depth() -> None:

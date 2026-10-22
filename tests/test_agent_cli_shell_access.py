@@ -28,7 +28,7 @@ from mindroom.runtime_state import clear_api_server_address, set_api_server_addr
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.identity_helpers import persist_entity_accounts
-from tests.minimal_agent_fixtures import ScriptedProvider
+from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 
 if TYPE_CHECKING:
@@ -114,8 +114,8 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
         )
 
     assert "done" in result
-    assert [tool["function"]["name"] for tool in provider.requests[0]["tools"]] == ["bash"]
-    output = next(str(message["content"]) for message in provider.requests[1]["messages"] if message["role"] == "tool")
+    assert offered_tools(provider.requests[0]) == ["bash"]
+    output = next(message.get_content_string() for message in provider.requests[1].messages if message.role == "tool")
     assert '"toolkit":"calculator"' in output.replace(" ", ""), output
     # The agent's own shell settings still apply, like in its ordinary local shell.
     assert "pass=visible" in output, output

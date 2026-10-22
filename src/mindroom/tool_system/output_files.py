@@ -21,7 +21,7 @@ from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
-from mindroom.tool_system.agno_toolkits import Function, Toolkit, ToolResult
+from mindroom.tool_system.agno_toolkits import Function, Toolkit, ToolResult, ToolValue
 from mindroom.tool_system.declarations import declare_tool_schema_finisher, declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
@@ -398,12 +398,12 @@ def _normalize_json_value(value: object) -> object:
     return normalized
 
 
-def _has_tool_result_media(result: ToolResult) -> bool:
+def _has_tool_result_media(result: ToolResult | ToolValue) -> bool:
     return bool(result.images or result.videos or result.audios or result.files)
 
 
 def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
-    if isinstance(result, ToolResult):
+    if isinstance(result, ToolResult | ToolValue):
         if _has_tool_result_media(result):
             return "ToolResult media artifacts cannot be redirected to workspace files in v1."
         serialized = _SerializedToolOutput(payload=result.content.encode("utf-8"), format="text")

@@ -1,28 +1,76 @@
-"""Real provider batches must be persisted before a shell can run."""
+"""Minimal Bash's provider batch is saved before its shell can run."""
 
 # ruff: noqa: D103
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Never
+from typing import TYPE_CHECKING
 
 import pytest
-from agno.exceptions import ModelProviderError
-from agno.media import Audio, Image
-from agno.models.fallback import FallbackConfig, acall_model_with_fallback
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
-from agno.tools.function import Function, FunctionCall, ToolResult
 
-from mindroom.agent_cli.agno_compat_cli_checkpoint import ProviderBatchCheckpoint, inner_cli_dispatch
-from mindroom.agent_cli.lifetime import response_cli_lifetime
+from mindroom.agent_cli.bash import MinimalBashTools
+from mindroom.agent_cli.checkpoint import BatchCheckpoint
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState
+from mindroom.agent_loop.tools import PlannedCall
 from mindroom.history.run_visibility import is_model_history_visible_run
+from mindroom.llm.media import Audio, Image
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.store import ConversationStore
+from mindroom.tool_system.agno_toolkits import ToolValue, adapt_toolkit
 from tests.test_agent_tool_calls import _catalog
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
+
+
+def _assistant(*call_ids: str, content: str | None = None) -> Message:
+    return Message(
+        role="assistant",
+        content=content,
+        tool_calls=[
+            {"id": call_id, "type": "function", "function": {"name": "bash", "arguments": '{"command":"work"}'}}
+            for call_id in call_ids
+        ],
+        provider_data={"signature": "real-provider-data"},
+    )
+
+
+async def _capture(checkpoint: BatchCheckpoint, record: RunRecord, messages: list[Message]) -> None:
+    """Capture the batch the last assistant message requests, as the loop does before it runs any call."""
+    bash = adapt_toolkit(MinimalBashTools()).functions[0]
+    planned = [
+        PlannedCall(
+            call_id=call["id"],
+            function=bash,
+            arguments={"command": "work"},
+            execution=ToolExecution(tool_call_id=call["id"], tool_name="bash", tool_args={"command": "work"}),
+        )
+        for call in messages[-1].tool_calls or ()
+    ]
+    state = LoopState(
+        messages=messages,
+        tools=(),
+        run=checkpoint.catalog.run,
+        record=record,
+        request_index=1,
+        loop_start_ids=frozenset(),
+        request_template=EMPTY_REQUEST,
+    )
+    await checkpoint.capture(state, planned)
+
+
+async def _stored_catalog(tmp_path: Path) -> PreparedAgentToolCatalog:
+    catalog = await _catalog(tmp_path, [])
+    catalog.store = create_state_storage("helper", tmp_path, session_table="sessions")
+    return catalog
+
+
+def _record() -> RunRecord:
+    return RunRecord(run_id="run", session_id="session", agent_id="helper", status=RunStatus.running)
 
 
 @pytest.mark.asyncio
@@ -30,238 +78,94 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-
-    catalog = await _catalog(tmp_path, [])
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
-
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-    checkpoint = ProviderBatchCheckpoint(catalog)
-    assistant = Message(
-        role="assistant",
-        content="working",
-        tool_calls=[
-            {"id": "bash-1", "type": "function", "function": {"name": "bash", "arguments": '{"command":"one"}'}},
-            {"id": "bash-2", "type": "function", "function": {"name": "bash", "arguments": '{"command":"two"}'}},
-        ],
-        provider_data={"signature": "real-provider-data"},
-    )
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    record = _record()
+    assistant = _assistant("bash-1", "bash-2", content="working")
     messages = [Message(role="user", content="do work"), assistant]
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(checkpoint, function)
-        calls = catalog.agent.model.get_function_calls_to_run(assistant, messages, {"bash": function})
-        with pytest.raises(ValueError, match="captured"):
-            await checkpoint.persist(FunctionCall(function=function, call_id="bash-1", arguments={"command": "one"}))
-        original = deepcopy(messages)
-        assistant.content = "mutated after capture"
-        await checkpoint.persist(calls[0])
-        saved = catalog.agent.db.get_session(session_id="session")
-        assert [item.to_dict() for item in saved.runs[0].messages] == [item.to_dict() for item in original]
-        # A crash before Agno's final save must not replay the unanswered Bash call.
-        assert not is_model_history_visible_run(saved.runs[0])
-        assert catalog.run_response.status != RunStatus.cancelled
-        assert catalog.run_response.messages == []
-        await checkpoint.persist(calls[1])
+    with pytest.raises(ValueError, match="captured"):
+        await checkpoint.persist("bash-1")
+    await _capture(checkpoint, record, messages)
+    original = deepcopy(messages)
+    assistant.content = "mutated after capture"
+    await checkpoint.persist("bash-1")
+    assert catalog.store is not None
+    saved = catalog.store.get_run("run")
+    assert isinstance(saved, RunRecord)
+    assert [item.to_dict() for item in saved.messages] == [item.to_dict() for item in original]
+    assert [tool.tool_call_id for tool in saved.tools or ()] == ["bash-1", "bash-2"]
+    # A crash before the run's own terminal save must not replay the unanswered Bash call.
+    assert not is_model_history_visible_run(saved)
+    assert record.status is RunStatus.running
+    assert record.messages == []
+    await checkpoint.persist("bash-2")
 
     def fail(*_args: object, **_kwargs: object) -> None:
         msg = "injected database failure"
         raise OSError(msg)
 
-    monkeypatch.setattr(catalog.agent.db, "save_run_row", fail)
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(checkpoint, function)
-        calls = catalog.agent.model.get_function_calls_to_run(assistant, messages, {"bash": function})
-        with pytest.raises(OSError, match="injected"):
-            await checkpoint.persist(calls[0])
-
-
-@pytest.mark.asyncio
-async def test_inner_dispatch_cannot_capture_provider_history(tmp_path: Path) -> None:
-
-    catalog = await _catalog(tmp_path, [])
-
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-    checkpoint = ProviderBatchCheckpoint(catalog)
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {
-                "id": "inner-forged",
-                "type": "function",
-                "function": {"name": "bash", "arguments": '{"command":"inner"}'},
-            },
-        ],
-    )
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(checkpoint, function)
-        with inner_cli_dispatch():
-            calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-        with pytest.raises(ValueError, match="captured"):
-            await checkpoint.persist(calls[0])
-
-
-@pytest.mark.asyncio
-async def test_real_fallback_batch_checkpoints_resolved_model(tmp_path: Path) -> None:
-    from agno.models.openai import OpenAIChat  # noqa: PLC0415 - keep optional provider/server imports deferred
-
-    class Primary(OpenAIChat):
-        async def ainvoke(self, *_args: object, **_kwargs: object) -> Never:
-            msg = "fake primary unavailable"
-            raise ModelProviderError(msg, status_code=503)
-
-    class Fallback(OpenAIChat):
-        async def ainvoke(self, messages: list[Message], *_args: object, **_kwargs: object) -> ModelResponse:
-            content = (
-                {"role": "assistant", "content": "fallback done"}
-                if any(message.role == "tool" for message in messages)
-                else {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "fallback-bash",
-                            "type": "function",
-                            "function": {"name": "bash", "arguments": '{"command":"work"}'},
-                        },
-                    ],
-                }
-            )
-            return ModelResponse(**content)
-
-    catalog = await _catalog(tmp_path, [])
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
-    catalog.agent.model = Primary()
-    fallback = Fallback()
-    catalog.agent.fallback_config = FallbackConfig(on_error=[fallback])
-    catalog.agent.fallback_config.resolve_models()
-    assert catalog.agent.fallback_config.on_error[0] is not fallback
-    checkpoint = ProviderBatchCheckpoint(catalog)
-    effects = []
-
-    async def bash(command: str, fc: FunctionCall) -> str:
-        await checkpoint.persist(fc)
-        effects.append(command)
-        return "tool finished"
-
-    function = Function.from_callable(bash)
-    function.process_entrypoint()
-    checkpoint.prepare_capture()  # Exercise Agno copying the already-wrapped fallback.
-    catalog.agent.fallback_config.resolve_models()
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(checkpoint, function)
-        response = await acall_model_with_fallback(
-            catalog.agent.model,
-            catalog.agent.fallback_config,
-            messages=[Message(role="user", content="work")],
-            tools=[function],
-        )
-    assert effects == ["work"]
-    assert response.content == "fallback done"
-    saved = catalog.agent.db.get_session("session")
-    assert saved.runs[0].messages[-1].tool_calls[0]["id"] == "fallback-bash"
+    monkeypatch.setattr(ConversationStore, "save_run", fail)
+    await _capture(checkpoint, record, messages)
+    with pytest.raises(OSError, match="injected"):
+        await checkpoint.persist("bash-1")
 
 
 @pytest.mark.asyncio
 async def test_approval_checkpoint_refreshes_mutable_session_state(tmp_path: Path) -> None:
-
-    catalog = await _catalog(tmp_path, [])
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
-
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-    checkpoint = ProviderBatchCheckpoint(catalog)
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {"id": "bash-1", "type": "function", "function": {"name": "bash", "arguments": '{"command":"work"}'}},
-        ],
-    )
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(checkpoint, function)
-        calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-        await checkpoint.persist(calls[0])
-        catalog.run_context.session_state["before_approval"] = "kept"
-        await checkpoint.persist_approval("bash-1")
-    saved = catalog.agent.db.get_session("session")
-    assert saved.session_data["session_state"]["before_approval"] == "kept"
-    assert saved.runs[0].messages[0].tool_calls[0]["id"] == "bash-1"
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    await _capture(checkpoint, _record(), [_assistant("bash-1")])
+    await checkpoint.persist("bash-1")
+    catalog.run.session_state["before_approval"] = "kept"
+    await checkpoint.persist_approval("bash-1")
+    assert catalog.store is not None
+    fields = catalog.store.read_session_fields("session")
+    assert fields is not None
+    assert fields.session_state["before_approval"] == "kept"
+    saved = catalog.store.get_run("run")
+    assert saved is not None
+    assert saved.messages[0].tool_calls[0]["id"] == "bash-1"
 
 
 @pytest.mark.asyncio
 async def test_checkpoint_retains_only_the_current_provider_batch(tmp_path: Path) -> None:
     """Long minimal turns keep one history snapshot, not one per Bash batch."""
     catalog = await _catalog(tmp_path, [])
-
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-    checkpoint = ProviderBatchCheckpoint(catalog)
+    checkpoint = BatchCheckpoint(catalog)
     messages = [Message(role="user", content="do work")]
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(checkpoint, function)
-        for index in range(3):
-            message = Message(
-                role="assistant",
-                tool_calls=[
-                    {"id": f"bash-{index}", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
-                ],
-            )
-            messages.append(message)
-            calls = catalog.agent.model.get_function_calls_to_run(message, messages, {"bash": function})
-            assert [call.call_id for call, _batch in checkpoint._calls.values()] == [calls[0].call_id]
+    for index in range(3):
+        messages.append(_assistant(f"bash-{index}"))
+        await _capture(checkpoint, _record(), messages)
+        checkpoint.complete(f"bash-{index}", "done")
+        for earlier in range(index):
+            with pytest.raises(ValueError, match="captured"):
+                checkpoint.complete(f"bash-{earlier}", "late")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("media", [False, True])
 async def test_approval_checkpoint_keeps_completed_sibling_result(tmp_path: Path, media: bool) -> None:
-
-    catalog = await _catalog(tmp_path, [])
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
-
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-    checkpoint = ProviderBatchCheckpoint(catalog)
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {"id": name, "type": "function", "function": {"name": "bash", "arguments": '{"command":"work"}'}}
-            for name in ("done", "waiting")
-        ],
-    )
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(checkpoint, function)
-        calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-        await checkpoint.persist(calls[0])
-
-        result = (
-            ToolResult(
-                content="real sibling result",
-                images=[Image(content=b"sibling-image", mime_type="image/png")],
-                audios=[Audio(url="https://example.test/sibling.wav")],
-            )
-            if media
-            else "real sibling result"
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    await _capture(checkpoint, _record(), [_assistant("done", "waiting")])
+    await checkpoint.persist("done")
+    result = (
+        ToolValue(
+            content="real sibling result",
+            images=(Image(content=b"sibling-image", mime_type="image/png"),),
+            audios=(Audio(url="https://example.test/sibling.wav"),),
         )
-        checkpoint.complete(calls[0], result)
-        await checkpoint.persist_approval("waiting")
-    saved = catalog.agent.db.get_session("session").runs[0]
+        if media
+        else "real sibling result"
+    )
+    checkpoint.complete("done", result)
+    await checkpoint.persist_approval("waiting")
+    assert catalog.store is not None
+    saved = catalog.store.get_run("run")
+    assert saved is not None
     assert saved.messages[-1].tool_call_id == "done"
     assert saved.messages[-1].content == "real sibling result"
-    assert [(tool.tool_call_id, tool.result) for tool in saved.tools] == [
+    assert [(tool.tool_call_id, tool.result) for tool in saved.tools or ()] == [
         ("done", "real sibling result"),
         ("waiting", None),
     ]
@@ -271,22 +175,9 @@ async def test_approval_checkpoint_keeps_completed_sibling_result(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_lifetime_capture_resolves_owner_created_during_first_pull(tmp_path: Path) -> None:
-
-    catalog = await _catalog(tmp_path, [])
-    checkpoint = ProviderBatchCheckpoint(catalog)
-    function = Function(name="bash", entrypoint=lambda: "done")
-    model = catalog.agent.model
-    message = Message(
-        role="assistant",
-        tool_calls=[{"id": "outer", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
-    )
-    async with response_cli_lifetime() as lifetime:
-        # Preparation runs after the lifetime context was entered.
-        lifetime.bind_provider(checkpoint, function)
-        calls = model.get_function_calls_to_run(message, [message], {"bash": function})
-        checkpoint.complete(calls[0], "done")
-        with lifetime.bind():
-            checkpoint.complete(calls[0], "same batch retained")
-    with pytest.raises(ValueError, match="captured"):
-        checkpoint.complete(calls[0], "closed")
+async def test_a_checkpoint_without_session_storage_refuses_the_bash_call(tmp_path: Path) -> None:
+    """Bash never runs when its batch cannot be saved first."""
+    checkpoint = BatchCheckpoint(await _catalog(tmp_path, []))
+    await _capture(checkpoint, _record(), [_assistant("bash-1")])
+    with pytest.raises(RuntimeError, match="persisted session storage"):
+        await checkpoint.persist("bash-1")

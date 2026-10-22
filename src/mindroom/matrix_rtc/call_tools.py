@@ -927,7 +927,7 @@ def matrix_message_available_during_call(config: Config, agent_name: str) -> boo
 
 
 def _function_available_during_call(
-    function: Function,
+    function: Function | ToolFunction,
     *,
     config: Config,
     agent_name: str,

@@ -5,9 +5,6 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from agno.tools.function import Function
-from agno.tools.toolkit import Toolkit
-
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
@@ -20,35 +17,12 @@ from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_targe
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from agno.agent import Agent
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.runs import RunRequirement
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
-
-
-def toolkit_owners_for_agents(agents: Sequence[Agent]) -> dict[tuple[str, str], str | None]:
-    """Observe final async toolkit functions with Agno's first-wins collision policy.
-
-    Tests that still build Agno agents read owners here; an owned agent build carries the same map as
-    ``AgentBuild.tool_owners``.
-    """
-    owners: dict[tuple[str, str], str | None] = {}
-    for agent in agents:
-        if agent.id is None:
-            continue
-        for tool in agent.tools if isinstance(agent.tools, list) else ():
-            if isinstance(tool, Toolkit):
-                for name, function in tool.get_async_functions().items():
-                    owners.setdefault((agent.id, name), function.owning_toolkit)
-            elif isinstance(tool, Function):
-                owners.setdefault((agent.id, tool.name), tool.owning_toolkit)
-            elif callable(tool) and isinstance(name := getattr(tool, "__name__", None), str):
-                owners.setdefault((agent.id, name), None)
-    return owners
 
 
 def validate_approval_tool_owners(
@@ -181,19 +155,18 @@ async def authorize_prepared_tool_call(
     current config to equal it keeps every config-derived toolkit assignment
     valid, so only live membership, worker routing, and function filters change.
     Recovery restores configured toolkits through ``required_approval_tool_names``
-    before rebuilding the Agent.
+    before rebuilding the agent.
     """
     catalog = binding.catalog
     context = catalog.runtime_context
     config = context.current_config
-    # Reserved namespace is assigned only to functions produced by this Agent's
-    # effective tool preparation. Never accept a binding the catalog does not
-    # own or use the namespace to bypass current config/membership/worker checks.
+    # The reserved namespace is assigned only to functions generated for this agent's
+    # build. Never accept a binding the catalog does not own or use the namespace to
+    # bypass current config/membership/worker checks.
     if binding.key.toolkit == "agent" and (
         not catalog.owns(binding)
-        or catalog.agent.id != context.agent_name
+        or catalog.agent_name != context.agent_name
         or binding.function.name != binding.key.function
-        or binding.function.owning_toolkit is not None
         or context.agent_name not in config.agents
     ):
         msg = "Generated CLI function no longer belongs to its prepared Agent"

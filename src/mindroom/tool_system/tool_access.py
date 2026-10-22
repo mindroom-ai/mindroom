@@ -46,16 +46,6 @@ class ToolDescriptor:
     instructions: tuple[str, ...]
 
 
-def function_schema(function: Function) -> dict[str, Any]:
-    """Return the input schema the model is shown for one Agno function, without mutating the live function.
-
-    A function without an entrypoint has nothing to derive a schema from, so its declared one is returned.
-    """
-    if function.entrypoint is None:
-        return function.parameters
-    return dict(adapt_function(function).parameters)
-
-
 def function_definition(function: Function) -> dict[str, object]:
     """Return the name, description, and input schema the model is shown for one Agno function."""
     if function.entrypoint is None:

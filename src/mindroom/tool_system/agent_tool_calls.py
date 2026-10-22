@@ -1,4 +1,4 @@
-"""Qualified tools bound to one live Agent turn, independent of presentation.
+"""Qualified tools bound to one live agent turn, independent of presentation.
 
 The catalog lock serializes materialization and execution. A caller's outer
 Bash-window lock must be distinct: Bash waits for calls using this lock.
@@ -10,45 +10,51 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, field
+from contextvars import ContextVar
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from functools import wraps
 from typing import TYPE_CHECKING, Literal
 
-from agno.models.response import ModelResponse, ModelResponseEvent, ToolExecution
-from agno.run.requirement import RunRequirement
-from agno.tools.function import Function
-from agno.tools.toolkit import Toolkit
-
-from mindroom.agent_cli.agno_compat_cli_checkpoint import inner_cli_dispatch
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
-from mindroom.agno_compat_prepared_tools import OwnedAgentFunctionCall, prepare_agent_tools, temporary_tool_instructions
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.tool_jobs.control import job_owns_execution
-from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.tool_access import (
-    ToolDescriptor,
-    ToolKey,
-    UnknownToolError,
-    function_schema,
-    validate_tool_arguments,
-)
+from mindroom.tool_system.tool_access import ToolDescriptor, ToolKey, UnknownToolError, validate_tool_arguments
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 
-    from agno.agent import Agent
-    from agno.models.message import Message
-    from agno.run import RunContext
-    from agno.run.agent import RunOutput, RunOutputEvent
-    from agno.run.team import TeamRunOutputEvent
-    from agno.session.agent import AgentSession
-
-    from mindroom.tool_system.agno_toolkits import AdaptedToolkit
+    from mindroom.agent_loop.spec import RunContext
+    from mindroom.llm.runs import RunRecord
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
+    from mindroom.tool_system.agno_toolkits import AdaptedToolkit, ToolValue
+    from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
+
+_INNER: ContextVar[bool] = ContextVar("cli_inner_dispatch", default=False)
+
+
+def cli_dispatch_active() -> bool:
+    """Return whether a CLI-dispatched tool call is executing in this context."""
+    return _INNER.get()
+
+
+@contextmanager
+def _inner_cli_dispatch() -> Iterator[None]:
+    token = _INNER.set(True)
+    try:
+        yield
+    finally:
+        _INNER.reset(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,35 +71,43 @@ class DeferredAgentToolkit:
 
 @dataclass(frozen=True, slots=True)
 class PreparedAgentToolBinding:
-    """A prepared Function and the catalog owning its exact live Agent turn, never a new Agent."""
+    """A prepared function and the catalog owning its exact live agent turn."""
 
     key: ToolKey
-    function: Function
+    function: ToolFunction
     catalog: PreparedAgentToolCatalog = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class AgentToolCallEvent:
-    """In-process event retaining Agno objects; transports must project safely."""
+    """One step of a CLI call; ``media`` holds what a successful call returned beside its text."""
 
-    kind: Literal["started", "progress", "media", "waiting", "continuation_required", "completed", "failed"]
+    kind: Literal["started", "media", "waiting", "continuation_required", "completed", "failed"]
     call_id: str
     key: ToolKey
     execution: ToolExecution | None = None
     requirement: RunRequirement | None = None
-    media: ModelResponse | None = None
-    progress: ModelResponse | RunOutputEvent | TeamRunOutputEvent | None = None
+    media: ToolValue | None = None
 
 
 @dataclass
 class PreparedAgentToolCatalog:
-    """One turn's catalog; prepare only the effective tools from Agent.aget_tools."""
+    """One turn's catalog of the agent's tools, each under the toolkit it was authored in.
 
-    agent: Agent
-    run_context: RunContext
-    run_response: RunOutput
-    session: AgentSession
+    ``run`` is the turn's run identity and the session state its calls share; ``session`` and ``store`` are where
+    that run is stored, and ``record`` is the run itself once known: the live run after its first tool batch is
+    planned, or the stored run a recovery continues. ``middleware`` is the build's tool-call policy, which every
+    call runs through, and ``tool_call_limit`` bounds the calls of one turn.
+    """
+
+    agent_name: str
+    run: RunContext
     runtime_context: ToolRuntimeContext
+    session: ConversationSession
+    store: ConversationStore | None = None
+    middleware: Sequence[ToolMiddleware] = ()
+    tool_call_limit: int | None = None
+    record: RunRecord | None = None
     _bindings: dict[ToolKey, PreparedAgentToolBinding] = field(default_factory=dict, init=False)
     _instructions: dict[ToolKey, tuple[str, ...]] = field(default_factory=dict, init=False)
     _deferred: dict[str, DeferredAgentToolkit] = field(default_factory=dict, init=False)
@@ -148,78 +162,58 @@ class PreparedAgentToolCatalog:
 
     async def prepare(
         self,
-        processed_tools: list[Toolkit | Callable | Function | dict],
+        toolkits: Sequence[AdaptedToolkit],
+        owners: Mapping[str, str | None],
         *,
-        include: Callable[[Function], bool] | None = None,
+        include: Callable[[ToolFunction], bool] | None = None,
     ) -> None:
-        """Prepare qualified entries separately so Agno cannot flatten collisions; skip functions `include` rejects."""
+        """Bind the run's functions under their authored toolkit; skip functions ``include`` rejects.
+
+        ``owners`` maps each function the run offers to its authored toolkit, None for one a configured toolkit
+        carries without that origin; a function it does not name was generated for the agent, such as the knowledge
+        search and the skill readers, and is reached as ``agent``. Only the first function of a name is bound,
+        because only that one is what the run offers.
+        """
         async with self._lock:
             self._check_open()
-            with self.execution_context():
-                self._prepare(processed_tools, include=include)
+            names: set[str] = set()
+            for toolkit in toolkits:
+                functions = []
+                for function in toolkit.functions:
+                    if function.name in names:
+                        continue
+                    names.add(function.name)
+                    if include is None or include(function):
+                        functions.append(function)
+                self._prepare(toolkit, functions, owners)
 
     def _prepare(
         self,
-        processed_tools: list[Toolkit | Callable | Function | dict],
-        owner: str | None = None,
-        *,
-        include: Callable[[Function], bool] | None = None,
+        toolkit: AdaptedToolkit,
+        functions: Sequence[ToolFunction],
+        owners: Mapping[str, str | None] | None = None,
     ) -> None:
+        """Bind ``functions`` of ``toolkit``, under their owner from ``owners``, or under the toolkit without one."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
-        instructions: dict[ToolKey, tuple[str, ...]] = {}
-        authored_ids = {id(tool) for tool in self.agent.tools or []} if isinstance(self.agent.tools, list) else set()
-        for tool in processed_tools:
-            if isinstance(tool, dict):
-                msg = "Provider-native tools cannot execute through the Agent catalog"
-                raise TypeError(msg)
-            if isinstance(tool, Toolkit):
-                functions = list(tool.get_async_functions().values())
-                toolkit_instructions = (tool.instructions,) if tool.instructions else ()
-            else:
-                functions = [tool if isinstance(tool, Function) else Function.from_callable(tool)]
-                source_toolkit = functions[0].source_toolkit
-                toolkit_instructions = (
-                    (source_toolkit.instructions,)
-                    if isinstance(source_toolkit, Toolkit) and source_toolkit.instructions
-                    else ()
-                )
-            for source in functions:
-                if include is not None and not include(source):
-                    continue
-                authored = isinstance(tool, Toolkit) or id(tool) in authored_ids or source.owning_toolkit is not None
-                namespace = (
-                    owner
-                    or source.owning_toolkit
-                    or (tool.name if isinstance(tool, Toolkit) else "tools" if authored else "agent")
-                )
-                if namespace == "agent" and authored:
-                    msg = "The agent toolkit namespace is reserved for generated functions"
-                    raise ValueError(msg)
-                key = ToolKey(namespace, source.name)
-                if key in bindings or key in self._bindings:
-                    msg = f"Duplicate qualified tool: {namespace}.{source.name}"
-                    raise ValueError(msg)
-                # Agent preparation may mutate instructions; hidden details must not
-                # leak into provider presentation. The compatibility helper restores it.
-                with temporary_tool_instructions(self.agent, ()):
-                    prepared = prepare_agent_tools(
-                        self.agent,
-                        processed_tools=[source],
-                        run_response=self.run_response,
-                        run_context=self.run_context,
-                        session=self.session,
-                    )
-                function = prepared[0]
-                assert isinstance(function, Function)
-                bindings[key] = PreparedAgentToolBinding(key, function, self)
-                instructions[key] = toolkit_instructions + ((source.instructions,) if source.instructions else ())
+        instructions = (toolkit.guidance,) if toolkit.guidance else ()
+        for function in functions:
+            authored = owners is None or function.name in owners
+            namespace = ((owners or {}).get(function.name) or toolkit.name) if authored else "agent"
+            if namespace == "agent" and authored:
+                msg = "The agent toolkit namespace is reserved for generated functions"
+                raise ValueError(msg)
+            key = ToolKey(namespace, function.name)
+            if key in bindings or key in self._bindings:
+                msg = f"Duplicate qualified tool: {namespace}.{function.name}"
+                raise ValueError(msg)
+            bindings[key] = PreparedAgentToolBinding(key, function, self)
+            self._instructions[key] = instructions
         self._bindings.update(bindings)
-        self._instructions.update(instructions)
 
-    def prepared_functions(self) -> tuple[Function, ...]:
-        """Expose already prepared hidden functions for the same Agent's context renderer."""
+    def bindings(self) -> tuple[PreparedAgentToolBinding, ...]:
+        """Return the bindings prepared so far, for a check over the whole prepared surface."""
         self._check_open()
-        return tuple(binding.function for binding in self._bindings.values())
+        return tuple(self._bindings.values())
 
     def metadata(self) -> list[dict[str, object]]:
         """Return discovery records without preparing deferred schemas."""
@@ -231,6 +225,17 @@ class PreparedAgentToolCatalog:
             {"toolkit": item.name, "description": item.description, "deferred": True}
             for item in self._deferred.values()
         ]
+
+    def call_context(self, call_id: str) -> ToolCallContext:
+        """Return the execution context of one call: the turn's run and the call's own id."""
+        return ToolCallContext(
+            run_id=self.run.run_id,
+            session_id=self.run.session_id,
+            user_id=self.run.user_id,
+            call_id=call_id,
+            session_state=self.run.session_state,
+            metadata=self.run.metadata or {},
+        )
 
     async def bind(
         self,
@@ -247,11 +252,8 @@ class PreparedAgentToolCatalog:
             if deferred is not None:
                 with self.execution_context():
                     toolkit = await deferred.materialize()
-                    # Transfer lifetime before schema processing can fail.
-                    if not isinstance(self.agent.tools, list) or not any(tool is toolkit for tool in self.agent.tools):
-                        self.agent.add_tool(toolkit)
-                    self._prepare([toolkit], owner=deferred.name)
-                    del self._deferred[key.toolkit]
+                self._prepare(replace(toolkit, name=deferred.name), toolkit.functions)
+                del self._deferred[key.toolkit]
             binding = self._bindings.get(key)
             if binding is None:
                 functions = sorted(known.function for known in self._bindings if known.toolkit == key.toolkit)
@@ -273,7 +275,7 @@ class PreparedAgentToolCatalog:
         return ToolDescriptor(
             key,
             binding.function.description or "",
-            function_schema(binding.function),
+            dict(binding.function.parameters),
             self._instructions[key],
         )
 
@@ -304,40 +306,42 @@ def _failure(
     )
 
 
-def _response_events(
+def _check_resolves(
+    requirement: RunRequirement,
     binding: PreparedAgentToolBinding,
     call_id: str,
-    response: ModelResponse | RunOutputEvent | TeamRunOutputEvent,
-) -> Iterator[AgentToolCallEvent]:
-    if not isinstance(response, ModelResponse):
-        yield AgentToolCallEvent("progress", call_id, binding.key, progress=response)
-    elif response.event == ModelResponseEvent.tool_call_started.value:
-        assert response.tool_executions
-        yield AgentToolCallEvent("started", call_id, binding.key, execution=response.tool_executions[0])
-    elif response.event == ModelResponseEvent.tool_call_paused.value:
-        for execution in response.tool_executions or []:
-            yield AgentToolCallEvent(
-                "waiting",
-                call_id,
-                binding.key,
-                execution=execution,
-                requirement=RunRequirement(execution),
-            )
-    elif response.event == ModelResponseEvent.tool_call_completed.value:
-        assert response.tool_executions
-        execution = response.tool_executions[0]
-        if response.images or response.audios or response.videos or response.files:
-            yield AgentToolCallEvent("media", call_id, binding.key, media=response)
-        kind = (
-            "continuation_required"
-            if execution.stop_after_tool_call
-            else "failed"
-            if execution.tool_call_error
-            else "completed"
-        )
-        yield AgentToolCallEvent(kind, call_id, binding.key, execution=execution)
-    else:
-        yield AgentToolCallEvent("progress", call_id, binding.key, progress=response)
+    arguments: dict[str, object],
+) -> None:
+    """Refuse a decision unless it is a confirmation of exactly this call to this function."""
+    execution = requirement.tool_execution
+    function = binding.function
+    if (
+        execution.tool_call_id != call_id
+        or execution.tool_name != binding.key.function
+        or json.dumps(execution.tool_args, sort_keys=True, allow_nan=False)
+        != json.dumps(arguments, sort_keys=True, allow_nan=False)
+        or execution.requires_confirmation is not True
+        or not requirement.is_resolved()
+        or requirement.confirmation is None
+        or function.external_execution
+        or (function.requires_confirmation and function.approval_type != execution.approval_type)
+    ):
+        msg = "Approval does not resolve this exact prepared call"
+        raise ValueError(msg)
+
+
+def _paused_execution(function: ToolFunction, call_id: str, arguments: dict[str, object]) -> ToolExecution | None:
+    """Return the waiting execution of a call its function pauses for a decision, or None when it runs now."""
+    if not (function.requires_confirmation or function.external_execution):
+        return None
+    execution = ToolExecution(tool_call_id=call_id, tool_name=function.name, tool_args=deepcopy(arguments))
+    if function.requires_confirmation:
+        execution.requires_confirmation = True
+        execution.approval_type = function.approval_type
+    if function.external_execution:
+        execution.external_execution_required = True
+        execution.external_execution_silent = function.external_execution_silent
+    return execution
 
 
 def execute_agent_tool_call(
@@ -387,7 +391,7 @@ async def execute_agent_shell_call(
             yield event
 
 
-async def _execute_agent_tool_call(  # noqa: C901 - one canonical execution and cleanup lifetime
+async def _execute_agent_tool_call(
     binding: PreparedAgentToolBinding,
     call_id: str,
     arguments: dict[str, object],
@@ -397,55 +401,42 @@ async def _execute_agent_tool_call(  # noqa: C901 - one canonical execution and 
     requirement: RunRequirement | None = None,
 ) -> AsyncIterator[AgentToolCallEvent]:
     catalog = binding.catalog
+    # The call runs with the arguments it was admitted with, whatever the caller does with its dict later.
+    arguments = deepcopy(arguments)
     async with catalog.dispatch(binding, authorize):
         if requirement is not None:
-            execution = requirement.tool_execution
-            if (
-                execution is None
-                or execution.tool_call_id != call_id
-                or execution.tool_name != binding.key.function
-                or json.dumps(execution.tool_args, sort_keys=True, allow_nan=False)
-                != json.dumps(arguments, sort_keys=True, allow_nan=False)
-                or execution.requires_confirmation is not True
-                or not requirement.is_resolved()
-                or requirement.confirmation is None
-                or requirement.needs_user_input
-                or requirement.needs_user_feedback
-                or requirement.needs_external_execution
-                or binding.function.requires_user_input
-                or binding.function.external_execution
-                or (
-                    binding.function.requires_confirmation and binding.function.approval_type != execution.approval_type
-                )
-            ):
-                msg = "Approval does not resolve this exact prepared call"
-                raise ValueError(msg)
+            _check_resolves(requirement, binding, call_id, arguments)
             if not requirement.confirmation:
-                yield _failure(
-                    binding,
-                    call_id,
-                    arguments,
-                    requirement.confirmation_note or "Not approved by requester",
-                )
+                note = requirement.confirmation_note or "Not approved by requester"
+                yield _failure(binding, call_id, arguments, note)
                 return
         try:
-            validate_tool_arguments(function_schema(binding.function), arguments)
+            validate_tool_arguments(dict(binding.function.parameters), arguments)
         except ValueError:
             yield _failure(binding, call_id, arguments, "Invalid tool arguments")
             return
-        limit = catalog.agent.tool_call_limit
+        limit = catalog.tool_call_limit
         if limit is not None and catalog._call_count >= limit:
             yield _failure(binding, call_id, arguments, "Tool call limit reached")
             return
-        model = catalog.agent.model
-        assert model is not None
-        # A shallow execution copy preserves private prepared bindings. Receipt-owned
-        # calls cannot reuse Function caches or mutate the shared control flags.
-        function = binding.function.model_copy(deep=False)
-        function.cache_results = False
+        paused = None if requirement is not None else _paused_execution(binding.function, call_id, arguments)
+        if paused is not None:
+            if paused.external_execution_required:
+                catalog._call_count += 1
+            yield AgentToolCallEvent(
+                "waiting",
+                call_id,
+                binding.key,
+                execution=paused,
+                requirement=RunRequirement(paused),
+            )
+            return
+        catalog._call_count += 1
+        execution = ToolExecution(tool_call_id=call_id, tool_name=binding.key.function, tool_args=deepcopy(arguments))
+        yield AgentToolCallEvent("started", call_id, binding.key, execution=deepcopy(execution))
+        function = binding.function
         if shell_leaf is not None:
             original = function.entrypoint
-            assert original is not None
 
             @wraps(original)
             async def pinned_leaf(**kwargs: object) -> object:
@@ -453,57 +444,51 @@ async def _execute_agent_tool_call(  # noqa: C901 - one canonical execution and 
                 try:
                     return await shell_leaf(kwargs)
                 finally:
-                    # Hook unwinding must regain exclusive Agent ownership even
+                    # Hook unwinding must regain exclusive catalog ownership even
                     # under repeated cancellation of the response task.
                     await wait_for_future_until_complete(asyncio.create_task(catalog._lock.acquire()))
 
-            function.entrypoint = pinned_leaf
-        call = OwnedAgentFunctionCall(function=function, call_id=call_id, arguments=arguments)
-        messages: list[Message] = []
+            function = replace(function, entrypoint=pinned_leaf)
         # A job's call has no time limit, so what it offloads must not hold a shared pool's thread.
         tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR if job_owns_execution() else None)
-
-        @contextmanager
-        def context() -> Iterator[None]:
-            with catalog.execution_context(), track_sync_tool_completion(tracker), inner_cli_dispatch():
-                yield
-
-        stream = context_bound_async_stream(
-            context_factory=context,
-            stream_factory=lambda: model.arun_function_calls(
-                [call],
-                messages,
-                current_function_call_count=catalog._call_count,
-                function_call_limit=limit,
-                skip_pause_check=requirement is not None,
-            ),
-        )
         try:
-            async with closing_async_stream(stream):
-                async for response in stream:
-                    for event in _response_events(binding, call_id, response):
-                        if event.kind == "started" or (
-                            event.kind == "waiting"
-                            and event.requirement is not None
-                            and event.requirement.needs_external_execution
-                        ):
-                            catalog._call_count += 1
-                        yield event
+            with catalog.execution_context(), track_sync_tool_completion(tracker), _inner_cli_dispatch():
+                outcome = await execute_tool_call(
+                    function,
+                    arguments,
+                    catalog.call_context(call_id),
+                    middleware=catalog.middleware,
+                )
         finally:
-            await _settle_call(binding, call, tracker)
+            await _settle_call(binding, tracker)
+        execution.result = outcome.content
+        execution.tool_call_error = outcome.is_error
+        execution.stop_after_tool_call = outcome.stop_after_call
+        if outcome.images or outcome.audios or outcome.videos or outcome.files:
+            yield AgentToolCallEvent("media", call_id, binding.key, media=outcome)
+        kind = "continuation_required" if outcome.stop_after_call else "failed" if outcome.is_error else "completed"
+        yield AgentToolCallEvent(kind, call_id, binding.key, execution=execution)
 
 
-async def _settle_call(
-    binding: PreparedAgentToolBinding,
-    call: OwnedAgentFunctionCall,
-    tracker: SyncToolCompletionTracker,
-) -> None:
+async def _settle_call(binding: PreparedAgentToolBinding, tracker: SyncToolCompletionTracker) -> None:
+    """Wait for a synchronous leaf the call started, so its thread never outlives the catalog."""
+
     async def settle() -> None:
         with binding.catalog.execution_context():
-            await call.close_result()
             pending = tracker.started_task()
             if pending is not None:
                 # Its failure was already reported as this call's own; waiting must not raise it again.
                 await asyncio.gather(pending, return_exceptions=True)
 
     await wait_for_future_until_complete(asyncio.create_task(settle(), name="agent-tool-call-cleanup"))
+
+
+__all__ = [
+    "AgentToolCallEvent",
+    "DeferredAgentToolkit",
+    "PreparedAgentToolBinding",
+    "PreparedAgentToolCatalog",
+    "cli_dispatch_active",
+    "execute_agent_shell_call",
+    "execute_agent_tool_call",
+]

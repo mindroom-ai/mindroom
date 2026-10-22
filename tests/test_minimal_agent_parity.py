@@ -6,23 +6,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 import time
 from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno evaluates tool annotations
-from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
-import httpx
 import pytest
 import yaml
-from agno.agent import Agent
-from agno.learn import LearningMachine
-from agno.models.fallback import FallbackConfig
-from agno.models.openai import OpenAIChat
-from agno.models.response import ModelResponse
 from agno.run import RunContext  # noqa: TC002 - injected tool argument
-from agno.skills import LocalSkills, Skills
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
@@ -41,14 +35,14 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.interactive import parse_and_format_interactive
+from mindroom.knowledge.read_protocol import SearchHit
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
-from mindroom.providers.pipeline import retry as provider_retry
 from mindroom.response_turn import apply_exact_approval_decisions
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -57,9 +51,10 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from mindroom.tool_system.worker_routing import agent_workspace_root_path, get_tool_execution_identity
 from tests.access_schema_support import with_responder_access
-from tests.delegation_helpers import DelegationModel
+from tests.delegation_helpers import ScriptedAgents
+from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     PLUGIN,
@@ -67,9 +62,14 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     agent_cli_api,
     cli_window,
     install_scripted_shell,
+    offered_tools,
     shell_cli_owner,
 )
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
+
+if TYPE_CHECKING:
+    from mindroom.llm.provider import ModelRequest, StreamEvent
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization", "agent_cli_api")
 
@@ -124,7 +124,7 @@ class ProtocolShell:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("function", ["sync", "asynchronous", "generator", "async_generator"])
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, streamed) -> None:  # noqa: C901 - paired native and CLI execution
+async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, streamed) -> None:
     """Removing canonical context, hooks, generators, or hidden dispatch breaks parity."""
     runtime = _runtime_context(tmp_path)
     runtime.config.administrators = [runtime.requester_id]
@@ -161,10 +161,10 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
         yield "result:"
         yield str(value)
 
-    async def hook(name, function_call, arguments):
-        hooks.append((name, "before"))
-        result = await function_call(**arguments)
-        hooks.append((name, "after"))
+    async def hook(call: ToolCall, call_next: ToolNext) -> object:
+        hooks.append((call.function.name, "before"))
+        result = await call_next(call.arguments)
+        hooks.append((call.function.name, "after"))
         return result
 
     original = agents.get_tool_by_name
@@ -172,12 +172,11 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
     def build(name, *args, **kwargs):
         if name != "calculator":
             return original(name, *args, **kwargs)
-        toolkit = Toolkit(name="calculator", tools=[sync, asynchronous, generator, async_generator])
-        for entry in toolkit.get_async_functions().values():
-            entry.tool_hooks = [hook]
-        return toolkit
+        return Toolkit(name="calculator", tools=[sync, asynchronous, generator, async_generator])
 
     monkeypatch.setattr(agents, "get_tool_by_name", build)
+    # The build's tool policy, which runs around every call the reply makes, natively or through Bash.
+    monkeypatch.setattr(agents, "_build_agent_tool_middleware", lambda **_kwargs: hook)
     shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
     install_scripted_shell(monkeypatch, shell.run_shell_command)
     provider = ScriptedProvider()
@@ -215,15 +214,18 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
     assert effects[0][:4] == effects[1][:4]
     assert effects[1][4] == identity
     assert len(effects) == 2
-    assert hooks == [(function, "before"), (function, "after")] * 2
+    assert [hook for hook in hooks if hook[0] == function] == [(function, "before"), (function, "after")] * 2
+    # Minimal Bash runs the agent's own shell call under the same policy; the Bash facade itself has none.
+    assert ("bash", "before") not in hooks
+    assert ("run_shell_command", "before") in hooks
     assert shell.receipts[0]["outcome"] == "result:7"
-    assert shell.owner.catalog.run_context.session_state["parity"] == 7
+    assert shell.owner.catalog.run.session_state["parity"] == 7
     assert all("done" in str(result) for result in results)
     assert len(provider.requests) == 4
-    assert function in str(provider.requests[0]["tools"])
-    assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in provider.requests[2:])
-    assert "result:7" in str(provider.requests[1]["messages"])
-    assert "result:7" in str(provider.requests[3]["messages"])
+    assert function in offered_tools(provider.requests[0])
+    assert all(offered_tools(request) == ["bash"] for request in provider.requests[2:])
+    assert "result:7" in str(provider.requests[1].messages)
+    assert "result:7" in str(provider.requests[3].messages)
     assert shell.tokens[0] not in str(provider.requests)
 
 
@@ -231,6 +233,7 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
 async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypatch) -> None:
     """The same child responder keeps native parent and follow-up relationships in both modes."""
     comparisons = []
+    respond_as_child = ai.run_delegated_child_response
     for mode in ("standard", "minimal"):
         runtime = _runtime_context(tmp_path / mode)
         runtime.config.administrators = [runtime.requester_id]
@@ -255,30 +258,15 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
         persist_entity_accounts(runtime.config, runtime.runtime_paths)
         children = []
 
-        async def child_response(child, *, runtime=runtime, children=children, **kwargs):
+        async def child_response(child, *, children=children, **kwargs):
             children.append(child)
-            child_identity = child_execution_identity(child)
-            child_agent = Agent(
-                id="code",
-                db=create_session_storage("code", runtime.config, runtime.runtime_paths, child_identity),
-                model=DelegationModel(id="test", responses=[ModelResponse(content="child done")]),
-            )
-            try:
-                await child_agent.arun(
-                    child.task,
-                    run_id=child.run_id,
-                    session_id=child.session_id,
-                    user_id=runtime.requester_id,
-                )
-            finally:
-                child_agent.db.close()
-            return "child done"
+            return await respond_as_child(child, **kwargs)
 
         monkeypatch.setattr(ai, "run_delegated_child_response", child_response)
         shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
         install_scripted_shell(monkeypatch, shell.run_shell_command)
         provider = ScriptedProvider()
-        provider.install(monkeypatch)
+        ScriptedAgents({"helper": provider, "code": ScriptedModel([answer("child done")] * 2)}).install(monkeypatch)
         for function, initial_arguments in (
             ("run_subagent", {"agent_name": "code", "task": "work"}),
             ("continue_subagent", None),
@@ -316,9 +304,7 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
                 receipt["call_id"] for receipt in shell.receipts
             ]
             assert all(receipt["parent_bash_call_id"] != receipt["call_id"] for receipt in shell.receipts)
-            assert all(
-                [tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in provider.requests
-            )
+            assert all(offered_tools(request) == ["bash"] for request in provider.requests)
         else:
             assert all(child.parent_tool_call_id.startswith("provider-") for child in children)
         comparisons.append(
@@ -350,7 +336,7 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
 
     h = SimpleNamespace(runtime=runtime, shell=shell, provider=provider)
 
-    async def respond(steps, *, mode="minimal", prompt="release parity"):
+    async def respond(steps, *, mode="minimal", prompt="release parity", knowledge=None):
         runtime = h.runtime
         persist_entity_accounts(runtime.config, runtime.runtime_paths)
         provider.steps = steps
@@ -360,6 +346,7 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
                 prompt=prompt,
                 runtime_paths=runtime.runtime_paths,
                 config=runtime.config,
+                knowledge=knowledge,
                 execution_identity=build_execution_identity_from_runtime_context(runtime),
                 supports_native_tool_approval=True,
                 show_tool_calls=True,
@@ -386,7 +373,9 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
         h.runtime.runtime_paths,
         build_execution_identity_from_runtime_context(h.runtime),
     )
-    old_messages = [message.to_dict() for message in storage.get_session(h.runtime.session_id).runs[0].messages]
+    old_messages = [
+        message.to_dict() for message in storage.load_session(h.runtime.session_id, "agent").runs[0].messages
+    ]
     await h.respond([_bash_call("memory", "add_memory", {"content": "Release parity durable lesson"}), "minimal saved"])
     assert h.shell.receipts[-1]["outcome"] == "Memorized: Release parity durable lesson"
     found = await search_agent_memories(
@@ -399,66 +388,55 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
     )
     assert any(item["memory"] == "Release parity durable lesson" for item in found.results)
     await h.respond(["standard sees same history"], mode="standard", prompt="after switch")
-    session = storage.get_session(h.runtime.session_id)
+    session = storage.load_session(h.runtime.session_id, "agent")
     assert len(session.runs) == 3
     assert [message.to_dict() for message in session.runs[0].messages] == old_messages
     final = h.provider.requests[-1]
-    assert "standard history sentinel" in str(final["messages"])
-    assert "Release parity durable lesson" in str(final["messages"])
-    assert [tool["function"]["name"] for tool in h.provider.requests[1]["tools"]] == ["bash"]
-    assert "add_memory" in str(final["tools"])
-    calls = {call["id"] for message in final["messages"] for call in message.get("tool_calls", [])}
-    assert any(message.get("tool_call_id") in calls for message in final["messages"])
+    assert "standard history sentinel" in str(final.messages)
+    assert "Release parity durable lesson" in str(final.messages)
+    assert offered_tools(h.provider.requests[1]) == ["bash"]
+    assert "add_memory" in offered_tools(final)
+    calls = {call["id"] for message in final.messages for call in message.tool_calls or ()}
+    assert any(message.tool_call_id in calls for message in final.messages)
+
+
+class _ReleaseIndex:
+    """A published index that answers every search with one chunk naming the query."""
+
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        return [SearchHit(content=f"knowledge:{query}")]
+
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        return self.search(query, limit=limit)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("generated", ["skills", "knowledge", "learning"])
-async def test_generated_tools_actual_minimal_response(response_harness, monkeypatch, tmp_path, generated) -> None:
-
+@pytest.mark.parametrize("generated", ["skills", "knowledge"])
+async def test_generated_tools_actual_minimal_response(response_harness, generated) -> None:
+    """The agent's generated functions are reached through Bash as `agent`, with Bash still the only tool offered."""
     h = response_harness
-    original = ai.create_agent
-    writes = []
-
-    async def retriever(agent, query, **kwargs):
-        return [{"content": f"knowledge:{agent.id}:{query}"}]
-
-    async def learning_tools(user_id, session_id, agent_id, **kwargs):
-        async def remember(value: str) -> str:
-            writes.append((agent_id, user_id, session_id, value))
-            return "learning saved"
-
-        return [remember]
-
-    skill = tmp_path / "skills" / "release-guide"
+    skill = agent_workspace_root_path(h.runtime.runtime_paths.storage_root, "helper") / "skills" / "release-guide"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text(
         "---\nname: release-guide\ndescription: Release guide\n---\nUse the same canonical session.\n",
     )
-
-    def build(*args, **kwargs):
-        agent = original(*args, **kwargs)
-        if generated == "skills":
-            agent.skills = Skills(loaders=[LocalSkills(str(skill.parent))])
-        elif generated == "knowledge":
-            agent.knowledge_retriever = retriever
-            agent.search_knowledge = True
-        else:
-            agent._learning = LearningMachine(custom_stores={"release": SimpleNamespace(aget_tools=learning_tools)})
-        return agent
-
-    monkeypatch.setattr(ai, "create_agent", build)
+    knowledge = AgentKnowledge(
+        sources=(
+            KnowledgeSource(description=KnowledgeSourceDescription("release", "Releases"), index=_ReleaseIndex()),
+        ),
+    )
     function, arguments, expected = {
         "skills": ("get_skill_instructions", {"skill_name": "release-guide"}, "same canonical session"),
-        "knowledge": ("search_knowledge_base", {"query": "release"}, "knowledge:helper:release"),
-        "learning": ("remember", {"value": "lesson"}, "learning saved"),
+        "knowledge": ("search_knowledge_base", {"query": "release"}, "knowledge:release"),
     }[generated]
-    result = await h.respond([_bash_call("agent", function, arguments), "done"])
+    result = await h.respond(
+        [_bash_call("agent", function, arguments), "done"],
+        knowledge=knowledge if generated == "knowledge" else None,
+    )
     assert "done" in str(result)
     assert expected in str(h.shell.receipts[-1]["outcome"])
-    assert expected in str(h.provider.requests[-1]["messages"])
-    assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
-    if generated == "learning":
-        assert writes == [("helper", h.runtime.requester_id, h.runtime.session_id, "lesson")]
+    assert expected in str(h.provider.requests[-1].messages)
+    assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
 
 
 @pytest.mark.asyncio
@@ -475,7 +453,7 @@ async def test_deferred_toolkit_is_callable_through_bash_without_loading(respons
     assert len(h.shell.receipts) == 1
     assert '"result": 5' in h.shell.receipts[0]["outcome"]
     assert len(h.provider.requests) == 2
-    assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
+    assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
 
 
 @pytest.mark.asyncio
@@ -492,7 +470,9 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
     script.write_text(
         'from mcp.server.mcpserver import MCPServer\nserver = MCPServer("echo")\n@server.tool()\ndef echo(text: str) -> str:\n return "echo:" + text\n@server.tool()\ndef secret() -> str:\n raise AssertionError("filtered tool ran")\nserver.run()\n',
     )
-    h.runtime.config.mcp_servers = {"echo": MCPServerConfig(transport="stdio", command="uv", args=["run", str(script)])}
+    h.runtime.config.mcp_servers = {
+        "echo": MCPServerConfig(transport="stdio", command=sys.executable, args=[str(script)]),
+    }
     h.runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
         memory_backend="file",
@@ -528,55 +508,10 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
         metadata = h.shell.catalog_snapshots[-1]
         assert next(item for item in metadata if item["toolkit"] == "duckduckgo")["deferred"] is True
         assert not any(item.get("function") == "echo_secret" for item in metadata)
-        assert all(
-            [tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests
-        )
+        assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
     finally:
         sync_mcp_tool_registry(None)
         await manager.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_actual_fallback_request_keeps_only_bash(response_harness, monkeypatch) -> None:
-    from openai import APIStatusError  # noqa: PLC0415 - keep optional provider/server imports deferred
-
-    h = response_harness
-    original = ai.create_agent
-    failed_requests = []
-    send = h.provider.send
-    monkeypatch.setattr(provider_retry, "_RETRY_BASE_DELAY_SECONDS", 0.0)
-
-    async def failing_primary(**request):
-        if request["model"] == "test-model":
-            failed_requests.append(request)
-            message = "fake provider unavailable"
-            raise APIStatusError(
-                message,
-                response=httpx.Response(503, request=httpx.Request("POST", "https://fake.test")),
-                body=None,
-            )
-        return await send(**request)
-
-    monkeypatch.setattr(
-        OpenAIChat,
-        "get_async_client",
-        lambda _self: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=failing_primary))),
-    )
-
-    def build(*args, **kwargs):
-        agent = original(*args, **kwargs)
-        agent.fallback_config = FallbackConfig(on_error=[OpenAIChat(id="fallback", api_key="fake")])
-        return agent
-
-    monkeypatch.setattr(ai, "create_agent", build)
-    result = await h.respond(["fallback done"])
-    assert "fallback done" in str(result)
-    assert failed_requests
-    assert h.provider.requests[-1]["model"] == "fallback"
-    assert all(
-        [tool["function"]["name"] for tool in request["tools"]] == ["bash"]
-        for request in failed_requests + h.provider.requests
-    )
 
 
 @pytest.mark.asyncio
@@ -587,7 +522,7 @@ async def test_compaction_cli_marks_real_session_before_next_reply(response_harn
     result = await h.respond([_bash_call("compact_context", "compact_context", {}), "done"])
     assert "done" in str(result)
     assert "before the next reply" in h.shell.receipts[-1]["outcome"]
-    state = h.shell.owner.catalog.run_context.session_state
+    state = h.shell.owner.catalog.run.session_state
     assert state["mindroom_pending_compaction_scope_keys"]
     assert len(h.provider.requests) == 2
 
@@ -617,8 +552,8 @@ async def test_interactive_context_actual_response_and_selection(response_harnes
     chosen = rendered.interactive_metadata.option_map["1"]
     result = await h.respond(["same-session selection accepted"], prompt=f"The user selected: {chosen}")
     assert "same-session selection accepted" in result
-    assert "Which path?" in str(h.provider.requests[-1]["messages"])
-    assert h.shell.owner.catalog.run_context.session_id == h.runtime.session_id
+    assert "Which path?" in str(h.provider.requests[-1].messages)
+    assert h.shell.owner.catalog.run.session_id == h.runtime.session_id
 
 
 @pytest.mark.asyncio
@@ -683,7 +618,7 @@ async def test_authored_confirmation_actual_owner_rechecks_effect_boundary(
     assert len(decisions) == 1
     assert effects == (["exact value"] if decision == "allow" else [])
     assert h.shell.receipts[-1]["status"] == ("completed" if decision == "allow" else "failed")
-    assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
+    assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
 
 
 @pytest.mark.asyncio
@@ -715,7 +650,7 @@ async def test_self_config_cli_preserves_native_next_build_change(response_harne
     assert receipt["status"] == "completed"
     saved = yaml.safe_load(h.runtime.runtime_paths.config_path.read_text())
     assert saved["agents"]["helper"]["instructions"] == ["new persisted instruction"]
-    assert "new persisted instruction" not in h.provider.requests[0]["messages"][0]["content"]
+    assert "new persisted instruction" not in h.provider.requests[0].messages[0].get_content_string()
 
 
 @pytest.mark.asyncio
@@ -769,22 +704,14 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
                 shell.owner.authenticate(peer.tokens[-1], now_ns=time.time_ns())
             with pytest.raises(CliAuthenticationError):
                 await shell.owner.get_call(peer.receipts[-1]["call_id"])
-        for field in ("requester_id", "agent_name", "session_id", "generation"):
+        for forged in ("requester_id", "agent_name", "session_id", "generation"):
             with pytest.raises(ValidationError):
-                parse_operation({"operation": "tools.list", field: "forged"})
+                parse_operation({"operation": "tools.list", forged: "forged"})
         return result
 
     install_scripted_shell(monkeypatch, run_shell_command)
-
-    async def send(**request):
-        runtime = get_tool_runtime_context()
-        return await providers[runtime.session_id].send(**request)
-
-    monkeypatch.setattr(
-        OpenAIChat,
-        "get_async_client",
-        lambda _self: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=send))),
-    )
+    # Each conversation gets its own scripted model, chosen by the session its reply runs in.
+    ScriptedAgents({}, by_session=providers).install(monkeypatch)
     for agent in config.agents:
         for requester in requesters:
             session = f"{agent}-{requester}"
@@ -841,7 +768,7 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
         standard_results = await asyncio.gather(*(respond(runtime, "standard") for runtime in runtimes.values()))
     assert all("done" in result for result in standard_results)
     for session, provider in providers.items():
-        assert "primary credential accepted" in str(provider.requests[-1]["messages"])
+        assert "primary credential accepted" in str(provider.requests[-1].messages)
         provider.steps = minimal_steps[session]
     async with asyncio.timeout(20):
         results = await asyncio.gather(*(respond(runtime) for runtime in runtimes.values()))
@@ -855,121 +782,41 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
         with pytest.raises(CliAuthenticationError):
             await shell.owner.get_call(shell.receipts[-1]["call_id"])
         assert not any(secret in str(providers[session].requests) for secret in secrets.values())
-        assert all(
-            [tool["function"]["name"] for tool in request["tools"]] == ["bash"]
-            for request in providers[session].requests[2:]
-        )
+        assert all(offered_tools(request) == ["bash"] for request in providers[session].requests[2:])
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("provider_name", ["anthropic", "google"])
-async def test_provider_sdk_initial_and_continued_minimal_requests(
-    response_harness,
-    monkeypatch,
-    provider_name,
-) -> None:
-    from agno.models.anthropic import Claude  # noqa: PLC0415 - keep optional provider/server imports deferred
-    from agno.models.google import Gemini  # noqa: PLC0415 - keep optional provider/server imports deferred
-    from anthropic.lib.streaming import ContentBlockStopEvent  # noqa: PLC0415 - optional provider SDK
-    from anthropic.types import (  # noqa: PLC0415 - keep optional provider/server imports deferred
-        ContentBlockDeltaEvent,
-        TextDelta,
-        ToolUseBlock,
-    )
-    from google.genai.types import (  # noqa: PLC0415 - keep optional provider/server imports deferred
-        Candidate,
-        Content,
-        FunctionCall,
-        GenerateContentResponse,
-        Part,
-    )
+@dataclass
+class _NamedModel(ScriptedProvider):
+    """A scripted model that logs its own name for every request it answers."""
 
-    h = response_harness
-    h.runtime.config.models["default"].provider = provider_name
-    h.runtime.config.models["default"].id = "test-provider"
-    h.runtime.config.agents["helper"].tools = ["shell", "calculator"]
-    requests = []
-    command = json.dumps(["calculator", "add", {"a": 2, "b": 3}])
+    log: list[str] = field(default_factory=list)
 
-    @asynccontextmanager
-    async def anthropic_stream(**request):
-        requests.append(request)
-        first = len(requests) == 1
-
-        async def events():
-            if first:
-                yield ContentBlockStopEvent(
-                    type="content_block_stop",
-                    index=0,
-                    content_block=ToolUseBlock(
-                        type="tool_use",
-                        id="anthropic-bash",
-                        name="bash",
-                        input={"command": command},
-                    ),
-                )
-            else:
-                yield ContentBlockDeltaEvent(
-                    type="content_block_delta",
-                    index=0,
-                    delta=TextDelta(type="text_delta", text="done"),
-                )
-
-        yield events()
-
-    async def google_stream(**request):
-        requests.append(request)
-        first = len(requests) == 1
-
-        async def events():
-            part = (
-                Part(function_call=FunctionCall(id="google-bash", name="bash", args={"command": command}))
-                if first
-                else Part(text="done")
-            )
-            yield GenerateContentResponse(candidates=[Candidate(content=Content(role="model", parts=[part]))])
-
-        return events()
-
-    messages = SimpleNamespace(stream=anthropic_stream)
-    monkeypatch.setattr(
-        Claude,
-        "get_async_client",
-        lambda _self: SimpleNamespace(messages=messages, beta=SimpleNamespace(messages=messages)),
-    )
-    monkeypatch.setattr(
-        Gemini,
-        "get_client",
-        lambda _self: SimpleNamespace(
-            aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=google_stream)),
-        ),
-    )
-    result = await h.respond([])
-    assert "done" in str(result)
-    assert len(requests) == 2
-    assert '"result": 5' in h.shell.receipts[-1]["outcome"]
-    for request in requests:
-        if provider_name == "anthropic":
-            assert [tool["name"] for tool in request["tools"]] == ["bash"]
-        else:
-            assert [function.name for tool in request["config"].tools for function in tool.function_declarations] == [
-                "bash",
-            ]
-    assert "result" in str(requests[1])
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Log this model's id, then answer as scripted."""
+        self.log.append(self.identity.id)
+        async for event in super().stream(request):
+            yield event
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("when", ["after-toolcall", "next-turn"])
-async def test_model_switch_timing_actual_minimal_requests(response_harness, when) -> None:
+async def test_model_switch_timing_actual_minimal_requests(response_harness, monkeypatch, when) -> None:
     h = response_harness
     h.runtime.config.agents["helper"].tools = ["shell", "thread_model"]
     h.runtime.config.models["other"] = h.runtime.config.models["default"].model_copy(update={"id": "other-model"})
-    await h.respond([_bash_call("thread_model", "switch_thread_model", {"model_name": "other", "when": when}), "done"])
-    assert [request["model"] for request in h.provider.requests] == [
-        "test-model",
-        "other-model" if when == "after-toolcall" else "test-model",
-    ]
+    steps: list = []
+    log: list[str] = []
+    requests: list[ModelRequest] = []
+    models = {
+        name: _NamedModel(steps=steps, requests=requests, log=log, identity=replace(SYNTHETIC, id=model_id))
+        for name, model_id in (("default", "test-model"), ("other", "other-model"))
+    }
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
+    steps.extend([_bash_call("thread_model", "switch_thread_model", {"model_name": "other", "when": when}), "done"])
+    await h.respond([])
+    assert log == ["test-model", "other-model" if when == "after-toolcall" else "test-model"]
     assert len(h.shell.tokens) == 1
-    await h.respond(["next turn done"])
-    assert h.provider.requests[-1]["model"] == "other-model"
-    assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
+    steps.append("next turn done")
+    assert "next turn done" in await h.respond([])
+    assert log[-1] == "other-model"
+    assert all(offered_tools(request) == ["bash"] for request in requests)
