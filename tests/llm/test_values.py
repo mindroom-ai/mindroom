@@ -316,7 +316,7 @@ def test_capabilities_default_to_the_least_capable_route() -> None:
 # --- errors ----------------------------------------------------------------------------------------------------
 
 
-def test_provider_error_fields_and_retryable_defaults() -> None:
+def test_provider_error_fields_and_retryable_classes() -> None:
     error = ProviderError("boom", provider="OpenAI Chat", status_code=500, code="server_error")
 
     assert str(error) == "boom"
@@ -328,7 +328,6 @@ def test_provider_error_fields_and_retryable_defaults() -> None:
     )
     assert RateLimited("slow down", provider="p", status_code=429).retryable is True
     assert ProviderUnavailable("down", provider="p").retryable is True
-    assert ProviderUnavailable("down", provider="p", retryable=False).retryable is False
     assert ContextWindowExceeded("too long", provider="p").retryable is False
     assert InvalidRequest("bad", provider="p", status_code=400).retryable is False
     assert all(

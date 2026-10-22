@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from mindroom.llm.usage import MessageMetrics
 
 # The ``ProviderError.code`` for a tool call the provider could not parse from the model's output, such as
@@ -24,9 +26,11 @@ MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Claude returned stop_reason=refusal"
 class ProviderError(Exception):
     """A model provider rejected or failed a request.
 
-    ``retryable`` tells the loop whether the same request may succeed later;
+    ``retryable`` tells the loop whether the same request may succeed later, and each error class fixes it;
     ``provider`` is the metrics provider name of the adapter that raised.
     """
+
+    retryable: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -35,13 +39,11 @@ class ProviderError(Exception):
         provider: str,
         status_code: int | None = None,
         code: str | None = None,
-        retryable: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.status_code = status_code
         self.code = code
-        self.retryable = retryable
 
 
 class ContextWindowExceeded(ProviderError):  # noqa: N818
@@ -53,33 +55,15 @@ class InvalidRequest(ProviderError):  # noqa: N818
 
 
 class RateLimited(ProviderError):  # noqa: N818
-    """The provider throttled the request; retryable unless the adapter says otherwise."""
+    """The provider throttled the request; retryable."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        provider: str,
-        status_code: int | None = None,
-        code: str | None = None,
-        retryable: bool = True,
-    ) -> None:
-        super().__init__(message, provider=provider, status_code=status_code, code=code, retryable=retryable)
+    retryable = True
 
 
 class ProviderUnavailable(ProviderError):  # noqa: N818
-    """The provider or the network failed before a response completed; retryable by default."""
+    """The provider or the network failed before a response completed; retryable."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        provider: str,
-        status_code: int | None = None,
-        code: str | None = None,
-        retryable: bool = True,
-    ) -> None:
-        super().__init__(message, provider=provider, status_code=status_code, code=code, retryable=retryable)
+    retryable = True
 
 
 class ModelOutputLimitError(RuntimeError):
