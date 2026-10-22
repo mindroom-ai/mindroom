@@ -156,7 +156,7 @@ The schema files list tools in sorted order and keep every other key in the orde
 The file maps each built-in tool registration name to `{"instructions", "add_instructions", "functions"}`.
 `instructions` and `add_instructions` are the toolkit's own values; Agno adds `instructions` to the system prompt only when `add_instructions` is true, and no function adds instructions of its own.
 `functions` lists the functions in the order Agno prepares them for an async run: sync functions in registration order, each replaced in place by an async variant of the same name, then async-only functions.
-Each function records `name`, `description`, `parameters`, `strict`, `requires_confirmation`, `external_execution`, `approval_type`, `stop_after_tool_call`, and `show_result` after Agno's per-run preparation (`parse_tools`), which runs `process_entrypoint` and MindRoom's schema postprocessors.
+Each function records `name`, `description`, `parameters`, `strict`, `requires_confirmation`, `external_execution`, `approval_type`, `stop_after_tool_call`, and `show_result` after Agno's per-run preparation (`parse_tools`), which runs `process_entrypoint` and MindRoom's schema postprocessors; the owned adapter (`adapt_toolkit`) repeats that preparation, and a regeneration records its output.
 The provider payload `Function.to_dict()` is the same entry, in the same key order, without `stop_after_tool_call`, `show_result`, and null values.
 Only Agno's non-strict preparation is captured, because Agno makes functions strict only for a run with an output schema on a model with native structured outputs, and no MindRoom run that has tools sets an output schema.
 
@@ -191,7 +191,7 @@ When the files were captured, every name in a tool's `ToolMetadata.function_name
 ### `tools/arguments.json`
 
 The file maps a case id to `{"function", "raw_arguments", "arguments", "kwargs"}` or `{"function", "raw_arguments", "arguments", "error_text"}`.
-Each case sends one tool call, whose arguments string is `raw_arguments`, to a probe in `tests/agno_parity/tool_argument_probes.py` through Agno's `Model.get_function_calls_to_run` and `Model.arun_function_calls`.
+Each case sends one tool call, whose arguments string is `raw_arguments`, to a probe in `tests/agno_parity/tool_argument_probes.py`; the capture sent it through Agno's `Model.get_function_calls_to_run` and `Model.arun_function_calls`, and a regeneration sends it through the owned `parse_tool_arguments` and `execute_tool_call`.
 `kwargs` is what the probe body received, each value encoded by `encode_kwargs` as `{"type": <Python type name>, "value": ...}`, so coercion such as `"3"` to `3` stays visible.
 An injected framework object, such as the calling agent, is encoded as `{"type": "injected", "value": null}`, so the owned loop may inject its own stand-in.
 `error_text` is the tool message content the model reads when the call fails.
