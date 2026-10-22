@@ -356,10 +356,12 @@ def _append_unstreamed_run_content(
 ) -> None:
     """Add each resumed run's content to its slot when the resume streamed no text there, as Agno's resume did.
 
-    That content is a member's error, or a run's paused notice when the run pauses again: the leader's is the
-    consensus, and each member run adds its own to its member's slot. A run without content adds nothing, where
-    Agno's resume added its messages' text again: what a resumed model wrote streamed into its slot, and what it
-    wrote before the pause is already in the restored document.
+    The leader's content goes to the consensus and each member run's to its member's slot: a run that pauses again
+    adds its paused notice, and a member run started in the resume that fails before it writes anything adds its
+    error. A run without content adds nothing, where Agno's resume added its messages' text, which repeated what the
+    run wrote before the pause. A member resumed after approval keeps its paused content until its model writes new
+    text, so when its model call fails before that, its slot repeats the text it wrote before the pause, or shows its
+    paused notice, and its error is not shown, as on Agno's resume.
     """
     if "team" not in streamed:
         presentation.append_consensus(record.content)
