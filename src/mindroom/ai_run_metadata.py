@@ -162,7 +162,7 @@ def _native_context_counts(
     return None
 
 
-def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
+def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     *,
     config: Config,
     model_name: str,
@@ -172,7 +172,6 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     model: str | None,
     model_provider: str | None,
     metrics: RunMetrics | dict[str, Any] | None = None,
-    metrics_fallback: dict[str, Any] | None = None,
     context_metrics: RunMetrics | None = None,
     context_raw_input_tokens: int | None = None,
     context_input_tokens: int | None = None,
@@ -194,14 +193,6 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     provider = model_provider or (model_config.provider if model_config is not None else None)
 
     usage_payload = _serialize_metrics(metrics)
-    if metrics_fallback:
-        fallback_usage_payload = dict(metrics_fallback)
-        if usage_payload is None:
-            usage_payload = fallback_usage_payload
-        else:
-            for key, value in fallback_usage_payload.items():
-                usage_payload.setdefault(key, value)
-
     usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
     if not isinstance(usage_input_tokens, int):
         usage_input_tokens = None
