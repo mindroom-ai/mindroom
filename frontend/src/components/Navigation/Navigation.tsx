@@ -206,13 +206,13 @@ export function Navigation({ mode = "all", className }: NavigationProps) {
             </button>
           </DialogTrigger>
           <DialogContent className="left-0 top-0 h-dvh w-[min(18rem,85vw)] max-w-none translate-x-0 translate-y-0 content-start gap-3 overflow-y-auto rounded-none border-0 border-r bg-background p-3">
-            <DialogHeader className="px-2 pb-1 pt-2 text-left">
+            <DialogHeader className="px-3 pb-1 pt-2 text-left">
               <DialogTitle className="text-base">Navigate</DialogTitle>
               <DialogDescription className="text-xs">
                 MindRoom configuration sections
               </DialogDescription>
             </DialogHeader>
-            <nav aria-label="Mobile navigation" className="px-3">
+            <nav aria-label="Mobile navigation">
               <NavigationLinks
                 currentValue={currentValue}
                 mobile
@@ -231,7 +231,7 @@ export function Navigation({ mode = "all", className }: NavigationProps) {
             className,
           )}
         >
-          <div className="flex h-14 shrink-0 items-center border-b px-5">
+          <div className="flex h-14 shrink-0 items-center border-b px-6">
             <BrandLink />
           </div>
           <nav

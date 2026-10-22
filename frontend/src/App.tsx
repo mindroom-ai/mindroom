@@ -202,7 +202,7 @@ function AppContent() {
 
     if (!isAuthError && canRecoverInvalidConfig) {
       return (
-        <div className="app-shell flex h-screen items-center justify-center">
+        <div className="flex h-screen items-center justify-center">
           <div className="glass-overlay mx-4 w-full max-w-4xl space-y-4 rounded-xl p-5 md:p-6">
             <div className="space-y-2">
               <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
@@ -273,7 +273,7 @@ function AppContent() {
     }
 
     return (
-      <div className="app-shell flex h-screen items-center justify-center">
+      <div className="flex h-screen items-center justify-center">
         <div className="glass-overlay mx-4 w-full max-w-md rounded-xl p-6">
           <div className="flex items-center mb-4">
             <span className="text-3xl mr-3">🔒</span>
@@ -355,7 +355,7 @@ function AppContent() {
   }
 
   return (
-    <div className="app-shell relative flex h-screen overflow-hidden">
+    <div className="relative flex h-screen overflow-hidden">
       <a
         href="#main-content"
         className="fixed left-3 top-3 z-[100] -translate-y-16 rounded-md bg-card px-3 py-2 text-sm font-medium shadow-lg focus:translate-y-0"

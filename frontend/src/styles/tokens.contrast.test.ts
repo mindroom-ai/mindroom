@@ -84,6 +84,9 @@ const TEXT_PAIRS: [string, Surface][] = [
   ["destructive", ["destructive", 0.1, "muted"]],
   ["destructive", ["destructive", 0.1, "active"]],
   ["foreground", "active"],
+  // Highlighted menu and select items keep their own text color on the active fill.
+  ["destructive", "active"],
+  ["primary", "popover"],
 ];
 
 describe.each([":root", ".dark"])("%s theme tokens", (selector) => {

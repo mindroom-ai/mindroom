@@ -112,10 +112,6 @@
 }
 
 @layer components {
-  .app-shell {
-    background: hsl(var(--background));
-  }
-
   /* Surfaces are solid and separated by a border; only overlays cast a shadow. */
   .glass-panel {
     border: 1px solid hsl(var(--border));
@@ -183,7 +179,6 @@
     outline-offset: 2px;
   }
 
-  .workspace-surface,
   .glass-panel,
   .glass-control,
   .glass-overlay,

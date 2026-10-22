@@ -1142,7 +1142,7 @@ export function Integrations() {
               <CardTitle className="text-lg">{integration.name}</CardTitle>
             </div>
             {isConnected ? (
-              <Badge className="border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-200">
+              <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
                 <CheckCircle2 className="h-3 w-3 mr-1" />
                 Connected
               </Badge>

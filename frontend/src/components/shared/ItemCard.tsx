@@ -2,7 +2,7 @@ import React, { ReactNode } from "react";
 import { Check } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { sharedStyles, getSelectionStyles } from "./styles";
+import { sharedStyles } from "./styles";
 
 export interface ItemCardBadge {
   /**
@@ -85,7 +85,7 @@ export function ItemCard({
       className={cn(
         "w-full",
         clickable && sharedStyles.item.containerCard,
-        getSelectionStyles(isSelected, "card"),
+        isSelected && sharedStyles.item.selectedCard,
         className,
       )}
       onClick={handleClick}
