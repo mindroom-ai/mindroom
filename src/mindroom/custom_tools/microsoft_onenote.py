@@ -57,7 +57,7 @@ _CONTAINERS = (
 )
 _INVALID_CONTAINER = (
     "container must be a Teams team id, a SharePoint site id (host,guid,guid), or a person's sign-in email address; "
-    "leave it empty for the requester's own notebooks."
+    "omit it for the requester's own notebooks."
 )
 
 
@@ -294,7 +294,7 @@ class MicrosoftOneNoteTools(Toolkit):
             page_token: The next_page_token of the previous call with the same container, to continue the listing.
             container: Where the notebooks are: a Teams team's id from microsoft_teams_list_teams, a SharePoint
                 site's id from microsoft_sharepoint_search_sites (host,guid,guid), or the sign-in email address
-                (not the id) of a person, for the notebooks that person shares with the requester. Leave it empty
+                (not the id) of a person, for the notebooks that person shares with the requester. Omit it
                 for the requester's own notebooks.
 
         """
@@ -317,7 +317,7 @@ class MicrosoftOneNoteTools(Toolkit):
         Args:
             notebook_id: The notebook's id from microsoft_onenote_list_notebooks.
             page_token: The next_page_token of the previous call for the same notebook, to continue the listing.
-            container: The container microsoft_onenote_list_notebooks listed the notebook with; leave it empty for
+            container: The container microsoft_onenote_list_notebooks listed the notebook with; omit it for
                 the requester's own notebooks.
 
         """
@@ -345,7 +345,7 @@ class MicrosoftOneNoteTools(Toolkit):
             section_id: The section's id from microsoft_onenote_list_sections.
             limit: Maximum number of pages to return, from 1 to 50.
             page_token: The next_page_token of the previous call for the same section, to continue the listing.
-            container: The container of the section's notebook; leave it empty for the requester's own notebooks.
+            container: The container of the section's notebook; omit it for the requester's own notebooks.
 
         """
         return self._send(
@@ -374,7 +374,7 @@ class MicrosoftOneNoteTools(Toolkit):
         Args:
             page_id: The page's id from microsoft_onenote_list_pages.
             page_token: The next_page_token of the previous call for the same page, to read on.
-            container: The container of the page's notebook; leave it empty for the requester's own notebooks.
+            container: The container of the page's notebook; omit it for the requester's own notebooks.
 
         """
 
@@ -409,7 +409,7 @@ class MicrosoftOneNoteTools(Toolkit):
             title: The page title.
             content: The page text, as plain text; may be empty for a page with only a title.
             expected_web_url: The web_url of the section's notebook from microsoft_onenote_list_notebooks; required.
-            container: The container of the section's notebook; leave it empty for the requester's own notebooks.
+            container: The container of the section's notebook; omit it for the requester's own notebooks.
 
         """
 
@@ -448,7 +448,7 @@ class MicrosoftOneNoteTools(Toolkit):
             page_id: The page's id from microsoft_onenote_list_pages.
             content: The text to add, as plain text.
             expected_web_url: The web_url of the page's notebook from microsoft_onenote_list_notebooks; required.
-            container: The container of the page's notebook; leave it empty for the requester's own notebooks.
+            container: The container of the page's notebook; omit it for the requester's own notebooks.
 
         """
 

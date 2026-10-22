@@ -751,7 +751,7 @@ def test_every_function_refuses_a_container_of_no_known_kind_before_any_request(
         (
             "invalid_argument",
             "container must be a Teams team id, a SharePoint site id (host,guid,guid), or a person's sign-in email "
-            "address; leave it empty for the requester's own notebooks.",
+            "address; omit it for the requester's own notebooks.",
         ),
     ] * len(results)
     assert graph.requests == []
