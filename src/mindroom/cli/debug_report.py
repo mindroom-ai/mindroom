@@ -132,7 +132,7 @@ def debug_report(
         "--event",
         "-e",
         help=(
-            "Matrix event ID; repeatable. Conversation-wide sources (Agno sessions, deliveries) "
+            "Matrix event ID; repeatable. Conversation-wide sources (stored runs, deliveries) "
             "need --room/--thread, or a report file."
         ),
     ),

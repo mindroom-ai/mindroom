@@ -21997,15 +21997,15 @@ Collect everything the backend stored about one conversation into a single JSON 
 The input is the JSON file a MindRoom Chat **Report a bug** message carries, or plain identifiers.
 See [Bug Reports](https://docs.mindroom.chat/bug-reports/) for how users send those reports and how administrators receive them.
 
-The report includes the event journal's turn records, admitted events, and outbound deliveries, the conversation's Agno runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
+The report includes the event journal's turn records, admitted events, and outbound deliveries, the conversation's stored runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
 Each source lists the files it read under `paths` and has a `status` of `ok`, `missing` (nothing to read there), or `error` with the message under `error`; a source that cannot be read, such as a locked or corrupt database, does not stop the others.
 Successful tool calls and LLM requests are only logged when `debug.log_llm_requests` is enabled.
-Nothing is redacted, and the newest matches are kept: up to 100 Agno runs, 1,000 records per JSONL source, and 2,000 log lines of 4,000 characters each, with `dropped` and `truncated` counting what was left out or shortened.
+Nothing is redacted, and the newest matches are kept: up to 100 runs, 1,000 records per JSONL source, and 2,000 log lines of 4,000 characters each, with `dropped` and `truncated` counting what was left out or shortened.
 
 Run it on the MindRoom host with the same `--config` and `--storage-path` the service uses, and hand the bug report and the output to whoever debugs the issue.
 When `debug.llm_request_log_dir` is relative, run the command from the service's working directory.
 The command never writes the config and reads only its `event_journal` and `debug.llm_request_log_dir` settings, so a config the runtime would reject still locates the data; a PostgreSQL journal URL comes from `event_journal.database_url`, the config directory's `.env`, or the environment, and an unresolved URL reports the journal sources as errors.
-`--event` alone does not reach Agno runs or outbound deliveries; pass `--room` and `--thread`, or a bug report file.
+`--event` alone does not reach stored runs or outbound deliveries; pass `--room` and `--thread`, or a bug report file.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -22030,7 +22030,7 @@ The command never writes the config and reads only its `event_journal` and `debu
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --event         -e      TEXT  Matrix event ID; repeatable. Conversation-wide sources   │
-│                               (Agno sessions, deliveries) need --room/--thread, or a   │
+│                               (stored runs, deliveries) need --room/--thread, or a     │
 │                               report file.                                             │
 │ --room          -r      TEXT  Matrix room ID.                                          │
 │ --thread        -t      TEXT  Thread root event ID.                                    │

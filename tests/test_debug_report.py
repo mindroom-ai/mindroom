@@ -22,10 +22,10 @@ from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.debug_report import (
     DebugReportSources,
     _postgres_query,
-    _read_agno_runs,
     _read_journal,
     _read_jsonl_records,
     _read_log_lines,
+    _read_runs,
     _sqlite_query,
     build_debug_report,
     collect_ids,
@@ -272,7 +272,7 @@ def test_postgres_query_reads_the_journal_and_cannot_write(postgres_journal_url:
 
 
 def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]]) -> None:
-    """Persist one session holding `(run_id, created_at)` runs in the Agno database under `state_root`."""
+    """Persist one session holding `(run_id, created_at)` runs in the conversation database under `state_root`."""
     storage = create_state_storage(
         state_root.name,
         state_root,
@@ -303,41 +303,41 @@ def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]
     )
 
 
-def _seed_agno(storage_root: Path) -> None:
+def _seed_general_runs(storage_root: Path) -> None:
     _seed_runs(storage_root / "agents" / "general", f"{ROOM}:$root", [("run-1", 1_723_837_600)])
     _seed_runs(storage_root / "agents" / "general", "!other:example.com", [("run-other", 1_723_837_600)])
 
 
-def test_read_agno_runs_matches_session_and_decodes_run_data(tmp_path: Path) -> None:
+def test_read_runs_matches_session_and_decodes_run_data(tmp_path: Path) -> None:
     """Runs match by session id, and run_data comes back as a nested object."""
-    _seed_agno(tmp_path)
+    _seed_general_runs(tmp_path)
     ids = collect_ids(None, room_id=ROOM, thread_id="$root")
-    result = _read_agno_runs(tmp_path, ids)
+    result = _read_runs(tmp_path, ids)
     assert result.status == "ok"
     assert [item["run_id"] for item in result.items] == ["run-1"]
     assert result.items[0]["run_data"]["metadata"] == {"matrix_event_id": "$user"}
     assert result.items[0]["table"] == "general_sessions_runs"
 
 
-def test_read_agno_runs_matches_a_run_id_alone(tmp_path: Path) -> None:
+def test_read_runs_matches_a_run_id_alone(tmp_path: Path) -> None:
     """Without a room there is no session to match, and a run is still found by its run ID."""
-    _seed_agno(tmp_path)
+    _seed_general_runs(tmp_path)
     ids = dataclasses.replace(collect_ids(None, event_ids=["$x"]), run_ids=frozenset({"run-other"}))
     assert ids.session_ids == frozenset()
-    result = _read_agno_runs(tmp_path, ids)
+    result = _read_runs(tmp_path, ids)
     assert [item["run_id"] for item in result.items] == ["run-other"]
 
 
-def test_read_agno_runs_keeps_the_newest_runs_across_databases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_runs_keeps_the_newest_runs_across_databases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Beyond the cap the oldest runs by created_at are dropped and counted, even within one table inserted out of order.
 
     The kept runs come oldest first.
     """
-    monkeypatch.setattr(debug_report_module, "_MAX_AGNO_RUNS", 2)
+    monkeypatch.setattr(debug_report_module, "_MAX_RUNS", 2)
     _seed_runs(tmp_path / "agents" / "general", ROOM, [("run-300", 300), ("run-100", 100), ("run-200", 200)])
     _seed_runs(tmp_path / "teams" / "crew", ROOM, [("run-250", 250)])
 
-    result = _read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM))
+    result = _read_runs(tmp_path, collect_ids(None, room_id=ROOM))
 
     assert result.status == "ok"
     assert [item["run_id"] for item in result.items] == ["run-250", "run-300"]
@@ -345,7 +345,7 @@ def test_read_agno_runs_keeps_the_newest_runs_across_databases(tmp_path: Path, m
     assert {item["table"] for item in result.items} == {"general_sessions_runs", "crew_sessions_runs"}
 
 
-def test_read_agno_runs_reads_only_the_runtime_session_database_layouts(tmp_path: Path) -> None:
+def test_read_runs_reads_only_the_runtime_session_database_layouts(tmp_path: Path) -> None:
     """Agent, team, private-instance, and system databases are read; a sessions/ folder in a workspace is not.
 
     The state roots come from the runtime's own helpers, so the reader's copied layouts are pinned to them.
@@ -361,15 +361,15 @@ def test_read_agno_runs_reads_only_the_runtime_session_database_layouts(tmp_path
     for state_root in [*state_roots, agent_workspace_root_path(root, "general")]:
         _seed_runs(state_root, f"{ROOM}:$root", [(f"run-{state_root.name}", 1_723_837_600)])
 
-    result = _read_agno_runs(root, collect_ids(None, room_id=ROOM, thread_id="$root"))
+    result = _read_runs(root, collect_ids(None, room_id=ROOM, thread_id="$root"))
 
     assert result.paths == sorted(str(state_root / "sessions" / f"{state_root.name}.db") for state_root in state_roots)
     assert sorted(item["run_id"] for item in result.items) == ["run-crew", "run-general", "run-helper", "run-system"]
 
 
-def test_read_agno_runs_reports_missing_databases(tmp_path: Path) -> None:
+def test_read_runs_reports_missing_databases(tmp_path: Path) -> None:
     """A session root without databases is reported as missing."""
-    result = _read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM))
+    result = _read_runs(tmp_path, collect_ids(None, room_id=ROOM))
     assert result.status == "missing"
 
 
@@ -533,13 +533,13 @@ def _write_corrupt_database(path: Path) -> None:
     path.write_bytes(b"this is not a sqlite database" * 100)
 
 
-def test_read_agno_runs_keeps_healthy_databases_when_one_fails(tmp_path: Path) -> None:
+def test_read_runs_keeps_healthy_databases_when_one_fails(tmp_path: Path) -> None:
     """A corrupt session database is named in `error` while the runs of a healthy one are still returned."""
-    _seed_agno(tmp_path)
+    _seed_general_runs(tmp_path)
     broken = tmp_path / "agents" / "x" / "sessions" / "x.db"
     _write_corrupt_database(broken)
 
-    result = _read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM, thread_id="$root"))
+    result = _read_runs(tmp_path, collect_ids(None, room_id=ROOM, thread_id="$root"))
 
     assert result.status == "ok"
     assert [item["run_id"] for item in result.items] == ["run-1"]
@@ -662,7 +662,7 @@ def test_cli_writes_backend_report_for_a_chat_bug_report(tmp_path: Path) -> None
     _write_config(config)
     storage = tmp_path / "storage"
     _seed_journal(storage / "tracking" / "event_journal.db")
-    _seed_agno(storage)
+    _seed_general_runs(storage)
     _seed_files(storage)
     report = tmp_path / "bug-report.json"
     report.write_text(json.dumps(_report()), encoding="utf-8")
@@ -677,13 +677,13 @@ def test_cli_writes_backend_report_for_a_chat_bug_report(tmp_path: Path) -> None
         "turn_records",
         "journal_events",
         "delivery_outbox",
-        "agno_runs",
+        "runs",
         "tool_calls",
         "llm_requests",
         "log_lines",
     }
-    assert document["sources"]["agno_runs"]["items"][0]["run_id"] == "run-1"
-    assert "agno_runs: ok" in result.output
+    assert document["sources"]["runs"]["items"][0]["run_id"] == "run-1"
+    assert "runs: ok, 1 items" in result.output.splitlines()
 
 
 def test_cli_shows_the_error_of_a_source_that_could_not_be_read(tmp_path: Path) -> None:
@@ -702,18 +702,18 @@ def test_cli_shows_the_error_of_a_source_that_could_not_be_read(tmp_path: Path) 
 
     assert result.exit_code == 0, result.output
     document = json.loads(output.read_text(encoding="utf-8"))
-    assert document["sources"]["agno_runs"]["status"] == "error"
+    assert document["sources"]["runs"]["status"] == "error"
     assert [item["index_event_id"] for item in document["sources"]["turn_records"]["items"]] == ["$user"]
-    assert f"agno_runs: error, 0 items ({document['sources']['agno_runs']['error']})" in result.output
+    assert f"runs: error, 0 items ({document['sources']['runs']['error']})" in result.output.splitlines()
     assert "turn_records: ok, 1 items" in result.output
 
 
 def test_cli_shows_the_error_of_a_source_that_is_ok_with_a_partial_failure(tmp_path: Path) -> None:
-    """One unreadable session database leaves agno_runs ok, and the stderr summary still names what failed."""
+    """One unreadable session database leaves runs ok, and the stderr summary still names what failed."""
     config = tmp_path / "config.yaml"
     _write_config(config)
     storage = tmp_path / "storage"
-    _seed_agno(storage)
+    _seed_general_runs(storage)
     _write_corrupt_database(storage / "agents" / "x" / "sessions" / "x.db")
     output = tmp_path / "backend.json"
 
@@ -723,10 +723,10 @@ def test_cli_shows_the_error_of_a_source_that_is_ok_with_a_partial_failure(tmp_p
     )
 
     assert result.exit_code == 0, result.output
-    agno_runs = json.loads(output.read_text(encoding="utf-8"))["sources"]["agno_runs"]
-    assert agno_runs["status"] == "ok"
-    assert [item["run_id"] for item in agno_runs["items"]] == ["run-1"]
-    assert f"agno_runs: ok, 1 items ({agno_runs['error']})" in result.output
+    runs = json.loads(output.read_text(encoding="utf-8"))["sources"]["runs"]
+    assert runs["status"] == "ok"
+    assert [item["run_id"] for item in runs["items"]] == ["run-1"]
+    assert f"runs: ok, 1 items ({runs['error']})" in result.output.splitlines()
 
 
 def test_cli_reports_journal_errors_when_the_postgres_url_is_not_configured(
