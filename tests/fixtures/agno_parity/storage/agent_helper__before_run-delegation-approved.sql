@@ -1,6 +1,6 @@
 -- The sessions one approval resume reads, from a conversation database written by Agno 3.0.9 through
 -- MindRoom's storage path just before the resume, dumped and normalized like the full stores (see
--- tests/fixtures/agno_parity/README.md). Regenerate with `python -m tests.agno_parity.capture_storage`.
+-- tests/fixtures/agno_parity/README.md); never edit by hand.
 BEGIN TRANSACTION;
 CREATE TABLE agno_schema_versions (
 	table_name VARCHAR NOT NULL,

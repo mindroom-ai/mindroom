@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agno.models.message import Message
+from mindroom.llm.messages import Message
 
 if TYPE_CHECKING:
     from types import ModuleType

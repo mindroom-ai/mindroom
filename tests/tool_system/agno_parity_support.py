@@ -1,10 +1,9 @@
-"""Build registered tools the way the C3 tool goldens were captured, so the owned adapter can be compared to them.
+"""Build registered tools the way the C3 tool goldens were captured from Agno 3.0.9, so the adapter can be compared.
 
 `tests/fixtures/agno_parity/README.md` describes the goldens.
-`tests/agno_parity/capture_tools.py` captures them with this same setup, so capture and comparison cannot drift: one
-agent of a config shaped like `mindroom config init` output, dummy credentials for tools that need settings, offline
-replacements for SDK clients that contact their service while constructing, and a hidden host environment that refuses
-network connections.
+The capture used this same setup: one agent of a config shaped like `mindroom config init` output, dummy credentials
+for tools that need settings, offline replacements for SDK clients that contact their service while constructing, and
+a hidden host environment that refuses network connections.
 """
 
 from __future__ import annotations
