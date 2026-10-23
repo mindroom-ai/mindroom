@@ -22,7 +22,6 @@ from mindroom.hooks import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
-from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -105,13 +104,6 @@ def detached_requester_context(context: DetachedRequesterContext | None) -> Iter
         yield
     finally:
         _DETACHED_REQUESTER_CONTEXT.reset(token)
-
-
-@contextmanager
-def _tool_runtime_context_scope(tool_context: ToolRuntimeContext | None) -> Iterator[None]:
-    """Bind tool runtime state only for the duration of one concrete operation."""
-    with tool_runtime_context(tool_context):
-        yield
 
 
 @dataclass(frozen=True)
@@ -456,16 +448,12 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
         agent_name: str | None = None,
     ) -> ToolExecutionIdentity:
         """Build the serializable execution identity used for worker routing."""
-        return build_tool_execution_identity(
-            channel="matrix",
+        return _matrix_execution_identity(
+            target,
             agent_name=agent_name or self.agent_name,
             transport_agent_name=self.agent_name,
-            runtime_paths=self.runtime_paths,
             requester_id=user_id or self.matrix_id.full_id,
-            room_id=target.room_id,
-            thread_id=target.resolved_thread_id,
-            resolved_thread_id=target.resolved_thread_id,
-            session_id=target.session_id,
+            runtime_paths=self.runtime_paths,
         )
 
     async def run_in_context(
@@ -475,7 +463,7 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
         operation: Callable[[], Awaitable[_ToolContextReturn]],
     ) -> _ToolContextReturn:
         """Execute one async operation inside the ambient tool runtime context."""
-        with _tool_runtime_context_scope(tool_context):
+        with tool_runtime_context(tool_context):
             return await operation()
 
     def stream_in_context(
@@ -486,7 +474,7 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
     ) -> AsyncIterator[_StreamChunk]:
         """Wrap one async iterator without spanning tool-runtime tokens across yields."""
         return context_bound_async_stream(
-            context_factory=lambda: _tool_runtime_context_scope(tool_context),
+            context_factory=lambda: tool_runtime_context(tool_context),
             stream_factory=stream_factory,
         )
 
@@ -556,13 +544,30 @@ def resolve_current_session_id(
 
 def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -> ToolExecutionIdentity:
     """Build the canonical execution identity represented by one live runtime context."""
-    target = context.target
-    return build_tool_execution_identity(
-        channel="matrix",
+    return _matrix_execution_identity(
+        context.target,
         agent_name=context.agent_name,
         transport_agent_name=context.transport_agent_name,
-        runtime_paths=context.runtime_paths,
         requester_id=context.requester_id,
+        runtime_paths=context.runtime_paths,
+    )
+
+
+def _matrix_execution_identity(
+    target: MessageTarget,
+    *,
+    agent_name: str,
+    transport_agent_name: str | None,
+    requester_id: str,
+    runtime_paths: RuntimePaths,
+) -> ToolExecutionIdentity:
+    """Build the execution identity of one Matrix conversation, keyed by its resolved thread."""
+    return build_tool_execution_identity(
+        channel="matrix",
+        agent_name=agent_name,
+        transport_agent_name=transport_agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
         resolved_thread_id=target.resolved_thread_id,
@@ -681,25 +686,6 @@ def get_tool_runtime_media_attachment(
 ) -> RuntimeEncryptedMediaAttachment | None:
     """Resolve one turn-scoped encrypted media handle without touching disk."""
     return context.runtime_media_attachments.get(attachment_id.strip())
-
-
-def get_plugin_state_root(
-    plugin_name: str,
-    *,
-    runtime_paths: RuntimePaths | None = None,
-) -> Path:
-    """Return the canonical plugin state root used by hooks and plugin tools."""
-    normalized_plugin_name = validate_plugin_name(plugin_name)
-
-    context = get_tool_runtime_context()
-    resolved_runtime_paths = runtime_paths or (context.runtime_paths if context is not None else None)
-    if resolved_runtime_paths is None:
-        msg = "runtime_paths are required when no tool runtime context is active"
-        raise RuntimeError(msg)
-
-    plugin_root = resolved_runtime_paths.storage_root / "plugins" / normalized_plugin_name
-    plugin_root.mkdir(parents=True, exist_ok=True)
-    return plugin_root
 
 
 async def emit_custom_event(

@@ -5203,7 +5203,6 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.scheduling.tasks",
     "mindroom.tool_system.context_bound_streams",
-    "mindroom.tool_system.plugin_identity",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -6958,7 +6957,6 @@ expose = [
     "execution_identity_matches_tool_runtime_context",
     "get_worker_progress_pump",
     "get_worker_runtime_context",
-    "get_plugin_state_root",
     "get_tool_runtime_context",
     "get_tool_runtime_media_attachment",
     "list_tool_runtime_attachment_ids",
