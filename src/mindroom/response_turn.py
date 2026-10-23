@@ -688,8 +688,6 @@ class BlockingTurnAdapter:
     snapshot_partial: Callable[[], TurnPartialSnapshot]
     release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
-    # Set by an entity whose runtime holds database handles the turn must close once it ends.
-    close_runtime_dbs: Callable[[ScopeSessionContext | None], None] | None = None
     on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
@@ -709,17 +707,10 @@ class StreamingTurnAdapter[ChunkT]:
     release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     make_text_chunk: Callable[[str], ChunkT]
-    close_runtime_dbs: Callable[[ScopeSessionContext | None], None] | None = None
     on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
-
-
-def _close_runtime_dbs(adapter: BlockingTurnAdapter | StreamingTurnAdapter[Any], run: TurnRunState) -> None:
-    """Close the entity's runtime database handles once the turn ends, when it holds any."""
-    if adapter.close_runtime_dbs is not None:
-        adapter.close_runtime_dbs(run.scope_context)
 
 
 def _raise_continuation_budget_exhausted() -> NoReturn:
@@ -1074,8 +1065,6 @@ async def run_blocking_response_turn(
             raise
         logger.exception("Response turn failed", entity=ctx.entity_label)
         return adapter.unexpected_error_text(e)
-    finally:
-        _close_runtime_dbs(adapter, run)
 
 
 def skip_unapproved_attempt(
@@ -1487,5 +1476,3 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
         logger.exception("Response turn failed", entity=ctx.entity_label)
         yield adapter.make_text_chunk(adapter.unexpected_error_text(e))
         return
-    finally:
-        _close_runtime_dbs(adapter, run)
