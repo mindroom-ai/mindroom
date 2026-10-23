@@ -1474,11 +1474,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         )
     entity_view = config.resolve_entity(agent_name)
     entries: list[_ToolkitEntry] = []
-    # The finished assembly, which tool search reads: its toolkit is built before the steps across toolkits run.
-    assembled: list[_AgentToolAssembly] = []
+    assembly: _AgentToolAssembly | None = None
 
     def searched_toolkits() -> tuple[DeferredToolkit, ...]:
-        [assembly] = assembled
+        # Tool search is one of the toolkits the assembly below is made of, and its names take part in the steps
+        # across toolkits, yet it searches what that assembly offers, so it reads the assembly when it runs.
+        assert assembly is not None
         return assembly.deferred_toolkits
 
     local_tool_names: list[str] = []
@@ -1649,7 +1650,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         worker_routed_tool_names=tuple(worker_routed_tool_names),
         tool_middleware=(hook_middleware,),
     )
-    assembled.append(assembly)
     return assembly
 
 
