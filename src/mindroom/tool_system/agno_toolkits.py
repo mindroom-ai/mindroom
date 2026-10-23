@@ -80,13 +80,7 @@ def adapt_function(function: Function) -> ToolFunction:
     if function.entrypoint is None:
         msg = f"Tool function {function.name!r} has no entrypoint"
         raise ValueError(msg)
-    if function.pre_hook is not None or function.post_hook is not None or function.tool_hooks:
-        # Rejected rather than dropped: such a hook may be a policy gate the tool's author relies on.
-        msg = (
-            f"Tool function {function.name!r} sets an Agno pre_hook, post_hook, or tool_hooks, which MindRoom does not"
-            " run; move that logic into the tool or a `tool:before_call` / `tool:after_call` hook"
-        )
-        raise ValueError(msg)
+    reject_agno_hooks(function)
     prepared = function.model_copy(deep=False)
     prepared.parameters = deepcopy(function.parameters)
     # An explicit strict setting on the function wins; MindRoom never asks Agno for strict schemas otherwise.
@@ -106,6 +100,19 @@ def adapt_function(function: Function) -> ToolFunction:
         injected_params=injected_parameter_names(function.entrypoint),
         entrypoint_processed=not function.skip_entrypoint_processing,
     )
+
+
+def reject_agno_hooks(function: Function) -> None:
+    """Raise when ``function`` sets an Agno ``pre_hook``, ``post_hook``, or ``tool_hooks``, which MindRoom does not run.
+
+    Rejected rather than dropped: such a hook may be a policy gate the tool's author relies on.
+    """
+    if function.pre_hook is not None or function.post_hook is not None or function.tool_hooks:
+        msg = (
+            f"Tool function {function.name!r} sets an Agno pre_hook, post_hook, or tool_hooks, which MindRoom does not"
+            " run; move that logic into the tool or a `tool:before_call` / `tool:after_call` hook"
+        )
+        raise ValueError(msg)
 
 
 def injected_parameter_names(entrypoint: Callable[..., Any]) -> frozenset[str]:
@@ -363,6 +370,7 @@ __all__ = [
     "framework_arguments",
     "injected_parameter_names",
     "model_arguments",
+    "reject_agno_hooks",
     "tool_value",
     "warm_agno_tool_imports",
 ]

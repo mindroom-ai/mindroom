@@ -54,7 +54,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, reject_agno_hooks
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ensure_tool_registry_loaded,
@@ -1467,6 +1467,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             # Function policies match on the owning toolkit, so stamp it before pruning.
             _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
             toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+            if toolkit is not None:
+                # Checked while this toolkit builds, so a hooked function costs only its own toolkit; the adapter,
+                # which would reject it too, runs once every toolkit is built.
+                for function in toolkit.get_async_functions().values():
+                    reject_agno_hooks(function)
             if toolkit is not None and persona_tools is not None:
                 # Record what survives the caller's filters; approval capability below may still hide gated calls.
                 persona_built[tool_name] = frozenset((*toolkit.functions, *toolkit.async_functions))

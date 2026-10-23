@@ -1146,6 +1146,31 @@ def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
     assert [tool.name for tool in agent.spec.toolkits] == ["calculator"]
 
 
+def test_create_agent_skips_a_toolkit_whose_function_sets_an_agno_hook(tmp_path: Path) -> None:
+    """A plugin function with an Agno hook MindRoom does not run drops its own toolkit, never the agent."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].tools = ["file", "calculator"]
+    config.agents["general"].include_default_tools = False
+    build_agent_toolkit = agents_module.build_agent_toolkit
+
+    def ping(text: str) -> str:
+        return text
+
+    def build(tool_name: str, **kwargs: object) -> Toolkit | None:
+        if tool_name == "file":
+            return Toolkit(name="file", tools=[Function(name="ping", entrypoint=ping, pre_hook=lambda: None)])
+        return build_agent_toolkit(tool_name, **kwargs)
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build), capture_logs() as logs:
+        agent = _create_agent_for_test("general", config=config)
+
+    assert [tool.name for tool in agent.spec.toolkits] == ["calculator"]
+    [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
+    assert warning["tool"] == "file"
+    assert "'ping' sets an Agno pre_hook" in warning["error"]
+
+
 @patch("mindroom.agents.get_tool_by_name")
 def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     mock_get_tool_by_name: MagicMock,
