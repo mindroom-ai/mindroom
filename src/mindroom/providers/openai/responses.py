@@ -192,8 +192,8 @@ class ResponsesAdapter:
                 async for event in events:
                     first_token = output_started(first_token, event)
                     yield event
-            if not accumulator.completed:
-                # The stream ended before ``response.completed``, so the turn did not finish.
+            if not accumulator.ended:
+                # The stream stopped before the response ended, so the turn did not finish.
                 return
             parts = accumulator.finish()
         else:

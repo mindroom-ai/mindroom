@@ -431,6 +431,40 @@ def _record_tool_search_items(parts: ResponsesTurnParts, output_items: Sequence[
         parts.provider_data.setdefault(TOOL_SEARCH_ITEMS_KEY, []).extend(items)
 
 
+def _incomplete_reason(response: Response) -> str | None:
+    return None if response.incomplete_details is None else response.incomplete_details.reason
+
+
+def _read_ended_response(
+    parts: ResponsesTurnParts,
+    response: Response,
+    items: list[dict[str, Any]],
+    *,
+    store: bool | None,
+    portable_replay: bool,
+    native_compaction: NativeCompactionReplay | None,
+) -> None:
+    """Record what a response that ended says about its turn, the same whether it streamed or arrived whole.
+
+    A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
+    status and the incomplete reason; only a completed response's output is recorded for replay.
+    """
+    parts.status = response.status
+    parts.incomplete_reason = _incomplete_reason(response)
+    if response.usage is not None:
+        parts.usage = _usage(response.usage)
+    if response.status == "completed":
+        _record_completed_output(
+            parts,
+            items,
+            store=store,
+            portable_replay=portable_replay,
+            native_compaction=native_compaction,
+        )
+    else:
+        parts.provider_data[_STORED_KEY] = store is not False
+
+
 def responses_stop_reason(status: str | None, incomplete_reason: str | None, *, tool_calls: bool) -> StopReason | None:
     """Map a response's terminal status to the normalized stop vocabulary."""
     if status == "completed":
@@ -458,7 +492,8 @@ class ResponsesStream:
     native_compaction: NativeCompactionReplay | None
     text_as_reasoning: bool
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
-    completed: bool = False
+    # Whether the response ended, completed or incomplete; a stream that stops before then did not finish the turn.
+    ended: bool = False
     _content: list[str] = field(default_factory=list)
     _reasoning: list[str] = field(default_factory=list)
     _tool_use: dict[str, Any] = field(default_factory=dict)
@@ -508,33 +543,31 @@ class ResponsesStream:
             _record_tool_search_items(self.parts, [current.item])
             if self.store is False or self.portable_replay:
                 self._items[current.output_index] = current.item.model_dump(mode="json", exclude_none=True)
-        elif event.type == "response.completed":
-            self._complete(current.response)
+        elif event.type in {"response.completed", "response.incomplete"}:
+            self._end(current.response)
         return events
 
-    def _complete(self, response: Response) -> None:
-        self.completed = True
+    def _end(self, response: Response) -> None:
+        self.ended = True
         if self.store is False:
             for item in response.output:
                 if item.type == "reasoning":
                     self.parts.provider_data["reasoning_output"] = item.model_dump(exclude_none=True)
-        if response.usage is not None:
-            self.parts.usage = _usage(response.usage)
         self.parts.provider_data["response_id"] = response.id
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [
             self._items[index] for index in sorted(self._items)
         ]
-        _record_completed_output(
+        _read_ended_response(
             self.parts,
+            response,
             items,
             store=self.store,
             portable_replay=self.portable_replay,
             native_compaction=self.native_compaction,
         )
-        self.parts.status = response.status
 
     def finish(self) -> ResponsesTurnParts:
-        """Return the finished turn after ``response.completed``."""
+        """Return the finished turn after the response ended."""
         self.parts.content = "".join(self._content) or None
         self.parts.reasoning = "".join(self._reasoning) or None
         return self.parts
@@ -583,11 +616,7 @@ def parse_response(
     """
     if response.error:
         raise _response_error(response.error.code, response.error.message, provider=wire.provider_name)
-    parts = ResponsesTurnParts(
-        provider_data={"response_id": response.id} if response.id else {},
-        status=response.status,
-        incomplete_reason=response.incomplete_details.reason if response.incomplete_details is not None else None,
-    )
+    parts = ResponsesTurnParts(provider_data={"response_id": response.id} if response.id else {})
     # The SDK's output union does not narrow on ``type``.
     for output in cast("list[Any]", response.output):
         if output.type == "message":
@@ -604,18 +633,16 @@ def parse_response(
         elif output.type == "reasoning" and store is False:
             parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
     parts.reasoning = _reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
-    if response.usage is not None:
-        parts.usage = _usage(response.usage)
     parts.provider_data[_STORED_KEY] = store is not False
     parts.provider_data["response_status"] = response.status
-    parts.provider_data["incomplete_reason"] = parts.incomplete_reason
+    parts.provider_data["incomplete_reason"] = _incomplete_reason(response)
     _record_tool_search_items(parts, response.output)
-    if response.status == "completed":
-        _record_completed_output(
-            parts,
-            [item.model_dump(mode="json", exclude_none=True) for item in response.output],
-            store=store,
-            portable_replay=portable_replay,
-            native_compaction=native_compaction,
-        )
+    _read_ended_response(
+        parts,
+        response,
+        [item.model_dump(mode="json", exclude_none=True) for item in response.output],
+        store=store,
+        portable_replay=portable_replay,
+        native_compaction=native_compaction,
+    )
     return parts

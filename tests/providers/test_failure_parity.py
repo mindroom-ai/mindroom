@@ -1257,6 +1257,70 @@ async def test_a_failed_request_is_retried_and_reported_as_the_parity_table_says
         assert raised.value.code == row.code
 
 
+# --- A response the provider ended incomplete --------------------------------------------------------------------
+
+
+def _incomplete_response(reason: str) -> dict[str, Any]:
+    output = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "incomplete",
+            "content": [{"type": "output_text", "text": _PARTIAL, "annotations": []}],
+        },
+    ]
+    usage = {"input_tokens": 40, "output_tokens": 9, "total_tokens": 49}
+    return {
+        **_RESPONSE,
+        "status": "incomplete",
+        "incomplete_details": {"reason": reason},
+        "output": output,
+        "usage": usage,
+    }
+
+
+def _incomplete(reason: str, *, stream: bool) -> Reply:
+    if not stream:
+        return _json(200, _incomplete_response(reason))
+    ended = {"type": "response.incomplete", "sequence_number": 2, "response": _incomplete_response(reason)}
+    return _responses_stream(_response_text(_PARTIAL), ended)
+
+
+# A response that ended incomplete ends the turn with its stop reason after one request, streamed or blocking, as a
+# blocking one did on the Agno-backed runtime; that runtime failed a streamed one as an incomplete stream instead.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "stop_reason"),
+    [("max_output_tokens", "output_limit"), ("content_filter", "content_filter")],
+)
+@pytest.mark.parametrize(
+    ("route", "stream"),
+    [("openai_responses", True), ("openai_responses", False), ("codex", True)],
+)
+async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reason_in_either_mode(
+    route: str,
+    stream: bool,
+    reason: str,
+    stop_reason: str,
+    tmp_path: Path,
+) -> None:
+    """The output limit and the content filter end a streamed and a blocking reply the same way, without a retry."""
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        answer = _incomplete(reason, stream=stream)()
+        assert isinstance(answer, httpx.Response)
+        return answer
+
+    provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+
+    turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=stream))
+
+    assert (turn.content, turn.stop_reason, turn.usage.output_tokens, len(sent)) == (_PARTIAL, stop_reason, 9, 1)
+
+
 # --- CLI login refresh --------------------------------------------------------------------------------------------
 
 
