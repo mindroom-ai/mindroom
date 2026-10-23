@@ -241,7 +241,7 @@ def test_a_provider_without_a_key_check_is_not_probed_even_at_a_custom_endpoint(
 
     monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
 
-    assert _validate_provider_key(provider, "k", base_url) == (None, "unknown provider")
+    assert _validate_provider_key(provider, "k", base_url) == (None, "no key check for this provider")
 
 
 def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

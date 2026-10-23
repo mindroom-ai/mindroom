@@ -300,7 +300,7 @@ def _validate_provider_key(
     """
     check = PROVIDER_KEY_CHECKS.get(provider_route(provider))
     if check is None:
-        return None, "unknown provider"
+        return None, "no key check for this provider"
     url, headers = check.request(api_key, url=base_url.rstrip("/") + "/models" if base_url else None)
     return _http_check(url, headers)
 
