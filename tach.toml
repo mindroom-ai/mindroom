@@ -5186,7 +5186,7 @@ depends_on = [
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.toolkit_connections",
     "mindroom.tool_system.worker_routing",
-    "mindroom.tool_system.legacy_tool_overrides",
+    "mindroom.config.legacy_fields",
     "mindroom.egress_broker",
 ]
 
@@ -9037,10 +9037,6 @@ from = ["mindroom.agent_cli.cli_approval_waits"]
 expose = [
     "CliApprovalWaits",
 ]
-
-[[modules]]
-path = "mindroom.tool_system.legacy_tool_overrides"
-depends_on = []
 
 [[modules]]
 path = "mindroom.config.skill_learning"

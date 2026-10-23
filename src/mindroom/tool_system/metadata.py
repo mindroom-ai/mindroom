@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import mindroom.tool_system.plugin_imports as plugin_module
+from mindroom.config.legacy_fields import retired_tool_override
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.egress_broker.env import egress_tool_unavailable
@@ -36,7 +37,6 @@ from mindroom.tool_system.dependencies import (
     optional_dependency_environment,
 )
 from mindroom.tool_system.filters import tool_name_allowed
-from mindroom.tool_system.legacy_tool_overrides import retired_tool_override
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
     BUILTIN_TOOL_REGISTRY,
@@ -327,7 +327,7 @@ def _validate_authored_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    retired = retired_tool_override(overrides)
+    retired = retired_tool_override(tool_name, overrides)
     if retired is not None:
         field_name, guidance = retired
         path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
