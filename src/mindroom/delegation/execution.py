@@ -678,7 +678,7 @@ async def _background_child_outcome(
     )
     # Settlement stays inside this claim, so recovery cannot take a child that failed before its terminal state.
     async with subagent_liveness(child, runtime_paths):
-        primary_error: Exception | None = None
+        primary_error: str | None = None
         try:
             outcome = await run(config=config, decisions=None, denial_reasons=None, approval_calls=(), fresh=True)
             while outcome.response.status == RunStatus.paused:
@@ -704,13 +704,14 @@ async def _background_child_outcome(
             await interrupt_stopped_child(child, config=config, runtime_paths=runtime_paths)
             raise
         except Exception as error:
-            primary_error = error
+            # What the failed child hands its caller, credentials redacted, however its cleanup ends.
+            primary_error = redact_sensitive_text(str(error))
             try:
                 await interrupt_child(
                     child,
                     config=config,
                     runtime_paths=runtime_paths,
-                    reason=redact_sensitive_text(str(error)),
+                    reason=primary_error,
                     status="failed",
                 )
             except Exception as cleanup_error:
@@ -722,7 +723,8 @@ async def _background_child_outcome(
                 )
                 return finished(
                     "failed",
-                    f"{error}\n\nDelegation cleanup did not complete; recovery may still be required: {cleanup_error}",
+                    f"{primary_error}\n\nDelegation cleanup did not complete; recovery may still be required: "
+                    f"{redact_sensitive_text(str(cleanup_error))}",
                 )
         try:
             receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
@@ -738,7 +740,8 @@ async def _background_child_outcome(
             return finished(
                 "failed",
                 f"{primary_error}\n\n"
-                f"Delegation settlement did not complete; recovery may still be required: {settlement_error}",
+                "Delegation settlement did not complete; recovery may still be required: "
+                f"{redact_sensitive_text(str(settlement_error))}",
             )
         status = child.status
         assert status != "running"

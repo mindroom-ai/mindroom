@@ -12,7 +12,8 @@ from agno.utils.string import url_safe_string
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunRequirement, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import PausedAttempt
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
@@ -146,6 +147,32 @@ def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> N
     assert format_team_response(TeamRunRecord(run_id="team-run", content="Five in all."), [scout]) == (
         "**Scout**: Three vendors.\n\nTwo more.\n\n\n**Team Consensus**:\n\nFive in all."
     )
+
+
+_RAW_FAILURE = "checker provider down: api_key=example-secret"
+
+
+@pytest.mark.parametrize("source", ["live", "loaded"])
+def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: str) -> None:
+    """A member whose run failed shows why, credentials redacted, whether its record is live or loaded from storage.
+
+    The live record carries the reason the loop recorded, though its model wrote text first; a loaded one holds only
+    Agno's stored content, the raw error, since the model wrote nothing.
+    """
+    reason = redact_sensitive_text(_RAW_FAILURE)
+    checker = RunRecord(
+        run_id="checker-run",
+        agent_id="checker",
+        agent_name="Checker",
+        status=RunStatus.error,
+        content="I will check." if source == "live" else _RAW_FAILURE,
+        error=reason if source == "live" else None,
+    )
+
+    document = format_team_response(TeamRunRecord(run_id="team-run", content="Unchecked."), [checker])
+
+    assert document == f"**Checker**: {reason}\n\n\n**Team Consensus**:\n\nUnchecked."
+    assert "example-secret" not in document
 
 
 def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_snapshot() -> None:

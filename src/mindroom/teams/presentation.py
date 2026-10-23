@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
-from mindroom.delegation.state import member_slot_id
+from mindroom.delegation.state import handover_content, member_slot_id
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import MODEL_PROVENANCE_KEY
 from mindroom.matrix.message_builder import opens_with_markdown_block
@@ -118,13 +118,15 @@ def render_team_member_slots(
 
 
 def finished_run_text(record: AnyRunRecord) -> str:
-    """Return a finished run's text: its content, or else the text its own model requests wrote.
+    """Return a finished run's text: what it shows (``handover_content``), or else the text its own requests wrote.
 
-    A run's input can carry the entity's earlier replies in the thread as assistant messages; only the messages a
-    model answered carry its provenance, so a run without content never shows an earlier turn's answer.
+    A failed run shows why it failed, credentials redacted. A run's input can carry the entity's earlier replies in
+    the thread as assistant messages; only the messages a model answered carry its provenance, so a run without
+    content never shows an earlier turn's answer.
     """
-    if record.content:
-        return str(record.content)
+    content = handover_content(record)
+    if content:
+        return str(content)
     return "\n\n".join(
         str(message.content)
         for message in record.messages

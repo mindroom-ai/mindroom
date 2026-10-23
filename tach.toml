@@ -7674,7 +7674,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.delegation.state"
-depends_on = []
+depends_on = ["mindroom.llm", "mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.delegation.hooks"
@@ -7930,6 +7930,7 @@ depends_on = [
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.sessions",
     "mindroom.logging_config",
+    "mindroom.redaction",
     "mindroom.response_turn",
 ]
 
