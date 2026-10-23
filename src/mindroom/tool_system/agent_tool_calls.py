@@ -424,8 +424,7 @@ async def _execute_agent_tool_call(
         if requirement is not None:
             _check_resolves(requirement, binding, call_id, arguments)
             if not requirement.confirmation:
-                assert requirement.confirmation_note is not None, "a denial records its note"
-                yield _failure(binding, call_id, arguments, requirement.confirmation_note)
+                yield _failure(binding, call_id, arguments, requirement.denial_note)
                 return
         try:
             validate_tool_arguments(dict(binding.function.parameters), arguments)

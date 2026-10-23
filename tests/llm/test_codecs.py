@@ -307,6 +307,29 @@ def test_run_requirement_denied_without_a_reason_tells_the_model_it_was_not_appr
     assert owned.to_dict() == expected_requirement_dict(agno("run_requirement_decided")["reject_with_note"])
 
 
+@pytest.mark.parametrize(
+    ("reason", "note"),
+    [("Alice declined it.", "Alice declined it."), (None, "Not approved by requester")],
+)
+def test_a_denied_requirement_gives_the_note_the_model_is_told(reason: str | None, note: str) -> None:
+    """A reader of a recorded denial gets its note as a string, whether or not the requester gave a reason."""
+    owned = RunRequirement.from_dict(agno("run_requirement"))
+    owned.reject(reason)
+
+    assert owned.denial_note == note
+
+
+@pytest.mark.parametrize("decision", ["pending", "confirmed"])
+def test_a_requirement_that_was_not_denied_has_no_denial_note(decision: str) -> None:
+    """Reading a denial's note from a call nobody denied is a mistake, not an empty note."""
+    owned = RunRequirement.from_dict(agno("run_requirement"))
+    if decision == "confirmed":
+        owned.confirm()
+
+    with pytest.raises(ValueError, match="not a recorded denial"):
+        _ = owned.denial_note
+
+
 def test_run_requirement_external_result_matches_agno() -> None:
     owned = RunRequirement.from_dict(agno("run_requirement_external"))
     assert owned.needs_external_execution is True

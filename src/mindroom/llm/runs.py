@@ -141,6 +141,14 @@ class RunRequirement:
         """Whether nothing is outstanding."""
         return not self.needs_confirmation and not self.needs_external_execution
 
+    @property
+    def denial_note(self) -> str:
+        """The note a denied call answers the model with, which ``reject`` always records."""
+        if self.confirmation is not False or self.confirmation_note is None:
+            msg = "This requirement is not a recorded denial"
+            raise ValueError(msg)
+        return self.confirmation_note
+
     def confirm(self) -> None:
         """Approve the call; both this requirement and its tool execution record the decision."""
         if not self.needs_confirmation:
