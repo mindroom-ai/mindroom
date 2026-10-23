@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import MediaKind, ModelIdentity, ModelProvider, ModelRequest, StreamEvent
+    from mindroom.llm.provider import MediaKind, ModelProvider, ModelRequest, StreamEvent
 
 __all__ = ["FALLBACK_MARKER", "media_fallback_stream"]
 
@@ -59,10 +59,6 @@ class _Route:
 
 # Learned limits live for the process only; a provider may add a capability at any time.
 _LEARNED_UNSUPPORTED: dict[_Route, set[MediaKind]] = {}
-
-
-def _route(identity: ModelIdentity) -> _Route:
-    return _Route(provider=identity.provider.lower(), model_id=identity.id, endpoint=identity.endpoint)
 
 
 def _media_kinds(messages: Sequence[Message]) -> frozenset[MediaKind]:
@@ -125,10 +121,6 @@ def _without_media(messages: Sequence[Message], removed: frozenset[MediaKind], f
     return stripped
 
 
-def _media_may_have_caused(error: ProviderError) -> bool:
-    return not error.retryable and error.code not in _NOT_MEDIA_RELATED_CODES
-
-
 def _names_capability_gap(error: ProviderError, kinds: frozenset[MediaKind]) -> bool:
     """Return whether a media-free success isolates one kind the provider says the model lacks."""
     if len(kinds) != 1 or isinstance(error, ContextWindowExceeded):
@@ -153,7 +145,7 @@ async def media_fallback_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with unsupported media replaced, retrying once media-free after a rejection."""
     identity = inner.identity
-    route = _route(identity)
+    route = _Route(provider=identity.provider.lower(), model_id=identity.id, endpoint=identity.endpoint)
     present = _media_kinds(request.messages)
     known = (frozenset(_LEARNED_UNSUPPORTED.get(route, ())) | inner.capabilities.omitted_media) & present
     remaining = present - known
@@ -161,7 +153,7 @@ async def media_fallback_stream(
 
     def without_remaining_media(error: ProviderError) -> Retry | None:
         nonlocal failure
-        if failure is not None or not remaining or not _media_may_have_caused(error):
+        if failure is not None or not remaining or error.retryable or error.code in _NOT_MEDIA_RELATED_CODES:
             return None
         failure = error
         logger.warning(
