@@ -102,7 +102,7 @@ def team_history_settings(config: Config, team_name: str | None) -> ResolvedHist
 
 
 def register_team_notice_storage(*, scope_context: ScopeSessionContext | None, entity_name: str) -> None:
-    """Register the scope's team storage for response-boundary notice finalization; a team without one has none."""
+    """Register the scope's storage for response-boundary notice finalization; a team without a bound scope has none."""
     if scope_context is None:
         return
     ai_runtime.register_queued_notice_storage(
