@@ -71,7 +71,7 @@ class _ResumedRequests:
 
     async def send(self, messages: list[Message] | None = None) -> list[Message]:
         request = messages if messages is not None else _resumed_messages()
-        await self._hook(request)
+        await self._hook(request, ())
         self.sent.append(request)
         return request
 

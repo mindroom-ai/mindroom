@@ -23,7 +23,6 @@ from mindroom.agent_loop.run import (
     drive_run,
     plan_resume,
     prepare_resume_tools,
-    resume_entry,
     resume_planned,
     resumed_record,
     run_agent,
@@ -177,7 +176,7 @@ def continue_team(
         leader = _leader_spec(spec, record, members.run, stream=stream)
         prepared = prepare_run_tools(leader)
 
-        async def entry() -> AsyncIterator[RunEvent]:
+        async def entry() -> None:
             results: list[str] = []
             for plan in plans:
                 resumed = await members.resume(plan.member, plan.paused, plan.plan)
@@ -188,8 +187,6 @@ def continue_team(
                     results.append(MEMBER_RESULT_LINE.format(name=plan.member.spec.name, content=content))
             if plans and not any(not r.is_resolved() for r in record.requirements or ()):
                 _answer_delegations(record, messages, results)
-            async for event in resume_entry(messages, prepared, ctx, hooks, decided):
-                yield event
 
         await _forward(
             drive_run(
@@ -202,6 +199,7 @@ def continue_team(
                 persist=persist,
                 template=request_template,
                 entry=entry,
+                resumed=decided,
                 pause_content=team_paused_content,
             ),
             emit,

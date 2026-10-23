@@ -123,15 +123,15 @@ async def test_approved_batch_notifies_next_real_model_request(*, stream: bool) 
 
 @pytest.mark.parametrize(
     "boundary",
-    ["resolved", "system", "developer", "unresolved", "stop", "newer-input", "no-queue"],
+    ["resolved", "system", "developer", "unresolved", "newer-input", "no-queue"],
 )
 @pytest.mark.asyncio
 async def test_resume_entry_only_notifies_a_resolved_current_batch(boundary: str) -> None:
-    """Resume entry must not split a batch, override stop-after, or revisit history."""
+    """Resume entry must not split a batch or revisit history; a batch that stops the run never reaches it."""
     messages = [
         Message(role="user", content="Read both items."),
         Message(role="assistant", tool_calls=_tool_calls()),
-        Message(role="tool", tool_call_id="call-1", content="Result 1", stop_after_tool_call=boundary == "stop"),
+        Message(role="tool", tool_call_id="call-1", content="Result 1"),
     ]
     if boundary != "unresolved":
         messages.append(Message(role="tool", tool_call_id="call-2", content="Result 2"))
@@ -141,7 +141,7 @@ async def test_resume_entry_only_notifies_a_resolved_current_batch(boundary: str
         messages.append(Message(role="user", content="A different request."))
 
     with queued_message_signal_context(_QueuedState(pending=boundary != "no-queue")):
-        await queued_notice_on_resume_entry(_NOTICE)(messages)
+        await queued_notice_on_resume_entry(_NOTICE)(messages, messages[-1:])
 
     notices = [message for message in messages if message.content == _NOTICE]
     assert len(notices) == (1 if boundary in {"resolved", "system", "developer"} else 0)

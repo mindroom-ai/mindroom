@@ -756,8 +756,9 @@ async def test_a_denial_without_a_note_answers_with_agno_s_default_text() -> Non
 async def test_resume_entry_hooks_run_after_the_decided_results_and_the_loop_continues_the_record() -> None:
     seen: list[list[str]] = []
 
-    async def entry(messages: list[Message]) -> None:
+    async def entry(messages: list[Message], results: Sequence[Message]) -> None:
         seen.append([message.role for message in messages])
+        assert [result.tool_call_id for result in results] == ["c1"]
 
     paused = _paused_record(_gated_add())
     paused.content = "Checking first."
@@ -778,6 +779,77 @@ async def test_resume_entry_hooks_run_after_the_decided_results_and_the_loop_con
     assert [event.tool.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1", "c2"]
     assert record.metrics is not None
     assert record.metrics.total_tokens == 6
+
+
+def switch_thread_model(model_name: str) -> str:
+    """Switch the thread's model for the rest of this response.
+
+    Args:
+        model_name: The configured model to switch to.
+
+    """
+    return f"switched to {model_name}"
+
+
+@pytest.mark.parametrize("stopping", ["approved", "before-pause"])
+@pytest.mark.asyncio
+async def test_a_resumed_batch_whose_result_stops_the_run_ends_it_without_another_request(stopping: str) -> None:
+    """An approved model switch for the current response ends the resume, as it ends a fresh batch.
+
+    The old model gets no request and the resume hooks see nothing, so the caller continues with the new model. A
+    result the batch produced before it paused stops the run the same way once its paused call is answered.
+    """
+    seen: list[str] = []
+
+    async def entry(*_hook_arguments: object) -> None:
+        seen.append("resume hook")
+
+    switch = toolkit(switch_thread_model, name="thread_model", stop_after_tool_call=True)
+    switch_call = tool_call("switch_thread_model", "c-switch", model_name="opus")
+    if stopping == "approved":
+        tools = replace(switch, functions=tuple(replace(f, requires_confirmation=True) for f in switch.functions))
+        waiting = ToolExecution(
+            tool_call_id="c-switch",
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "opus"},
+            requires_confirmation=True,
+            approval_type="mindroom_policy",
+        )
+        paused = _paused_record(waiting)
+        paused.messages[1] = Message(role="assistant", tool_calls=[switch_call])
+        approved = [_approval("c-switch", "switch_thread_model", {"model_name": "opus"})]
+        agent = spec(ScriptedModel([answer("The old model answers.")]), tools)
+    else:
+        switched = ToolExecution(
+            tool_call_id="c-switch",
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "opus"},
+            result="switched to opus",
+            stop_after_tool_call=True,
+        )
+        paused = _paused_record(switched, _gated_add())
+        paused.messages[1] = Message(role="assistant", tool_calls=[switch_call, tool_call("add", "c1", a=1, b=2)])
+        paused.messages.append(
+            Message(
+                role="tool",
+                content="switched to opus",
+                tool_call_id="c-switch",
+                tool_name="switch_thread_model",
+                stop_after_tool_call=True,
+            ),
+        )
+        approved = [_approval("c1", "add", {"a": 1, "b": 2})]
+        agent = spec(ScriptedModel([answer("The old model answers.")]), switch, gated(add))
+
+    _, record, store = await _resume(agent, paused, approved=approved, hooks=LoopHooks(on_resume_entry=(entry,)))
+
+    assert isinstance(agent.model, ScriptedModel)
+    assert agent.model.requests == []
+    assert seen == []
+    assert record.status is RunStatus.completed
+    assert [saved["status"] for saved in store.saved] == ["COMPLETED"]
+    assert record.tools is not None
+    assert all(tool.result is not None for tool in record.tools)
 
 
 # --- toolkit connections ---------------------------------------------------------------------------------------------

@@ -21,7 +21,7 @@ from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
 from mindroom.teams.runtime import MemberEvent, continue_team, run_team
 from mindroom.teams.spec import TeamMode
-from tests.agent_loop.helpers import echo, external, gated
+from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.team_runtime.squad import (
     PROVIDER,
@@ -343,6 +343,39 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
     ]
     assert store.members == []
     assert leader.requests[-1].messages[-1].content == "hello"
+
+
+async def test_a_leader_level_approval_whose_call_stops_the_run_sends_the_leader_no_request() -> None:
+    """An approved leader call that stops the run, such as a model switch, ends the team resume as a fresh batch does."""
+    leader = scripted("leader-model", calls(tool_call("echo", "call-echo", text="hello"), metrics=usage(10, 2)))
+    stopping = toolkit(
+        echo,
+        name="job_controls",
+        requires_confirmation=True,
+        approval_type="mindroom_policy",
+        stop_after_tool_call=True,
+    )
+    team = squad(leader, scripted("writer-model"), scripted("checker-model"), leader_toolkits=(stopping,))
+    _, paused = await collect(
+        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    assert paused.status is RunStatus.paused
+
+    _, record = await collect(
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={(None, "call-echo"): approval("call-echo", "echo", {"text": "hello"}, agent="squad")},
+            ctx=run_context("r", SQUAD),
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    assert record.tools is not None
+    assert (record.tools[0].result, record.tools[0].stop_after_tool_call) == ("hello", True)
+    # Only the request that asked for the call; the resume sends none.
+    assert len(leader.requests) == 1
 
 
 async def test_an_external_result_resumes_the_member_that_waits_for_it() -> None:

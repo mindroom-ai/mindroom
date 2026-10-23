@@ -6,8 +6,8 @@ through ``RunFinished``, ``CANCELLED`` or ``ERROR`` through the exception that e
 handed to the persist callback once, before the run yields or raises its ending, so a caller that writes its own
 record for the same run afterwards always writes last.
 
-``drive_run``, ``resumed_record``, ``decide_requirements``, and ``resume_entry`` are the pieces an agent run and a
-resume are made of; the team runtime drives a team leader's record through the same pieces.
+``drive_run``, ``resumed_record``, and ``decide_requirements`` are the pieces an agent run and a resume are made of;
+the team runtime drives a team leader's record through the same pieces.
 """
 
 from __future__ import annotations
@@ -16,21 +16,12 @@ import asyncio
 import time
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
-from mindroom.agent_loop.model_loop import (
-    EMPTY_REQUEST,
-    NO_HOOKS,
-    LoopEnded,
-    LoopHooks,
-    append_tool_results,
-    run_model_loop,
-)
-from mindroom.agent_loop.tools import PlannedCall, dispatch_tool_calls, prepare_run_tools, tool_result_message
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
+from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
-from mindroom.llm.messages import Message
+from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
@@ -44,9 +35,10 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.agent_loop.tools import PreparedTools
     from mindroom.llm.events import RunEvent
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import AnyRunRecord, RunRequirement, ToolExecution
-    from mindroom.tool_system.tool_function import ToolFunction, ToolkitClose
+    from mindroom.tool_system.tool_function import ToolkitClose
 
 logger = get_logger(__name__)
 
@@ -54,7 +46,6 @@ logger = get_logger(__name__)
 REJECTED_TEXT = "Function call was rejected by the user"
 
 type Persist[R] = Callable[[R], Awaitable[None]]
-type _Entry = Callable[[], AsyncIterator[RunEvent]]
 
 
 class ApprovedCall(Protocol):
@@ -198,7 +189,7 @@ def resume_planned(
         hooks=hooks,
         persist=persist,
         template=request_template,
-        entry=partial(resume_entry, messages, plan.prepared, ctx, hooks, plan.decided),
+        resumed=plan.decided,
     )
 
 
@@ -210,71 +201,6 @@ def prepare_resume_tools(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> P
             msg = f"Approved tool {call.tool_name!r} is no longer offered to agent {spec.id!r}"
             raise ValueError(msg)
     return prepared
-
-
-async def resume_entry(
-    messages: list[Message],
-    prepared: PreparedTools,
-    ctx: RunContext,
-    hooks: LoopHooks,
-    decided: Sequence[RunRequirement],
-) -> AsyncIterator[RunEvent]:
-    """Answer the requirements this resume decided, in order, append the answers, and run the resume-entry hooks.
-
-    A run that paused more than once also carries the requirements earlier resumes answered; those keep their
-    answers and never run again.
-    """
-    results: list[Message] = []
-    for requirement in decided:
-        execution = requirement.tool_execution
-        if requirement.confirmation is True:
-            assert execution.tool_name is not None
-            async for event in _run_approved(prepared.functions[execution.tool_name], execution, ctx, hooks, results):
-                yield event
-        elif requirement.confirmation is False:
-            execution.tool_call_error = True
-            execution.requires_confirmation = False
-            results.append(_rejection_message(execution))
-        if requirement.external_execution_result is not None:
-            results.append(tool_result_message(execution))
-            execution.external_execution_required = False
-    await append_tool_results(messages, results, ())
-    for hook in hooks.on_resume_entry:
-        await hook(messages)
-
-
-def _rejection_message(execution: ToolExecution) -> Message:
-    """Return the tool message that answers a denied call with the stored note, as Agno's ``reject_tool_call`` did."""
-    return Message(
-        role="tool",
-        content=execution.confirmation_note,
-        tool_call_id=execution.tool_call_id,
-        tool_name=execution.tool_name,
-        tool_args=execution.tool_args,
-        tool_call_error=True,
-        stop_after_tool_call=execution.stop_after_tool_call,
-    )
-
-
-async def _run_approved(
-    function: ToolFunction,
-    execution: ToolExecution,
-    ctx: RunContext,
-    hooks: LoopHooks,
-    results: list[Message],
-) -> AsyncIterator[RunEvent]:
-    assert execution.tool_call_id is not None
-    # The decision has been taken: the entry no longer waits, so the dispatcher runs it.
-    execution.requires_confirmation = False
-    planned = PlannedCall(
-        call_id=execution.tool_call_id,
-        function=function,
-        arguments=execution.tool_args,
-        execution=execution,
-    )
-    yield ToolStarted(execution)
-    results.extend(await dispatch_tool_calls([planned], run=ctx, middleware=hooks.tool_middleware))
-    yield ToolCompleted(execution)
 
 
 def resumed_record[R: AnyRunRecord](paused: R) -> R:
@@ -368,12 +294,15 @@ async def drive_run[R: AnyRunRecord](
     hooks: LoopHooks,
     persist: Persist[R] | None,
     template: ModelRequest,
-    entry: _Entry | None = None,
+    entry: Callable[[], Awaitable[None]] | None = None,
+    resumed: Sequence[RunRequirement] | None = None,
     pause_content: Callable[[R], str] = _agent_paused_content,
 ) -> AsyncIterator[RunEvent]:
     """Run ``entry`` and then the loop over ``messages``, ending the record exactly once however the run ends.
 
-    ``spec`` supplies the model and the tool-call limit; ``record`` is the agent or team run the loop fills. A run
+    ``spec`` supplies the model and the tool-call limit; ``record`` is the agent or team run the loop fills;
+    ``entry`` is work the run does before the loop (a team resume's paused members), and ``resumed`` holds a
+    resume's decided requirements, which the loop answers before its first request. A run
     that ends paused without text of its own gets ``pause_content(record)`` as its content. The spec's toolkits that
     hold a connection for one run are connected before ``entry`` and closed after the run reports its end, as Agno's
     agent closed them after its completed event, once the consumer reads past ``RunFinished`` or closes the stream;
@@ -385,10 +314,7 @@ async def drive_run[R: AnyRunRecord](
     try:
         await connect_toolkits(spec.toolkits, closes)
         if entry is not None:
-            entry_events = entry()
-            async with closing_async_stream(entry_events):
-                async for event in entry_events:
-                    yield event
+            await entry()
         loop = run_model_loop(
             spec.model,
             messages,
@@ -398,6 +324,7 @@ async def drive_run[R: AnyRunRecord](
             hooks=hooks,
             tool_call_limit=spec.tool_call_limit,
             request_template=template,
+            resumed=resumed,
         )
         async with closing_async_stream(loop):
             async for event in loop:
@@ -496,7 +423,6 @@ __all__ = [
     "plan_resume",
     "prepare_resume_tools",
     "resume_agent",
-    "resume_entry",
     "resume_planned",
     "resumed_record",
     "run_agent",

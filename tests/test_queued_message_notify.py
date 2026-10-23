@@ -3064,8 +3064,11 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call() -> None:
-    """The injected notice should stay unique, remain last, avoid double wrapping, and skip stop-after-tool-call results."""
+async def test_notice_hook_keeps_single_notice_at_end() -> None:
+    """The injected notice should stay unique, remain last, and avoid double wrapping.
+
+    A batch whose result stops the run reaches no batch hook; the loop owns that rule.
+    """
     plain_messages = [OwnedMessage(role="user", content="hello")]
     await _after_batch(plain_messages, OwnedMessage(role="tool", content="result"))
     assert _notice_count(plain_messages) == 0
@@ -3074,9 +3077,6 @@ async def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_
         queued_messages = [OwnedMessage(role="user", content="hello")]
         await _after_batch(queued_messages, OwnedMessage(role="tool", content="result"))
         await _after_batch(queued_messages, OwnedMessage(role="tool", content="another result"))
-
-        stop_after_messages = [OwnedMessage(role="user", content="hello")]
-        await _after_batch(stop_after_messages, OwnedMessage(role="tool", content="done", stop_after_tool_call=True))
 
     with queued_message_signal_context(_StaticQueuedState(pending=True)) as next_notice_context:
         next_turn_messages = [OwnedMessage(role="user", content="hello")]
@@ -3091,7 +3091,6 @@ async def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_
     assert _notice_count(next_turn_messages) == 1
     assert next_turn_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
     assert next_notice_context.response_turn_id != notice_context.response_turn_id
-    assert _notice_count(stop_after_messages) == 0
 
 
 def test_default_queued_notice_requires_pause_handoff() -> None:
@@ -3185,11 +3184,8 @@ async def test_queued_notice_logs_once_per_response_turn() -> None:
         },
     ]
 
-    with capture_logs() as no_injection_logs:
-        with queued_message_signal_context(_StaticQueuedState(pending=False)):
-            await _after_batch([], OwnedMessage(role="tool", content="result"))
-        with queued_message_signal_context(_StaticQueuedState(pending=True)):
-            await _after_batch([], OwnedMessage(role="tool", content="done", stop_after_tool_call=True))
+    with capture_logs() as no_injection_logs, queued_message_signal_context(_StaticQueuedState(pending=False)):
+        await _after_batch([], OwnedMessage(role="tool", content="result"))
 
     assert not any(entry.get("event") == "queued_message_notice_injected" for entry in no_injection_logs)
 
