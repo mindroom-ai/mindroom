@@ -12,6 +12,7 @@ from mindroom.agent_loop.run import run_agent
 from mindroom.ai import stream_agent_response
 from mindroom.approval import receipt as approval_receipt
 from mindroom.approval.receipt import (
+    add_approval_receipt_reader,
     approval_receipt_context,
     approval_receipt_hook,
     build_approval_receipt,
@@ -24,6 +25,7 @@ from mindroom.event_journal import ApprovalCall, ApprovalDecision
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
+from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
@@ -43,6 +45,7 @@ from tests.delegation_helpers import (
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import streamed_text
+from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -479,6 +482,43 @@ async def test_a_fresh_turn_the_receipt_names_sends_it_once_across_its_delegatio
     # The first request, then one continuation after each delegation.
     assert _receipt_flags(leader) == [True, False, False]
     assert _receipt_flags(code) == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_a_background_job_an_approval_continuation_starts_never_reads_its_receipt(tmp_path: Path) -> None:
+    """A run in the job, named a reader as the resume of the job's own approvals names it, reads no outer receipt."""
+    runtime = await tool_job_runtime(tmp_path)
+    model = ScriptedModel([answer("done")])
+
+    async def operation() -> BackgroundOutcome:
+        add_approval_receipt_reader("job-run")
+        _, record = await collect(
+            run_agent(
+                spec(model),
+                [Message(role="user", content="Go")],
+                ctx=context(run_id="job-run"),
+                hooks=LoopHooks(before_request=(approval_receipt_hook(Capabilities()),)),
+            ),
+        )
+        return BackgroundOutcome("completed", str(record.content))
+
+    try:
+        with approval_receipt_context("Trusted approval receipt.", run_id="turn-run"):
+            job = await start_job(
+                runtime,
+                "job-1",
+                tool_name="run_subagent",
+                depth=0,
+                adapter={},
+                owner=job_owner(),
+                operation=operation,
+            )
+        waited = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
+    finally:
+        await runtime.shutdown()
+
+    assert waited.job.result == "done"
+    assert _receipt_flags(model) == [False]
 
 
 @pytest.mark.asyncio

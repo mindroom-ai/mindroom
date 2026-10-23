@@ -22,7 +22,7 @@ from mindroom.delegation.audit import observe_child_event as record_child_event
 from mindroom.delegation.personas import caller_toolkit_names, self_only_refusal
 from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
-from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.state import DelegationChild, handover_content
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.llm.events import ContentDelta, RunFinished, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -180,7 +180,7 @@ async def settle_child_response(
 ) -> None:
     """Derive operational state from one exact run, then publish its audit view.
 
-    A failed run's result is its redacted ``error`` when it ran in this process, else its stored content.
+    A failed run's result is its ``handover_content``.
     """
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
@@ -193,7 +193,7 @@ async def settle_child_response(
         child.result = str(response.content or "Delegation cancelled.")
     elif response.status in {RunStatus.error, RunStatus.regenerated}:
         child.status = "failed"
-        child.result = response.error or str(response.content or response.status)
+        child.result = str(handover_content(response) or response.status)
     else:
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None

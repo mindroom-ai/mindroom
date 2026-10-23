@@ -22,7 +22,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
-from mindroom.delegation.state import pending_call_slot
+from mindroom.delegation.state import member_slot_id, pending_call_slot
 from mindroom.delivery_gateway import DeliveryStage
 from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
@@ -98,19 +98,6 @@ def _team_config_names_by_provider_id(state: dict[str, object]) -> dict[str, str
     return config_names_by_provider_id
 
 
-def _resolve_team_member_identity(member_id: str, config_names_by_provider_id: dict[str, str]) -> tuple[str, str]:
-    """Resolve an exact requirement identity to its frozen presentation ID and config name."""
-    matches = [
-        (provider_id, config_name)
-        for provider_id, config_name in config_names_by_provider_id.items()
-        if member_id in (provider_id, config_name)
-    ]
-    if len(matches) != 1:
-        msg = "Paused approval tool has no unique frozen member config identity"
-        raise RuntimeError(msg)
-    return matches[0]
-
-
 def identify_approval_tools(
     paused: PausedAttempt,
     *,
@@ -119,10 +106,9 @@ def identify_approval_tools(
     """Resolve exact paused call IDs, names, and invoking member ownership."""
     config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
     owners = {
-        requirement.tool_execution.tool_call_id: _resolve_team_member_identity(
-            requirement.member_agent_id,
-            config_names_by_provider_id,
-        )[1]
+        requirement.tool_execution.tool_call_id: config_names_by_provider_id[
+            member_slot_id(config_names_by_provider_id, requirement.member_agent_id)
+        ]
         for requirement in paused.requirements
         if requirement.tool_execution is not None and requirement.member_agent_id
     }
@@ -178,7 +164,7 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
             msg = "Approval suspension requires an ordered presentation for every pending tool"
             raise RuntimeError(msg)
         if member_id is not None:
-            member_id, _ = _resolve_team_member_identity(member_id, config_names_by_provider_id)
+            member_id = member_slot_id(config_names_by_provider_id, member_id)
         expected_scope = f"agent:{member_id}" if member_id is not None else ("team" if is_team_presentation else None)
         # Call ids are unique only within one member's run, so another member's call may share the anchor's id.
         if sum(entry.scope_key == expected_scope for entry in matches) != 1:

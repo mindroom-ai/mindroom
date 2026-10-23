@@ -554,6 +554,9 @@ class ToolJobRuntime:
                 await self._publish(entry, _updated(entry.job, status=status))
 
     async def _run(self, entry: _Entry, operation: _Operation) -> None:
+        # approval.receipt imports the model loop, whose tool dispatch imports this module.
+        from mindroom.approval.receipt import without_approval_receipt  # noqa: PLC0415
+
         outcome = None
         returned = False
         loop = asyncio.get_running_loop()
@@ -571,6 +574,9 @@ class ToolJobRuntime:
                 with (
                     # A newer human message releases replies, never the background work they wait for.
                     pending_human_messages_context(None),
+                    # The job is not part of an approval continuation that starts it: a run the job resumes with
+                    # approvals of its own never reads that continuation's receipt.
+                    without_approval_receipt(),
                     tool_progress_reporter(report_progress),
                     # The reply span that started the job may end first; the job owns its calls' outcome.
                     without_tool_call_recording(),

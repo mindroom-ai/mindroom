@@ -15,6 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
+from mindroom.delegation.state import member_slot_id
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import MODEL_PROVENANCE_KEY
 from mindroom.matrix.message_builder import opens_with_markdown_block
@@ -335,17 +336,11 @@ class TeamStreamPresentation:
         return state
 
     def resolve_member_id(self, agent_id: str | None, reported_name: str | None) -> str:
-        """Resolve an event or a member run only through its stable member identity: a member id or a config name.
+        """Resolve an event or a member run only through its stable member identity, by ``member_slot_id``.
 
         A run record's member identity is optional, and a run that names no member has no slot.
         """
-        if agent_id in self.per_member:
-            return agent_id
-        for member_id, config_name in self.config_names_by_id.items():
-            if agent_id == config_name:
-                return member_id
-        msg = f"Team event has no frozen member slot for {reported_name or agent_id!r}"
-        raise RuntimeError(msg)
+        return member_slot_id(self.config_names_by_id, agent_id, reported_name)
 
     def append_member(self, member_id: str, content: object | None) -> None:
         """Append a member content delta to the slot of ``member_id``, which ``resolve_member_id`` returned."""

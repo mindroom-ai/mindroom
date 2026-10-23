@@ -126,7 +126,7 @@ def test_identify_approval_tools_rejects_unknown_member_owner(
     """Ownership requires an exact frozen identity even when the display name matches."""
     member_pause.requirements[0].member_agent_id = member_agent_id
 
-    with pytest.raises(RuntimeError, match="frozen member"):
+    with pytest.raises(RuntimeError, match=f"^Team has no frozen member slot for {member_agent_id!r}$"):
         identify_approval_tools(member_pause, default_agent_name="test-team")
 
 

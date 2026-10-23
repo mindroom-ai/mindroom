@@ -82,8 +82,8 @@ def approval_receipt_context(receipt_text: str, *, run_id: str) -> Generator[Non
     That run reads the receipt, and so does every run that ``add_approval_receipt_reader`` names: one whose own
     paused calls the approval decided, one that continues with the result of a delegation call whose card or
     child's calls the approval decided, or a recovered CLI call's follow-up. Each reads it once, in its first request
-    as a reader. No other run reads it, such as a run the continuation starts or a member it continues with the
-    result of a delegation the approval did not decide.
+    as a reader. No other run reads it, such as a run the continuation starts, a run of a background job it starts,
+    or a member it continues with the result of a delegation the approval did not decide.
     """
     token = _context.set(_ApprovalReceiptContext(receipt_text=receipt_text, readers={run_id}))
     try:
@@ -97,6 +97,19 @@ def add_approval_receipt_reader(run_id: str) -> None:
     receipt = _context.get()
     if receipt is not None:
         receipt.readers.add(run_id)
+
+
+@contextmanager
+def without_approval_receipt() -> Generator[None, None, None]:
+    """Run work that outlives the bound approval continuation, such as a background job it starts, outside it.
+
+    No run in that work reads the receipt, and naming one a reader binds nothing.
+    """
+    token = _context.set(None)
+    try:
+        yield
+    finally:
+        _context.reset(token)
 
 
 def _is_response_chain_boundary(message: Message) -> bool:
@@ -187,4 +200,5 @@ __all__ = [
     "approval_receipt_hook",
     "build_approval_receipt",
     "messages_with_approval_receipt",
+    "without_approval_receipt",
 ]

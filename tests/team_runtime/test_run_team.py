@@ -478,7 +478,7 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
         pytest.param(
             [answer("Five is prime.")],
             [[Await(_overloaded)]],
-            # A failed member's record holds its error text, which the broadcast labels like any result.
+            # A failed member hands over its error text, which the broadcast labels like any result.
             "Agent Writer: Five is prime.Agent Checker: Checker overloaded",
             id="error",
         ),
@@ -517,6 +517,76 @@ async def test_a_blocking_collaborate_run_gives_the_leader_agno_s_labeled_member
     assert record.tools[0].result == expected
     delegated = leader.requests[1].messages[-1]
     assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-all", expected)
+
+
+_REDACTED_FAILURE = "checker provider down: api_key=***redacted***"
+
+
+@pytest.mark.parametrize(
+    ("mode", "stream", "expected"),
+    [
+        pytest.param(TeamMode.COORDINATE, True, _REDACTED_FAILURE, id="coordinate-streamed"),
+        pytest.param(TeamMode.COORDINATE, False, _REDACTED_FAILURE, id="coordinate-blocking"),
+        pytest.param(TeamMode.COLLABORATE, True, f"Five is prime.{_REDACTED_FAILURE}", id="collaborate-streamed"),
+        pytest.param(
+            TeamMode.COLLABORATE,
+            False,
+            f"Agent Writer: Five is prime.Agent Checker: {_REDACTED_FAILURE}",
+            id="collaborate-blocking",
+        ),
+    ],
+)
+@pytest.mark.parametrize("wrote_text", [True, False], ids=["wrote-text", "silent"])
+async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_redacted_error(
+    mode: TeamMode,
+    stream: bool,
+    expected: str,
+    *,
+    wrote_text: bool,
+) -> None:
+    """The leader reads why the member failed, credentials redacted, not the text the member wrote before failing."""
+
+    async def lose_the_checker_provider() -> None:
+        msg = "checker provider down: api_key=example-secret"
+        raise ProviderError(msg, provider="Synthetic")
+
+    earlier = [calls(tool_call("echo", "call-echo", text="5"), content="I will check.")] if wrote_text else []
+
+    delegation = (
+        calls(tool_call("delegate_task_to_members", "call-all", task="Check 5."), metrics=usage(10, 2))
+        if mode is TeamMode.COLLABORATE
+        else _delegate("call-all", "checker", "Check 5.", metrics=usage(10, 2))
+    )
+    leader = scripted("leader-model", delegation, answer("The checker could not finish."))
+    checker = scripted("checker-model", *earlier, [Await(lose_the_checker_provider)])
+    team = squad(
+        leader,
+        scripted("writer-model", answer("Five is prime.")),
+        checker,
+        mode=mode,
+        checker_toolkits=(toolkit(echo),),
+    )
+    store = Store()
+
+    _, record = await collect(
+        run_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            persist=store,
+            request_template=ModelRequest(messages=(), stream=stream),
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    assert record.tools is not None
+    assert record.tools[0].result == expected
+    delegated = leader.requests[1].messages[-1]
+    assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-all", expected)
+    # The member's stored row keeps Agno's content: the text its model wrote before the failure, else the error.
+    [failed] = [member for member in store.members if member.agent_id == "checker"]
+    stored_content = "I will check." if wrote_text else "checker provider down: api_key=example-secret"
+    assert (failed.status, failed.content) == (RunStatus.error, stored_content)
 
 
 async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_notice_and_pauses_the_team() -> None:

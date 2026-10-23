@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.llm.runs import RunRequirement
+    from mindroom.llm.runs import AnyRunRecord, RunRequirement
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
 
@@ -245,6 +245,21 @@ def pending_call_slot(requirement: RunRequirement, member_ids: Collection[str]) 
     return requirement.member_agent_id, requirement.tool_execution.tool_call_id
 
 
+def member_slot_id(member_slots: Mapping[str, str], member: str | None, reported_name: str | None = None) -> str:
+    """Return the slot id of the team member that ``member`` names by its slot id or its config name.
+
+    ``member_slots`` maps each member's slot id to its config name, as a team presentation freezes them. A name that
+    is neither, None included, has no slot; ``reported_name`` is how the error names it then, if given.
+    """
+    if member is not None and member in member_slots:
+        return member
+    slot_id = next((slot_id for slot_id, config_name in member_slots.items() if config_name == member), None)
+    if slot_id is None:
+        msg = f"Team has no frozen member slot for {reported_name or member!r}"
+        raise RuntimeError(msg)
+    return slot_id
+
+
 def child_card_id(delegation_id: str, call_id: str) -> str:
     """Return the id a delegated child's paused call has on its parent, ``delegation_id:call_id``, which its card uses."""
     return f"{delegation_id}:{call_id}"
@@ -253,6 +268,16 @@ def child_card_id(delegation_id: str, call_id: str) -> str:
 def child_call_id(delegation_id: str, card_id: str) -> str:
     """Return the child's own call id from the id ``child_card_id`` gave that call on the child's parent."""
     return card_id.removeprefix(f"{delegation_id}:")
+
+
+def handover_content(record: AnyRunRecord) -> str | dict[str, Any] | None:
+    """Return what a finished child or member run hands the run that started it: why it failed, else its content.
+
+    A run that failed in this process carries its reason, credentials redacted, on ``error``; its ``content`` is what
+    its model said before the failure, or the unredacted error when it said nothing. A record loaded from storage has
+    no ``error`` and hands over its stored content.
+    """
+    return record.content if record.error is None else record.error
 
 
 class ChildResponseRunner(Protocol):

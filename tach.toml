@@ -1335,6 +1335,7 @@ visibility = [
     "mindroom.loop_hooks",
     "mindroom.response_runner",
     "mindroom.teams",
+    "mindroom.tool_jobs.runtime",
 ]
 
 [[modules]]
@@ -3302,6 +3303,7 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.providers.registry",
     "mindroom.response_turn",
+    "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
     "mindroom.system_prompt",
     "mindroom.thread_models",
@@ -8341,6 +8343,7 @@ path = "mindroom.tool_jobs.runtime"
 depends_on = [
     "mindroom.tool_jobs.background_after",
     "mindroom.ai_runtime",
+    "mindroom.approval.receipt",
     "mindroom.tool_jobs.control",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_jobs.instances",

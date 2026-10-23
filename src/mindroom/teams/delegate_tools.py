@@ -15,6 +15,7 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol
 
+from mindroom.delegation.state import handover_content
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.spec import TeamMode
@@ -103,15 +104,15 @@ def delegate_functions(
 def member_result_text(child: RunRecord, *, stream: bool) -> str:
     """Return what a coordinate leader reads for a finished member run, by Agno's rules with or without streaming.
 
-    A failed member's record holds the error text as its content, so the leader reads what went wrong, as it did
-    when Agno absorbed a member error into the member's run.
+    The rules read the content the run hands over (``handover_content``), so a failed member gives the reason its
+    run recorded, credentials redacted, where Agno gave the member's content: stale text, or the raw error.
     """
     return _streamed_result(child) if stream else _blocking_result(child)
 
 
 def _streamed_result(child: RunRecord) -> str:
     """Return the member's text, else its tool results, else Agno's notice."""
-    content = child.content
+    content = handover_content(child)
     if isinstance(content, str) and content.strip():
         return content
     if isinstance(content, dict):
@@ -127,7 +128,7 @@ def _blocking_result(child: RunRecord) -> str:
     A run whose text is blank gives its tool results, which without tools leaves nothing; any other content, None
     among it, is JSON.
     """
-    content = child.content
+    content = handover_content(child)
     if content is None and not child.tools:
         return NO_MEMBER_RESPONSE
     if isinstance(content, str):
@@ -170,7 +171,7 @@ def _labeled_result(child: RunRecord) -> str:
 
     Unlike a coordinate delegation, the broadcast kept empty tool results and named a blank run without tools.
     """
-    content = child.content
+    content = handover_content(child)
     if content is None and not child.tools:
         return NO_MEMBER_RESPONSE
     if isinstance(content, str):

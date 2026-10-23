@@ -14,6 +14,7 @@ import asyncio
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -65,6 +66,7 @@ from mindroom.response_turn import (
     stream_response_turn,
     stream_with_llm_request_log_context,
 )
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
@@ -448,7 +450,7 @@ def run_prepared_team(
     )
 
 
-def _persist_bound_seen_event_ids(
+async def _persist_bound_seen_event_ids(
     *,
     scope_context: ScopeSessionContext | None,
     session_id: str,
@@ -457,11 +459,14 @@ def _persist_bound_seen_event_ids(
     """Record the Matrix events this team turn consumed on the stored session row, creating the row if needed.
 
     The ids merge into the metadata the row holds, so nothing the run or another writer stored is put back or lost.
+    The write runs in the database's lane, as the session's other writes do.
     """
     if scope_context is None:
         return
+    storage = scope_context.storage
     session = new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=True)
-    update_scope_seen_event_ids(scope_context.storage, session, scope_context.scope, event_ids)
+    record = partial(update_scope_seen_event_ids, session=session, scope=scope_context.scope, event_ids=event_ids)
+    await run_session_storage_operation(lambda: storage, record)
 
 
 def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[str]:
@@ -724,7 +729,7 @@ class _TeamTurn:
         record = attempt.records.terminal(self.entity_name)
         if record.status is RunStatus.paused:
             return self.resolve_paused(attempt, record, blocking=True)
-        return self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
+        return await self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
 
     async def run_streaming_attempt(
         self,
@@ -763,7 +768,9 @@ class _TeamTurn:
             return
         # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
         # carries the trigger either, so the next turn still reads it.
-        yield AttemptResolved(self.resolve_completed(run, attempt, record, blocking=False, mark_seen=emitted_output))
+        yield AttemptResolved(
+            await self.resolve_completed(run, attempt, record, blocking=False, mark_seen=emitted_output),
+        )
 
     def failure_metadata(self, attempt: TeamAttempt) -> dict[str, Any] | None:
         """Return the run metadata of a failed attempt when the caller collects metadata and the run was stored."""
@@ -820,7 +827,7 @@ class _TeamTurn:
             team_member_model_names=tuple(sorted(self.holder.member_model_names.items())),
         )
 
-    def resolve_completed(
+    async def resolve_completed(
         self,
         run: TurnRunState,
         attempt: TeamAttempt,
@@ -834,7 +841,7 @@ class _TeamTurn:
         ``mark_seen`` records the Matrix events the turn consumed as seen on the stored session row.
         """
         if mark_seen and self.ctx.reply_to_event_id:
-            _persist_bound_seen_event_ids(
+            await _persist_bound_seen_event_ids(
                 scope_context=run.scope_context,
                 session_id=self.session_id,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
