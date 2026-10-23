@@ -216,11 +216,8 @@ def _truncate_excerpt(text: str, max_chars: int) -> str:
 
 
 def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
-    parts: list[str] = []
-    if summary_block:
-        parts.append(summary_block)
-    parts.append(f"<new_conversation>\n{serialized_runs}\n</new_conversation>")
-    return "\n\n".join(parts)
+    conversation = f"<new_conversation>\n{serialized_runs}\n</new_conversation>"
+    return f"{summary_block}\n\n{conversation}" if summary_block else conversation
 
 
 def _previous_summary_block(summary: str | None) -> str:
@@ -299,9 +296,6 @@ def _bounded_arg(value: object) -> object:
     return value if len(serialized) <= _TOOL_RESULT_ARG_CHARS else _truncate_excerpt(serialized, _TOOL_RESULT_ARG_CHARS)
 
 
-def _unescape_xml_content(text: str) -> str:
-    return text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
-
-
 def _escape_xml_content(text: str) -> str:
-    return escape(_unescape_xml_content(text), quote=False)
+    """Escape ``text`` for an XML body, unescaping it first so already-escaped text is not escaped twice."""
+    return escape(text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&"), quote=False)
