@@ -2985,7 +2985,7 @@ defaults:
 Compaction is enabled by default through `defaults.compaction`.
 It summarizes older history so later replies keep useful context instead of losing it to replay fitting.
 Supported OpenAI and Claude routes use [native compaction](#native-compaction) inside ordinary requests; every other route uses portable text compaction.
-Text compaction runs before a reply when history exceeds the hard replay budget or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
+Text compaction runs before a reply when history exceeds the compaction threshold on a route without native compaction, when it exceeds the hard replay budget, or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
 A [scheduled task](https://docs.mindroom.chat/scheduling/) run with a `history_limit` cannot use native compaction, so it also runs text compaction once history exceeds the compaction threshold.
 While it runs, the agent posts `Compacting history...` and edits that notice with the result.
 If compaction fails, the notice reads `Compaction failed; continuing without compaction.` with the reason; before a reply, the reply continues with fitted history.
@@ -2995,7 +2995,7 @@ Set these fields under `defaults.compaction`, an agent's `compaction`, or a team
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | `false` disables automatic compaction for the scope, both before and during a reply |
-| `threshold_tokens` | int, >= 1 | `null` | Native provider trigger in tokens; on text-only routes a soft planning threshold that does not compact by itself while history still fits. Mutually exclusive with `threshold_percent` |
+| `threshold_tokens` | int, >= 1 | `null` | Compaction trigger in tokens: the native provider trigger on native routes, and the point where text compaction runs on every other route. Mutually exclusive with `threshold_percent` |
 | `threshold_percent` | float, > 0 and < 1 | `null` | The same trigger as a fraction of the effective replay window. When neither threshold is set, the trigger is 80% of that window |
 | `replay_window_tokens` | int, >= 1 | `null` | Cap replayed history and compaction planning below the model's real `context_window` without lowering the provider request limit. The smaller of the two applies; when the model window is unknown, this value alone sets the replay window |
 | `reserve_tokens` | int, >= 0 | `16384` | Headroom kept free for the current prompt, tool definitions, and output; set it at least to the model's maximum output tokens, including any thinking budget |

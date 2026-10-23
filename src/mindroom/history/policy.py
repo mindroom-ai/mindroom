@@ -96,8 +96,8 @@ def classify_compaction_decision(  # noqa: PLR0911
     """Classify compaction as none or required before the next reply.
 
     Between the trigger and hard budgets, native provider compaction owns the
-    history, so a run that disallows it (a scheduled run with a history limit)
-    compacts at the trigger budget instead.
+    history, so a run without an active native route (a text-only provider, or a
+    scheduled run with a history limit) compacts at the trigger budget instead.
     """
     trigger_budget = plan.replay_budget_tokens
     hard_budget = plan.hard_replay_budget_tokens

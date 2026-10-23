@@ -54,6 +54,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
 )
+from mindroom.native_compaction import NativeCompactionModel
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from tests.conftest import (
@@ -813,14 +814,33 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     assert len(folded_run_ids(storage)) == 3
 
 
+class _NativeFakeModel(NativeCompactionModel, FakeModel):
+    """A fake model on a route that supports native provider compaction."""
+
+    def native_compaction_supported(self) -> bool:
+        return True
+
+    def native_compaction_endpoint(self) -> str:
+        return "test-endpoint"
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("allow_native_compaction", [True, False])
-async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_compaction_is_disallowed(
+@pytest.mark.parametrize(
+    ("native_model", "allow_native_compaction"),
+    [(True, True), (True, False), (False, True)],
+    ids=["native-route", "native-disallowed", "text-only-route"],
+)
+async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native_route(
     tmp_path: Path,
     *,
+    native_model: bool,
     allow_native_compaction: bool,
 ) -> None:
-    """A scheduled run with a history limit cannot rely on native compaction above the trigger budget."""
+    """Above the trigger budget only an active native route may leave history uncompacted.
+
+    A scheduled run with a history limit disallows native compaction, and a text-only route (OpenRouter, Gemini, a
+    local model) never had it; neither has anything that compacts between the trigger and hard budgets.
+    """
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -852,7 +872,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,
         text_compaction_available=True,
-        explicit_compaction_model=True,
+        explicit_compaction_model=False,
         compaction_model_name="summary-model",
         replay_window_tokens=64_000,
         trigger_threshold_tokens=trigger_budget,
@@ -863,7 +883,8 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
         summary_input_budget_tokens=50_000,
         compaction_timeout_seconds=600.0,
     )
-    agent = _agent(db=storage)
+    model = _NativeFakeModel(id="fake-model", provider="fake") if native_model else None
+    agent = _agent(db=storage, model=model)
     resolved_inputs = replace(
         resolve_agent_preparation_inputs(agent=agent, agent_name="test_agent", config=config, static_prompt_tokens=0),
         history_settings=_ALL_HISTORY_SETTINGS,
@@ -892,7 +913,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
-    if allow_native_compaction:
+    if native_model and allow_native_compaction:
         assert prepared.compaction_decision.mode == "none"
         assert prepared.compaction_decision.reason == "within_hard_budget"
         assert prepared.compaction_reply_outcome == "none"
