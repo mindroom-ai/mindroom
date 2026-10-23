@@ -49,7 +49,7 @@ class _CurationPlan:
     # Every memory/ topic file the scan read at fire time, so verify can tell detail moved from detail deleted.
     memory_tokens: int
     curated: Mapping[str, int]
-    # MEMORY.md lines at fire time; the preload keeps only the first memory.file.max_entrypoint_lines.
+    # MEMORY.md lines at fire time; the preload withholds lines beyond memory.file.max_entrypoint_lines.
     memory_lines: int
     upper_tokens: int
     floor_tokens: int
@@ -113,7 +113,7 @@ def _plan_curation(
     curated = {path: _tokens(payload) for path, payload in curated_payloads.items()}
     measured = sum(curated.values())
     memory_lines = len(curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8").splitlines())
-    # The preload keeps only the first lines of MEMORY.md, so lines past its cap are withheld at any token count.
+    # The preload withholds MEMORY.md lines beyond its line cap at any token count.
     if measured <= settings.trigger_tokens and memory_lines <= config.memory.file.max_entrypoint_lines:
         return None
     return _CurationPlan(
