@@ -173,22 +173,23 @@ class _DelegationTarget:
     model: str | None = None
 
 
+def _delegation_call(requirement: RunRequirement) -> bool:
+    tool = requirement.tool_execution
+    return tool.tool_name in DELEGATION_FUNCTIONS and bool(tool.external_execution_required)
+
+
 def _external_requirements(response: AnyRunRecord) -> list[RunRequirement]:
+    """Return the run's delegation calls still waiting for their answers."""
     return [
         requirement
         for requirement in response.requirements or ()
-        if requirement.needs_external_execution and requirement.tool_execution.tool_name in DELEGATION_FUNCTIONS
+        if _delegation_call(requirement) and requirement.external_execution_result is None
     ]
 
 
 def has_delegation_state(response: AnyRunRecord) -> bool:
     """Return whether the native delegation driver owns this run's pause."""
     return bool(_external_requirements(response) or (response.metadata or {}).get(DELEGATION_STATE_KEY))
-
-
-def _delegation_call(requirement: RunRequirement) -> bool:
-    tool = requirement.tool_execution
-    return tool.tool_name in DELEGATION_FUNCTIONS and bool(tool.external_execution_required)
 
 
 def answered_delegation_calls(response: AnyRunRecord) -> dict[tuple[str | None, str], str]:
@@ -332,15 +333,14 @@ async def _execute_child(
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    if decisions is not None:
-        await settle_child_response(
-            child,
-            persisted,
-            config=config,
-            runtime_paths=runtime_paths,
-            decisions=decisions,
-            denial_reasons=denial_reasons,
-        )
+    await settle_child_response(
+        child,
+        persisted,
+        config=config,
+        runtime_paths=runtime_paths,
+        decisions=decisions,
+        denial_reasons=denial_reasons,
+    )
     knowledge = await resolve_agent_knowledge_access_async(
         child.child_agent_name,
         config,
@@ -477,7 +477,7 @@ async def _continue_child(
     runtime_paths: RuntimePaths,
     identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    decisions: dict[str, bool] | None,
+    decisions: dict[str, bool],
     denial_reasons: dict[str, str | None] | None,
     approval_calls: Sequence[ApprovalCall],
 ) -> RunRecord:
@@ -486,15 +486,14 @@ async def _continue_child(
     async def continue_run(paused: RunRecord, resume: ResumeDecisions, _on_event: ResumeEvents | None) -> RunRecord:
         return await forward_resume(_observed_child_events(runner.events(paused, resume)), None, record_type=RunRecord)
 
+    driver_decisions: dict[str, bool] | None = decisions
     if not has_delegation_state(persisted):
-        if decisions is None:
-            return persisted
         persisted = await continue_run(
             persisted,
             approval_decisions(approval_calls, decisions, denial_reasons or {}),
             None,
         )
-        decisions = None
+        driver_decisions = None
         denial_reasons = None
         approval_calls = ()
     return await _drive_delegations(
@@ -509,7 +508,7 @@ async def _continue_child(
         execution_identity=identity,
         delegation_depth=child.depth,
         refresh_scheduler=refresh_scheduler,
-        decisions=decisions,
+        decisions=driver_decisions,
         denial_reasons=denial_reasons,
         approval_calls=approval_calls,
     )
@@ -649,8 +648,8 @@ def _resolve_delegation_requirement(
 ) -> str:
     """Answer one external call with its finished result and close its live tool trace, including rejections.
 
-    The answer stays on the parent's requirement, as Agno's driver stored it, so a later entry never advances the
-    call again; the parent's continuation hands every answer to the loop's own decision check.
+    The answer stays on the parent's requirement, so a later entry never advances the call again; the parent's
+    continuation hands every answer to the loop's own decision check.
     """
     result = _finalize_delegation_output(result, output_request)
     requirement.set_external_execution_result(result)
