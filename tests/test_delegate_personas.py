@@ -14,12 +14,12 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation.execution import _resolve_delegation_target
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
 from mindroom.delegation.personas import inline_persona
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
-from mindroom.knowledge import utils as knowledge_utils
 from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -358,8 +358,8 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
     )
     ScriptedAgents({"leader": model}, by_session={identity.session_id: parent}).install(monkeypatch)
     resumed_knowledge: list[object] = []
-    # The approval resume imports the resolver from its module when it runs.
-    resolve = knowledge_utils.resolve_agent_knowledge_access_async
+    # The child's resume resolves its knowledge through the delegation driver's import.
+    resolve = delegation_execution.resolve_agent_knowledge_access_async
 
     async def recording_resolve(*args: object, **kwargs: object) -> object:
         # The resumed parent resolves its own knowledge too; only the child's resolution is the persona's.
@@ -368,7 +368,7 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
             resumed_knowledge.append(kwargs.get("only"))
         return await resolve(*args, **kwargs)
 
-    monkeypatch.setattr(knowledge_utils, "resolve_agent_knowledge_access_async", recording_resolve)
+    monkeypatch.setattr(delegation_execution, "resolve_agent_knowledge_access_async", recording_resolve)
     options = {"config": config, "runtime_paths": paths, "identity": identity}
 
     paused = await respond("leader", "Delegate", **options, run_id="parent-run")

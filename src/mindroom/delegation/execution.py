@@ -64,10 +64,17 @@ from mindroom.delegation.state import (
 )
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.history.types import HistoryScope
+from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
+from mindroom.response_turn import (
+    ResponsePausedForApproval,
+    apply_exact_approval_decisions,
+    local_approval_requirements,
+    paused_attempt_from_response,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -296,10 +303,8 @@ async def _execute_child(
     fresh: bool,
 ) -> _ChildOutcome:
     """Start a fresh envelope or resume the exact stored child under its own scope."""
-    # These imports cross the creation/envelope cycle only during execution.
+    # mindroom.agents imports this module, so the child's agent is created through a deferred import.
     from mindroom.agents import create_agent  # noqa: PLC0415
-    from mindroom.knowledge.utils import resolve_agent_knowledge_access_async  # noqa: PLC0415
-    from mindroom.response_turn import local_approval_requirements  # noqa: PLC0415
 
     identity = child_execution_identity(child)
     context = get_tool_runtime_context()
@@ -435,8 +440,6 @@ async def _start_child_envelope(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> _ChildOutcome:
     """Run the normal response loop in the child's retained conversation scope."""
-    from mindroom.response_turn import ResponsePausedForApproval  # noqa: PLC0415
-
     result = None
     toolkit_owners = {}
     try:
@@ -515,8 +518,6 @@ async def _continue_child(
 
 
 def _pending_child(state: DelegationState, child: DelegationChild, outcome: _ChildOutcome) -> None:
-    from mindroom.response_turn import paused_attempt_from_response  # noqa: PLC0415
-
     response = outcome.response
     paused = paused_attempt_from_response(
         response,
@@ -1375,8 +1376,6 @@ def prepare_delegation_state(
     Decisions on the parent's own calls, asked about after its delegations, resume the parent; decisions on a
     delegation's gate are kept as gates for the call they name.
     """
-    from mindroom.response_turn import apply_exact_approval_decisions  # noqa: PLC0415
-
     state = DelegationState.from_metadata(response.metadata)
     if not state.storage_bindings and isinstance(response, RunRecord):
         state.storage_bindings = freeze_delegation_storage(config, (agent_name,))
