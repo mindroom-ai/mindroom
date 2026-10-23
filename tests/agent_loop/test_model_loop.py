@@ -290,6 +290,29 @@ async def test_a_stop_after_tool_call_ends_the_loop_without_another_request() ->
     assert messages[-1].stop_after_tool_call is True
 
 
+async def test_a_batch_that_stops_the_run_skips_the_batch_hooks_as_agno_did() -> None:
+    """No later request reads what a batch hook adds after a stopping batch, so Agno fired none there."""
+    batches: list[list[str | None]] = []
+
+    async def after_batch(_messages: list[Message], results: Sequence[Message]) -> None:
+        batches.append([result.tool_call_id for result in results])
+
+    model = ScriptedModel(
+        [
+            calls(tool_call("add", "c1", a=1, b=2), metrics=usage(1, 1)),
+            calls(tool_call("echo", "c2", text="switch"), metrics=usage(1, 1)),
+        ],
+    )
+
+    await _run(
+        spec(model, toolkit(add), toolkit(echo, name="stopper", stop_after_tool_call=True)),
+        _prompt(),
+        hooks=LoopHooks(after_tool_batch=(after_batch,)),
+    )
+
+    assert batches == [["c1"]]
+
+
 async def test_tool_media_reach_the_model_on_a_follow_up_user_message() -> None:
     def picture(label: str) -> ToolResult:
         """Return a picture.
