@@ -7,6 +7,7 @@ memory extraction that happens after every response.
 
 from __future__ import annotations
 
+import textwrap
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+
+_SIMILAR_MEMORY_LIMIT = 3
 
 
 def _memory_result_lines(results: list[MemoryResult]) -> list[str]:
@@ -121,14 +124,17 @@ class MemoryTools(Toolkit):
 
         Use this when explicitly asked to remember something, or when you
         encounter important information worth retaining for future conversations.
+        To correct something already stored, use update_memory on that entry instead of adding a new one.
 
         Args:
             content: The fact or information to memorize.
 
         Returns:
-            Confirmation message.
+            Confirmation message, followed by similar existing memories when there are any.
 
         """
+        # Look up before storing, so the new entry cannot list itself as similar.
+        similar = await self._similar_memories(content)
         try:
             await add_agent_memory(
                 content,
@@ -142,8 +148,35 @@ class MemoryTools(Toolkit):
         except Exception as e:
             detail = _memory_tool_failure(e, action="add", agent=self._agent_name)
             return f"Failed to store memory: {detail}"
-        else:
+        if not similar:
             return f"Memorized: {content}"
+        lines = [f"Memorized: {content}", "", "Similar existing memories:"]
+        for i, mem in enumerate(similar, 1):
+            text = textwrap.shorten(mem.get("memory", ""), width=200, placeholder="...")
+            lines.append(f"{i}. [id={mem.get('id', '?')}] {text}")
+        lines.append(
+            "If the new memory corrects or repeats one of these, update that entry with update_memory "
+            "and delete the duplicate with delete_memory.",
+        )
+        return "\n".join(lines)
+
+    async def _similar_memories(self, content: str) -> list[MemoryResult]:
+        """Return a few existing memories related to ``content``; a failed lookup returns none."""
+        try:
+            outcome = await search_agent_memories(
+                content,
+                self._agent_name,
+                self._storage_path,
+                self._config,
+                self._runtime_paths,
+                limit=_SIMILAR_MEMORY_LIMIT,
+                execution_identity=self._execution_identity,
+            )
+        except Exception as e:
+            _memory_tool_failure(e, action="find similar", agent=self._agent_name)
+            return []
+        # semantic:* IDs are read-only locators that update_memory and delete_memory reject.
+        return [mem for mem in outcome.results if not str(mem.get("id", "")).startswith("semantic:")]
 
     async def search_memories(self, query: str, limit: int = 5) -> str:
         """Search your memories for information relevant to a query.

@@ -360,6 +360,7 @@ delete_memory("abc123")
 The tool reaches every agent and team scope visible to the agent, as described in [Memory Scopes](#memory-scopes).
 Search and list results include an ID: Mem0 memory IDs and file-backed `file:<path>:<line>` IDs work with `get_memory`, `update_memory`, and `delete_memory`.
 Semantic file-memory matches use read-only `semantic:<source_file>:<rank>` locators that these functions do not accept.
+After storing, `add_memory` lists up to three similar existing memories with their IDs, so the agent can update a corrected entry instead of keeping both.
 Result metadata includes `search_mode` (`keyword` or `semantic`), showing which search produced each result.
 Failures are returned as readable error messages rather than raised into the conversation.
 
