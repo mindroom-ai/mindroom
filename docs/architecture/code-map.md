@@ -244,7 +244,7 @@ Matrix sync callback
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, the Responses shared-prefix split and ordered output replay, and the history budget's size of explicitly replayed Responses input (`replay_estimate.py`) |
 | `providers/pipeline/` | Stages composed around a provider's `stream()`: the malformed tool-call guidance retry, portable deferred tool search, media fallback, stream retry with the idle limit, the typed safeguard refusal, and request logging |
-| `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it; `model_capabilities` reads a configured model's route capabilities from its bare adapter |
+| `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `model_capabilities` reads a configured model's route capabilities from its bare adapter |
 | `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, Google Search grounding, decision-request config, and reply parsing |
 | `providers/ollama_adapter.py` | Owned Ollama adapter over the native chat API |
 | `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls |

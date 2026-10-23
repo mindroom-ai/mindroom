@@ -15,8 +15,7 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext
-from mindroom.config.models import DebugConfig, ModelConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.config.models import DebugConfig
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
@@ -48,7 +47,7 @@ from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.providers.pipeline.compose import stream_idle_timeout_seconds, wrap_provider
+from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.deferred_tools import portable_tool_search_stream
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE, guidance_retry_stream
 from mindroom.providers.pipeline.media import FALLBACK_MARKER, media_fallback_stream
@@ -956,39 +955,6 @@ def _request() -> ModelRequest:
 
 
 # --- Composition ----------------------------------------------------------------------------------------------
-
-
-def test_stream_idle_limit_policy(tmp_path: Path) -> None:
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={})
-    with_base_url = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "data",
-        process_env={"OPENAI_BASE_URL": "http://localhost:4000/v1"},
-    )
-    with_vertex_base_url = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "data",
-        process_env={"ANTHROPIC_VERTEX_BASE_URL": "https://vertex.proxy.example/v1"},
-    )
-    hosted = ModelConfig(provider="openai", id="gpt-6-astra")
-    assert stream_idle_timeout_seconds(hosted, paths) == 300.0
-    assert stream_idle_timeout_seconds(hosted, with_base_url) is None
-    assert stream_idle_timeout_seconds(hosted, with_vertex_base_url) == 300.0
-    vertex = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5")
-    assert stream_idle_timeout_seconds(vertex, paths) == 300.0
-    assert stream_idle_timeout_seconds(vertex, with_vertex_base_url) is None
-    assert stream_idle_timeout_seconds(ModelConfig(provider="llama_cpp", id="m"), paths) is None
-    assert (
-        stream_idle_timeout_seconds(ModelConfig(provider="zai", id="m", extra_kwargs={"base_url": "http://x"}), paths)
-        is None
-    )
-    assert (
-        stream_idle_timeout_seconds(ModelConfig(provider="openai", id="m", stream_idle_timeout_seconds=0), paths)
-        is None
-    )
-    assert (
-        stream_idle_timeout_seconds(ModelConfig(provider="groq", id="m", stream_idle_timeout_seconds=12), paths) == 12
-    )
 
 
 @pytest.mark.asyncio

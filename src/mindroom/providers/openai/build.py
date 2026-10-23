@@ -64,11 +64,13 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["OPENAI_FAMILY_PROVIDERS", "ProviderRuntime", "build_provider"]
+__all__ = ["ENDPOINT_VARIABLES", "OPENAI_FAMILY_PROVIDERS", "ProviderRuntime", "build_provider"]
 
 logger = get_logger(__name__)
 
 _OPENAI_API_BASE_URL = "https://api.openai.com/v1"
+# The runtime env variable that sets the ``openai`` endpoint, for Chat and Responses alike, when the config sets none.
+_OPENAI_BASE_URL_VARIABLE = "OPENAI_BASE_URL"
 # Routes whose public endpoint and model ids support Responses native compaction.
 _NATIVE_COMPACTION_ENDPOINTS = frozenset({_OPENAI_API_BASE_URL, CODEX_BASE_URL})
 _NATIVE_COMPACTION_MODEL_PREFIXES = ("gpt-5.3-codex", "gpt-5.4", "gpt-6")
@@ -92,6 +94,8 @@ class _ChatRoute:
     structured_output: Literal["native", "json_schema", "json_mode"] = "native"
     omitted_media: frozenset[MediaKind] = _CHAT_OMITTED_MEDIA
     developer_system_role: bool = False
+    # The runtime env variable that sets the endpoint when the config sets none.
+    base_url_variable: str | None = None
 
 
 _CHAT_ROUTES: dict[str, _ChatRoute] = {
@@ -103,6 +107,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         dialect="openai",
         accepted=CHAT_FIELDS,
         developer_system_role=True,
+        base_url_variable=_OPENAI_BASE_URL_VARIABLE,
     ),
     "azure": _ChatRoute(
         provider="Azure",
@@ -163,6 +168,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         accepted=GROQ_FIELDS,
         structured_output="json_mode",
         omitted_media=frozenset({"audio", "file", "video"}),
+        base_url_variable="GROQ_BASE_URL",
     ),
     "cerebras": _ChatRoute(
         provider="Cerebras",
@@ -173,8 +179,11 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         accepted=CEREBRAS_FIELDS,
         structured_output="json_schema",
         omitted_media=_ALL_MEDIA,
+        base_url_variable="CEREBRAS_BASE_URL",
     ),
 }
+# The endpoint variable of every route that reads one, by ``provider`` value.
+ENDPOINT_VARIABLES = {key: route.base_url_variable for key, route in _CHAT_ROUTES.items() if route.base_url_variable}
 _ROUTE_ALIASES = {"openai_codex": "codex", "kimi_code": "kimi"}
 # Every ``provider`` value this module builds, after canonicalization.
 OPENAI_FAMILY_PROVIDERS = frozenset(_CHAT_ROUTES) | {"codex", "openai_codex", "kimi_code"}
@@ -281,18 +290,17 @@ def _openai_client(
 
 
 def _chat_base_url(route_key: str, route: _ChatRoute, settings: ChatSettings, runtime: ProviderRuntime) -> str:
-    env = runtime.runtime_paths
-    authored = _authored_base_url(settings.client_params, settings.base_url)
+    configured = _authored_base_url(settings.client_params, settings.base_url) or (
+        runtime.runtime_paths.env_value(route.base_url_variable) if route.base_url_variable else None
+    )
     if route_key == "openai":
-        return authored or env.env_value("OPENAI_BASE_URL") or _OPENAI_API_BASE_URL
+        return configured or _OPENAI_API_BASE_URL
     if route_key == "groq":
         # The Groq SDK's base URL was a host; its paths start with /openai/v1.
-        host = authored or env.process_env.get("GROQ_BASE_URL") or "https://api.groq.com"
-        return f"{host.rstrip('/')}/openai/v1"
+        return f"{(configured or 'https://api.groq.com').rstrip('/')}/openai/v1"
     if route_key == "cerebras":
-        host = authored or env.process_env.get("CEREBRAS_BASE_URL") or "https://api.cerebras.ai"
-        return f"{host.rstrip('/')}/v1"
-    return authored or route.base_url or ""
+        return f"{(configured or 'https://api.cerebras.ai').rstrip('/')}/v1"
+    return configured or route.base_url or ""
 
 
 def _chat_client_factory(
@@ -497,7 +505,9 @@ def _build_responses(
         base_url = authored_base_url or CODEX_BASE_URL
         provider, provider_name = "OpenAI Codex", "OpenAI Codex Responses"
     else:
-        base_url = authored_base_url or runtime.runtime_paths.env_value("OPENAI_BASE_URL") or _OPENAI_API_BASE_URL
+        base_url = (
+            authored_base_url or runtime.runtime_paths.env_value(_OPENAI_BASE_URL_VARIABLE) or _OPENAI_API_BASE_URL
+        )
         provider, provider_name = "OpenAI", "OpenAI Responses"
     endpoint = base_url.rstrip("/")
     identity = ModelIdentity(id=model_id, provider=provider, provider_name=provider_name, endpoint=endpoint)
@@ -576,7 +586,7 @@ def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatA
         base_url = _authored_base_url(
             extra_kwargs.get("client_params"),
             extra_kwargs.get("base_url"),
-        ) or runtime.runtime_paths.env_value("OPENAI_BASE_URL")
+        ) or runtime.runtime_paths.env_value(_OPENAI_BASE_URL_VARIABLE)
         if model_config.api == "responses" or (
             model_config.api is None and openai_native_tool_search_supported("openai", model_id, base_url=base_url)
         ):

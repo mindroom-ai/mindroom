@@ -67,7 +67,12 @@ from mindroom.providers.anthropic.native_compaction import (
     uses_compaction_edit,
 )
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
-from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings, parse_claude_settings
+from mindroom.providers.anthropic.settings import (
+    ENDPOINT_VARIABLES,
+    ClaudeRouteKind,
+    ClaudeSettings,
+    parse_claude_settings,
+)
 from mindroom.providers.anthropic.wire import (
     OUTPUT_LIMIT_STOP_REASONS,
     assistant_message_from_response,
@@ -141,7 +146,7 @@ def native_compaction_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings)
         base_url = (
             settings.base_url
             or client_params.get("base_url")
-            or os.environ.get("ANTHROPIC_VERTEX_BASE_URL")
+            or os.environ.get(ENDPOINT_VARIABLES["vertexai_claude"])
             or _VERTEX_ENDPOINTS.get(region or "", f"https://{region}-aiplatform.googleapis.com/v1")
         )
         return f"{str(base_url).rstrip('/')}|{project}|{region}"
@@ -635,7 +640,7 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
         kwargs["project_id"] = project_id
     if "region" not in kwargs and (region := runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])):
         kwargs["region"] = region
-    if "base_url" not in kwargs and (base_url := runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")):
+    if "base_url" not in kwargs and (base_url := runtime_paths.env_value(ENDPOINT_VARIABLES["vertexai_claude"])):
         kwargs["base_url"] = base_url
     client_params = dict(kwargs.get("client_params") or {})
     if "credentials" not in client_params and (

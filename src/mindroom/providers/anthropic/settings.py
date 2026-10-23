@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 type ClaudeRouteKind = Literal["anthropic", "vertexai_claude", "bedrock_claude"]
 
+# The runtime env variable that sets a route's endpoint when its config sets none; the anthropic SDK alone reads
+# ``ANTHROPIC_BASE_URL``.
+ENDPOINT_VARIABLES: dict[ClaudeRouteKind, str] = {"vertexai_claude": "ANTHROPIC_VERTEX_BASE_URL"}
+
 # Agno's Claude default; a reply that reaches it is answered as cut off instead of run (the loop's policy).
 DEFAULT_MAX_TOKENS = 8192
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past ten minutes unless the
@@ -117,6 +121,7 @@ __all__ = [
     "ACCEPTED_KEYS",
     "DEFAULT_MAX_TOKENS",
     "DEFAULT_TIMEOUT_SECONDS",
+    "ENDPOINT_VARIABLES",
     "ClaudeRouteKind",
     "ClaudeSettings",
     "parse_claude_settings",

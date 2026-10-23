@@ -1,23 +1,25 @@
 """Build the provider a configured model answers with: its family's adapter inside the request pipeline.
 
 A key the dashboard saved for the model (``model:<name>``) beats the configured key, which beats the provider's
-shared key; Codex gets the configured default instructions; and every request goes through the same idle limit,
-media fallback prompt, and request log.
+shared key; Codex gets the configured default instructions; and every request goes through the model's idle
+limit, the media fallback prompt, and the request log.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 from mindroom.logging_config import get_logger
+from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.gemini.adapter import build_provider as build_gemini_provider
 from mindroom.providers.model_loading import dashboard_api_key
 from mindroom.providers.names import canonical_provider
 from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
+from mindroom.providers.openai.build import ENDPOINT_VARIABLES as OPENAI_ENDPOINT_VARIABLES
 from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
 from mindroom.providers.openai.build import build_provider as build_openai_provider
-from mindroom.providers.pipeline.compose import stream_idle_timeout_seconds, wrap_provider
+from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 
@@ -28,12 +30,18 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import Capabilities, ModelProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["build_model_provider", "model_capabilities"]
+__all__ = ["build_model_provider", "model_capabilities", "stream_idle_timeout_seconds"]
 
 logger = get_logger(__name__)
 
 _CLAUDE_PROVIDERS = frozenset(get_args(ClaudeRouteKind.__value__))
 _GEMINI_PROVIDERS = frozenset({"google", "gemini"})
+# A hosted API that sends no stream event for this long has stalled.
+_DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
+# Local servers can stay silent for minutes while a request queues or a model loads.
+_LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
+# The runtime env variable each route reads its endpoint from when its config sets none, as the builders declare it.
+_ENDPOINT_VARIABLES: dict[str, str] = {**OPENAI_ENDPOINT_VARIABLES, **CLAUDE_ENDPOINT_VARIABLES}
 
 
 def _configured_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelConfig:
@@ -114,6 +122,31 @@ def build_model_provider(
         media_fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
         request_log=request_log,
     )
+
+
+def _sets_base_url(value: object) -> bool:
+    """Return whether settings, at any depth, point the client at an explicit endpoint."""
+    if not isinstance(value, dict):
+        return False
+    settings = cast("dict[str, Any]", value)
+    return any((key == "base_url" and bool(item)) or _sets_base_url(item) for key, item in settings.items())
+
+
+def stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: RuntimePaths) -> float | None:
+    """Return the silence limit for one model's streamed requests, or None for no limit.
+
+    Unset, hosted providers on their built-in endpoint get 300 s; local servers and configured endpoints, a
+    ``base_url`` anywhere in ``extra_kwargs`` or the endpoint variable the model's route reads, get no limit; ``0``
+    disables it.
+    """
+    if model_config.stream_idle_timeout_seconds is not None:
+        return model_config.stream_idle_timeout_seconds or None
+    provider = canonical_provider(model_config.provider)
+    if provider in _LOCAL_STREAM_PROVIDERS or _sets_base_url(model_config.extra_kwargs):
+        return None
+    if (variable := _ENDPOINT_VARIABLES.get(provider)) and runtime_paths.env_value(variable):
+        return None
+    return _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
 
 
 def model_capabilities(config: Config, runtime_paths: RuntimePaths, model_name: str) -> Capabilities:

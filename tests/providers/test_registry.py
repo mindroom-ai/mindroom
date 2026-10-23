@@ -34,7 +34,7 @@ from mindroom.providers.ollama_adapter import OllamaProvider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
-from mindroom.providers.registry import build_model_provider, model_capabilities
+from mindroom.providers.registry import build_model_provider, model_capabilities, stream_idle_timeout_seconds
 from mindroom.providers.synthetic_adapter import SyntheticProvider
 from tests.providers.bare_adapter import bare_adapter
 from tests.providers.golden_support import (
@@ -277,6 +277,95 @@ def test_the_model_in_use_is_logged_with_its_effective_id(runtime_paths: Runtime
         },
     ]
     assert provider.identity.id == "gpt-6.1-sol"
+
+
+# --- Stream idle limit -----------------------------------------------------------------------------------
+
+
+def test_stream_idle_limit_policy(tmp_path: Path) -> None:
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={})
+    with_base_url = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"OPENAI_BASE_URL": "http://localhost:4000/v1"},
+    )
+    with_vertex_base_url = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_VERTEX_BASE_URL": "https://vertex.proxy.example/v1"},
+    )
+    hosted = ModelConfig(provider="openai", id="gpt-6-astra")
+    assert stream_idle_timeout_seconds(hosted, with_vertex_base_url) == 300.0
+    vertex = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5")
+    assert stream_idle_timeout_seconds(vertex, with_base_url) == 300.0
+    assert stream_idle_timeout_seconds(ModelConfig(provider="llama_cpp", id="m"), paths) is None
+    assert (
+        stream_idle_timeout_seconds(ModelConfig(provider="zai", id="m", extra_kwargs={"base_url": "http://x"}), paths)
+        is None
+    )
+    assert (
+        stream_idle_timeout_seconds(ModelConfig(provider="openai", id="m", stream_idle_timeout_seconds=0), paths)
+        is None
+    )
+    assert (
+        stream_idle_timeout_seconds(ModelConfig(provider="groq", id="m", stream_idle_timeout_seconds=12), paths) == 12
+    )
+
+
+_VERTEX_CREDENTIALS = {"credentials": Credentials(token="registry-google-token")}  # noqa: S106 - synthetic credential
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fields", "variable", "endpoint"),
+    [
+        (
+            {"provider": "openai", "api": "chat_completions", "id": "gpt-6-astra"},
+            "OPENAI_BASE_URL",
+            "https://proxy.test/v1",
+        ),
+        ({"provider": "openai", "api": "responses", "id": "gpt-6-astra"}, "OPENAI_BASE_URL", "https://proxy.test/v1"),
+        ({"provider": "groq", "id": "openai/gpt-oss-120b"}, "GROQ_BASE_URL", "https://proxy.test"),
+        ({"provider": "cerebras", "id": "gpt-oss-120b"}, "CEREBRAS_BASE_URL", "https://proxy.test"),
+        (
+            {
+                "provider": "vertexai_claude",
+                "id": "claude-sonnet-5-5",
+                "extra_kwargs": {"project_id": "p", "region": "us-east5", "client_params": _VERTEX_CREDENTIALS},
+            },
+            "ANTHROPIC_VERTEX_BASE_URL",
+            "https://proxy.test/v1",
+        ),
+    ],
+    ids=["openai-chat", "openai-responses", "groq", "cerebras", "vertexai_claude"],
+)
+async def test_an_endpoint_the_runtime_env_sets_has_no_idle_limit_by_default(
+    fields: dict[str, Any],
+    variable: str,
+    endpoint: str,
+    tmp_path: Path,
+    wire: Wire,
+) -> None:
+    """The endpoint variable a route sends its requests to lifts the hosted idle limit, as a ``base_url`` does."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    hosted = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    proxied = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "data",
+        process_env={variable: endpoint},
+    )
+    model_config = ModelConfig(**fields, api_key=None if fields["provider"] == "vertexai_claude" else "k")
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    provider = build_model_provider(Config(models={"default": model_config}), proxied)
+
+    with pytest.raises(ProviderError):
+        await complete(provider, ModelRequest(messages=[_user()]))
+
+    assert str(wire.requests[0].url).startswith(endpoint)
+    assert stream_idle_timeout_seconds(model_config, hosted) == 300.0
+    assert stream_idle_timeout_seconds(model_config, proxied) is None
 
 
 # --- Credentials --------------------------------------------------------------------------------------------
