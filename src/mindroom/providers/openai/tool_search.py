@@ -10,7 +10,7 @@ the cached prompt prefix.
 from __future__ import annotations
 
 import re
-from typing import Any, cast
+from typing import Any
 
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT, OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
 from mindroom.providers.names import provider_route
@@ -47,21 +47,14 @@ def openai_native_tool_search_supported(provider: str, model_id: str, *, base_ur
     return version >= OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
 
 
-def _as_dict(value: object) -> dict[str, Any] | None:
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
-
-
 def request_params_with_deferred_tool_search(
     request_params: dict[str, Any],
     deferred_tool_names: frozenset[str],
 ) -> dict[str, Any]:
-    """Tag deferred function tools with ``defer_loading`` and inject the search tool.
+    """Tag deferred function tools with ``defer_loading`` and add the search tool when any is present.
 
-    Every deferred tool's full definition still ships on every request; the API keeps deferred schemas out of the
-    rendered context and loads discovered tools at the end of the context window. The tools array is ordered
-    deterministically (search tool, then the remaining non-deferred tools, then deferred tools sorted by name) so
-    the cached prefix stays byte-stable across requests. The search tool is injected only when at least one
-    deferred tool is present in the request.
+    The tools are ordered search tool, non-deferred tools, then deferred tools by name, so the cached prefix stays
+    byte-stable across requests.
     """
     tools = request_params.get("tools")
     if not deferred_tool_names or not isinstance(tools, list):
@@ -69,13 +62,8 @@ def request_params_with_deferred_tool_search(
     non_deferred_tools: list[Any] = []
     deferred_tools: list[dict[str, Any]] = []
     for tool in tools:
-        tool_dict = _as_dict(tool)
-        if (
-            tool_dict is not None
-            and tool_dict.get("type") == "function"
-            and tool_dict.get("name") in deferred_tool_names
-        ):
-            deferred_tools.append({**tool_dict, "defer_loading": True})
+        if isinstance(tool, dict) and tool.get("type") == "function" and tool.get("name") in deferred_tool_names:
+            deferred_tools.append({**tool, "defer_loading": True})
         else:
             non_deferred_tools.append(tool)
     if not deferred_tools:
