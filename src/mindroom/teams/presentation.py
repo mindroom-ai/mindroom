@@ -341,23 +341,26 @@ class TeamStreamPresentation:
         """
         return member_slot_id(self.config_names_by_id, agent_id, reported_name)
 
-    def append_member(self, member_id: str, content: object | None) -> None:
-        """Append a member content delta to the slot of ``member_id``, which ``resolve_member_id`` returned."""
+    def append_member(self, member_id: str, content: object | None, *, separate: bool = False) -> None:
+        """Append a member content delta to the slot of ``member_id``, which ``resolve_member_id`` returned.
+
+        ``separate`` starts the content in a paragraph of its own when the slot already holds text.
+        """
         scope_key = f"agent:{member_id}"
         self.per_member[member_id] = append_stream_text(
             self.per_member[member_id],
             content,
-            separate=scope_key in self.separate_next_scopes,
+            separate=separate or scope_key in self.separate_next_scopes,
         )
         if content:
             self.separate_next_scopes.discard(scope_key)
 
-    def append_consensus(self, content: object | None) -> None:
-        """Append a coordinator content delta to the consensus slot."""
+    def append_consensus(self, content: object | None, *, separate: bool = False) -> None:
+        """Append a coordinator content delta to the consensus slot; ``separate`` as for ``append_member``."""
         self.consensus = append_stream_text(
             self.consensus,
             content,
-            separate="team" in self.separate_next_scopes,
+            separate=separate or "team" in self.separate_next_scopes,
         )
         if content:
             self.separate_next_scopes.discard("team")
