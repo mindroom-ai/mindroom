@@ -58,14 +58,10 @@ class ApprovalRecovery:
             self._schedule_startup_cleanup_retry()
 
     def _unavailable_entity_reason(self, entity_name: str) -> str | None:
-        permanently_unavailable = (
-            self.entity_permanently_unavailable is not None and self.entity_permanently_unavailable(entity_name)
-        )
-        configured = self.entity_configured is None or self.entity_configured(entity_name)
-        if configured and not permanently_unavailable:
-            return None
-        if permanently_unavailable:
+        if self.entity_permanently_unavailable is not None and self.entity_permanently_unavailable(entity_name):
             return f"Requesting agent '{entity_name}' could not start and is unavailable."
+        if self.entity_configured is None or self.entity_configured(entity_name):
+            return None
         return f"Requesting agent '{entity_name}' is no longer available."
 
     async def reconcile_unavailable_entities(self, entity_names: Iterable[str]) -> None:

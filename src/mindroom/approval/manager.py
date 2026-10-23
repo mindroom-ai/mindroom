@@ -45,7 +45,6 @@ from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_fail
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
-    from pathlib import Path
 
     from mindroom.approval.recovery import ApprovalRecovery
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
@@ -1210,10 +1209,6 @@ class ApprovalManager:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    def _uses_storage_root(self, storage_root: Path) -> bool:
-        """Check whether a runtime rebind belongs to this store."""
-        return self.runtime_paths.storage_root == storage_root
-
     def _has_live_work(self) -> bool:
         """Report decisions currently committing in this process."""
         with self._live_lock:
@@ -1327,7 +1322,7 @@ def initialize_approval_store(
 ) -> ApprovalManager:
     """Initialize the module-level approval domain for one runtime context."""
     global _MANAGER
-    if _MANAGER is not None and _MANAGER._uses_storage_root(runtime_paths.storage_root):
+    if _MANAGER is not None and _MANAGER.runtime_paths.storage_root == runtime_paths.storage_root:
         _MANAGER._configure_transport(
             prepare_event=prepare_event,
             send_delivery=send_delivery,

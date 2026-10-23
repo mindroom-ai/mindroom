@@ -8,7 +8,7 @@ import json
 import threading
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.approval import manager as approval_manager
@@ -117,20 +117,6 @@ class MatrixApprovalAction:
     scheduled_scope: str | None = None
 
 
-def _check_callable_from_module(
-    module: ModuleType,
-    resolved_path: Path,
-) -> Callable[[str, dict[str, Any], str], bool] | Callable[[str, dict[str, Any], str], Awaitable[bool]]:
-    check = getattr(module, "check", None)
-    if not callable(check):
-        msg = f"Approval script '{resolved_path}' must define callable check(tool_name, arguments, agent_name)."
-        raise ToolApprovalScriptError(msg)
-    return cast(
-        "Callable[[str, dict[str, Any], str], bool] | Callable[[str, dict[str, Any], str], Awaitable[bool]]",
-        check,
-    )
-
-
 def _load_script_module(
     script: str,
     runtime_paths: RuntimePaths,
@@ -168,12 +154,6 @@ def _load_script_module(
             _SCRIPT_CACHE.pop(stale_key, None)
         _SCRIPT_CACHE[cache_key] = module
     return module, resolved_path
-
-
-def _clear_script_cache() -> None:
-    """Clear the shared approval-script cache under the cache lock."""
-    with _SCRIPT_CACHE_LOCK:
-        _SCRIPT_CACHE.clear()
 
 
 def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
@@ -232,7 +212,10 @@ async def evaluate_tool_approval(
 
     assert rule.script is not None
     module, resolved_path = _load_script_module(rule.script, runtime_paths)
-    check = _check_callable_from_module(module, resolved_path)
+    check = getattr(module, "check", None)
+    if not callable(check):
+        msg = f"Approval script '{resolved_path}' must define callable check(tool_name, arguments, agent_name)."
+        raise ToolApprovalScriptError(msg)
     try:
         result = check(tool_name, arguments, agent_name)
         if inspect.isawaitable(result):
@@ -410,4 +393,5 @@ async def shutdown_approval_runtime() -> None:
     try:
         await approval_manager.shutdown_approval_manager()
     finally:
-        _clear_script_cache()
+        with _SCRIPT_CACHE_LOCK:
+            _SCRIPT_CACHE.clear()
