@@ -11,13 +11,10 @@ if TYPE_CHECKING:
 
 __all__ = (
     "ANTHROPIC_BASE_URL_DEFAULT",
-    "AWS_BEDROCK_CLAUDE_OPUS",
-    "AZURE_OPENAI_DEFAULT_DEPLOYMENT",
     "CARTESIA_TTS",
     "CEREBRAS_HOST_DEFAULT",
     "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
     "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
-    "CODEX_GPT",
     "CODEX_GPT_ALIAS",
     "CODEX_GPT_ENDPOINT",
     "CONFIG_INIT_ADDITIONAL_MODELS",
@@ -58,7 +55,6 @@ __all__ = (
     "OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES",
     "OPENAI_IMAGE_PATCH_MODEL_PREFIXES",
     "OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES",
-    "OPENAI_REALTIME",
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
     "OPENAI_TRANSCRIPTION",
     "OPENAI_TTS",
@@ -130,10 +126,10 @@ TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES = (
     "claude-sonnet-4@",
 )
 _AWS_BEDROCK_CLAUDE_FABLE = "anthropic.claude-fable-5-1"
-AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-5-5"
+_AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-5-5"
 _AWS_BEDROCK_CLAUDE_SONNET = "anthropic.claude-sonnet-5-5"
 _AWS_BEDROCK_CLAUDE_HAIKU = "anthropic.claude-haiku-5-5"
-CODEX_GPT = "gpt-6.1-sol"
+_CODEX_GPT = "gpt-6.1-sol"
 CODEX_GPT_ALIAS = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
 # Just under the Codex catalog's 95% effective budget (258,400) of its 272k context window.
@@ -156,7 +152,7 @@ OPENAI_IMAGE_PATCH_MODEL_PREFIXES = (*OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREF
 # native tool-search path without a list update.
 OPENAI_TOOL_SEARCH_MIN_GPT_VERSION = (5, 4)
 OPENAI_AVATAR_PROMPT = _OPENAI_GPT
-AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
+_AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 
 _GOOGLE_GEMINI_FLASH = "gemini-3.8-flash"
 _GOOGLE_GEMINI_LITE = "gemini-3.5-flash-lite"
@@ -225,7 +221,6 @@ SENTENCE_TRANSFORMERS_DEFAULT = "sentence-transformers/all-MiniLM-L6-v2"
 OPENAI_TRANSCRIPTION = "gpt-transcribe"
 OPENROUTER_OPENAI_TRANSCRIPTION = f"openai/{OPENAI_TRANSCRIPTION}"
 OPENAI_TTS = "gpt-4o-mini-tts"
-OPENAI_REALTIME = "gpt-realtime-2.1"
 OPENAI_IMAGE = "gpt-image-2.5-sunburst"
 OPENAI_AVATAR_IMAGE = OPENAI_IMAGE
 
@@ -242,9 +237,9 @@ DEEPSEEK_V4_PRO = "deepseek-v4-pro"
 CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
-        "bedrock_claude": ModelPreset("bedrock_claude", AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
-        "azure": ModelPreset("azure", AZURE_OPENAI_DEFAULT_DEPLOYMENT),
-        "codex": ModelPreset("codex", CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
+        "bedrock_claude": ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
+        "azure": ModelPreset("azure", _AZURE_OPENAI_DEFAULT_DEPLOYMENT),
+        "codex": ModelPreset("codex", _CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
         "kimi": ModelPreset("kimi", KIMI_K3, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),
