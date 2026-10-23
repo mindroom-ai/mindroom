@@ -159,7 +159,7 @@ def injected_parameter_names(entrypoint: Callable[..., Any]) -> frozenset[str]:
 class ToolCallActor:
     """What an Agno toolkit may read from its injected ``agent`` or ``team``: the state its toolkit keeps there."""
 
-    session_state: dict[str, Any] | None
+    session_state: dict[str, Any]
 
 
 def framework_arguments(function: ToolFunction, context: ToolCallContext) -> dict[str, Any]:
