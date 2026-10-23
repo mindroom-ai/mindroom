@@ -360,6 +360,8 @@ class _MindRoomWebsiteReader:
             ):
                 continue
             self._visited.add(current_url)
+            # TODO(simplify): The pause also precedes the first fetch, so reading one page always waits 1-3 seconds.
+            # Pause only between fetches of one crawl. Users would get single-page reads seconds sooner.
             self.delay()
             num_links += self._record_current_url(
                 current_url=current_url,

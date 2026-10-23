@@ -52,6 +52,9 @@ def _query_collection(collection: Collection, embedding: Sequence[float], *, lim
         meta_data = dict(metadata or {})
         name = meta_data.pop("name", None)
         meta_data.pop("content_id", None)
+        # TODO(simplify): Hits show the model the stored source signature, Agno's empty `linked_to`, `content_hash`, and
+        # the cosine distance twice, once as a `similarity_score` that falls as matches improve. Show the source, the
+        # chunk, and one distance. Models would read shorter hits; the knowledge goldens pin these keys.
         meta_data["distances"] = distance
         meta_data["similarity_score"] = distance
         hit = SearchHit(
