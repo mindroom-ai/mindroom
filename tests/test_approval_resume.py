@@ -30,11 +30,11 @@ from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_res
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.ai_run_golden_helpers import golden_metadata, published_as_compared
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, approval_calls_for, approval_executor, resume
 from tests.fakes.scripted_model import answer, usage
 from tests.team_runtime.squad import STORAGE, comparable, golden_run, scripted
-from tests.test_ai_run_metadata_goldens import golden_metadata, published_as_compared
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -12,13 +12,12 @@ A run's duration is a clock reading, so only its presence is compared.
 
 from __future__ import annotations
 
-import copy
 import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 
@@ -34,6 +33,7 @@ from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_res
 from mindroom.teams.resume import blocking_team_pause
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from tests.ai_run_golden_helpers import GOLDEN_RUN_METADATA, golden_metadata, published_as_compared
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -46,11 +46,7 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer,
 from tests.team_runtime.squad import SQUAD_APPROVED, STORAGE, approval, scripted
 from tests.team_turn_helpers import authored_team_config, build_team_turn, install_team_models
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
 _FIXTURES = Path(__file__).parent / "fixtures" / "agno_parity"
-_GOLDEN: dict[str, dict[str, Any]] = json.loads((_FIXTURES / "events" / "ai_run.json").read_text(encoding="utf-8"))
 _REQUESTER = "@alice:example.org"
 # The capture's agents, teams, and models, as far as the published metadata reads them: the ``code`` agent's model
 # name, display name, and context window, and the teams' leader model and its window.
@@ -86,7 +82,6 @@ _STREAMED = {"run-tools", "panel-completed"}
 _RESUMED = {"run-approved", "run-rejected", "run-delegation-approved", "team-approved"}
 # An edit cut removed this run's row, so no stored record remains to replay it from.
 _WITHOUT_RECORD = {"run-c4"}
-_CLOCK = "<clock>"
 
 
 def _stored_runs() -> dict[str, AnyRunRecord]:
@@ -102,26 +97,6 @@ def _stored_runs() -> dict[str, AnyRunRecord]:
 
 
 _RUNS = _stored_runs()
-
-
-def published_as_compared(content: Mapping[str, Any]) -> dict[str, Any]:
-    """Return published run metadata as the comparison sees it: its duration, a clock reading, as a sentinel."""
-    compared = copy.deepcopy(dict(content))
-    usage = compared[AI_RUN_METADATA_KEY].get("usage", {})
-    if "duration" in usage:
-        usage["duration"] = _CLOCK
-    return compared
-
-
-def golden_metadata(run_id: str) -> dict[str, Any]:
-    """Return the metadata the captured run ``run_id`` published, as the comparison sees it."""
-    expected = published_as_compared(_GOLDEN[run_id])
-    if run_id == "run-tools":
-        # Agno's streamed reply merged the counters its requests reported into the usage, so the zero cache-write
-        # count a request reported appeared as 0; the owned usage leaves zero counters out, as every blocking reply's
-        # usage did.
-        assert expected[AI_RUN_METADATA_KEY]["usage"].pop("cache_write_tokens") == 0
-    return expected
 
 
 def _prepared_history(record: AnyRunRecord) -> PreparedHistoryState:
@@ -276,11 +251,11 @@ async def _team_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: s
 
 def test_only_the_cut_run_has_no_stored_record() -> None:
     """Every golden run but the one an edit cut removed has a stored record to replay it from."""
-    assert {run_id for run_id in _GOLDEN if run_id not in _RUNS} == _WITHOUT_RECORD
+    assert {run_id for run_id in GOLDEN_RUN_METADATA if run_id not in _RUNS} == _WITHOUT_RECORD
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("run_id", sorted(set(_GOLDEN) - _WITHOUT_RECORD - _RESUMED))
+@pytest.mark.parametrize("run_id", sorted(set(GOLDEN_RUN_METADATA) - _WITHOUT_RECORD - _RESUMED))
 async def test_a_reply_publishes_the_golden_run_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
