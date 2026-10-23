@@ -314,7 +314,7 @@ def test_compaction_writes_back_only_the_runs_it_edited(storage: ConversationSto
     _save(storage, linked)
     assert _fold(storage, ["r0"], "S1") is not None
 
-    save_working_run_changes(storage, _loaded(storage), loaded_runs, working)
+    save_working_run_changes(storage, session=_loaded(storage), loaded_runs=loaded_runs, working_session=working)
 
     stored = {run.run_id: run for run in _loaded(storage).runs or []}
     assert stored["p1"].status == RunStatus.completed

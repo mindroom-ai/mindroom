@@ -114,7 +114,7 @@ def _seen(storage: ConversationStore, session: ConversationSession) -> set[str]:
 
 
 def _redact(storage: ConversationStore, session: ConversationSession, event_id: str) -> bool:
-    return _remove_redacted_event_from_history(storage, session, _SCOPE, event_id=event_id)
+    return _remove_redacted_event_from_history(storage, session=session, scope=_SCOPE, event_id=event_id)
 
 
 def _legacy_session(run_ids: list[str], summary: str, seen_event_ids: list[str]) -> ConversationSession:

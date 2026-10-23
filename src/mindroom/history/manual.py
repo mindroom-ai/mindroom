@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
 from mindroom.history.session_context import open_resolved_scope_session_context
-from mindroom.history.storage import add_pending_force_compaction_scope, read_scope_state, set_force_compaction_state
+from mindroom.history.storage import add_pending_force_compaction_scope, update_scope_state_on_latest
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -82,9 +82,12 @@ def request_compaction_before_next_reply(
         session = scope_context.session
         # create_session_if_missing opens a new session when none is stored yet.
         assert session is not None
-        current_state = read_scope_state(session, scope_context.scope)
-        set_force_compaction_state(session, scope_context.scope, current_state, force=True)
-        scope_context.storage.save_session_fields(session, "metadata")
+        update_scope_state_on_latest(
+            scope_context.storage,
+            session=session,
+            scope=scope_context.scope,
+            update=lambda latest: replace(latest, force_compact_before_next_run=True),
+        )
 
         next_session_state = session_state
         if record_pending_scope_in_session_state:

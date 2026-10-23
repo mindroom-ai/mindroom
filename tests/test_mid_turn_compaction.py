@@ -32,7 +32,7 @@ from mindroom.history.replay import (
 )
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
-from mindroom.history.storage import new_scope_session, read_scope_state, set_force_compaction_state
+from mindroom.history.storage import _with_scope_state, new_scope_session, read_scope_state
 from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
@@ -1350,7 +1350,11 @@ async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_c
     storage = seeded_storage(config, paths)
     stored = storage.load_session("session-1", "agent")
     assert stored is not None
-    set_force_compaction_state(stored, TEST_AGENT_SCOPE, HistoryScopeState(), force=True)
+    stored.metadata = _with_scope_state(
+        stored.metadata,
+        TEST_AGENT_SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     storage.save_session_fields(stored, "metadata")
     model = ToolLoopModel(tool_rounds=5)
 

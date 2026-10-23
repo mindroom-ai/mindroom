@@ -30,10 +30,10 @@ from mindroom.constants import (
 from mindroom.history import summary_rows
 from mindroom.history.compaction import Summarizer, SummaryModel
 from mindroom.history.storage import (
+    _with_scope_state,
     append_compaction_chunk,
     new_scope_session,
     read_chunk_basis,
-    set_force_compaction_state,
 )
 from mindroom.history.types import (
     CompactionLifecycleFailure,
@@ -433,7 +433,7 @@ def _forced_compaction_context(
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     runtime_context = _hook_runtime_context(
         config=config,

@@ -404,7 +404,7 @@ class _Runner:
             floor = None
         segment_rows = self._segment_rows()
         barrier = self._latest_barrier()
-        _remove_redacted_event_from_history(self._storage, self._load(), _SCOPE, event_id=event_id)
+        _remove_redacted_event_from_history(self._storage, session=self._load(), scope=_SCOPE, event_id=event_id)
         # A run goes whole, so a cut that removed one of its fold rows starts right after that row.
         remaining = self._segment_rows()
         for row_id, (after_run_index, owner) in segment_rows.items():

@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
     from mindroom.session_storage.schema import TableNames
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
 
 type _Key = tuple[int, int]
 
@@ -190,6 +191,7 @@ def append_summary(
     summary: str,
     summary_model: str,
     segment: Segment | None = None,
+    session: ConversationSession | None = None,
 ) -> int | None:
     """Append one summary row after the newest covered run, unless its input went stale; return its id.
 
@@ -198,8 +200,9 @@ def append_summary(
     removed the segment's run. The row's event sets come from the covered rows as they are stored now, so
     metadata written during the summary call, such as a reply's response event id, counts. A segment's
     run, when stored, moves after the new row, since what it still holds follows what the row folded.
+    ``session``, a loaded copy of the session, then holds the runs and summary a load returns.
     """
-    with _write_transaction(storage) as (connection, tables):
+    with _write_transaction(storage, session_id, session) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key, latest_only=True)
         previous_index = rows[-1].after_run_index if rows else -1
         # A row never sorts behind the latest one: that would return what it folded to replay.
@@ -318,13 +321,15 @@ def cut_at_event(
     scope_key: str,
     event_id: str,
     match: Literal["answered", "any"],
+    session: ConversationSession | None = None,
 ) -> bool:
     """Delete the earliest element of the scope's log that holds ``event_id`` and everything after it.
 
     An edit matches what a run answered; a redaction (``"any"``) also what it read or wrote. Returns
-    whether any element held the event.
+    whether any element held the event. ``session``, a loaded copy of the session, then holds the runs
+    and summary a load returns.
     """
-    with _write_transaction(storage) as (connection, tables):
+    with _write_transaction(storage, session_id, session) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
         boundary = rows[-1].after_run_index if rows else None
         loaded_holder = next(
@@ -375,22 +380,37 @@ def legacy_event_ids(storage: ConversationStore, *, session_id: str, scope_key: 
     return frozenset().union(*(row.event_ids for row in in_force)) if in_force else None
 
 
-def cut_at_legacy_row(storage: ConversationStore, *, session_id: str, scope_key: str) -> None:
-    """Delete the legacy summary in force and everything after it: every run and later row of the scope."""
-    with _write_transaction(storage) as (connection, tables):
+def cut_at_legacy_row(
+    storage: ConversationStore,
+    *,
+    session_id: str,
+    scope_key: str,
+    session: ConversationSession | None = None,
+) -> None:
+    """Delete the legacy summary in force and everything after it: every run and later row of the scope.
+
+    ``session``, a loaded copy of the session, then holds the runs and summary a load returns.
+    """
+    with _write_transaction(storage, session_id, session) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
         legacy = [row for row in _after_latest_barrier(rows) if row.legacy and row.summary is not None]
         if legacy:
             _cut(connection, tables, session_id, scope_key, rows, (legacy[0].after_run_index, legacy[0].id))
 
 
-def retire(storage: ConversationStore, *, session_id: str, scope_key: str) -> None:
+def retire(
+    storage: ConversationStore,
+    *,
+    session_id: str,
+    scope_key: str,
+    session: ConversationSession | None = None,
+) -> None:
     """Stop every summary of the scope from replaying or counting as seen, keeping the runs stored.
 
     A run that folded mid-turn goes with its descendants, since its stored part would replay without
-    what it built on.
+    what it built on. ``session``, a loaded copy of the session, then holds the runs and summary a load returns.
     """
-    with _write_transaction(storage) as (connection, tables):
+    with _write_transaction(storage, session_id, session) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
         connection.execute(
             f"INSERT INTO {tables.summaries} (session_id, scope_key, after_run_index, created_at) "  # noqa: S608
@@ -574,9 +594,16 @@ def _after_latest_barrier(rows: Sequence[_SummaryRow]) -> list[_SummaryRow]:
 
 
 @contextmanager
-def _write_transaction(storage: ConversationStore) -> Iterator[tuple[sqlite3.Connection, _Tables]]:
-    """Run one write transaction on the log; it creates the log's tables and takes the write lock up front."""
-    with storage.transaction(write=True) as connection:
+def _write_transaction(
+    storage: ConversationStore,
+    session_id: str,
+    session: ConversationSession | None,
+) -> Iterator[tuple[sqlite3.Connection, _Tables]]:
+    """Run one write transaction on the log; it creates the log's tables and takes the write lock up front.
+
+    Once it commits, ``session``, when given, holds the runs and summary a load returns.
+    """
+    with storage.log_transaction(session_id, session=session) as connection:
         yield connection, _Tables(storage.names)
 
 

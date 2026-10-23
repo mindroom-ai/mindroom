@@ -11,6 +11,7 @@ These tests exercise the owning interfaces directly, not the bot runtime.
 
 from __future__ import annotations
 
+import sqlite3
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,8 +32,8 @@ from mindroom.constants import (
 )
 from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
 from mindroom.history.storage import (
+    _with_scope_state,
     read_scope_state,
-    set_force_compaction_state,
     update_scope_state_on_latest,
 )
 from mindroom.history.summary_call import (
@@ -58,6 +59,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, transport_error
+from mindroom.session_storage import store as store_module
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.token_budget import estimate_compaction_input_tokens
@@ -231,7 +233,11 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
     concurrent_session = storage.load_session("session-1", "agent")
     assert concurrent_session is not None
     concurrent_state = HistoryScopeState(force_compact_before_next_run=True)
-    set_force_compaction_state(concurrent_session, _SCOPE, HistoryScopeState(), force=True)
+    concurrent_session.metadata = _with_scope_state(
+        concurrent_session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     concurrent_session.runs = [*(concurrent_session.runs or []), _completed_run("run-2")]
     seed_session(storage, concurrent_session)
 
@@ -241,42 +247,52 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
         seen_states.append(latest)
         return HistoryScopeState(force_compact_before_next_run=False)
 
-    returned_state = update_scope_state_on_latest(storage, stale_session, _SCOPE, clear_force)
+    returned_state = update_scope_state_on_latest(storage, session=stale_session, scope=_SCOPE, update=clear_force)
 
     assert seen_states == [concurrent_state]
     assert returned_state.force_compact_before_next_run is False
     persisted_session = storage.load_session("session-1", "agent")
     assert persisted_session is not None
     assert read_scope_state(persisted_session, _SCOPE) == returned_state
-    assert [run.run_id for run in stale_session.runs or []] == ["run-1", "run-2"]
+    assert stale_session.metadata == persisted_session.metadata
 
 
-def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(tmp_path: Path) -> None:
-    """A no-op update must not upsert but still syncs the session from the freshest row."""
+def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-op update writes nothing, and the session then holds the freshest row's metadata."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     stale_session = _session([_completed_run("run-1")])
-    persisted_state = HistoryScopeState(force_compact_before_next_run=True)
-    set_force_compaction_state(stale_session, _SCOPE, HistoryScopeState(), force=True)
     seed_session(storage, stale_session)
 
     concurrent_session = storage.load_session("session-1", "agent")
     assert concurrent_session is not None
-    concurrent_session.runs = [*(concurrent_session.runs or []), _completed_run("run-2")]
+    persisted_state = HistoryScopeState(force_compact_before_next_run=True)
+    concurrent_session.metadata = _with_scope_state(concurrent_session.metadata, _SCOPE, persisted_state)
     seed_session(storage, concurrent_session)
+    statements: list[str] = []
+    connect = store_module.connect_conversation_database
 
-    store_type = type(storage)
-    with patch.object(
-        store_type,
-        "save_session_fields",
-        autospec=True,
-        side_effect=store_type.save_session_fields,
-    ) as save_spy:
-        returned_state = update_scope_state_on_latest(storage, stale_session, _SCOPE, lambda latest: latest)
+    def traced_connect(path: Path) -> sqlite3.Connection:
+        connection = connect(path)
+        connection.set_trace_callback(statements.append)
+        return connection
 
-    save_spy.assert_not_called()
+    monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
+
+    returned_state = update_scope_state_on_latest(
+        storage,
+        session=stale_session,
+        scope=_SCOPE,
+        update=lambda latest: latest,
+    )
+
+    assert statements
+    assert not [statement for statement in statements if statement.lstrip().upper().startswith("UPDATE")]
     assert returned_state == persisted_state
-    assert [run.run_id for run in stale_session.runs or []] == ["run-1", "run-2"]
+    assert read_scope_state(stale_session, _SCOPE) == persisted_state
 
 
 def test_scope_state_writes_keep_other_scopes_verbatim() -> None:
@@ -290,7 +306,11 @@ def test_scope_state_writes_keep_other_scopes_verbatim() -> None:
         },
     }
 
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
 
     metadata = session.metadata or {}
     assert metadata[MINDROOM_COMPACTION_METADATA_KEY]["states"] == {
@@ -313,7 +333,11 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
             _completed_run("run-2", marker="RUN2-MARKER", padding=16_000),
         ],
     )
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     seed_session(storage, session)
     first_pass_inputs: list[str] = []
 
@@ -1067,7 +1091,11 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
         }
         runs.append(run)
     session = _session(runs)
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     seed_session(storage, session)
     summary_inputs: list[str] = []
 
@@ -1124,7 +1152,11 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
             _completed_run("run-2", marker="RUN2-MARKER", padding=16_000),
         ],
     )
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     seed_session(storage, session)
 
     attempts: list[str] = []
@@ -1335,7 +1367,11 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             _completed_run("run-2", marker="RUN2-MARKER", padding=16_000),
         ],
     )
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     seed_session(storage, session)
     primary = summary_model()
     fallback = summary_model(model_id="fallback-model-id")
@@ -1397,7 +1433,11 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER")])
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     seed_session(storage, session)
     attempts: list[str] = []
 
@@ -1447,7 +1487,11 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     seed_session(storage, session)
     summary_input_budget = 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
     attempts: list[str] = []
@@ -1513,7 +1557,11 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     previous_summary = ("word " * 975) + "TAIL-FACT-MUST-SURVIVE"
     session = _session([_completed_run("run-1", marker="RUN1-MARKER")])
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     seed_session(storage, session)
     seed_summary(storage, session, _SCOPE, previous_summary)
     session = storage.load_session("session-1", "agent")
@@ -1595,7 +1643,11 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=16_000)])
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     seed_session(storage, session)
     attempts: list[str] = []
 
@@ -1656,7 +1708,11 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session([_completed_run("run-1", marker="RUN1-MARKER", padding=4_000)])
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        _SCOPE,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     seed_session(storage, session)
 
     attempts: list[str] = []

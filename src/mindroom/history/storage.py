@@ -14,9 +14,10 @@ outside it, only the session loader and run-insertion rules in
 - the pending force-compaction scope keys list inside the tools' shared ``session_state``
 
 Nothing else the summary rows already know is stored: the event ids compacted
-history represents are derived from them when seen ids are read. Session fields are
-written one at a time against the freshest stored row, so a write never restores
-what another writer dropped.
+history represents are derived from them when seen ids are read. A metadata change
+applies to the metadata the stored row holds, under the write lock, so it never
+restores what another writer dropped, and every write here leaves the in-memory
+session holding what the store does.
 
 Compaction appends summary rows and never deletes a run (a mid-turn fold moves
 only its own stored run after its row); edits and redactions cut the log,
@@ -27,7 +28,7 @@ summary covered to replay (see ``tests/test_compaction_fuzz.py`` for the invaria
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -42,6 +43,7 @@ from mindroom.history.run_visibility import is_model_history_visible_run, run_in
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.session_storage.agent_storage import save_compaction_usage
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
 
 if TYPE_CHECKING:
@@ -96,7 +98,11 @@ def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> Conve
 
 def read_scope_state(session: ConversationSession, scope: HistoryScope) -> HistoryScopeState:
     """Return the scoped compaction state for one session and scope."""
-    raw_state = _raw_scope_states(session.metadata).get(scope.key, {})
+    return _scope_state(session.metadata, scope)
+
+
+def _scope_state(metadata: dict[str, Any] | None, scope: HistoryScope) -> HistoryScopeState:
+    raw_state = _raw_scope_states(metadata).get(scope.key, {})
     return HistoryScopeState(force_compact_before_next_run=bool(raw_state.get("force_compact_before_next_run")))
 
 
@@ -115,18 +121,22 @@ def _raw_scope_states(metadata: dict[str, Any] | None) -> dict[str, dict[str, An
     return {}
 
 
-def _write_scope_state(session: ConversationSession, scope: HistoryScope, state: HistoryScopeState) -> None:
-    """Persist one scope's compaction control state back into session metadata.
+def _with_scope_state(
+    metadata: dict[str, Any] | None,
+    scope: HistoryScope,
+    state: HistoryScopeState,
+) -> dict[str, Any]:
+    """Return session ``metadata`` holding ``state`` as one scope's compaction control state.
 
-    Other scopes' stored mappings are kept verbatim.
+    Other scopes' stored mappings are kept verbatim, and ``metadata`` itself is left alone.
     """
-    raw_states = _raw_scope_states(session.metadata)
+    raw_states = _raw_scope_states(metadata)
     if state.force_compact_before_next_run:
         raw_states[scope.key] = {"force_compact_before_next_run": True}
     else:
         raw_states.pop(scope.key, None)
 
-    session_metadata = dict(session.metadata or {})
+    session_metadata = dict(metadata or {})
     if not raw_states:
         session_metadata.pop(MINDROOM_COMPACTION_METADATA_KEY, None)
     else:
@@ -134,20 +144,7 @@ def _write_scope_state(session: ConversationSession, scope: HistoryScope, state:
             "version": _COMPACTION_METADATA_VERSION,
             "states": raw_states,
         }
-    session.metadata = session_metadata
-
-
-def set_force_compaction_state(
-    session: ConversationSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-    *,
-    force: bool,
-) -> HistoryScopeState:
-    """Set the next-run force flag in one session scope."""
-    next_state = replace(state, force_compact_before_next_run=force)
-    _write_scope_state(session, scope, next_state)
-    return next_state
+    return session_metadata
 
 
 def add_pending_force_compaction_scope(
@@ -250,7 +247,7 @@ def update_scope_seen_event_ids(session: ConversationSession, scope: HistoryScop
     updated_seen_ids = existing_seen_ids.union(event_id for event_id in event_ids if event_id)
     if updated_seen_ids == existing_seen_ids:
         return False
-    _replace_scope_seen_event_ids(session, scope, updated_seen_ids)
+    session.metadata = _with_scope_seen_event_ids(session.metadata, scope=scope, event_ids=updated_seen_ids)
     return True
 
 
@@ -272,9 +269,9 @@ def remove_runs_answering(storage: ConversationStore, session_id: str, scope: Hi
 
 def _remove_redacted_event_from_history(
     storage: ConversationStore,
+    *,
     session: ConversationSession,
     scope: HistoryScope,
-    *,
     event_id: str,
     legacy_source_event_id: str | None = None,
 ) -> bool:
@@ -286,23 +283,22 @@ def _remove_redacted_event_from_history(
     return as unseen thread context. ``session`` is synced to the stored result.
     Returns whether the scope's history changed.
     """
-    legacy_event_ids = summary_rows.legacy_event_ids(storage, session_id=session.session_id, scope_key=scope.key)
+    session_id = session.session_id
+    legacy_event_ids = summary_rows.legacy_event_ids(storage, session_id=session_id, scope_key=scope.key)
     if legacy_event_ids is not None and _legacy_summary_may_contain(event_id, legacy_source_event_id, legacy_event_ids):
-        summary_rows.cut_at_legacy_row(storage, session_id=session.session_id, scope_key=scope.key)
+        summary_rows.cut_at_legacy_row(storage, session_id=session_id, scope_key=scope.key, session=session)
     elif not summary_rows.cut_at_event(
         storage,
-        session_id=session.session_id,
+        session_id=session_id,
         scope_key=scope.key,
         event_id=event_id,
         match="any",
+        session=session,
     ):
         return False
     elif legacy_event_ids is not None:
-        summary_rows.retire(storage, session_id=session.session_id, scope_key=scope.key)
-    target_session = _latest_persisted_session(storage, session)
-    _replace_scope_seen_event_ids(target_session, scope, set())
-    storage.save_session_fields(target_session, "metadata")
-    _adopt_session_fields(session, target_session)
+        summary_rows.retire(storage, session_id=session_id, scope_key=scope.key, session=session)
+    storage.update_metadata(session, partial(_with_scope_seen_event_ids, scope=scope, event_ids=set()))
     return True
 
 
@@ -329,13 +325,12 @@ async def remove_history_of_redacted_events(
         for event_id in sorted(set(redacted).difference(removed_event_ids)):
             removal = partial(
                 _remove_redacted_event_from_history,
-                storage,
-                session,
-                scope,
+                session=session,
+                scope=scope,
                 event_id=event_id,
                 legacy_source_event_id=redacted[event_id],
             )
-            if await run_blocking_until_complete(removal):
+            if await run_session_storage_operation(lambda: storage, removal):
                 newly_removed.append(event_id)
         if not newly_removed:
             return removed_event_ids
@@ -368,44 +363,26 @@ def _legacy_summary_may_contain(
     )
 
 
-def _latest_persisted_session(storage: ConversationStore, session: ConversationSession) -> ConversationSession:
-    """Return the freshest stored row for one session, or the given session when it has none."""
-    latest_session = storage.load_session(session.session_id, session.kind)
-    return session if latest_session is None else latest_session
-
-
-def _adopt_session_fields(session: ConversationSession, source: ConversationSession) -> None:
-    """Sync one in-memory session's durable fields from another loaded row."""
-    session.metadata = source.metadata
-    session.runs = source.runs
-    session.summary = source.summary
-
-
-def reload_session(storage: ConversationStore, session: ConversationSession) -> None:
-    """Sync one in-memory session's durable fields from its freshest stored row."""
-    _adopt_session_fields(session, _latest_persisted_session(storage, session))
-
-
 def update_scope_state_on_latest(
     storage: ConversationStore,
+    *,
     session: ConversationSession,
     scope: HistoryScope,
     update: Callable[[HistoryScopeState], HistoryScopeState],
 ) -> HistoryScopeState:
-    """Apply one scope-state update against the freshest stored row and sync the session.
+    """Apply one scope-state update to the stored row's metadata, which ``session`` then holds; return the new state.
 
-    The update callable sees the latest persisted state, so it can refuse to write
-    (return its input unchanged) when the durable row moved since the caller read it.
-    Only the metadata field is written, so other writers' fields stay.
+    The update callable sees the latest stored state, so it can refuse to write (return its input unchanged) when
+    the durable row moved since the caller read it.
     """
-    target_session = _latest_persisted_session(storage, session)
-    latest_state = read_scope_state(target_session, scope)
-    next_state = update(latest_state)
-    if next_state != latest_state:
-        _write_scope_state(target_session, scope, next_state)
-        storage.save_session_fields(target_session, "metadata")
-    _adopt_session_fields(session, target_session)
-    return next_state
+
+    def change(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+        latest = _scope_state(metadata, scope)
+        next_state = update(latest)
+        return metadata if next_state == latest else _with_scope_state(metadata, scope, next_state)
+
+    storage.update_metadata(session, change)
+    return read_scope_state(session, scope)
 
 
 @dataclass(frozen=True)
@@ -438,8 +415,8 @@ def read_chunk_basis(
 
 
 def append_compaction_chunk(
-    *,
     storage: ConversationStore,
+    *,
     session: ConversationSession,
     scope: HistoryScope,
     basis: _ChunkBasis,
@@ -450,7 +427,7 @@ def append_compaction_chunk(
     """Durably append one compaction chunk's summary row before the next chunk is attempted.
 
     The append writes nothing when the scope's latest row, or a run the chunk folded,
-    changed since ``basis`` was read. ``session`` is synced to the stored result.
+    changed since ``basis`` was read. ``session`` then holds the stored result.
     Returns whether the row was appended.
     """
     row_id = summary_rows.append_summary(
@@ -461,11 +438,9 @@ def append_compaction_chunk(
         covered=[run for run in basis.covered if run.run_id in included_run_ids],
         summary=summary,
         summary_model=summary_model,
+        session=session,
     )
-    if row_id is None:
-        return False
-    reload_session(storage, session)
-    return True
+    return row_id is not None
 
 
 @dataclass(frozen=True)
@@ -515,7 +490,11 @@ def append_fold(
     summary_model: str,
     segment: summary_rows.Segment,
 ) -> bool:
-    """Append a mid-turn fold's summary row with its segment, unless its basis went stale or a cut removed its run."""
+    """Append a mid-turn fold's summary row with its segment, unless its basis went stale or a cut removed its run.
+
+    ``session``, the turn's own, then holds what a fresh load does, so a request rebuilt from it within the turn,
+    as a delegation continuation is, replays only what the summary does not cover.
+    """
     return (
         summary_rows.append_summary(
             storage,
@@ -526,6 +505,7 @@ def append_fold(
             summary=summary,
             summary_model=summary_model,
             segment=segment,
+            session=session,
         )
         is not None
     )
@@ -545,6 +525,7 @@ def ensure_scope_session_row(storage: ConversationStore, session: ConversationSe
 
 def save_working_run_changes(
     storage: ConversationStore,
+    *,
     session: ConversationSession,
     loaded_runs: Sequence[AnyRunRecord],
     working_session: ConversationSession,
@@ -583,9 +564,14 @@ def _read_preserved_scope_seen_event_ids(session: ConversationSession, scope: Hi
     return {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
 
 
-def _replace_scope_seen_event_ids(session: ConversationSession, scope: HistoryScope, event_ids: set[str]) -> None:
-    """Make ``event_ids`` the scope's preserved seen ids, leaving other scopes untouched."""
-    session_metadata = dict(session.metadata or {})
+def _with_scope_seen_event_ids(
+    metadata: dict[str, Any] | None,
+    *,
+    scope: HistoryScope,
+    event_ids: set[str],
+) -> dict[str, Any]:
+    """Return ``metadata`` with ``event_ids`` as the scope's preserved seen ids, leaving other scopes untouched."""
+    session_metadata = dict(metadata or {})
     raw_value = _valid_matrix_history_metadata(session_metadata)
     matrix_history: dict[str, Any] = (
         dict(raw_value) if raw_value is not None else {"version": _MATRIX_HISTORY_METADATA_VERSION}
@@ -605,7 +591,7 @@ def _replace_scope_seen_event_ids(session: ConversationSession, scope: HistorySc
         session_metadata[MINDROOM_MATRIX_HISTORY_METADATA_KEY] = matrix_history
     else:
         session_metadata.pop(MINDROOM_MATRIX_HISTORY_METADATA_KEY, None)
-    session.metadata = session_metadata
+    return session_metadata
 
 
 def _valid_matrix_history_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:

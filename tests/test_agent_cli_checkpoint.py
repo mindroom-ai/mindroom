@@ -116,6 +116,22 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
 
 
 @pytest.mark.asyncio
+async def test_the_turns_session_holds_the_checkpoint_as_stored(tmp_path: Path) -> None:
+    """A checkpoint saves through the turn's own session, which then holds the saved run as a load would."""
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    await _capture(checkpoint, _record(), [_assistant("bash-1")])
+
+    await checkpoint.persist("bash-1")
+
+    assert catalog.store is not None
+    stored = catalog.store.load_session("session", "agent")
+    assert stored is not None
+    assert [(run.run_id, run.status) for run in catalog.session.runs] == [("run", RunStatus.cancelled)]
+    assert [run.to_dict() for run in catalog.session.runs] == [run.to_dict() for run in stored.runs]
+
+
+@pytest.mark.asyncio
 async def test_approval_checkpoint_refreshes_mutable_session_state(tmp_path: Path) -> None:
     catalog = await _stored_catalog(tmp_path)
     checkpoint = BatchCheckpoint(catalog)

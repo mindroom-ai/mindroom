@@ -8,7 +8,6 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.history.compaction import (
     ConversationChangedError,
     compact_running_turn,
@@ -41,7 +40,6 @@ from mindroom.history.session_context import (
 from mindroom.history.storage import (
     consume_pending_force_compaction_scope,
     read_scope_state,
-    set_force_compaction_state,
     update_scope_state_on_latest,
 )
 from mindroom.history.summary_call import is_summary_timeout
@@ -61,6 +59,7 @@ from mindroom.history.types import (
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
 from mindroom.redaction import redact_sensitive_text
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -116,7 +115,7 @@ def note_prepared_history_timing(
     )
 
 
-def _clear_forced_compaction_after_failure(
+async def _clear_forced_compaction_after_failure(
     *,
     storage: ConversationStore,
     session: ConversationSession,
@@ -133,11 +132,14 @@ def _clear_forced_compaction_after_failure(
     """
     if not state.force_compact_before_next_run:
         return
-    update_scope_state_on_latest(
-        storage,
-        session,
-        scope,
-        lambda latest: replace(latest, force_compact_before_next_run=False),
+    await run_session_storage_operation(
+        lambda: storage,
+        partial(
+            update_scope_state_on_latest,
+            session=session,
+            scope=scope,
+            update=lambda latest: replace(latest, force_compact_before_next_run=False),
+        ),
     )
 
 
@@ -299,12 +301,12 @@ async def prepare_scope_history(
     session = scope_context.session
     if pipeline_timing is not None:
         pipeline_timing.mark("history_classify_start")
-    # Preparing the scope state may write the session row; keep it off the event loop and
-    # let an in-flight write finish before cancellation propagates.
-    state = await run_blocking_until_complete(
+    # Preparing the scope state may write the session row; it runs in the database's lane, behind the session's
+    # other writes, and an in-flight write finishes before cancellation propagates.
+    state = await run_session_storage_operation(
+        lambda: scope_context.storage,
         partial(
             _prepare_scope_state_for_run,
-            storage=scope_context.storage,
             session=session,
             scope=scope_context.scope,
             execution_plan=execution_plan,
@@ -631,7 +633,7 @@ async def _compact_before_reply(
         raise
     except Exception:
         # A failing manual compaction must not retry on every reply.
-        _clear_forced_compaction_after_failure(storage=storage, session=session, scope=scope, state=state)
+        await _clear_forced_compaction_after_failure(storage=storage, session=session, scope=scope, state=state)
         raise
 
 
@@ -950,19 +952,30 @@ def resolve_agent_preparation_inputs(
 
 
 def _prepare_scope_state_for_run(
-    *,
     storage: ConversationStore,
+    *,
     session: ConversationSession,
     scope: HistoryScope,
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
     state = read_scope_state(session, scope)
     if consume_pending_force_compaction_scope(session, scope):
-        state = set_force_compaction_state(session, scope, state, force=True)
-        storage.save_session_fields(session, "metadata", "session_state")
+        # The flag is stored before the request leaves the tools' state, so a crash between the two writes repeats
+        # the request instead of losing it.
+        state = update_scope_state_on_latest(
+            storage,
+            session=session,
+            scope=scope,
+            update=lambda latest: replace(latest, force_compact_before_next_run=True),
+        )
+        storage.save_session_fields(session, "session_state")
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
-        state = set_force_compaction_state(session, scope, state, force=False)
-        storage.save_session_fields(session, "metadata")
+        state = update_scope_state_on_latest(
+            storage,
+            session=session,
+            scope=scope,
+            update=lambda latest: replace(latest, force_compact_before_next_run=False),
+        )
         description = describe_compaction_unavailability(execution_plan)
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",

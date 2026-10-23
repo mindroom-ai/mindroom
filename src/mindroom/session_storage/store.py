@@ -125,31 +125,12 @@ class ConversationStore:
         The runs are those after the owner scope's latest summary row, every paused, cancelled, or errored run,
         and their member runs, in log order; a run folded mid-turn loads without the messages its segments hold.
         """
-        names = self.names
         with self.transaction(write=False) as connection:
-            tables = table_names(connection)
-            row = self._session_row(connection, session_id)
-            if row is None or row[0] != kind:
-                return None
-            stored_kind, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at = row
-            summaries = quote_identifier(names.summaries) if names.summaries in tables else None
-            run_rows = _loaded_run_rows(connection, names, summaries, session_id) if names.runs in tables else []
-            folded = _folded_message_ids(connection, summaries, session_id, [run_id for run_id, _, _ in run_rows])
-            summary = _replay_summary(
-                connection,
-                summaries,
-                session_id,
-                owner_scope_key(stored_kind, agent_id, team_id),
-            )
+            loaded = self._read_load(connection, session_id, kind)
+        if loaded is None:
+            return None
+        _, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at = loaded.row
         state = _session_state(session_data)
-        runs: list[AnyRunRecord] = []
-        for run_id, stored_type, run_data in run_rows:
-            run = run_from_row(stored_type, run_data)
-            if run is None:
-                continue
-            if run_id in folded:
-                run.messages = [message for message in run.messages if message.id not in folded[run_id]]
-            runs.append(run)
         return ConversationSession(
             session_id=session_id,
             kind=kind,
@@ -158,11 +139,52 @@ class ConversationStore:
             metadata=_decoded_mapping(metadata),
             session_state=state,
             stored_session_state=copy.deepcopy(state),
-            runs=runs,
-            summary=summary,
+            runs=loaded.runs(),
+            summary=loaded.summary,
             created_at=created_at,
             updated_at=updated_at,
         )
+
+    def _read_load(self, connection: sqlite3.Connection, session_id: str, kind: SessionKind) -> _Load | None:
+        """Read what a load of session ``session_id`` returns in the caller's transaction, its runs still encoded."""
+        names = self.names
+        tables = table_names(connection)
+        row = self._session_row(connection, session_id)
+        if row is None or row[0] != kind:
+            return None
+        stored_kind, agent_id, team_id = row[:3]
+        summaries = quote_identifier(names.summaries) if names.summaries in tables else None
+        run_rows = _loaded_run_rows(connection, names, summaries, session_id) if names.runs in tables else []
+        return _Load(
+            row=row,
+            run_rows=run_rows,
+            folded=_folded_message_ids(connection, summaries, session_id, [run_id for run_id, _, _ in run_rows]),
+            summary=_replay_summary(connection, summaries, session_id, owner_scope_key(stored_kind, agent_id, team_id)),
+        )
+
+    @contextmanager
+    def log_transaction(
+        self,
+        session_id: str,
+        *,
+        session: ConversationSession | None = None,
+    ) -> Iterator[sqlite3.Connection]:
+        """Run one write transaction that changes session ``session_id``'s log: its runs, summary rows, or removed runs.
+
+        Once it commits, ``session``, when given, holds the runs and summary a load returns, read in the same
+        transaction, so no other writer's change lands between the write and what the session holds.
+        """
+        with self.transaction(write=True) as connection:
+            yield connection
+            loaded = self._read_load(connection, session_id, session.kind) if session is not None else None
+        if session is not None:
+            _adopt_log(session, loaded)
+
+    def reload_log(self, session: ConversationSession) -> None:
+        """Make ``session``'s runs and summary what a load returns now, after another writer changed its log."""
+        with self.transaction(write=False) as connection:
+            loaded = self._read_load(connection, session.session_id, session.kind)
+        _adopt_log(session, loaded)
 
     def _session_row(self, connection: sqlite3.Connection, session_id: str) -> tuple[Any, ...] | None:
         if self.names.sessions not in table_names(connection):
@@ -254,6 +276,35 @@ class ConversationStore:
         caller must not change it.
         """
         self._save_fields(session, metadata=False, state=state)
+
+    def update_metadata(
+        self,
+        session: ConversationSession,
+        update: Callable[[dict[str, Any] | None], dict[str, Any] | None],
+    ) -> None:
+        """Apply ``update`` to the metadata ``session``'s row holds, under the write lock.
+
+        ``update`` receives a private copy of the stored metadata, or of the session's own when no row exists yet,
+        and returns the metadata to store, so a change never restores what another writer dropped. Only a change
+        writes, creating the row if needed. Once it commits, ``session.metadata`` is what the row holds.
+        """
+        sessions = quote_identifier(self.names.sessions)
+        created = None
+        with self.transaction(write=True) as connection:
+            stored = connection.execute(
+                f"SELECT metadata FROM {sessions} WHERE session_id = ?",  # noqa: S608
+                (session.session_id,),
+            ).fetchone()
+            current = _decoded_mapping(stored[0]) if stored is not None else session.metadata
+            updated = update(copy.deepcopy(current))
+            if updated != current:
+                created = _ensure_session_row(connection, self.names, session)
+                connection.execute(
+                    f"UPDATE {sessions} SET metadata = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
+                    (_json_or_null(updated), int(time()), session.session_id),
+                )
+        _record_stored_state(session, created)
+        session.metadata = updated
 
     def _save_fields(self, session: ConversationSession, *, metadata: bool, state: dict[str, Any] | None) -> None:
         """Write ``session``'s metadata when asked and ``state`` when given, creating the row if needed."""
@@ -393,6 +444,34 @@ class ConversationStore:
 
 
 @dataclass(frozen=True, slots=True)
+class _Load:
+    """What one load of a session read: its row, its runs as stored, the messages its folds hold, and its summary."""
+
+    row: tuple[Any, ...]
+    run_rows: list[tuple[str, str, str]]
+    folded: dict[str, set[str]]
+    summary: ScopeSummary | None
+
+    def runs(self) -> list[AnyRunRecord]:
+        """Decode the runs, each folded run without the messages its segments hold."""
+        runs: list[AnyRunRecord] = []
+        for run_id, stored_type, run_data in self.run_rows:
+            run = run_from_row(stored_type, run_data)
+            if run is None:
+                continue
+            if run_id in self.folded:
+                run.messages = [message for message in run.messages if message.id not in self.folded[run_id]]
+            runs.append(run)
+        return runs
+
+
+def _adopt_log(session: ConversationSession, loaded: _Load | None) -> None:
+    """Make ``session``'s runs and summary those of ``loaded``, or none when the session is no longer stored."""
+    session.runs = loaded.runs() if loaded is not None else []
+    session.summary = loaded.summary if loaded is not None else None
+
+
+@dataclass(frozen=True, slots=True)
 class _WrittenRow:
     """One run row as an upsert left it: its timestamps, its ``run_data`` text, and whether it now ends the log."""
 
@@ -439,9 +518,8 @@ def _reconcile(session: ConversationSession, saved: Iterable[_SavedRun]) -> None
                 runs = [*(run for run in runs if run.run_id != save.run_id), stored]
             else:
                 runs[place] = stored
-    # A new list, so a reader of the old one is unaffected. A save in the database's lane assigns it from the lane's
-    # worker thread, so event-loop code must not assign ``session.runs`` while a save of this session is in flight,
-    # or one of the two assignments is lost.
+    # A new list, so a reader of the old one is unaffected. Only the store assigns a session's runs and summary, and
+    # async callers run its writes in the database's lane one at a time, so no write's assignment overtakes another's.
     session.runs = runs
 
 

@@ -31,9 +31,9 @@ from mindroom.history.session_context import (
     open_resolved_scope_session_context,
 )
 from mindroom.history.storage import (
+    _with_scope_state,
     read_chunk_basis,
     read_scope_state,
-    set_force_compaction_state,
 )
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
@@ -139,7 +139,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
     with (
@@ -202,7 +202,7 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
@@ -259,7 +259,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
@@ -299,7 +299,7 @@ async def test_prepare_history_for_run_compaction_failure_notice_redacts_credent
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
     api_key = "sk-" + "proj" + "A1b2C3d4E5f6G7h8J9k0"
@@ -351,7 +351,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_ca
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
@@ -402,7 +402,7 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
@@ -482,7 +482,11 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(thread_session, scope, HistoryScopeState(), force=True)
+    thread_session.metadata = _with_scope_state(
+        thread_session.metadata,
+        scope,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     seed_session(storage, room_session)
     seed_session(storage, thread_session)
 
@@ -566,7 +570,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     )
     seed_session(storage, session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
@@ -1099,7 +1103,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     )
     seed_session(storage, session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
@@ -1237,7 +1241,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     visible_runs = list(session.runs or [])
     first_summary_text = "first chunk summary"
@@ -1341,7 +1345,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1")])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,
@@ -1632,7 +1636,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     flag_at_failure_notice: list[bool] = []
 
@@ -1697,7 +1701,7 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 

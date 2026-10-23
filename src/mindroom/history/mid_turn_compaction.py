@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -40,7 +39,7 @@ from mindroom.history.summary_message import (
     mark_summary_follows,
 )
 from mindroom.history.summary_rows import Segment, folded_tool_call_ids
-from mindroom.history.types import HistoryScope, ScopeSummary
+from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
@@ -48,7 +47,6 @@ from mindroom.native_compaction import checkpoint_items, native_replay_messages
 from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.store import runs_without
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests
 
@@ -307,7 +305,8 @@ async def _compact_scope(
 ) -> Message | None:
     """Append one summary row covering the scope's stored runs after the latest row and this run's exchanges.
 
-    The row holds the run's folded part as its segment; once it is stored, the run's in-memory state follows.
+    The row holds the run's folded part as its segment; the append leaves the turn's session as the store holds it,
+    and once the row is stored, the run's request and record follow.
     """
     storage = binding.store
     scope = binding.scope
@@ -330,10 +329,6 @@ async def _compact_scope(
         )
         if binding.turn_recorder is not None:
             binding.turn_recorder.record_folded_tool_calls(folded_calls)
-        # The turn's session then holds what a fresh load does, so a request rebuilt from it within the turn, as a
-        # delegation continuation is, replays only what the summary does not cover.
-        session.summary = ScopeSummary(text=summary, updated_at=datetime.now(UTC))
-        session.runs = runs_without(session.runs, [run.run_id for run in basis.covered])
         _finish(messages, layout, summary_message, record)
 
     outcome = await compact_scope_mid_turn(

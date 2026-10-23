@@ -2583,6 +2583,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.compaction"
 depends_on = [
+    "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
     "mindroom.background_tasks",
     "mindroom.error_handling",
@@ -2746,6 +2747,7 @@ visibility = [
 path = "mindroom.history.storage"
 depends_on = [
     "mindroom.session_storage.agent_storage",
+    "mindroom.session_storage.lanes",
     "mindroom.history.summary_rows",
     "mindroom.background_tasks",
     "mindroom.constants",
@@ -2806,6 +2808,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
+    "mindroom.session_storage.lanes",
     "mindroom.history.compaction",
     "mindroom.history.native",
     "mindroom.history.policy",
@@ -9357,7 +9360,6 @@ depends_on = [
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
-    "mindroom.session_storage.store",
     "mindroom.usage.storage",
 ]
 visibility = [
