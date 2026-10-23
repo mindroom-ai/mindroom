@@ -32,7 +32,7 @@ from mindroom.usage.storage import has_token_usage
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.llm.provider import ModelProvider, ModelTurn, StopReason
+    from mindroom.llm.provider import ModelProvider, ModelTurn
     from mindroom.llm.usage import MessageMetrics
 
 logger = get_logger(__name__)
@@ -174,25 +174,14 @@ def build_summary_request_messages(*, summary_prompt: str, summary_input: str) -
     ]
 
 
-def _completion_status(stop_reason: StopReason | None) -> Literal["complete", "output_limit", "incomplete"]:
-    """Read a finished summary turn's stop reason; a route that reports none counts as complete."""
-    if stop_reason is None or stop_reason == "end":
-        return "complete"
-    return "output_limit" if stop_reason == "output_limit" else "incomplete"
-
-
-def _consume_detached_compaction_request_result(
-    response_task: asyncio.Task[ModelTurn],
-    *,
-    log_message: str,
-) -> None:
+def _consume_detached_compaction_request_result(response_task: asyncio.Task[ModelTurn]) -> None:
     """Consume a detached request result so late failures do not surface unhandled."""
     try:
         response_task.result()
     except asyncio.CancelledError:
         pass
     except Exception:
-        logger.warning(log_message, exc_info=True)
+        logger.warning("Detached compaction request raised after caller moved on", exc_info=True)
 
 
 def _warn_if_detached_compaction_request_still_running(
@@ -216,12 +205,7 @@ def _detach_cancelled_compaction_request(
     reason: str,
 ) -> None:
     """Detach one cancelled provider request without blocking the caller or leaking cleanup tasks."""
-    response_task.add_done_callback(
-        partial(
-            _consume_detached_compaction_request_result,
-            log_message="Detached compaction request raised after caller moved on",
-        ),
-    )
+    response_task.add_done_callback(_consume_detached_compaction_request_result)
     asyncio.get_running_loop().call_later(
         _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS,
         partial(
@@ -307,11 +291,11 @@ async def generate_compaction_summary(
             f"has_reasoning={bool(message.reasoning_content or message.redacted_reasoning_content)})"
         )
         raise _CompactionSummaryEmptyResultError(msg)
-    completion = _completion_status(turn.stop_reason)
-    if completion == "output_limit":
+    if turn.stop_reason == "output_limit":
         msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
         raise CompactionSummaryOutputLimitError(msg)
-    if completion == "incomplete":
+    # A route that reports no stop reason counts as complete.
+    if turn.stop_reason not in {None, "end"}:
         msg = "provider returned an incomplete compaction summary; refusing to persist partial text"
         raise CompactionSummaryIncompleteError(msg)
     return normalized_text
@@ -319,8 +303,6 @@ async def generate_compaction_summary(
 
 def _normalize_compaction_summary_text(raw_text: str) -> str:
     normalized = raw_text.strip()
-    if not normalized:
-        return ""
     if normalized.startswith("```") and normalized.endswith("```"):
         first_newline = normalized.find("\n")
         if first_newline != -1:
