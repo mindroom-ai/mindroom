@@ -365,7 +365,6 @@ async def test_same_named_function_uses_selected_toolkit_schema_and_entrypoint(
                 "properties": {"date": {"type": "string"}},
                 "required": ["date"],
             },
-            instructions="Use ISO dates.",
         ),
     }
     files = Toolkit(name="files")
@@ -378,7 +377,6 @@ async def test_same_named_function_uses_selected_toolkit_schema_and_entrypoint(
                 "properties": {"path": {"type": "string"}},
                 "required": ["path"],
             },
-            instructions="Use an absolute path.",
         ),
     }
     entries = {

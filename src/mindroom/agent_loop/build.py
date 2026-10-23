@@ -66,15 +66,14 @@ class AgentBuild:
     ``spec`` carries no system message: ``prompt_for_turn`` renders one per turn from ``prompt``, whose
     ``additional_context`` is the build's own context, the date and session context. ``request_template`` holds the
     settings of every request of a run, such as the deferred tool names; ``tool_owners``, which approvals check, maps
-    each configured function to the authored toolkit it came from, None for one without an authored toolkit, and
-    leaves out the functions generated for the agent, such as the knowledge search. ``tool_policy`` is the agent's
-    tool-call policy, outermost first: the binding through which a scheduled call runs one of the build's functions
-    (for a build that offers the scheduler), plugin before and after hooks, call recording, and the computer
-    announcement. ``tool_jobs`` is the agent as tool jobs see it while the instance runs them, which the loop's hooks
-    offer the wait budget of its managed calls and the notices of its ended jobs for. Every call runs through
-    ``tool_policy`` behind tool-job admission when ``tool_jobs`` is set (``agent_tool_middleware``), and admission
-    runs a managed job's call through ``tool_policy`` again in the job's own task, so a step that must reach every
-    call joins ``tool_policy``.
+    each function a run offers from a configured toolkit to that toolkit's authored name, and leaves out the functions
+    generated for the agent, such as the knowledge search. ``tool_policy`` is the agent's tool-call policy, outermost
+    first: the binding through which a scheduled call runs one of the build's functions (for a build that offers the
+    scheduler), plugin before and after hooks, call recording, and the computer announcement. ``tool_jobs`` is the agent
+    as tool jobs see it while the instance runs them, which the loop's hooks offer the wait budget of its managed calls
+    and the notices of its ended jobs for. Every call runs through ``tool_policy`` behind tool-job admission when
+    ``tool_jobs`` is set (``agent_tool_middleware``), and admission runs a managed job's call through ``tool_policy``
+    again in the job's own task, so a step that must reach every call joins ``tool_policy``.
     """
 
     spec: AgentSpec
@@ -82,7 +81,7 @@ class AgentBuild:
     request_template: ModelRequest
     history_settings: ResolvedHistorySettings
     store: ConversationStore | None
-    tool_owners: Mapping[str, str | None]
+    tool_owners: Mapping[str, str]
     surface: AgentSurface
     tool_policy: tuple[ToolMiddleware, ...] = ()
     tool_jobs: JobActor | None = None

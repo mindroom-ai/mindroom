@@ -4015,7 +4015,7 @@ def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None
 
     job = gated()
     assert (job.requires_confirmation, job.approval_type) == (False, JOB_APPROVAL_TYPE)
-    for paused in (gated(stop_after_tool_call=True), gated(requires_user_input=True), gated(connects=True)):
+    for paused in (gated(stop_after_tool_call=True), gated(external_execution=True), gated(connects=True)):
         assert (paused.requires_confirmation, paused.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
     # An authored confirmation is the tool's own pause, never a job's approval.
     authored = gated(requires_confirmation=True)

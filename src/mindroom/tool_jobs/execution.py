@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ToolSpec
     from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
-    from mindroom.tool_system.agno_toolkits import Function, Toolkit
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
@@ -99,23 +99,23 @@ class _JobCallError(Exception):
 
 def assembled_job_tools(
     functions: Mapping[str, ToolFunction],
-    owners: Mapping[str, str | None],
-    toolkits: Mapping[str, Toolkit],
+    sources: Mapping[str, tuple[str, Toolkit]],
     snapshot: Mapping[str, Any],
 ) -> dict[str, JobTool]:
-    """Describe each offered function whose authored toolkit ``owners`` names, built as ``toolkits`` holds it.
+    """Describe each offered function a MindRoom-assembled toolkit built, by name.
 
-    ``snapshot`` is the actor's execution scope and file access, empty for a team; generated functions have no owner.
+    ``functions`` holds every function the actor offers; ``sources`` holds, for each one an assembled toolkit built,
+    its authored toolkit and the concrete toolkit built for the actor, so a generated function has none.
+    ``snapshot`` is the actor's execution scope and file access, empty for a team.
     """
     return {
         name: JobTool(
-            function=function,
+            function=functions[name],
             toolkit_name=owner,
-            toolkit=toolkits[name],
-            authority=toolkit_authority(snapshot, toolkits[name]),
+            toolkit=toolkit,
+            authority=toolkit_authority(snapshot, toolkit),
         )
-        for name, function in functions.items()
-        if (owner := owners.get(name)) is not None
+        for name, (owner, toolkit) in sources.items()
     }
 
 
@@ -124,17 +124,12 @@ def _declares_background_after(parameters: Mapping[str, Any]) -> bool:
     return BACKGROUND_AFTER in parameters.get("properties", {})
 
 
-def approval_can_run_as_job(function: Function, toolkit: Toolkit) -> bool:
-    """Whether a policy-gated function's approval can be the first phase of the managed job its call runs as.
-
-    ``function`` is the toolkit's own function: whether it asks its user for input is not part of the call the loop
-    sees, and such a call must finish in its run.
-    """
+def approval_can_run_as_job(function: ToolFunction, toolkit: Toolkit) -> bool:
+    """Whether a policy-gated function of ``toolkit`` can ask for its approval as the first phase of its call's job."""
     return not (
         isinstance(toolkit, JobTools)
         or function.external_execution
         or function.stop_after_tool_call
-        or function.requires_user_input
         or connects_per_run(toolkit)
     )
 

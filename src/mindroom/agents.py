@@ -15,7 +15,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import PromptSpec, model_note_for
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import first_of_each_name, prepare_run_tools
 from mindroom.approval.tool_approval import (
     JOB_APPROVAL_TYPE,
     POLICY_CONFIRMATION_APPROVAL_TYPE,
@@ -54,7 +54,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, reject_agno_hooks
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ensure_tool_registry_loaded,
@@ -144,27 +144,45 @@ class _AdditionalContextChunk:
 
 
 @dataclass(frozen=True)
+class _ToolkitEntry:
+    """One toolkit assembled for an agent: the Agno toolkit built for it, what a run offers of it, and its owner.
+
+    ``owner`` is the authored toolkit that approvals and tool jobs name its functions by; ``toolkit`` is the concrete
+    toolkit tool jobs check a call's grant and exclusions by. ``deferred`` is set for a toolkit whose functions stay
+    off the provider request until tool search finds them.
+    """
+
+    toolkit: Toolkit
+    adapted: AdaptedToolkit
+    owner: str
+    deferred: DeferredToolkit | None = None
+
+
+# A toolkit a run offers, with its entry, or None for one generated beside the assembled toolkits.
+type _OfferedToolkit = tuple[_ToolkitEntry | None, AdaptedToolkit]
+
+
+@dataclass(frozen=True)
 class _AgentToolAssembly:
     """Toolkits and dynamic-tool visibility assembled for one agent instance."""
 
-    toolkits: tuple[AdaptedToolkit, ...]
-    # Each configured function's authored toolkit, None for one without an authored toolkit; the functions generated
-    # for the agent, such as the knowledge search, are absent. The first function of a name owns it, as the loop
-    # offers them.
-    tool_owners: Mapping[str, str | None]
-    # The concrete toolkit each of those functions came from, which tool jobs check its grant and exclusions by.
-    tool_sources: Mapping[str, Toolkit]
-    # Toolkits whose surviving functions stay off the provider request until tool search finds them.
-    # Keep the owners rather than a pre-projection name snapshot because final
-    # MCP collision projection may remove a deferred function while preserving
-    # an eager local function with the same wire name.
-    deferred_toolkits: tuple[DeferredToolkit, ...]
+    # The assembled toolkits in the order a run offers them.
+    entries: tuple[_ToolkitEntry, ...]
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
     cli_deferred: tuple[DeferredAgentToolkit, ...]
     # The tool-call policy the loop runs around every call: the hook bridge, then each browser toolkit's
     # computer announcement.
     tool_middleware: tuple[ToolMiddleware, ...]
+
+    @property
+    def deferred_toolkits(self) -> tuple[DeferredToolkit, ...]:
+        """Return the toolkits whose surviving functions stay off the provider request until tool search finds them.
+
+        They are kept rather than a snapshot of names because the final MCP collision projection may remove a
+        deferred function while preserving an eager local function with the same wire name.
+        """
+        return _deferred_toolkits(self.entries)
 
     @property
     def deferred_tool_names(self) -> tuple[str, ...]:
@@ -611,23 +629,22 @@ def _build_registered_agent_tool(
     )
 
 
-def _log_toolkits_without_unique_model_functions(
-    toolkits: Sequence[AdaptedToolkit],
+def _log_toolkits_without_offered_functions(
+    entries: Sequence[_ToolkitEntry],
+    offered: Mapping[str, _ToolkitEntry],
     *,
     agent_name: str,
 ) -> None:
-    """Warn when a configured toolkit offers no function of its own because earlier toolkits took every name."""
-    seen_function_names: set[str] = set()
-    for toolkit in toolkits:
-        function_names = {function.name for function in toolkit.functions}
-        if function_names and function_names <= seen_function_names:
+    """Warn when a run offers no function of a configured toolkit because earlier toolkits took every name."""
+    for entry in entries:
+        function_names = sorted(function.name for function in entry.adapted.functions)
+        if function_names and all(offered.get(name) is not entry for name in function_names):
             logger.warning(
                 "Configured toolkit exposes no unique model functions because function names collide",
                 agent=agent_name,
-                toolkit=toolkit.name,
-                function_names=sorted(function_names),
+                toolkit=entry.adapted.name,
+                function_names=function_names,
             )
-        seen_function_names.update(function_names)
 
 
 def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> dict[str, tuple[str, ...]]:
@@ -1180,7 +1197,6 @@ def apply_tool_approval_capability(
     ``toolkit`` is the Agno toolkit ``adapted`` came from. With ``approvals_as_jobs``, a gated function whose call can
     become a managed job asks for its approval as that job's first phase instead of pausing the run.
     """
-    sources = toolkit.get_async_functions()
 
     def approved(function: ToolFunction) -> ToolFunction:
         if registered_tool_name == "delegate" and function.name in {"run_subagent", "continue_subagent"}:
@@ -1198,7 +1214,7 @@ def apply_tool_approval_capability(
             registered_tool_name,
         ):
             return function
-        if approvals_as_jobs and approval_can_run_as_job(sources[function.name], toolkit):
+        if approvals_as_jobs and approval_can_run_as_job(function, toolkit):
             return replace(function, approval_type=JOB_APPROVAL_TYPE)
         return replace(function, requires_confirmation=True, approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE)
 
@@ -1321,13 +1337,13 @@ def _keep_persona_functions(toolkit: Toolkit, tool_name: str, persona_tools: tup
             del functions[name]
 
 
-def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
-    """Attach the configured toolkit identity to its executable functions."""
+def _set_owning_toolkit(toolkit: Toolkit, authored_name: str) -> None:
+    """Attach the configured toolkit identity to its executable functions, for the function filters that read it."""
     for function in (*toolkit.functions.values(), *toolkit.get_async_functions().values()):
         function.owning_toolkit = authored_name
 
 
-def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferred tools share one construction path
+def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools share one construction path
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
@@ -1420,18 +1436,18 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             tool_registry_preloaded=True,
         )
     entity_view = config.resolve_entity(agent_name)
-    # Each built toolkit with the registered tool name its approval policy reads; the job controls have none.
-    entries: list[tuple[Toolkit, str | None]] = []
+    entries: list[_ToolkitEntry] = []
     local_tool_names: list[str] = []
     worker_routed_tool_names: list[str] = []
-    deferred_toolkits: list[DeferredToolkit] = []
     persona_built: dict[str, frozenset[str]] = {}
 
     def routes_through_worker(tool_name: str) -> bool:
         return _registry_tool_routes_through_worker(tool_name, runtime_paths=runtime_paths, worker_tools=worker_tools)
 
-    def build_entry(tool_entry: EffectiveToolConfig) -> Toolkit | None:
+    def build_entry(tool_entry: EffectiveToolConfig) -> _ToolkitEntry | None:
+        """Build and adapt one configured toolkit; what the agent records of it waits until both succeeded."""
         tool_name = tool_entry.name
+        authored_name = tool_entry.authored_name or tool_name
         runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
         # A worker builds and connects its own copy of a toolkit routed through it.
         routed = routes_through_worker(tool_name)
@@ -1449,7 +1465,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 persona=persona,
-                deferred_toolkits=tuple(deferred_toolkits),
+                deferred_toolkits=_deferred_toolkits(entries),
                 list_mcp_functions=not routed,
             )
         if routed and toolkit is not None and is_unconnected_mcp_toolkit(toolkit):
@@ -1459,27 +1475,24 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 agent=agent_name,
                 tool=tool_name,
             )
-        if toolkit:
+        built_functions = None
+        if toolkit is not None:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
             if persona_tools is not None:
                 # Match the concrete toolkit, which a preset or implied tool reaches under its authored name.
                 _keep_persona_functions(toolkit, tool_name, persona_tools)
-            # Function policies match on the owning toolkit, so stamp it before pruning.
-            _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
+            # Function filters match on the owning toolkit, so stamp it before pruning.
+            _set_owning_toolkit(toolkit, authored_name)
             toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
-            if toolkit is not None:
-                # Checked while this toolkit builds, so a hooked function costs only its own toolkit; the adapter,
-                # which would reject it too, runs once every toolkit is built. The check runs before the steps that
-                # hide unresumable approval functions, session MCP collisions, and shadowed deferred functions, so
-                # a hooked function one of those would hide still drops its toolkit.
-                for function in toolkit.get_async_functions().values():
-                    reject_agno_hooks(function)
             if toolkit is not None and persona_tools is not None:
-                # Record what survives the caller's filters; approval capability below may still hide gated calls.
-                persona_built[tool_name] = frozenset((*toolkit.functions, *toolkit.async_functions))
+                # What survives the caller's filters; hiding unresumable approvals below may still remove gated calls.
+                built_functions = frozenset((*toolkit.functions, *toolkit.async_functions))
         if toolkit is not None and not supports_native_tool_approval:
             toolkit = _hide_unresumable_approval_functions(toolkit, config, registered_tool_name=tool_name)
-        if toolkit:
+        entry = adapt_entry(toolkit, tool_entry, authored_name) if toolkit is not None else None
+        if built_functions is not None:
+            persona_built[tool_name] = built_functions
+        if toolkit is not None:
             announcement = computer_announcement_middleware(
                 toolkit,
                 tool_name,
@@ -1489,39 +1502,45 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             )
             if announcement is not None:
                 tool_middleware.append(announcement)
-        return toolkit
+        return entry
 
-    def adapt_entry(toolkit: Toolkit, tool_name: str | None) -> AdaptedToolkit:
+    def adapt_entry(toolkit: Toolkit, tool_entry: EffectiveToolConfig, authored_name: str) -> _ToolkitEntry:
+        tool_name = tool_entry.name
+        deferred = None
+        # initial deferred tools stay in the rendered prompt prefix as plain non-deferred tools.
+        if wire_deferred_tools and tool_entry.defer and not tool_entry.initial:
+            metadata = TOOL_METADATA.get(authored_name)
+            # Deferred before it is adapted, so its instructions leave the prompt for the search results.
+            deferred = defer_toolkit(authored_name, metadata.description if metadata else "", toolkit)
         adapted = adapt_toolkit(toolkit)
-        # The job controls carry no registered name: they act only on the caller's own jobs, each approved already.
-        if tool_name is None:
-            return adapted
         if not routes_through_worker(tool_name):
             adapted = replace(adapted, connect=run_connection(toolkit))
-        if not supports_native_tool_approval:
-            return adapted
-        return apply_tool_approval_capability(
-            adapted,
-            toolkit,
-            config,
-            registered_tool_name=tool_name,
-            # Only a top-level agent's own calls ask as their job; the same setting installs the job executor.
-            approvals_as_jobs=approvals_as_jobs
-            and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
-        )
+        if supports_native_tool_approval:
+            adapted = apply_tool_approval_capability(
+                adapted,
+                toolkit,
+                config,
+                registered_tool_name=tool_name,
+                # Only a top-level agent's own calls ask as their job; the same setting installs the job executor.
+                approvals_as_jobs=approvals_as_jobs
+                and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
+            )
+        return _ToolkitEntry(toolkit=toolkit, adapted=adapted, owner=authored_name, deferred=deferred)
 
     cli_deferred = []
-    for entry in deferred_configs.values():
+    for deferred_entry in deferred_configs.values():
 
-        async def materialize(entry: EffectiveToolConfig = entry) -> AdaptedToolkit:
-            toolkit = await asyncio.to_thread(build_entry, entry)
-            if toolkit is None:
-                msg = f"Configured toolkit {entry.name!r} is unavailable"
+        async def materialize(tool_entry: EffectiveToolConfig = deferred_entry) -> AdaptedToolkit:
+            entry = await asyncio.to_thread(build_entry, tool_entry)
+            if entry is None:
+                msg = f"Configured toolkit {tool_entry.name!r} is unavailable"
                 raise ValueError(msg)
-            return adapt_entry(toolkit, entry.name)
+            return entry.adapted
 
-        metadata = TOOL_METADATA.get(entry.name)
-        cli_deferred.append(DeferredAgentToolkit(entry.name, metadata.description if metadata else "", materialize))
+        metadata = TOOL_METADATA.get(deferred_entry.name)
+        cli_deferred.append(
+            DeferredAgentToolkit(deferred_entry.name, metadata.description if metadata else "", materialize),
+        )
 
     dynamic_tools_entry = resolved_tool_configs.pop("dynamic_tools", None)
 
@@ -1529,27 +1548,16 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         yield from resolved_tool_configs.items()
         # The search toolkit comes after every deferred toolkit it searches, and only portable tool search rewrites
         # call_tool, so an authored dynamic_tools entry is ignored everywhere else.
-        if dynamic_tools_entry is not None and portable_deferred_tools and deferred_toolkits:
+        if dynamic_tools_entry is not None and portable_deferred_tools and _deferred_toolkits(entries):
             yield dynamic_tools_entry.name, dynamic_tools_entry
 
     for tool_name, tool_entry in tool_entries():
         try:
-            toolkit = build_entry(tool_entry)
-            if toolkit:
-                entries.append((toolkit, tool_name))
-                target_names = worker_routed_tool_names if routes_through_worker(tool_name) else local_tool_names
-                target_names.append(tool_name)
-                # initial deferred tools stay in the rendered prompt prefix as plain non-deferred tools.
-                if wire_deferred_tools and tool_entry.defer and not tool_entry.initial:
-                    domain_name = tool_entry.authored_name or tool_name
-                    metadata = TOOL_METADATA.get(domain_name)
-                    deferred_toolkits.append(
-                        defer_toolkit(domain_name, metadata.description if metadata else "", toolkit),
-                    )
+            entry = build_entry(tool_entry)
         except _MatrixRoomRuntimeToolCollisionError:
             raise
         except Exception as exc:
-            # One toolkit's construction failure must never stop the agent.
+            # One toolkit's construction or adaptation failure must never stop the agent.
             if minimal_mode:
                 raise MinimalModeUnavailableError(
                     minimal_mode_failure_message(str(exc), agent_name, subagent=delegation_depth > 0),
@@ -1561,8 +1569,13 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 error=str(exc),
                 exc_info=not isinstance(exc, ValueError | ImportError),
             )
+            continue
+        if entry is not None:
+            entries.append(entry)
+            target_names = worker_routed_tool_names if routes_through_worker(tool_name) else local_tool_names
+            target_names.append(tool_name)
     controls = _job_controls(
-        [toolkit for toolkit, _ in entries],
+        [entry.toolkit for entry in entries],
         runtime_paths,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
         depth=delegation_depth,
@@ -1574,17 +1587,14 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         ),
     )
     if controls is not None:
-        entries.append((controls, None))
-    tools = [toolkit for toolkit, _ in entries]
+        entries.append(_job_controls_entry(controls))
+    tools = [entry.toolkit for entry in entries]
     hidden_mcp_functions = _hide_session_mcp_function_collisions(tools, agent_name=agent_name)
-    drop_shadowed_deferred_functions(tools, deferred_toolkits)
+    drop_shadowed_deferred_functions(tools, _deferred_toolkits(entries))
     if persona_tools is not None:
         require_built_persona_tools(persona_tools, persona_built, hidden_mcp_functions)
     return _AgentToolAssembly(
-        toolkits=tuple(adapt_entry(toolkit, tool_name) for toolkit, tool_name in entries),
-        tool_owners=_tool_owners(tools),
-        tool_sources=_tool_sources(tools),
-        deferred_toolkits=tuple(deferred_toolkits),
+        entries=tuple(_without_hidden_functions(entry) for entry in entries),
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
@@ -1793,6 +1803,11 @@ def _job_controls(
     )
 
 
+def _job_controls_entry(controls: Toolkit) -> _ToolkitEntry:
+    """Assemble the job controls as their own authored toolkit, which no approval rule gates."""
+    return _ToolkitEntry(toolkit=controls, adapted=adapt_toolkit(controls), owner=controls.name)
+
+
 @dataclass(frozen=True)
 class LeaderJobs:
     """A team leader's job controls as the owned loop offers them, the tool-call policy they run under, and the team.
@@ -1829,8 +1844,8 @@ def team_background_jobs(
         config=config,
         runtime_paths=runtime_paths,
     )
-    adapted = adapt_toolkit(controls)
-    control_names = frozenset(function.name for function in adapted.functions)
+    entry = _job_controls_entry(controls)
+    control_names = frozenset(function.name for function in entry.adapted.functions)
 
     async def control_hooks(call: ToolCall, call_next: ToolNext) -> object:
         # The leader's delegations run without the tool-call policy, as they do with jobs off.
@@ -1844,67 +1859,73 @@ def team_background_jobs(
         depth=0,
         # A team has no execution scope of its own, so its calls run under the grants of the work around them.
         tools=assembled_job_tools(
-            {function.name: function for function in adapted.functions},
-            _tool_owners([controls]),
-            _tool_sources([controls]),
+            {function.name: function for function in entry.adapted.functions},
+            _job_sources(_offered_entries(((entry, entry.adapted),))),
             {},
         ),
     )
-    return LeaderJobs(controls=adapted, middleware=with_job_admission(actor, (control_hooks,)), actor=actor)
+    return LeaderJobs(controls=entry.adapted, middleware=with_job_admission(actor, (control_hooks,)), actor=actor)
 
 
 _MEMORY_SEARCH_TOOL_NAME = "search_memories"
 
 
-def _offers_function(toolkits: Sequence[AdaptedToolkit], function_name: str) -> bool:
-    return any(function.name == function_name for toolkit in toolkits for function in toolkit.functions)
+def _offers_function(entries: Sequence[_ToolkitEntry], function_name: str) -> bool:
+    return any(function.name == function_name for entry in entries for function in entry.adapted.functions)
 
 
 def _agent_toolkits(
-    toolkits: Sequence[AdaptedToolkit],
+    entries: Sequence[_ToolkitEntry],
     knowledge: AgentKnowledge | None,
     skills: SkillsToolkit | None,
     generated_visible: Callable[[Function], bool],
-) -> tuple[AdaptedToolkit, ...]:
+) -> tuple[_OfferedToolkit, ...]:
     """Return the agent's tools in the order the model is offered them: configured toolkits, knowledge search, skills.
 
-    The knowledge search and skill functions are generated beside the configured toolkits, so they get the
-    approval and persona policy here that configured functions got while their toolkits were built.
+    Each toolkit comes with its entry; the knowledge search and skill functions are generated beside the configured
+    toolkits, so they have none, and they get the approval and persona policy here that configured functions got
+    while their toolkits were built.
     """
-    adapted = list(toolkits)
+    offered: list[_OfferedToolkit] = [(entry, entry.adapted) for entry in entries]
     if knowledge is not None:
         search = knowledge.search_function(
-            memory_search_available=_offers_function(toolkits, _MEMORY_SEARCH_TOOL_NAME),
+            memory_search_available=_offers_function(entries, _MEMORY_SEARCH_TOOL_NAME),
         )
         if generated_visible(search):
-            adapted.append(
-                AdaptedToolkit(name=KNOWLEDGE_SEARCH_TOOL_NAME, functions=(adapt_function(search),), instructions=None),
+            search_toolkit = AdaptedToolkit(
+                name=KNOWLEDGE_SEARCH_TOOL_NAME,
+                functions=(adapt_function(search),),
+                instructions=None,
             )
-    if skills is not None and (offered := _prune_toolkit_functions(skills, generated_visible)) is not None:
-        adapted.append(adapt_toolkit(offered))
-    return tuple(adapted)
+            offered.append((None, search_toolkit))
+    if skills is not None and (visible_skills := _prune_toolkit_functions(skills, generated_visible)) is not None:
+        offered.append((None, adapt_toolkit(visible_skills)))
+    return tuple(offered)
 
 
-def _tool_owners(toolkits: Sequence[Toolkit]) -> dict[str, str | None]:
-    """Map each function the agent offers to the authored toolkit it came from.
+def _deferred_toolkits(entries: Sequence[_ToolkitEntry]) -> tuple[DeferredToolkit, ...]:
+    return tuple(entry.deferred for entry in entries if entry.deferred is not None)
 
-    The first function of a name is the one the run offers, so it owns the name even when it has no authored
-    toolkit; a later same-named function never fills the owner in.
+
+def _without_hidden_functions(entry: _ToolkitEntry) -> _ToolkitEntry:
+    """Offer only the adapted functions the Agno toolkit still holds once the steps across toolkits hid some."""
+    kept = entry.toolkit.get_async_functions()
+    functions = tuple(function for function in entry.adapted.functions if function.name in kept)
+    return replace(entry, adapted=replace(entry.adapted, functions=functions))
+
+
+def _offered_entries(toolkits: Sequence[_OfferedToolkit]) -> dict[str, _ToolkitEntry]:
+    """Map each function a run of ``toolkits`` offers to its entry, as ``first_of_each_name`` selects the run's functions.
+
+    A generated function has no entry, so it is absent, and so is any function a same-named earlier one shadows.
     """
-    owners: dict[str, str | None] = {}
-    for toolkit in toolkits:
-        for name, function in toolkit.get_async_functions().items():
-            owners.setdefault(name, function.owning_toolkit)
-    return owners
+    pairs = ((entry, function) for entry, toolkit in toolkits for function in toolkit.functions)
+    return {function.name: entry for entry, function in first_of_each_name(pairs) if entry is not None}
 
 
-def _tool_sources(toolkits: Sequence[Toolkit]) -> dict[str, Toolkit]:
-    """Map each function the agent offers to the toolkit it came from, the first of a name winning as for owners."""
-    sources: dict[str, Toolkit] = {}
-    for toolkit in toolkits:
-        for name in toolkit.get_async_functions():
-            sources.setdefault(name, toolkit)
-    return sources
+def _job_sources(offered: Mapping[str, _ToolkitEntry]) -> dict[str, tuple[str, Toolkit]]:
+    """Return the owner and concrete toolkit of each offered function, as tool jobs describe its calls."""
+    return {name: (entry.owner, entry.toolkit) for name, entry in offered.items()}
 
 
 @timed("system_prompt_assembly.agent_create")
@@ -2117,11 +2138,31 @@ def create_agent(
         skill_authoring=persona is None,
     )
 
-    _log_toolkits_without_unique_model_functions(tool_assembly.toolkits, agent_name=agent_name)
+    entity_view = config.resolve_entity(agent_name)
+    enabled_knowledge = (
+        knowledge
+        if not disable_runtime_capabilities
+        and (persona is None or persona.kept_knowledge != ())
+        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
+        else None
+    )
+    # Minimal mode presents skill contents as context documents instead of through skill functions.
+    offered_skills = skills if agent_mode == "minimal" else prompt_skills
+    offered_toolkits = _agent_toolkits(
+        tool_assembly.entries,
+        enabled_knowledge,
+        offered_skills,
+        partial(_generated_function_visible, config, tool_function_filter),
+    )
+    # Owners and job sources come from the same selection over the same toolkits as the functions a run offers.
+    offered = _offered_entries(offered_toolkits)
+    _log_toolkits_without_offered_functions(tool_assembly.entries, offered, agent_name=agent_name)
+    tool_owners = {name: entry.owner for name, entry in offered.items()}
+    toolkits = tuple(toolkit for _entry, toolkit in offered_toolkits)
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
     # A subagent runs inside its caller's response, whose CLI belongs to the caller, so its shell gets none.
     windowed_toolkits = (
-        wrap_native_shell_window(tool_assembly.toolkits, tool_assembly.tool_owners)
+        wrap_native_shell_window(toolkits, tool_owners)
         if agent_cli_in_shell
         and agent_mode == "standard"
         and delegation_depth == 0
@@ -2133,27 +2174,12 @@ def create_agent(
     if cli_shell:
         instructions = [*instructions, STANDARD_CLI_NOTE]
 
-    entity_view = config.resolve_entity(agent_name)
-    enabled_knowledge = (
-        knowledge
-        if not disable_runtime_capabilities
-        and (persona is None or persona.kept_knowledge != ())
-        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
-        else None
-    )
-    # Minimal mode presents skill contents as context documents instead of through skill functions.
-    offered_skills = skills if agent_mode == "minimal" else prompt_skills
     spec = AgentSpec(
         id=agent_name,
         name=agent_config.display_name,
         model=provider,
         system_message=None,
-        toolkits=_agent_toolkits(
-            tool_assembly.toolkits if windowed_toolkits is None else windowed_toolkits,
-            enabled_knowledge,
-            offered_skills,
-            partial(_generated_function_visible, config, tool_function_filter),
-        ),
+        toolkits=toolkits if windowed_toolkits is None else windowed_toolkits,
         tool_call_limit=entity_view.max_tool_calls_per_turn,
     )
     prepared = prepare_run_tools(spec)
@@ -2214,7 +2240,7 @@ def create_agent(
         "Created agent",
         agent=agent_name,
         display_name=agent_config.display_name,
-        tool_count=len(tool_assembly.toolkits),
+        tool_count=len(tool_assembly.entries),
     )
     # The agent's calls can run as jobs whenever the instance runs them, granted as the agent is now.
     tool_jobs = (
@@ -2224,8 +2250,7 @@ def create_agent(
             depth=delegation_depth,
             tools=assembled_job_tools(
                 prepared.functions,
-                tool_assembly.tool_owners,
-                tool_assembly.tool_sources,
+                _job_sources(offered),
                 authority_snapshot(config, agent_name),
             ),
         )
@@ -2238,8 +2263,8 @@ def create_agent(
         request_template=ModelRequest(messages=(), deferred_tool_names=tool_assembly.deferred_wire_tool_names),
         history_settings=entity_view.history_settings,
         store=store,
-        tool_owners=tool_assembly.tool_owners,
-        tool_policy=bind_live_tools(prepared.functions, tool_assembly.tool_owners, tool_assembly.tool_middleware),
+        tool_owners=tool_owners,
+        tool_policy=bind_live_tools(prepared.functions, tool_owners, tool_assembly.tool_middleware),
         tool_jobs=tool_jobs,
         surface=surface,
     )
