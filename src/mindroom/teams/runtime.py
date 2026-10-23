@@ -145,6 +145,9 @@ def continue_team(
     requirements on the team run, and the leader sends no request. The leader's and the members' requests stream
     (``resume_request_template``).
     """
+    # TODO(simplify): A resume that fails or is cancelled stores this record over the paused team row, so its
+    # approval can no longer be resumed. Keep the paused row until the resume completes or pauses again. Users would
+    # notice (#3075).
     record = resumed_record(paused)
     record.member_responses = []
     # Agno's continuation started the leader's text afresh; the paused notice is not part of the answer.
@@ -177,6 +180,8 @@ def continue_team(
                 if resumed.status is RunStatus.paused:
                     propagate_member_pause(record, plan.member, resumed)
                 else:
+                    # TODO(simplify): A resumed member's result is its raw content, or ``Task completed`` without any,
+                    # unlike a first run's (``member_result_text``). Use that rule for both. Models would notice.
                     results.append(f"[{plan.member.spec.name}]: {resumed.handover_content or 'Task completed'}")
             if plans and all(r.is_resolved() for r in record.requirements or ()):
                 _answer_delegations(record, messages, [plan.member for plan in plans], results)
@@ -350,11 +355,11 @@ def _answer_delegations(
 
     A result waited on one of the ``resumed`` members when it is the notice the delegation gave for that member's
     pause (``waited_on_member``). The replacement lands on the run's tool entries and on the leader's request, so the
-    leader reads the members' results where it read the pause notice. ``results`` holds only the members resumed in
-    this call, so a collaborate sibling's text that completed earlier, or a member completed in an earlier chained
-    resume, no longer reaches the leader; Agno 3.0.9 lost it the same way, and the request-body parity contract keeps
-    that.
+    leader reads the members' results where it read the pause notice.
     """
+    # TODO(simplify): ``results`` holds only the members resumed in this call, so a collaborate sibling that completed
+    # earlier, or a member completed in an earlier chained resume, never reaches the leader (Agno 3.0.9 lost it too).
+    # Hand the leader every member's result. Models would notice (#3075).
     text = "\n".join(["Member results after human-in-the-loop resolution:", *results])
     answered: set[str | None] = set()
     for tool in record.tools or ():

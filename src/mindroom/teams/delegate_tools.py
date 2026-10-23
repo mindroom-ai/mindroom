@@ -97,6 +97,8 @@ def member_result_text(child: RunRecord, *, stream: bool) -> str:
     The rules read the content the run hands over (``handover_content``), so a failed member gives the reason its
     run recorded, credentials redacted, where Agno gave the member's content: stale text, or the raw error.
     """
+    # TODO(simplify): The rules differ by stream mode: without streaming, a run with tools but no content reads
+    # ``null`` and a blank run without tools reads empty. Use the streamed rules in both modes. Models would notice.
     return _streamed_result(child) if stream else _blocking_result(child)
 
 
@@ -144,6 +146,8 @@ def collaborate_result_text(
     Blocking, a piece is the member's result labeled with its name, as Agno's non-stream broadcast gave it. A paused
     member contributes Agno's notice and its requirements reach the team run.
     """
+    # TODO(simplify): Pieces join with no separator, and only blocking pieces are labeled, by a third result rule
+    # (``_labeled_result``). Label every piece by one rule and separate pieces with blank lines. Models would notice.
     pieces: list[str] = []
     for member, child in zip(members, children, strict=True):
         if child.status is RunStatus.paused:
