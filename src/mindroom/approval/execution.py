@@ -16,7 +16,7 @@ from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import collect_streamed_response_content, run_delegated_child_response, stream_agent_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
-from mindroom.approval.receipt import add_approval_receipt_reader
+from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner, approval_decisions
 from mindroom.approval.tool_owners import (
     authorize_prepared_tool_call,

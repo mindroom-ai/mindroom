@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.run import resume_agent
 from mindroom.agent_loop.spec import RunContext
-from mindroom.approval.receipt import add_approval_receipt_reader
+from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history

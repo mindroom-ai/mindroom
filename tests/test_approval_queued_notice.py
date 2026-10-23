@@ -17,7 +17,8 @@ from mindroom.ai_runtime import (
     queued_notice_after_tool_batch,
     queued_notice_on_resume_entry,
 )
-from mindroom.approval.receipt import approval_receipt_context, approval_receipt_hook
+from mindroom.approval.receipt import approval_receipt_hook
+from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.messages import Message

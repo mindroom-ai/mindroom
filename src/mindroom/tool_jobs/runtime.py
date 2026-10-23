@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
+from mindroom.approval.receipt_readers import without_approval_receipt
 from mindroom.background_tasks import (
     run_blocking_until_complete,
     run_coroutine_until_complete,
@@ -554,9 +555,6 @@ class ToolJobRuntime:
                 await self._publish(entry, _updated(entry.job, status=status))
 
     async def _run(self, entry: _Entry, operation: _Operation) -> None:
-        # approval.receipt imports the model loop, whose tool dispatch imports this module.
-        from mindroom.approval.receipt import without_approval_receipt  # noqa: PLC0415
-
         outcome = None
         returned = False
         loop = asyncio.get_running_loop()

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, ca
 from uuid import uuid4
 
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.approval.receipt import add_approval_receipt_reader
+from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners

@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import re
-from contextlib import contextmanager
-from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.model_loop import SendRequest
+from mindroom.approval.receipt_readers import take_unsent_receipt
 from mindroom.event_journal import ApprovalCall
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.llm.messages import Message
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Sequence
+    from collections.abc import Sequence
 
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState, RequestDecision
     from mindroom.llm.provider import Capabilities
@@ -58,58 +56,6 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
             outcome = "approval was denied; the tool was not executed."
         lines.append(f"- {call_label}: {outcome}")
     return "\n".join(lines)
-
-
-@dataclass(frozen=True)
-class _ApprovalReceiptContext:
-    """One approval continuation's receipt and, by run id, the runs that read it and those that already did."""
-
-    receipt_text: str
-    readers: set[str]
-    sent: set[str] = field(default_factory=set)
-
-
-_context: ContextVar[_ApprovalReceiptContext | None] = ContextVar(
-    "approval_receipt_context",
-    default=None,
-)
-
-
-@contextmanager
-def approval_receipt_context(receipt_text: str, *, run_id: str) -> Generator[None, None, None]:
-    """Bind one approval's trusted receipt around its continuation, for the paused run ``run_id`` it resumes.
-
-    That run reads the receipt, and so does every run that ``add_approval_receipt_reader`` names: one whose own
-    paused calls the approval decided, one that continues with the result of a delegation call whose card or
-    child's calls the approval decided, or a recovered CLI call's follow-up. Each reads it once, in its first request
-    as a reader. No other run reads it, such as a run the continuation starts, a run of a background job it starts,
-    or a member it continues with the result of a delegation the approval did not decide.
-    """
-    token = _context.set(_ApprovalReceiptContext(receipt_text=receipt_text, readers={run_id}))
-    try:
-        yield
-    finally:
-        _context.reset(token)
-
-
-def add_approval_receipt_reader(run_id: str) -> None:
-    """Have run ``run_id`` read the bound approval receipt; outside an approval continuation nothing is bound."""
-    receipt = _context.get()
-    if receipt is not None:
-        receipt.readers.add(run_id)
-
-
-@contextmanager
-def without_approval_receipt() -> Generator[None, None, None]:
-    """Run work that outlives the bound approval continuation, such as a background job it starts, outside it.
-
-    No run in that work reads the receipt, and naming one a reader binds nothing.
-    """
-    token = _context.set(None)
-    try:
-        yield
-    finally:
-        _context.reset(token)
 
 
 def _is_response_chain_boundary(message: Message) -> bool:
@@ -178,15 +124,13 @@ def approval_receipt_hook(capabilities: Capabilities) -> BeforeRequestHook:
     """
 
     async def hook(state: LoopState) -> RequestDecision:
-        receipt = _context.get()
-        run_id = state.run.run_id
-        if receipt is None or run_id not in receipt.readers or run_id in receipt.sent:
+        receipt_text = take_unsent_receipt(state.run.run_id)
+        if receipt_text is None:
             return SendRequest()
-        receipt.sent.add(run_id)
         return SendRequest(
             messages=messages_with_approval_receipt(
                 state.messages,
-                receipt.receipt_text,
+                receipt_text,
                 after_response_id=capabilities.approval_receipt_after_response_id,
             ),
         )
@@ -195,10 +139,7 @@ def approval_receipt_hook(capabilities: Capabilities) -> BeforeRequestHook:
 
 
 __all__ = [
-    "add_approval_receipt_reader",
-    "approval_receipt_context",
     "approval_receipt_hook",
     "build_approval_receipt",
     "messages_with_approval_receipt",
-    "without_approval_receipt",
 ]

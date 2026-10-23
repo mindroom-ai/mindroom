@@ -15,7 +15,7 @@ from mindroom.approval.execution import (
     _continuation_turn_context,
     _stream_continuation_turn,
 )
-from mindroom.approval.receipt import approval_receipt_context
+from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.calculator import CalculatorTools

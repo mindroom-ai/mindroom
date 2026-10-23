@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
+from mindroom.approval.receipt import build_approval_receipt
+from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.main import Config
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.delegation import records

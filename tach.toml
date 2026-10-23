@@ -1246,7 +1246,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
-    "mindroom.approval.receipt",
+    "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.execution",
@@ -1270,7 +1270,7 @@ visibility = ["mindroom.response_runner"]
 path = "mindroom.approval.resume"
 depends_on = [
     "mindroom.agent_loop",
-    "mindroom.approval.receipt",
+    "mindroom.approval.receipt_readers",
     "mindroom.history.native",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
@@ -1325,14 +1325,23 @@ visibility = [
 path = "mindroom.approval.receipt"
 depends_on = [
     "mindroom.agent_loop",
+    "mindroom.approval.receipt_readers",
     "mindroom.event_journal",
     "mindroom.llm",
 ]
 visibility = [
+    "mindroom.loop_hooks",
+    "mindroom.response_runner",
+]
+
+[[modules]]
+path = "mindroom.approval.receipt_readers"
+depends_on = []
+visibility = [
     "mindroom.approval.execution",
+    "mindroom.approval.receipt",
     "mindroom.approval.resume",
     "mindroom.delegation.execution",
-    "mindroom.loop_hooks",
     "mindroom.response_runner",
     "mindroom.teams",
     "mindroom.tool_jobs.runtime",
@@ -3119,6 +3128,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.approval.execution",
     "mindroom.approval.receipt",
+    "mindroom.approval.receipt_readers",
     "mindroom.approval.response",
     "mindroom.automations.steps",
     "mindroom.config.participation",
@@ -3273,7 +3283,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
-    "mindroom.approval.receipt",
+    "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.authorization",
@@ -7616,7 +7626,7 @@ depends_on = [
     "mindroom.delegation.personas",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.context_bound_streams",
-    "mindroom.approval.receipt",
+    "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.sessions",
@@ -8343,7 +8353,7 @@ path = "mindroom.tool_jobs.runtime"
 depends_on = [
     "mindroom.tool_jobs.background_after",
     "mindroom.ai_runtime",
-    "mindroom.approval.receipt",
+    "mindroom.approval.receipt_readers",
     "mindroom.tool_jobs.control",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_jobs.instances",

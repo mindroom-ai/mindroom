@@ -23,7 +23,8 @@ from agno.tools import Toolkit
 from mindroom import ai_runtime, loop_hooks, response_runner, response_turn
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.approval.manager import get_approval_store, initialize_approval_store
-from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
+from mindroom.approval.receipt import build_approval_receipt
+from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import AI_RUN_METADATA_KEY

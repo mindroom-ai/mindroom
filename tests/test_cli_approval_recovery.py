@@ -34,7 +34,7 @@ from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_loop.tools import PlannedCall, PreparedTools
 from mindroom.approval import execution as approval_execution
 from mindroom.approval import tool_owners as approval_tools
-from mindroom.approval.receipt import approval_receipt_context
+from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.types import HistoryScope
