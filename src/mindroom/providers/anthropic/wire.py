@@ -447,17 +447,6 @@ def _tool_result_block(message: Message) -> dict[str, Any]:
     return {"type": "tool_result", "tool_use_id": message.tool_call_id, "content": payload}
 
 
-def build_system_blocks(system: str, *, cache_system_prompt: bool, extended_cache_time: bool) -> list[dict[str, Any]]:
-    """Return the ``system`` array: one text block, marked for caching when the model caches its prompt."""
-    block: dict[str, Any] = {"text": system, "type": "text"}
-    if cache_system_prompt:
-        cache_control: dict[str, str] = {"type": "ephemeral"}
-        if extended_cache_time:
-            cache_control["ttl"] = "1h"
-        block["cache_control"] = cache_control
-    return [block]
-
-
 def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
     """Return the schema with ``additionalProperties: false`` on every object schema that lists properties.
 
@@ -631,7 +620,6 @@ __all__ = [
     "TRAILING_USER_MESSAGE",
     "FormattedConversation",
     "assistant_message_from_response",
-    "build_system_blocks",
     "format_claude_messages",
     "format_claude_tools",
     "inline_url_media",

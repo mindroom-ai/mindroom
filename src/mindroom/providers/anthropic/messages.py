@@ -75,7 +75,6 @@ from mindroom.providers.anthropic.settings import (
 )
 from mindroom.providers.anthropic.wire import (
     assistant_message_from_response,
-    build_system_blocks,
     format_claude_messages,
     format_claude_tools,
     inline_url_media,
@@ -422,13 +421,8 @@ class ClaudeProvider:
             "messages": conversation.messages,
             **self._request_params(request, output_format, strict_tools=strict_tools),
         }
-        cache_system_prompt = settings.cache_system_prompt and overrides.prompt_cache is not False
         if conversation.system:
-            body["system"] = build_system_blocks(
-                conversation.system,
-                cache_system_prompt=cache_system_prompt,
-                extended_cache_time=settings.extended_cache_time,
-            )
+            body["system"] = [{"text": conversation.system, "type": "text"}]
         if tools:
             body["tools"] = tools
         body = prepare_request_body(
@@ -437,7 +431,7 @@ class ClaudeProvider:
             deferred_tool_names=request.deferred_tool_names,
             tool_choice=request.tool_choice,
             extended_cache_time=settings.extended_cache_time,
-            cache_system_prompt=cache_system_prompt,
+            cache_system_prompt=settings.cache_system_prompt and overrides.prompt_cache is not False,
         )
         return _PreparedRequest(
             client=self._client(caller_retries=overrides.caller_retries),

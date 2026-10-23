@@ -109,13 +109,13 @@ def _with_prompt_cache_ladder(body: dict[str, Any], cache_control: dict[str, str
     return prepared
 
 
-def _with_shared_system_prefix(body: dict[str, Any]) -> dict[str, Any]:
-    """Keep the shared instructions cacheable independently of the session context that follows them."""
+def _with_marked_system_prompt(body: dict[str, Any], cache_control: dict[str, str]) -> dict[str, Any]:
+    """Mark the system prompt, keeping its shared instructions cacheable apart from the session context after them."""
     system = body.get("system")
-    if not isinstance(system, list):
+    if not system:
         return body
-    split_system = split_shared_system_prefix(system)
-    return body if split_system is system else {**body, "system": split_system}
+    marked = {**system[0], "cache_control": dict(cache_control)}
+    return {**body, "system": split_shared_system_prefix([marked, *system[1:]])}
 
 
 def _with_deferred_tool_search(body: dict[str, Any], deferred_tool_names: frozenset[str]) -> dict[str, Any]:
@@ -251,6 +251,6 @@ def prepare_request_body(
     prepared = _with_tool_choice(prepared, tool_choice)
     if cache_system_prompt:
         cache_control = prompt_cache_control(extended_cache_time=extended_cache_time)
-        prepared = _with_shared_system_prefix(prepared)
+        prepared = _with_marked_system_prompt(prepared, cache_control)
         prepared = _with_prompt_cache_ladder(prepared, cache_control)
     return prepared
