@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 from contextlib import asynccontextmanager, suppress
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -1492,8 +1493,49 @@ class TestStreamingBehavior:
         assert mock_client.room_send.call_count == 1
 
     @pytest.mark.asyncio
+    async def test_edits_that_land_behind_live_text_keep_the_throttle(self) -> None:
+        """A stream that outruns every edit's round trip still gets throttled edits, not one per delta."""
+        mock_client = _make_matrix_client_mock()
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=1.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=100,
+            min_char_update_interval=0.35,
+        )
+        streaming.last_update = float("-inf")
+        delta_seconds = 0.025
+        clock = 100.0
+        send_times: list[float] = []
+
+        async def room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
+            _ = (args, kwargs)
+            send_times.append(clock)
+            # The model streams on while the edit is in flight, so every edit lands behind the live text.
+            streaming._update("x")
+            mock_response = MagicMock()
+            mock_response.__class__ = nio.RoomSendResponse
+            mock_response.event_id = "$fast_stream"
+            return mock_response
+
+        mock_client.room_send.side_effect = room_send
+
+        with patch("mindroom.streaming.time.time", side_effect=lambda: clock):
+            for _ in range(120):
+                clock += delta_seconds
+                await push_stream_chunk(streaming, "tok ", mock_client)
+
+        gaps = [later - earlier for earlier, later in pairwise(send_times)]
+        assert len(gaps) >= 3
+        # Each edit waits for 100 characters it has not shown: the one that arrived
+        # in flight plus 25 deltas of 4, which comes before the 1 s interval.
+        assert gaps == [pytest.approx(25 * delta_seconds)] * len(gaps)
+
+    @pytest.mark.asyncio
     async def test_stale_nonterminal_send_does_not_strand_newer_text(self) -> None:
-        """A stale send must not reset throttling state for a newer buffered chunk."""
+        """Text that arrived while an edit was in flight stays pending until the throttle delivers it."""
         mock_client = _make_matrix_client_mock()
         first_send_started = asyncio.Event()
         allow_first_send_to_finish = asyncio.Event()
@@ -1532,9 +1574,9 @@ class TestStreamingBehavior:
 
         delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
         delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
-        streaming_times = iter([100.0, 100.0, 100.1, 100.2, 100.2, 100.2])
+        clock = 100.0
 
-        with patch("mindroom.streaming.time.time", side_effect=lambda: next(streaming_times, 100.2)):
+        with patch("mindroom.streaming.time.time", side_effect=lambda: clock):
             consume_task = asyncio.create_task(
                 _consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue),
             )
@@ -1542,18 +1584,26 @@ class TestStreamingBehavior:
             await asyncio.sleep(0)
             await asyncio.sleep(0)
             assert second_yield_started.is_set()
+            clock = 100.2
             allow_first_send_to_finish.set()
             await consume_task
             shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
+            assert shutdown_error is None
+            # The edit that just landed restarts the throttle window; only "B" is pending.
+            assert mock_client.room_send.call_count == 1
+            assert streaming.chars_since_last_update == 1
+
+            # A later request with no new text delivers it once the window has passed.
+            clock = 100.6
+            await streaming._throttled_send(mock_client, progress_hint=True)
+
         assert mock_client.room_send.call_count == 2
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
             for call in mock_client.room_send.call_args_list
         ]
-        assert bodies[0] == "A"
-        assert bodies[1] == "AB"
+        assert bodies == ["A", "AB"]
 
     @pytest.mark.asyncio
     async def test_boundary_refresh_initializes_stream_started_at(self) -> None:

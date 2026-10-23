@@ -752,23 +752,25 @@ class StreamingResponse:
         now = time.time()
         if self.stream_started_at is None:
             self.stream_started_at = now
+        self.last_update = now
+        live_text = _normalize_stream_accumulated_text(self.accumulated_text)
         delivery_matches_live_state = (
-            _normalize_stream_accumulated_text(self.accumulated_text) == committed_state.accumulated_text
+            live_text == committed_state.accumulated_text
             and _tool_traces_match(self.tool_trace, committed_state.tool_trace)
             and self.presentation_state == committed_state.presentation_state
         )
         if delivery_matches_live_state:
-            self.last_update = now
             self.last_delta_at = now
             self.last_boundary_refresh_at = now if boundary_refresh else None
             self.chars_since_last_update = 0
             return
 
         # The outbound payload was captured before newer live state arrived.
-        # Keep pending-delta bookkeeping and boundary-refresh eligibility intact
-        # so the next request can surface the newer content immediately.
+        # Only what arrived after the capture is still pending; it stays pending,
+        # and boundary-refresh eligibility stays intact, so a later request
+        # delivers it when the throttle allows.
         self.last_boundary_refresh_at = None
-        self.chars_since_last_update = max(1, self.chars_since_last_update)
+        self.chars_since_last_update = max(1, len(live_text) - len(committed_state.accumulated_text))
 
     def matching_inflight_nonterminal_capture(self) -> asyncio.Future[None] | None:
         """Return the current in-flight capture when it already froze the live state."""
