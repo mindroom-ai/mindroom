@@ -1071,7 +1071,7 @@ depends_on = ["mindroom.history.summary_rows_schema", "mindroom.usage.storage"]
 
 [[modules]]
 path = "mindroom.session_storage.codec"
-depends_on = ["mindroom.llm"]
+depends_on = ["mindroom.llm", "mindroom.session_storage.legacy_tool_results"]
 
 [[modules]]
 path = "mindroom.session_storage.legacy_agno2_runs"
@@ -2564,7 +2564,6 @@ path = "mindroom.history.request_messages"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.legacy_summary_system_prompt",
-    "mindroom.history.legacy_tool_results",
     "mindroom.history.message_content",
     "mindroom.history.summary_message",
     "mindroom.llm",
@@ -9378,6 +9377,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.history.legacy_tool_results"
+path = "mindroom.session_storage.legacy_tool_results"
 depends_on = ["mindroom.llm"]
-visibility = ["mindroom.history.request_messages"]
+visibility = ["mindroom.session_storage.codec"]

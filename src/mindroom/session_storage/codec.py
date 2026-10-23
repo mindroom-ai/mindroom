@@ -10,6 +10,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.runs import RunRecord, TeamRunRecord
+from mindroom.session_storage.legacy_tool_results import split_combined_tool_results
 
 if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
@@ -22,7 +23,9 @@ def run_from_row(run_type: str, run_data: str) -> AnyRunRecord | None:
         return None
     data = json.loads(run_data)
     _drop_tool_schemas(data)
-    return TeamRunRecord.from_dict(data) if run_type == "team" else RunRecord.from_dict(data)
+    run = TeamRunRecord.from_dict(data) if run_type == "team" else RunRecord.from_dict(data)
+    split_combined_tool_results(run)
+    return run
 
 
 def run_type(run: AnyRunRecord) -> SessionKind:
