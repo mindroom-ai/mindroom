@@ -377,7 +377,6 @@ def _leader_run(
 ) -> _LeaderRun:
     """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
     history = prepared.prepared_history
-    plan = history.replay_plan
     native = history.native_history
     return _LeaderRun(
         spec=built.spec,
@@ -390,8 +389,7 @@ def _leader_run(
                 store=storage.store if storage is not None else None,
                 session=storage.session if storage is not None else None,
                 scope=storage.scope if storage is not None else None,
-                scoped=storage is not None and plan is not None and plan.add_history_to_context,
-                native_compaction=native.native_compaction if native is not None else None,
+                replay_plan=history.replay_plan,
                 prompt_id=prepared.turn.prompt.id,
                 lifecycle=compaction_lifecycle,
                 turn_recorder=turn_recorder,

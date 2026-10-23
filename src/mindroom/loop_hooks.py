@@ -37,8 +37,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.history.types import CompactionLifecycle, HistoryScope, ResolvedHistorySettings
-    from mindroom.llm.provider import ModelProvider, NativeCompactionReplay
+    from mindroom.history.types import CompactionLifecycle, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
+    from mindroom.llm.provider import ModelProvider
     from mindroom.participation import ParticipationGate
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
@@ -51,11 +51,11 @@ if TYPE_CHECKING:
 class HookTurn:
     """What one run or resume takes from its turn for its hooks, the same for an agent's and a leader's.
 
-    ``store``, ``session``, and ``scope`` are where the run's scope stores, and ``scoped`` says this request
-    replays the scope's stored history, so a fold lands there; a run without a scope compacts within itself.
-    ``model_name`` is the configured name of the model the run resolved, ``native_compaction`` the provider
-    checkpoint the request replays, and ``prompt_id`` the turn's prompt; ``lifecycle`` and ``turn_recorder`` are
-    the turn's compaction lifecycle and recorder, which a resume and a team member lack.
+    ``store``, ``session``, and ``scope`` are where the run's scope stores, and ``replay_plan`` is the plan the run's
+    requests replay the scope's stored history under, so a fold lands there when they replay some; a run without a
+    scope or a plan compacts within itself. ``model_name`` is the configured name of the model the run resolved, and
+    ``prompt_id`` the turn's prompt; ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and
+    recorder, which a resume and a team member lack.
     """
 
     config: Config
@@ -64,8 +64,7 @@ class HookTurn:
     store: ConversationStore | None
     session: ConversationSession | None
     scope: HistoryScope | None
-    scoped: bool
-    native_compaction: NativeCompactionReplay | None
+    replay_plan: ResolvedReplayPlan | None
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None = None
     turn_recorder: TurnRecorder | None = None
@@ -173,7 +172,7 @@ def _loop_hooks(
     ``job_definitions``' managed calls joins their definitions first, so the participation decision and the
     compaction's sizing see the definitions the request sends; the participation gate decides next, so a reply that
     stays silent never compacts or requests; mid-turn compaction rewrites the live messages, and folds into the
-    scope only when the turn is ``scoped``; with ``approval_receipt``, the receipt projects into the run's first
+    scope only when the run replays it; with ``approval_receipt``, the receipt projects into the run's first
     request. Queued-message notices follow every tool batch and a resume's entry when ``queued_notices`` is on; the
     run hears of the ended jobs of ``job_notices_for`` after each batch; ``skill_review_capture`` records the final
     request of run ``run_id``.
@@ -195,9 +194,9 @@ def _loop_hooks(
             model=model,
             history_settings=history_settings,
             store=turn.store,
-            session=turn.session if turn.scoped else None,
-            scope=turn.scope if turn.scoped else None,
-            native_compaction=turn.native_compaction,
+            session=turn.session,
+            scope=turn.scope,
+            replay_plan=turn.replay_plan,
             deferred_tool_names=deferred_tool_names,
             prompt_id=turn.prompt_id,
             lifecycle=turn.lifecycle,

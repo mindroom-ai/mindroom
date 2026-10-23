@@ -772,8 +772,6 @@ def _agent_loop_hooks(
     """
     ctx = run_context.turn
     prepared = run_context.prepared_run
-    native = prepared.prepared_history.native_history
-    plan = prepared.prepared_history.replay_plan
     return agent_loop_hooks(
         prepared.build,
         HookTurn(
@@ -783,8 +781,7 @@ def _agent_loop_hooks(
             store=storage.store,
             session=storage.session,
             scope=storage.scope,
-            scoped=storage.store is not None and plan is not None and plan.add_history_to_context,
-            native_compaction=native.native_compaction if native is not None else None,
+            replay_plan=prepared.prepared_history.replay_plan,
             prompt_id=prepared.turn.prompt.id,
             lifecycle=run_context.compaction_lifecycle,
             turn_recorder=run_context.turn_recorder,

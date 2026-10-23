@@ -226,8 +226,7 @@ async def _pause(agent: _Resumable) -> RunRecord:
                 store=agent.store,
                 session=agent.session,
                 scope=TEST_AGENT_SCOPE,
-                scoped=agent.replays_history,
-                native_compaction=None,
+                replay_plan=plan if agent.replays_history else None,
                 prompt_id=turn.prompt.id,
             ),
             agent_name="test_agent",
@@ -404,6 +403,7 @@ async def test_a_continuation_on_the_turns_own_session_replays_no_run_the_fold_s
     assert fresh is not None
     assert [run.run_id for run in agent.session.runs] == [run.run_id for run in fresh.runs] == [paused.run_id]
     before = len(model.requests)
+    plan = configured_replay_plan(history_settings=agent.build.history_settings, estimated_tokens=0)
 
     events = resume_from_session(
         agent.build.spec,
@@ -412,7 +412,7 @@ async def test_a_continuation_on_the_turns_own_session_replays_no_run_the_fold_s
         session=agent.session,
         scope=TEST_AGENT_SCOPE,
         settings=agent.build.history_settings,
-        plan=configured_replay_plan(history_settings=agent.build.history_settings, estimated_tokens=0),
+        plan=plan,
         user_id=None,
         hooks=agent_loop_hooks(
             agent.build,
@@ -423,8 +423,7 @@ async def test_a_continuation_on_the_turns_own_session_replays_no_run_the_fold_s
                 store=agent.store,
                 session=agent.session,
                 scope=TEST_AGENT_SCOPE,
-                scoped=True,
-                native_compaction=None,
+                replay_plan=plan,
                 prompt_id=None,
             ),
             agent_name="test_agent",

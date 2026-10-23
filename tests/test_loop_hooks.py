@@ -66,8 +66,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         store=None,
         session=None,
         scope=None,
-        scoped=False,
-        native_compaction=None,
+        replay_plan=None,
         prompt_id=None,
     )
 

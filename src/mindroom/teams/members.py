@@ -339,8 +339,7 @@ def _team_member(
         store=None,
         session=None,
         scope=None,
-        scoped=False,
-        native_compaction=None,
+        replay_plan=None,
         prompt_id=None,
     )
 
