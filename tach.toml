@@ -2681,7 +2681,13 @@ visibility = ["mindroom.providers.anthropic.prompt_cache"]
 
 [[modules]]
 path = "mindroom.providers.anthropic.wire"
-depends_on = ["mindroom.llm", "mindroom.logging_config", "mindroom.providers.claude_wire_blocks"]
+depends_on = [
+    "mindroom.llm",
+    "mindroom.logging_config",
+    "mindroom.providers.claude_wire_blocks",
+    "mindroom.providers.legacy_stored_tool_calls",
+    "mindroom.providers.stored_tool_calls",
+]
 visibility = ["mindroom.providers.anthropic.messages"]
 
 [[modules]]
@@ -5932,6 +5938,7 @@ depends_on = [
     "mindroom.providers.cache_ladder",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.legacy_stored_tool_calls",
     "mindroom.providers.model_http_client",
     "mindroom.providers.model_loading",
     "mindroom.providers.names",
@@ -5948,6 +5955,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.model_usage",
     "mindroom.providers.names",
+    "mindroom.providers.stored_tool_calls",
     "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.usage.storage",
@@ -7868,6 +7876,15 @@ depends_on = ["mindroom.llm"]
 path = "mindroom.providers.remote_media"
 depends_on = ["mindroom.bounded_bytes", "mindroom.llm"]
 
+# How every wire reads stored tool calls, and the shapes earlier releases stored.
+[[modules]]
+path = "mindroom.providers.stored_tool_calls"
+depends_on = ["mindroom.llm"]
+
+[[modules]]
+path = "mindroom.providers.legacy_stored_tool_calls"
+depends_on = []
+
 [[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
@@ -7875,8 +7892,10 @@ depends_on = [
     "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.legacy_stored_tool_calls",
     "mindroom.providers.model_loading",
     "mindroom.providers.remote_media",
+    "mindroom.providers.stored_tool_calls",
     "mindroom.providers.tool_policy",
 ]
 
@@ -7887,7 +7906,9 @@ depends_on = [
     "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.legacy_stored_tool_calls",
     "mindroom.providers.remote_media",
+    "mindroom.providers.stored_tool_calls",
     "mindroom.providers.tool_policy",
 ]
 

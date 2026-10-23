@@ -36,7 +36,9 @@ from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started, split_thinking
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
+from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.remote_media import download_media
+from mindroom.providers.stored_tool_calls import call_arguments
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -103,7 +105,10 @@ class OllamaProvider:
 
         A reply that arrives whole has its ``<think>`` reasoning split out, as Agno did for non-streamed replies.
         """
-        messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
+        messages = [
+            await _format_message(message, self.identity.provider_name)
+            for message in repair_legacy_tool_calls(request.messages)
+        ]
         chat_kwargs = self._chat_kwargs(request)
         reply = _OllamaReply()
         started = time.monotonic()
@@ -230,13 +235,9 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
             {
                 "id": call.get("id"),
                 "type": "function",
-                "function": {
-                    "name": call["function"]["name"],
-                    "arguments": _call_arguments(call["function"].get("arguments")),
-                },
+                "function": {"name": call["function"]["name"], "arguments": call_arguments(call["function"])},
             }
             for call in message.tool_calls
-            if "function" in call
         ]
         if tool_calls:
             formatted["tool_calls"] = tool_calls
@@ -245,16 +246,6 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
         if images:
             formatted["images"] = images
     return formatted
-
-
-def _call_arguments(arguments: object) -> object:
-    """Return stored tool-call arguments as the object Ollama expects; undecodable arguments become empty."""
-    if not isinstance(arguments, str):
-        return {} if arguments is None else arguments
-    try:
-        return json.loads(arguments)
-    except json.JSONDecodeError:
-        return {}
 
 
 async def _image_bytes(image: Image, provider: str) -> bytes | None:

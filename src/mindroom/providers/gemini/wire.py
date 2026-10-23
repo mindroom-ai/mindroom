@@ -25,7 +25,9 @@ from mindroom.llm.media import IMAGE_HEADER_BYTES, image_mime_type
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
+from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.remote_media import download_media
+from mindroom.providers.stored_tool_calls import call_arguments
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -113,7 +115,7 @@ async def format_contents(
     """
     contents: list[dict[str, Any]] = []
     system_instruction: str | list[Any] | None = None
-    for message in messages:
+    for message in repair_legacy_tool_calls(messages):
         if message.role in ("system", "developer"):
             system_instruction = message.content
             continue
@@ -174,11 +176,7 @@ def _text_part(text: str, provider_data: Mapping[str, Any] | None) -> dict[str, 
 
 def _function_call_part(call: Mapping[str, Any]) -> dict[str, Any]:
     function = call["function"]
-    try:
-        args = json.loads(function["arguments"]) if "arguments" in function else {}
-    except (json.JSONDecodeError, TypeError):
-        args = {}
-    function_call = _without_none(name=function["name"], args=args, id=_provider_id(call.get("id")))
+    function_call = _without_none(name=function["name"], args=call_arguments(function), id=_provider_id(call.get("id")))
     part: dict[str, Any] = {"function_call": function_call}
     if "thought_signature" in call:
         part["thought_signature"] = base64.b64decode(call["thought_signature"])

@@ -30,6 +30,8 @@ from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.providers.claude_wire_blocks import as_dict
+from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
+from mindroom.providers.stored_tool_calls import call_arguments
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -175,7 +177,7 @@ def format_claude_messages(
     """
     turns: list[dict[str, Any]] = []
     system_texts: list[str] = []
-    for message in messages:
+    for message in repair_legacy_tool_calls(messages):
         if message.role in {"system", "developer"}:
             system_texts.append(message.get_content_string())
             continue
@@ -441,12 +443,7 @@ def _assistant_blocks(message: Message) -> list[Any]:
     for call in message.tool_calls or []:
         function = call["function"]
         blocks.append(
-            ToolUseBlock(
-                id=call["id"],
-                input=json.loads(function["arguments"]) if "arguments" in function else {},
-                name=function["name"],
-                type="tool_use",
-            ),
+            ToolUseBlock(id=call["id"], input=call_arguments(function), name=function["name"], type="tool_use"),
         )
     return blocks
 
