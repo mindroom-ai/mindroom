@@ -1344,24 +1344,20 @@ async def test_authored_reasoning_stores_the_output_text_as_agno_did(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary", [False, True], ids=["without-summary", "with-summary"])
-async def test_a_whole_reply_with_authored_reasoning_yields_the_reasoning_deltas_its_stream_would(
+async def test_the_stored_copy_of_the_output_text_never_streams_as_reasoning(
     tmp_path: Path,
     *,
     summary: bool,
 ) -> None:
-    """The stored copy of the output text stays out of the deltas: only a reasoning summary is reasoning."""
+    """With ``reasoning`` authored, only a reasoning summary streams as reasoning; the text's stored copy does not."""
     config = {**_OPENAI_RESPONSES, "extra_kwargs": {"reasoning": {"effort": "low"}}}
-    deltas = {}
-    for stream in (True, False):
-        root = tmp_path / ("streamed" if stream else "blocking")
-        root.mkdir()
-        built = _Built(root, config, _reasoning_reply(stream=stream, summary=summary))
-        events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()], stream=stream))]
-        deltas[stream] = [event for event in events if isinstance(event, (ReasoningDelta, TextDelta))]
+    built = _Built(tmp_path, config, _reasoning_reply(stream=True, summary=summary))
+
+    events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
 
     expected = [TextDelta(_PACK)]
-    assert deltas[True] == ([ReasoningDelta("Think. "), *expected] if summary else expected)
-    assert deltas[False] == deltas[True]
+    deltas = [event for event in events if isinstance(event, (ReasoningDelta, TextDelta))]
+    assert deltas == ([ReasoningDelta("Think. "), *expected] if summary else expected)
 
 
 @pytest.mark.asyncio

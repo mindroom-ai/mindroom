@@ -1534,19 +1534,13 @@ async def test_ollama_non_streaming_replies_split_think_tags(tmp_path: Path) -> 
     assert request["body"]["stream"] is False
     completed = _completed(events)
     assert (completed.message.content, completed.message.reasoning_content) == ("Hi there", "Plan first.")
-    assert [type(event).__name__ for event in events] == [
-        "ReasoningDelta",
-        "TextDelta",
-        "UsageReported",
-        "TurnCompleted",
-    ]
-    assert events[1] == TextDelta("Hi there")
+    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
     assert completed.message.metrics.input_tokens == 7
 
 
 @pytest.mark.asyncio
 async def test_ollama_non_streaming_tool_call_replies_have_no_text(tmp_path: Path) -> None:
-    """A whole reply that only calls a tool yields the call and no empty text or reasoning delta."""
+    """A whole reply that only calls a tool finishes with the call and no empty text or reasoning."""
     reply = httpx.Response(
         200,
         json=_ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}]),
@@ -1554,9 +1548,9 @@ async def test_ollama_non_streaming_tool_call_replies_have_no_text(tmp_path: Pat
 
     _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER], stream=False), tmp_path, reply)
 
-    assert [type(event).__name__ for event in events] == ["ToolCallReady", "UsageReported", "TurnCompleted"]
+    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
     completed = _completed(events)
-    assert completed.message.content is None
+    assert (completed.message.content, completed.message.reasoning_content) == (None, None)
     [call] = completed.message.tool_calls or []
     assert call["function"] == {"name": "get_weather", "arguments": '{"city": "Oslo"}'}
     assert completed.stop_reason == "tool_use"
@@ -1577,7 +1571,6 @@ async def test_ollama_keeps_think_tags_agno_did_not_split(content: str, tmp_path
     completed = _completed(events)
     assert completed.message.content == content
     assert completed.message.reasoning_content is None
-    assert [type(event).__name__ for event in events] == ["TextDelta", "UsageReported", "TurnCompleted"]
 
 
 @pytest.mark.asyncio

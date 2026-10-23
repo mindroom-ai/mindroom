@@ -72,7 +72,8 @@ async def test_stream_events_match_the_finished_message(
 ) -> None:
     """Deltas add up to the finished message, and usage is final once, as the message's own metrics.
 
-    The chunk that carries the usage reports it as a partial report first, which the final report replaces.
+    A whole Ollama reply yields no deltas; Gemini reads a whole reply as one chunk, so its deltas come too. The chunk
+    that carries the usage reports it as a partial report first, which the final report replaces.
     """
     hide_provider_environment(monkeypatch)
 
@@ -86,9 +87,12 @@ async def test_stream_events_match_the_finished_message(
     calls = [event.call for event in result.events if isinstance(event, ToolCallReady)]
     reports = [event for event in result.events if isinstance(event, UsageReported)]
     final = [report.usage for report in reports if report.final]
-    assert text == (message.content or "")
-    assert reasoning == (message.reasoning_content or "")
-    assert calls == (message.tool_calls or [])
+    if golden.data["input"]["stream"] or golden.family != "ollama":
+        assert text == (message.content or "")
+        assert reasoning == (message.reasoning_content or "")
+        assert calls == (message.tool_calls or [])
+    else:
+        assert (text, reasoning, calls) == ("", "", [])
     assert len(final) == 1
     assert final[0] is message.metrics
     assert comparable_metrics(final[0]) == golden.data["parsed"]["metrics"]

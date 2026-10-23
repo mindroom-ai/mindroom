@@ -55,7 +55,6 @@ __all__ = [
     "ResponsesTurnParts",
     "ResponsesWire",
     "parse_response",
-    "reasoning_summary",
     "request_store",
     "responses_input",
     "responses_request_kwargs",
@@ -565,7 +564,7 @@ def usage_report(event: ResponseStreamEvent) -> UsageReported | None:
     return UsageReported(_usage(usage), final=False)
 
 
-def reasoning_summary(response: Response) -> str:
+def _reasoning_summary(response: Response) -> str:
     """Return the reasoning summary text a response carries, which a stream delivers as reasoning deltas."""
     return "".join(
         item.text
@@ -612,7 +611,7 @@ def parse_response(
             )
         elif output.type == "reasoning" and store is False:
             parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
-    parts.reasoning = reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
+    parts.reasoning = _reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
     if response.usage is not None:
         parts.usage = _usage(response.usage)
     parts.provider_data[_STORED_KEY] = store is not False

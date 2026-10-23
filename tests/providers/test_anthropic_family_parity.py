@@ -49,12 +49,17 @@ async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> No
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", _FIXTURES, ids=golden_id)
 async def test_output_events_add_up_to_the_finished_message(path: Path, tmp_path: Path) -> None:
-    """Streamed or whole, a reply's deltas and ready tool calls add up to its finished message."""
-    replay = await run_golden(load_golden(path), tmp_path)
+    """A streamed reply's deltas and ready tool calls add up to its finished message; a whole reply yields none."""
+    golden = load_golden(path)
+    replay = await run_golden(golden, tmp_path)
     completed = replay.events[-1]
     assert isinstance(completed, TurnCompleted)
     message = completed.message
-    assert "".join(event.text for event in replay.events if isinstance(event, TextDelta)) == (message.content or "")
-    reasoning = "".join(event.text for event in replay.events if isinstance(event, ReasoningDelta))
+    outputs = [event for event in replay.events if isinstance(event, TextDelta | ReasoningDelta | ToolCallReady)]
+    if not golden["input"]["stream"]:
+        assert outputs == []
+        return
+    assert "".join(event.text for event in outputs if isinstance(event, TextDelta)) == (message.content or "")
+    reasoning = "".join(event.text for event in outputs if isinstance(event, ReasoningDelta))
     assert reasoning == (message.reasoning_content or "")
-    assert [event.call for event in replay.events if isinstance(event, ToolCallReady)] == (message.tool_calls or [])
+    assert [event.call for event in outputs if isinstance(event, ToolCallReady)] == (message.tool_calls or [])

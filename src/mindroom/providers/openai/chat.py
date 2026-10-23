@@ -17,7 +17,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.providers.assistant_turn import finished_assistant_message, output_started, whole_turn_deltas
+from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.chat_wire import (
@@ -99,12 +99,12 @@ class ChatAdapter:
                 finally:
                     await sdk_stream.close()
                 parts = accumulator.finish()
+                # A stream assembles its tool calls from their pieces, so each is complete only now.
+                for call in parts.tool_calls:
+                    yield ToolCallReady(call)
             else:
                 parts = parse_chat_completion(await client.chat.completions.create(**kwargs), self.wire)
                 first_token = time.monotonic()
-                # Tool calls are yielded after the branch for both paths, so the whole reply contributes none here.
-                for event in whole_turn_deltas(reasoning=parts.reasoning, content=parts.content, tool_calls=()):
-                    yield event
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
         message = finished_assistant_message(
@@ -117,8 +117,6 @@ class ChatAdapter:
             started=started,
             first_output_at=first_token,
         )
-        for call in parts.tool_calls:
-            yield ToolCallReady(call)
         if parts.usage is not None:
             yield UsageReported(message.metrics)
         yield TurnCompleted(message=message, stop_reason=chat_stop_reason(parts.finish_reason))

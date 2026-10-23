@@ -105,8 +105,9 @@ class NativeCompactionReplay:
 class ModelRequest:
     """One provider request.
 
-    ``stream=False`` asks for one non-streaming provider call where the route offers one; the events still
-    arrive through ``stream()``, after the response completes.
+    ``stream=False`` asks for one non-streaming provider call where the route offers one; its events still
+    arrive through ``stream()``, after the response completes, and callers read its output from the finished turn,
+    since a route may yield no deltas for it.
     ``deferred_tool_names`` name tools kept out of the rendered prompt: routes with native tool search defer
     them server-side, and the portable tool-search wrapper hides them behind ``call_tool`` everywhere else.
     ``portable_replay`` replays history explicitly instead of continuing provider-stored state, and

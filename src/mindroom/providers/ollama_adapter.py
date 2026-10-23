@@ -33,12 +33,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import (
-    finished_assistant_message,
-    output_started,
-    split_thinking,
-    whole_turn_deltas,
-)
+from mindroom.providers.assistant_turn import finished_assistant_message, output_started, split_thinking
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.remote_media import download_media
@@ -133,8 +128,7 @@ class OllamaProvider:
                     **chat_kwargs,
                 )
                 first_output_at = time.monotonic()
-                for event in _whole_reply_events(reply, cast("ChatResponse", response)):
-                    yield event
+                _read_whole_reply(reply, cast("ChatResponse", response))
         except Exception as error:
             raise _provider_error(error, provider=self.identity.provider_name) from error
         message = finished_assistant_message(
@@ -280,15 +274,14 @@ def _read_image(path: Path, provider: str) -> bytes:
         raise InvalidRequest(msg, provider=provider) from error
 
 
-def _whole_reply_events(reply: _OllamaReply, response: ChatResponse) -> list[StreamEvent]:
-    """Read a reply that arrived whole: its ``<think>`` reasoning becomes a reasoning delta ahead of the text.
+def _read_whole_reply(reply: _OllamaReply, response: ChatResponse) -> None:
+    """Read a reply that arrived whole, splitting out its ``<think>`` reasoning.
 
     Agno's Ollama split only a reply that contains an opening ``<think>`` tag.
     """
     _read_chunk(reply, response)
     if "<think>" in reply.content:
         reply.reasoning, reply.content = split_thinking(reply.content)
-    return whole_turn_deltas(reasoning=reply.reasoning, content=reply.content, tool_calls=reply.tool_calls)
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
