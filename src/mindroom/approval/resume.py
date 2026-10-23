@@ -53,7 +53,7 @@ type ContinueRun[R: AnyRunRecord] = Callable[[R, ResumeDecisions, ResumeEvents |
 class ResumeDecisions:
     """What one resume answers: the approved calls, the denied calls with the reasons given, and the external results.
 
-    A denial's reason is None when the requester gave none; the denied run records its default note.
+    A denial's reason is None or empty when the requester gave none; the denied run records its default note.
     ``external_results`` holds what an externally executed call (a delegation) returned, by the member whose run
     waits for it, None for the run's own call, and the call id.
     """

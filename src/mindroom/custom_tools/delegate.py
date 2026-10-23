@@ -27,6 +27,7 @@ from mindroom.delegation.personas import (
 )
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.sessions import SubagentSessionError
+from mindroom.delegation.state import RUN_SUBAGENT
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.invocation import current_tool_call
@@ -80,7 +81,7 @@ class DelegateTools(Toolkit):
             instructions=self._build_instructions(),
             tools=[self.run_subagent, self.continue_subagent],
         )
-        delegate_function = self.async_functions["run_subagent"]
+        delegate_function = self.async_functions[RUN_SUBAGENT]
         delegate_function.description = self._build_run_subagent_description()
         hidden = {
             *(() if self._minimal_targets else ("minimal",)),
@@ -89,7 +90,7 @@ class DelegateTools(Toolkit):
         if hidden:
             # Offer no option this caller cannot use. Agno keeps explicitly set
             # parameters when it later processes the entrypoint, so derive them once here.
-            derived = Function(name="run_subagent", entrypoint=self.run_subagent)
+            derived = Function(name=RUN_SUBAGENT, entrypoint=self.run_subagent)
             derived.process_entrypoint()
             properties = {name: value for name, value in derived.parameters["properties"].items() if name not in hidden}
             delegate_function.parameters = {**derived.parameters, "properties": properties}

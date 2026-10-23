@@ -514,11 +514,12 @@ async def test_a_denied_call_resumes_into_agno_s_rejected_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_call_denied_without_a_reason_tells_the_model_it_was_not_approved() -> None:
+@pytest.mark.parametrize("reason", [None, ""])
+async def test_a_call_denied_without_a_reason_tells_the_model_it_was_not_approved(reason: str | None) -> None:
     paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
     model = _model("code-model", answer("I did not multiply.", usage(260, 9, time_to_first_token=0.25)))
 
-    _, record, _ = await _resume(_agent(model, [_gated_calculator()]), paused, denied={"call-multiply": None})
+    _, record, _ = await _resume(_agent(model, [_gated_calculator()]), paused, denied={"call-multiply": reason})
 
     assert model.requests[0].messages[-1].content == "Not approved by requester"
     assert record.tools[0].confirmation_note == "Not approved by requester"  # type: ignore[index]

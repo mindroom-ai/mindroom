@@ -297,6 +297,24 @@ async def test_gated_call_waits_for_its_approval_then_runs_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reason", [None, ""])
+async def test_a_call_denied_without_a_reason_tells_the_model_it_was_not_approved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str | None,
+) -> None:
+    """A denial that gives no reason answers the model with the note every other denial path records."""
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run:
+        async with execution_resources():
+            with tool_runtime_context(run.context):
+                reply = asyncio.create_task(run.turn())
+                await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+                run.cards.decision.set_result(BackgroundApprovalDecision("denied", reason))
+                response = await asyncio.wait_for(reply, JOB_TEST_TIMEOUT)
+        assert (_tool_result(response), run.effects) == ("Not approved by requester", [])
+
+
+@pytest.mark.asyncio
 async def test_reply_goes_on_while_its_call_waits_for_approval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """After the wait, the reply continues and the job runs the call once approved."""
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0.05) as run:

@@ -241,8 +241,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
             assert requirement is not None
             # An approval for the outer Bash itself never authorizes replaying its script.
             if not decisions[call_id]:
-                assert requirement.confirmation_note is not None, "a denial records its note"
-                result = requirement.confirmation_note
+                result = requirement.denial_note
             denied = replace(
                 requirement.tool_execution,
                 result=result,

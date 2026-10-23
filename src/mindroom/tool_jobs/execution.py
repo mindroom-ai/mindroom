@@ -20,6 +20,7 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
+from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.tool_jobs.approvals import ask_tool_call_approval
@@ -443,7 +444,7 @@ async def _run_operation(
         if approval is not None:
             approved, reason = await approval()
             if not approved:
-                return BackgroundOutcome("denied", reason or "The requester did not approve this call.")
+                return BackgroundOutcome("denied", denial_note_for(reason))
         with tool_execution_identity(owner), authorized_tool_call(owner, call):
             job_checkpoint()
             check_current_execution_authority()
