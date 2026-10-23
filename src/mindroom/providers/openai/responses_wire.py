@@ -302,7 +302,7 @@ def _codex_params(params: dict[str, Any], settings: ResponsesSettings, wire: Res
         params.pop(name, None)
 
 
-def _base_params(settings: ResponsesSettings, request: ModelRequest, store: bool | None) -> dict[str, Any]:
+def _base_params(settings: ResponsesSettings, request: ModelRequest) -> dict[str, Any]:
     """Return the configured request parameters that are set, with reasoning and the text format."""
     reasoning = dict(settings.reasoning or {})
     if settings.reasoning_effort is not None:
@@ -319,7 +319,6 @@ def _base_params(settings: ResponsesSettings, request: ModelRequest, store: bool
     params = {
         **settings.request_fields(),
         "include": copy.deepcopy(settings.include),
-        "store": store,
         "reasoning": reasoning,
         "text": text or None,
     }
@@ -328,11 +327,10 @@ def _base_params(settings: ResponsesSettings, request: ModelRequest, store: bool
 
 def _add_continuation(params: dict[str, Any], request: ModelRequest, store: bool | None) -> None:
     """Continue the last stored response, or replay with encrypted reasoning when nothing is stored."""
+    params["store"] = store is not False
     if store is False:
-        params["store"] = False
         _with_encrypted_reasoning(params)
         return
-    params["store"] = True
     prepared, _ = _prepare_continuation(request.messages, explicit_replay=request.portable_replay)
     if (latest := _latest_response_data(prepared)) is not None:
         params["previous_response_id"] = latest["response_id"]
@@ -362,7 +360,7 @@ def responses_request_kwargs(
     Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
     store = request_store(wire, request)
-    params = _base_params(settings, request, store)
+    params = _base_params(settings, request)
     if tools := _tool_dicts(request.tools):
         params["tools"] = tools
     if request.tool_choice is not None:
