@@ -55,7 +55,7 @@ class TeamReplyText:
     presentation: TeamStreamPresentation
     per_member: dict[str, str] = field(init=False)
     consensus: str = ""
-    streamed_member_runs: set[str] = field(default_factory=set)
+    streamed_member_runs: set[str] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         """Give every configured slot empty text."""
