@@ -67,18 +67,6 @@ def _attachable_deferred_tools(config: Config, agent_name: str, requested_tools:
     ]
 
 
-def _normalize_effective_tool_config_overrides(
-    tool_name: str,
-    overrides: dict[str, object],
-) -> dict[str, object]:
-    return validate_authored_tool_entry_overrides(tool_name, overrides)
-
-
-def _has_deferred_tools(config: Config, agent_name: str) -> bool:
-    """Return whether one agent has at least one authored deferred tool."""
-    return bool(config.resolve_entity(agent_name).authored_deferred_tool_configs)
-
-
 def defer_toolkit(domain_name: str, description: str, toolkit: Toolkit) -> ToolDeferral:
     """Record a wire-deferred toolkit's renderable instructions, then keep them out of the system prompt.
 
@@ -131,7 +119,7 @@ def _special_tool_names(
     if config.agent_uses_knowledge_graph(agent_name):
         tool_names.append("knowledge_graph")
 
-    if enable_dynamic_tools_manager and _has_deferred_tools(config, agent_name):
+    if enable_dynamic_tools_manager and config.resolve_entity(agent_name).authored_deferred_tool_configs:
         tool_names.append("dynamic_tools")
 
     return tool_names
@@ -167,15 +155,11 @@ def _visible_authored_tool_configs(
         is_visible_owner = not authored_entry.defer or authored_entry.name in attached_deferred_tools
         for tool_name in config.expand_tool_names([authored_entry.name]):
             expanded = _expanded_authored_entry_config(authored_entry, tool_name)
-            expanded_precedence = _tool_config_owner_precedence(config, expanded)
-            if is_visible_owner:
-                current = visible_by_name.get(tool_name)
-                if current is None or expanded_precedence > _tool_config_owner_precedence(config, current):
-                    visible_by_name[tool_name] = expanded
-                continue
-            current_hidden = hidden_deferred_by_name.get(tool_name)
-            if current_hidden is None or expanded_precedence > _tool_config_owner_precedence(config, current_hidden):
-                hidden_deferred_by_name[tool_name] = expanded
+            owners = visible_by_name if is_visible_owner else hidden_deferred_by_name
+            current = owners.get(tool_name)
+            precedence = _tool_config_owner_precedence(config, expanded)
+            if current is None or precedence > _tool_config_owner_precedence(config, current):
+                owners[tool_name] = expanded
 
     resolved: list[EffectiveToolConfig] = []
     for tool_name in config.resolve_entity(agent_name).available_tools:
@@ -259,10 +243,7 @@ def visible_tool_surface(
     runtime_tool_configs = [
         EffectiveToolConfig(
             name=entry.name,
-            tool_config_overrides=_normalize_effective_tool_config_overrides(
-                entry.name,
-                dict(entry.tool_config_overrides),
-            ),
+            tool_config_overrides=validate_authored_tool_entry_overrides(entry.name, dict(entry.tool_config_overrides)),
             defer=entry.defer,
             initial=entry.initial,
             authored_order=entry.authored_order,
