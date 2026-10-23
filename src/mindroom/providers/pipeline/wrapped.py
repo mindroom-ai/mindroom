@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY
-from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, TurnCompleted
+from mindroom.llm.provider import ReasoningDelta, StreamProgress, TextDelta, ToolCallReady, TurnCompleted
 from mindroom.usage.storage import has_token_usage
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "WrappedProvider",
-    "is_visible_output",
+    "commits_attempt",
     "with_carried_usage",
 ]
 
@@ -80,10 +80,15 @@ class WrappedProvider:
         return self.stage(self.inner, request)
 
 
-def is_visible_output(event: StreamEvent) -> bool:
-    """Return whether retrying after this event would duplicate output the caller already received."""
+def commits_attempt(event: StreamEvent) -> bool:
+    """Return whether a retry after this event could repeat work: output the caller received, or a hosted tool's run.
+
+    Every retrying stage decides by this alone, for a failure the adapter raised and for the idle limit's stall.
+    """
     if isinstance(event, TextDelta | ReasoningDelta):
         return bool(event.text)
+    if isinstance(event, StreamProgress):
+        return event.commits
     return isinstance(event, ToolCallReady)
 
 

@@ -147,10 +147,10 @@ class ResponsesAdapter:
                 for delta in deltas:
                     yield delta
                 if not deltas:
-                    # An event without deltas, such as hosted-tool progress or tool-call arguments, is still activity.
+                    # An event without deltas, such as tool-call arguments, is still activity.
                     yield StreamProgress()
         except sdk_failures() as error:
-            raise accumulator.attempt_error(provider_error(error, provider=self.identity.provider_name)) from error
+            raise provider_error(error, provider=self.identity.provider_name) from error
         finally:
             await sdk_stream.close()
         if not accumulator.completed:

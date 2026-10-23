@@ -2,8 +2,9 @@
 
 Media a route never accepts (``Capabilities.omitted_media``) and media a route rejected earlier in this
 process are replaced up front by a note telling the model the attachment was not inspected. When the
-provider then rejects the request before any visible output, the remaining media goes the same way and
-the request is sent once more. A rejection that names the missing capability is remembered for the route.
+provider then rejects the request before the attempt committed (no visible output and no hosted tool that acts),
+the remaining media goes the same way and the request is sent once more. A rejection that names the missing
+capability is remembered for the route.
 """
 
 from __future__ import annotations
@@ -13,17 +14,11 @@ import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.errors import (
-    INCOMPLETE_STREAM,
-    MALFORMED_TOOL_CALL,
-    SAFEGUARD_REFUSAL,
-    ContextWindowExceeded,
-    ProviderError,
-)
+from mindroom.llm.errors import MALFORMED_TOOL_CALL, SAFEGUARD_REFUSAL, ContextWindowExceeded, ProviderError
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
 from mindroom.llm.provider import ReportedUsage
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import commits_attempt, with_carried_usage
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -42,7 +37,7 @@ _UNSUPPORTED_VIEW_MESSAGE = (
     "The active model rejected the viewed image input; the retained attachment is still available."
 )
 # A retried media-free request must not repeat a failure the media cannot have caused.
-_NOT_MEDIA_RELATED_CODES = frozenset({INCOMPLETE_STREAM, SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL})
+_NOT_MEDIA_RELATED_CODES = frozenset({SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL})
 _PAYLOAD_TOO_LARGE_STATUS = 413
 _SERVER_ERROR_STATUS = 500
 # Rejections naming one input's size or type prove only that this input failed, not the whole media kind.
@@ -173,17 +168,17 @@ async def media_fallback_stream(
     known = (frozenset(_LEARNED_UNSUPPORTED.get(route, ())) | inner.capabilities.omitted_media) & present
     remaining = present - known
     first = replace(request, messages=_without_media(request.messages, known, fallback_prompt))
-    visible = False
+    committed = False
     usage = ReportedUsage()
     try:
         events = inner.stream(first)
         async with closing_async_stream(events):
             async for event in events:
                 usage.observe(event)
-                visible = visible or is_visible_output(event)
+                committed = committed or commits_attempt(event)
                 yield event
     except ProviderError as error:
-        if visible or not remaining or not _media_may_have_caused(error):
+        if committed or not remaining or not _media_may_have_caused(error):
             raise
         failure = error
     else:

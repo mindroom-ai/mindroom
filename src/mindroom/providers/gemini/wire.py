@@ -21,7 +21,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported
+from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.providers.remote_media import download_media
@@ -579,11 +579,7 @@ def _dictionary_schema(additional: Mapping[str, Any], *, description: str | None
 
 @dataclass(slots=True)
 class GeminiReply:
-    """What one streamed Gemini reply produced so far.
-
-    ``hosted_tool_ran`` turns true once a chunk shows a native tool (grounding, code execution) at work, after
-    which a failed attempt must not be retried, since the retry would run the tool again.
-    """
+    """What one streamed Gemini reply produced so far."""
 
     content: str = ""
     reasoning: str = ""
@@ -591,7 +587,6 @@ class GeminiReply:
     thought_signature: str | None = None
     usage: MessageMetrics | None = None
     finish_reason: str | None = None
-    hosted_tool_ran: bool = False
 
 
 def read_chunk(
@@ -606,7 +601,8 @@ def read_chunk(
     returned as a partial report of the reply's usage so far. A whole response without candidates, such as a blocked
     prompt, still counts its prompt usage, as Agno's non-streaming parser did; Agno's streaming parser dropped it, so
     a streamed one does not. A candidate that ended in a malformed tool call reports its usage and nothing else;
-    ``malformed_tool_call_error`` then ends the reply.
+    ``malformed_tool_call_error`` then ends the reply. A chunk that shows Google Search grounding or code execution
+    at work reports that hosted tool's start.
     """
     if not chunk.candidates:
         if not whole_response or chunk.usage_metadata is None:
@@ -618,10 +614,10 @@ def read_chunk(
     finish_reason = None if candidate.finish_reason is None else candidate.finish_reason.value
     if finish_reason != _MALFORMED_FUNCTION_CALL:
         parts = candidate.content.parts if candidate.content is not None else None
-        if candidate.grounding_metadata is not None or any(
-            part.executable_code is not None or part.code_execution_result is not None for part in parts or ()
-        ):
-            reply.hosted_tool_ran = True
+        if candidate.grounding_metadata is not None:
+            events.append(hosted_tool_started("google_search"))
+        if any(part.executable_code is not None or part.code_execution_result is not None for part in parts or ()):
+            events.append(hosted_tool_started("code_execution"))
         events.extend(event for part in parts or () for event in _read_part(reply, part))
     if finish_reason is not None:
         reply.finish_reason = finish_reason

@@ -1,8 +1,8 @@
 """Request once more, with guidance, after the model wrote a tool call the provider could not parse.
 
 Agno answered Gemini's MALFORMED_FUNCTION_CALL by appending a temporary user message with its guidance text and
-requesting again; this stage does the same for any route that fails with ``MALFORMED_TOOL_CALL`` before visible
-output. The guidance travels on the retried request only, so it never reaches the conversation the caller stores.
+requesting again; this stage does the same for any route that fails with ``MALFORMED_TOOL_CALL`` before the
+attempt committed. The guidance travels on the retried request only, so it never reaches the conversation the caller stores.
 A second malformed call fails the request.
 """
 
@@ -15,7 +15,7 @@ from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ReportedUsage
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import commits_attempt, with_carried_usage
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -39,17 +39,17 @@ Guidelines:
 
 async def guidance_retry_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, resending it once with the malformed-call guidance after a malformed tool call."""
-    visible = False
+    committed = False
     usage = ReportedUsage()
     try:
         events = inner.stream(request)
         async with closing_async_stream(events):
             async for event in events:
                 usage.observe(event)
-                visible = visible or is_visible_output(event)
+                committed = committed or commits_attempt(event)
                 yield event
     except ProviderError as error:
-        if visible or error.code != MALFORMED_TOOL_CALL:
+        if committed or error.code != MALFORMED_TOOL_CALL:
             raise
     else:
         return

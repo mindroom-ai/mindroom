@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from mindroom.config.models import DebugConfig, ModelConfig
-from mindroom.llm.errors import INCOMPLETE_STREAM, MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
+from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
 from mindroom.llm.media import Audio, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, ToolSpec, complete
@@ -386,11 +386,10 @@ async def test_failure_after_a_server_tool_started_is_final(
     provider = _pipeline(spec.adapter(tmp_path, wire))
     request = ModelRequest(messages=[Message(role="user", content="Hi")], overrides=RequestOverrides(sdk_max_retries=0))
 
-    with pytest.raises(ProviderError) as raised:
+    with pytest.raises(ProviderUnavailable) as raised:
         await complete(provider, request)
 
-    assert (raised.value.code, raised.value.retryable, len(wire.requests)) == (INCOMPLETE_STREAM, False, 1)
-    assert type(raised.value) is ProviderError
+    assert (raised.value.code, len(wire.requests)) == ("connection_error", 1)
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ import httpx
 from pydantic import ValidationError
 
 from mindroom.credentials.sync import get_api_key_for_provider
-from mindroom.llm.errors import INCOMPLETE_STREAM, InvalidRequest, ProviderError
+from mindroom.llm.errors import InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
@@ -110,10 +110,9 @@ class GeminiProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.
 
-        Media uploads and downloads happen first, so their SDK and transport errors are normalized too; a
-        failure after a native tool ran is final, because a retry would run the tool again. Usage is reported as the
-        reply's finished candidate carries it, so an attempt that fails or is cut off afterwards, such as one that
-        ended in a malformed tool call, still settles it.
+        Media uploads and downloads happen first, so their SDK and transport errors are normalized too. Usage is
+        reported as the reply's finished candidate carries it, so an attempt that fails or is cut off afterwards,
+        such as one that ended in a malformed tool call, still settles it.
         """
         started = time.monotonic()
         reply = GeminiReply()
@@ -139,7 +138,7 @@ class GeminiProvider:
                 for event in events:
                     yield event
         except Exception as error:
-            self._raise_provider_error(error, hosted_tool_ran=reply.hosted_tool_ran)
+            self._raise_provider_error(error)
         if (malformed := malformed_tool_call_error(reply, provider=self.identity.provider_name)) is not None:
             raise malformed
         provider_data: dict[str, Any] = {}
@@ -159,7 +158,7 @@ class GeminiProvider:
             yield UsageReported(message.metrics)
         yield TurnCompleted(message=message, stop_reason=stop_reason(reply))
 
-    def _raise_provider_error(self, error: Exception, *, hosted_tool_ran: bool) -> NoReturn:
+    def _raise_provider_error(self, error: Exception) -> NoReturn:
         """Raise the normalized error for one failed request; unknown failures propagate as they are.
 
         Media and chunk failures arrive normalized and are re-raised as they are: ``raise error from error`` would
@@ -184,11 +183,6 @@ class GeminiProvider:
             mapped = google_auth
         else:
             raise error
-        if hosted_tool_ran and mapped.retryable:
-            # A retry would run the native tool again.
-            msg = f"Gemini stream failed after a native tool ran: {mapped}"
-            final = ProviderError(msg, provider=provider, status_code=mapped.status_code, code=INCOMPLETE_STREAM)
-            raise final from error
         if mapped is error:
             raise error
         raise mapped from error

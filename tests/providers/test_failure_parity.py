@@ -217,12 +217,26 @@ _RESPONSE_FAILED = {
     "sequence_number": 2,
     "response": {**_RESPONSE, "status": "failed", "output": [], "error": {"code": "server_error", "message": "Failed"}},
 }
-_WEB_SEARCH_STARTED = {
-    "type": "response.output_item.added",
-    "sequence_number": 1,
-    "output_index": 0,
-    "item": {"id": "ws_1", "type": "web_search_call", "status": "in_progress"},
+
+
+def _item_added(item: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "response.output_item.added", "sequence_number": 1, "output_index": 0, "item": item}
+
+
+_WEB_SEARCH_STARTED = _item_added({"id": "ws_1", "type": "web_search_call", "status": "in_progress"})
+# The hosted tools a Responses route may run, by the output item that shows each starting.
+_RESPONSES_HOSTED_TOOLS = {
+    "web_search": _WEB_SEARCH_STARTED,
+    "file_search": _item_added({"id": "fs_1", "type": "file_search_call", "status": "in_progress", "queries": []}),
+    "code_interpreter": _item_added(
+        {"id": "ci_1", "type": "code_interpreter_call", "status": "in_progress", "code": "", "container_id": "c"},
+    ),
+    "image_generation": _item_added({"id": "ig_1", "type": "image_generation_call", "status": "in_progress"}),
 }
+_TOOL_SEARCH_STARTED = _item_added(
+    {"id": "ts_1", "type": "tool_search_call", "status": "in_progress", "execution": "server", "arguments": {}},
+)
+_COMPACTION_STARTED = _item_added({"id": "cmp_1", "type": "compaction", "encrypted_content": "e"})
 _RESPONSE_COMPLETED = {
     "type": "response.completed",
     "sequence_number": 3,
@@ -281,6 +295,35 @@ def _ollama_chunk(content: str = "", *, done: bool = False) -> dict[str, Any]:
 
 def _ollama_stream(*chunks: dict[str, Any], pause: float = 0.0, drop: bool = False) -> Reply:
     return lambda: ndjson_response(chunks, pause_seconds=pause, drop=drop)
+
+
+class _OpenAfter(httpx.AsyncByteStream):
+    """A response body sent at once, after which the connection stays open without sending more."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+        self.sent = asyncio.Event()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Send the body, mark it sent once the reader asks for more, then wait forever."""
+        yield self._body
+        self.sent.set()
+        await asyncio.get_running_loop().create_future()
+
+
+def _then_silent(reply: Reply) -> Reply:
+    """Send ``reply``'s whole body at once and then keep the connection open without sending more."""
+
+    def silent() -> httpx.Response:
+        sent = reply()
+        assert isinstance(sent, httpx.Response)
+        return httpx.Response(
+            200,
+            headers={"content-type": sent.headers["content-type"]},
+            stream=_OpenAfter(sent.content),
+        )
+
+    return silent
 
 
 def _connect_error() -> Exception:
@@ -350,6 +393,7 @@ _SDK_AND_PIPELINE = 15
 _PIPELINE = 5
 _STALLED = 2
 
+_CLAUDE_WEB_SEARCH = {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}
 _CLAUDE_CASES = [
     _Case(
         "http_429",
@@ -527,14 +571,43 @@ _CLAUDE_CASES = [
     # A retry would run the web search again, so the failure is final; the Agno-backed runtime retried it.
     _Case(
         "event_after_web_search",
-        _claude_stream(
-            *_claude_block(0, {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}),
-            _claude_error("api_error"),
-        ),
-        ProviderError,
+        _claude_stream(*_claude_block(0, _CLAUDE_WEB_SEARCH), _claude_error("api_error")),
+        ProviderUnavailable,
         UNAVAILABLE,
         1,
-        code=INCOMPLETE_STREAM,
+    ),
+    # A stall after a server tool that acts or costs started is final too; the Agno-backed runtime retried it once.
+    _Case(
+        "stall_after_web_search",
+        _then_silent(_claude_stream(*_claude_block(0, _CLAUDE_WEB_SEARCH))),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        1,
+        code=STREAM_STALLED,
+    ),
+    _Case(
+        "stall_after_code_execution",
+        _then_silent(_claude_stream(*_claude_block(0, {**_CLAUDE_WEB_SEARCH, "name": "code_execution"}))),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        1,
+        code=STREAM_STALLED,
+    ),
+    _Case(
+        "stall_after_tool_search",
+        _then_silent(_claude_stream(*_claude_block(0, {**_CLAUDE_WEB_SEARCH, "name": "tool_search_tool_regex"}))),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        _STALLED,
+        code=STREAM_STALLED,
+    ),
+    _Case(
+        "stall_after_compaction",
+        _then_silent(_claude_stream(*_claude_block(0, {"type": "compaction", "content": "Summary."}))),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        _STALLED,
+        code=STREAM_STALLED,
     ),
 ]
 
@@ -810,34 +883,51 @@ _RESPONSES_CASES = [
     _Case(
         "event_after_visible_output",
         _responses_stream(_response_text(_PARTIAL), _response_error("server_error")),
-        ProviderError,
+        ProviderUnavailable,
         UNAVAILABLE,
         1,
-        code=INCOMPLETE_STREAM,
+        code="server_error",
     ),
     _Case(
         "reset_after_visible_output",
         _responses_stream(_response_text(_PARTIAL), drop=True),
-        ProviderError,
-        ERROR,
+        ProviderUnavailable,
+        UNAVAILABLE,
         1,
-        code=INCOMPLETE_STREAM,
+        code="connection_error",
     ),
     _Case(
         "end_after_visible_output",
         _responses_stream(_response_text(_PARTIAL)),
-        ProviderError,
+        ProviderUnavailable,
         UNAVAILABLE,
         1,
         code=INCOMPLETE_STREAM,
     ),
-    _Case(
-        "event_after_hosted_tool",
-        _responses_stream(_WEB_SEARCH_STARTED, _response_error("server_error")),
-        ProviderError,
-        UNAVAILABLE,
-        1,
-        code=INCOMPLETE_STREAM,
+    # A retry would run the hosted tool again, so a failure after it started is final, a stall included.
+    *(
+        _Case(
+            f"{failure}_after_{tool}",
+            reply,
+            ProviderUnavailable,
+            UNAVAILABLE,
+            1,
+            code=code,
+        )
+        for tool, started in _RESPONSES_HOSTED_TOOLS.items()
+        for failure, reply, code in (
+            ("event", _responses_stream(started, _response_error("server_error")), "server_error"),
+            ("stall", _then_silent(_responses_stream(started)), STREAM_STALLED),
+        )
+    ),
+    # Rerunning a tool search or a compaction repeats no work, so their items keep the retry budget.
+    *(
+        _Case(f"{failure}_after_{name}", reply, ProviderUnavailable, UNAVAILABLE, requests, code=code)
+        for name, started in (("tool_search", _TOOL_SEARCH_STARTED), ("compaction", _COMPACTION_STARTED))
+        for failure, reply, requests, code in (
+            ("event", _responses_stream(started, _response_error("server_error")), _PIPELINE, "server_error"),
+            ("stall", _then_silent(_responses_stream(started)), _STALLED, STREAM_STALLED),
+        )
     ),
 ]
 
@@ -958,13 +1048,18 @@ _GEMINI_CASES = [
         UNAVAILABLE,
         1,
     ),
-    _Case(
-        "reset_after_grounding",
-        _gemini_stream(_gemini_chunk(grounding=True), drop=True),
-        ProviderError,
-        ERROR,
-        1,
-        code=INCOMPLETE_STREAM,
+    # A retry would run Google Search grounding or code execution again, so a failure after either is final, a
+    # stall included; the Agno-backed runtime retried a stall.
+    *(
+        _Case(f"{failure}_after_{tool}", reply, ProviderUnavailable, UNAVAILABLE, 1, code=code)
+        for tool, chunk in (
+            ("grounding", _gemini_chunk(grounding=True)),
+            ("code_execution", _gemini_chunk({"executableCode": {"language": "PYTHON", "code": "print(1)"}})),
+        )
+        for failure, reply, code in (
+            ("reset", _gemini_stream(chunk, drop=True), "connection_error"),
+            ("stall", _then_silent(_gemini_stream(chunk)), STREAM_STALLED),
+        )
     ),
     # One guidance retry follows a malformed tool call in both modes.
     _Case(
@@ -1150,20 +1245,6 @@ async def test_a_blocking_reply_slower_than_the_idle_limit_is_waited_for(route: 
 # --- Usage of a cut-off stream ------------------------------------------------------------------------------------
 
 
-class _OpenAfter(httpx.AsyncByteStream):
-    """A response body sent at once, after which the connection stays open without sending more."""
-
-    def __init__(self, body: bytes) -> None:
-        self._body = body
-        self.sent = asyncio.Event()
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        """Send the body, mark it sent once the reader asks for more, then wait forever."""
-        yield self._body
-        self.sent.set()
-        await asyncio.get_running_loop().create_future()
-
-
 _CLAUDE_USAGE_DELTA = {
     "type": "message_delta",
     "delta": {"stop_reason": "end_turn", "stop_sequence": None},
@@ -1192,11 +1273,11 @@ _USAGE_THEN_SILENCE: dict[str, Reply] = {
 
 
 def _silent_after_usage(route: str) -> tuple[_OpenAfter, Callable[[httpx.Request], httpx.Response]]:
-    reply = _USAGE_THEN_SILENCE[route]()
+    reply = _then_silent(_USAGE_THEN_SILENCE[route])()
     assert isinstance(reply, httpx.Response)
-    body = _OpenAfter(reply.content)
-    headers = {"content-type": reply.headers["content-type"]}
-    return body, lambda _request: httpx.Response(200, headers=headers, stream=body)
+    assert isinstance(reply.stream, _OpenAfter)
+    body = reply.stream
+    return body, lambda _request: reply
 
 
 def _billed(usage: ReportedUsage) -> tuple[int, int] | None:

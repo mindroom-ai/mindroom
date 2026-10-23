@@ -96,8 +96,8 @@ async def test_stream_events_match_the_finished_message(
         [],
         [comparable_metrics(final[0])],
     )
-    # Every chunk carries output or usage, so none shows up as bare provider activity.
-    assert not [event for event in result.events if isinstance(event, StreamProgress)]
+    # Every chunk carries output, usage, or a hosted tool's start, so none shows up as bare provider activity.
+    assert not [event for event in result.events if isinstance(event, StreamProgress) and not event.commits]
 
 
 # ---------------------------------------------------------------------------

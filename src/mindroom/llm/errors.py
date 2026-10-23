@@ -10,8 +10,7 @@ from mindroom.llm.usage import MessageMetrics
 # Gemini's MALFORMED_FUNCTION_CALL; the request pipeline answers it with one guidance retry, and the media fallback
 # never strips media for it.
 MALFORMED_TOOL_CALL = "malformed_tool_call"
-# The ``ProviderError.code`` of a stream that failed after the attempt exposed output or a hosted tool ran: a retry
-# could duplicate output or rerun the tool, so the error is final and the media fallback never resends the request.
+# The ``ProviderError.code`` of a stream that ended before its turn completed.
 INCOMPLETE_STREAM = "incomplete_stream"
 # The ``ProviderError.code`` of a transport failure that timed out, such as an HTTP connect or read timeout, so callers
 # that report timeouts need not read the error's text; other transport failures carry ``connection_error``.

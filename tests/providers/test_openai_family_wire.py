@@ -770,19 +770,21 @@ async def test_a_non_streamed_failed_response_raises_its_error(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("events", "retryable"), [(_text_events("")[:1], True), (_text_events("Pack"), False)])
+@pytest.mark.parametrize(("events", "requests"), [(_text_events("")[:1], 5), (_text_events("Pack"), 1)])
 async def test_responses_stream_without_completion_fails(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     events: list[dict[str, Any]],
-    retryable: bool,
+    requests: int,
 ) -> None:
     """An early end is retried like a dropped connection only while nothing reached the caller."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, _responses_reply(*events))
 
-    with pytest.raises(ProviderError, match=r"without response\.completed") as info:
-        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+    with pytest.raises(ProviderUnavailable, match=r"without response\.completed") as info:
+        await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.code, info.value.retryable) == ("incomplete_stream", retryable)
+    assert (info.value.code, len(built.requests)) == ("incomplete_stream", requests)
 
 
 _SEARCH_CALL = {"id": "ws_1", "type": "web_search_call", "status": "in_progress", "action": {"type": "search"}}
@@ -813,9 +815,9 @@ def _argument_delta(delta: str) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("events", "drop_connection", "retryable", "requests"),
+    ("events", "drop_connection", "requests"),
     [
-        ([_text_events("")[0], _SERVER_ERROR], False, True, 5),
+        ([_text_events("")[0], _SERVER_ERROR], False, 5),
         (
             [
                 _text_events("")[0],
@@ -824,10 +826,9 @@ def _argument_delta(delta: str) -> dict[str, Any]:
                 _SERVER_ERROR,
             ],
             False,
-            False,
             1,
         ),
-        ([_text_events("")[0], _item_event("added", _FUNCTION_CALL), _argument_delta('{"city"')], True, False, 1),
+        ([_text_events("")[0], _item_event("added", _FUNCTION_CALL), _argument_delta('{"city"')], True, 5),
         (
             [
                 _text_events("")[0],
@@ -836,7 +837,6 @@ def _argument_delta(delta: str) -> dict[str, Any]:
                 _SERVER_ERROR,
             ],
             False,
-            True,
             5,
         ),
     ],
@@ -847,24 +847,25 @@ def _argument_delta(delta: str) -> dict[str, Any]:
         "finished-reasoning-then-error-event",
     ],
 )
-async def test_responses_failure_after_exposed_output_is_final(
+async def test_responses_failure_is_final_once_a_hosted_tool_started(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     events: list[dict[str, Any]],
     drop_connection: bool,
-    retryable: bool,
     requests: int,
 ) -> None:
-    """A retry after a hosted tool or function call started could run the tool again, so the failure stands."""
+    """A retry after a hosted tool started could run the tool again, so the failure stands.
+
+    A function call still streaming its arguments is the model's unfinished output, which a retry writes again.
+    """
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     reply = {**_responses_reply(*events), "drop_connection": drop_connection}
     built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, reply)
 
-    with pytest.raises(ProviderError) as info:
+    with pytest.raises(ProviderUnavailable):
         await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.retryable, len(built.requests)) == (retryable, requests)
-    assert (info.value.code == "incomplete_stream") is not retryable
+    assert len(built.requests) == requests
 
 
 _IDLE_LIMIT_SECONDS = 0.5

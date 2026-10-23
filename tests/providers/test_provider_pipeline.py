@@ -39,6 +39,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
     complete,
+    hosted_tool_started,
 )
 from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -191,6 +192,47 @@ async def test_progress_events_are_not_visible_output() -> None:
     events = await _drain(provider, ModelRequest(messages=[_user()]))
 
     assert (len(inner.requests), events[0]) == (2, StreamProgress())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [_transient(), 1.0],
+    ids=["provider-error", "stall"],
+)
+async def test_a_failure_after_a_hosted_tool_committed_the_attempt_is_final(failure: Exception | float) -> None:
+    """A retry could run the hosted tool again, so the stage reissues nothing, for its own stall too."""
+    inner = _ScriptedProvider([[StreamProgress(commits=True), failure, _turn()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=0.05))
+
+    with pytest.raises(ProviderUnavailable):
+        await _drain(provider, ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "commits"),
+    [
+        ("tool_search_tool_regex", False),
+        ("tool_search_tool_bm25", False),
+        ("tool_search_tool_result", False),
+        ("tool_search_call", False),
+        ("tool_search_output", False),
+        ("compaction", False),
+        ("web_search", True),
+        ("web_fetch", True),
+        ("code_execution", True),
+        ("web_search_call", True),
+        ("file_search_call", True),
+        ("code_interpreter_call", True),
+        ("image_generation_call", True),
+        ("google_search", True),
+    ],
+)
+def test_only_a_hosted_tool_that_reads_keeps_the_attempt_retryable(name: str, *, commits: bool) -> None:
+    """Tool search and compaction repeat no work; every other hosted tool acts or costs, on every route."""
+    assert hosted_tool_started(name) == StreamProgress(commits=commits)
 
 
 @pytest.mark.asyncio
@@ -378,6 +420,18 @@ async def test_a_learned_media_limit_stays_with_its_endpoint() -> None:
     await _drain(WrappedProvider(other, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT)), request)
 
     assert other.requests[0].messages[0].images == [_image()]
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_after_a_hosted_tool_committed_the_attempt_is_not_resent_without_media() -> None:
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
+    inner = _ScriptedProvider([[StreamProgress(commits=True), rejection], [_turn()]])
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+
+    with pytest.raises(InvalidRequest):
+        await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert len(inner.requests) == 1
 
 
 @pytest.mark.asyncio

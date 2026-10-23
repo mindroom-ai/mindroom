@@ -15,7 +15,14 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from pydantic import BaseModel
 
 from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError, ProviderUnavailable
-from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, ToolCallReady, UsageReported
+from mindroom.llm.provider import (
+    ReasoningDelta,
+    StopReason,
+    TextDelta,
+    ToolCallReady,
+    UsageReported,
+    hosted_tool_started,
+)
 from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
 from mindroom.providers.openai.chat_wire import function_definition, with_sdk_options
@@ -60,6 +67,8 @@ _ENCRYPTED_REASONING = "reasoning.encrypted_content"
 # The events that end a response; each carries the response with its usage.
 _TERMINAL_EVENT_TYPES = frozenset({"response.completed", "response.incomplete", "response.failed"})
 _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
+# The output items the model writes itself; every other item is a hosted tool's call or output.
+_MODEL_ITEM_TYPES = frozenset({"message", "reasoning", "function_call"})
 _STORED_KEY = "mindroom_response_stored"
 _PORTABLE_KEY = "mindroom_portable_replay"
 
@@ -437,28 +446,14 @@ def responses_stop_reason(status: str | None, incomplete_reason: str | None, *, 
     return None if status is None else "incomplete"
 
 
-def _exposes_no_output(event: ResponseStreamEvent) -> bool:
-    """Return whether an event only frames output that a retried request regenerates unseen.
-
-    Reasoning models open and close reasoning items long before any text, so those boundaries are not
-    output; tool calls and hosted tools are, since they may already have started or run.
-    """
-    if event.type in {"response.created", "response.in_progress"}:
-        return not cast("Any", event).response.output
-    if event.type == "response.output_item.added":
-        return cast("Any", event).item.type in {"message", "reasoning"}
-    if event.type == "response.output_item.done":
-        return cast("Any", event).item.type == "reasoning"
-    return event.type == "response.content_part.added"
-
-
 @dataclass(slots=True)
 class ResponsesStream:
     """Fold streamed Responses events into deltas and one finished turn.
 
-    ``exposed`` turns true once the attempt produced anything a retry could duplicate. ``text_as_reasoning``
-    also records the output text in the stored reasoning, in event order with any summary text, as Agno did for a
-    model config that authors ``reasoning`` without ``reasoning_summary``.
+    An output item other than the model's own message, reasoning, or function call is a hosted tool at work, and
+    its start is reported as such. ``text_as_reasoning`` also records the output text in the stored reasoning, in
+    event order with any summary text, as Agno did for a model config that authors ``reasoning`` without
+    ``reasoning_summary``.
     """
 
     wire: ResponsesWire
@@ -468,7 +463,6 @@ class ResponsesStream:
     text_as_reasoning: bool
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
     completed: bool = False
-    exposed: bool = False
     _content: list[str] = field(default_factory=list)
     _reasoning: list[str] = field(default_factory=list)
     _tool_use: dict[str, Any] = field(default_factory=dict)
@@ -488,9 +482,10 @@ class ResponsesStream:
         """Fold one event and return the deltas it carried; failure events raise."""
         current = cast("Any", event)
         if event.type in {"error", "response.failed"}:
-            raise self.attempt_error(self._failure(event))
-        self.exposed = self.exposed or not (_exposes_no_output(event) and not self._tool_use)
+            raise self._failure(event)
         events: list[StreamEvent] = []
+        if event.type == "response.output_item.added" and current.item.type not in _MODEL_ITEM_TYPES:
+            events.append(hosted_tool_started(current.item.type))
         if event.type == "response.output_text.delta":
             self._content.append(current.delta)
             if self.text_as_reasoning:
@@ -542,29 +537,10 @@ class ResponsesStream:
         )
         self.parts.status = response.status
 
-    def attempt_error(self, error: ProviderError) -> ProviderError:
-        """Return the error that ends this attempt: ``error`` itself until the attempt exposed output.
-
-        Afterwards a retry could duplicate output or rerun hosted tools, so the failure becomes final; its code
-        also tells the media fallback that inline media did not cause it.
-        """
-        if not self.exposed:
-            return error
-        message = f"OpenAI Responses stream failed after yielding output: {error}"
-        return ProviderError(
-            message,
-            provider=self.wire.provider_name,
-            status_code=error.status_code,
-            code=INCOMPLETE_STREAM,
-        )
-
     def incomplete_error(self) -> ProviderError:
-        """Return the error for a stream that ended without ``response.completed``."""
+        """Return the error for a stream that ended without ``response.completed``, retried like a dropped connection."""
         message = "OpenAI Responses stream ended without response.completed"
-        # Before any exposed output, the early end is retried like a dropped connection.
-        return self.attempt_error(
-            ProviderUnavailable(message, provider=self.wire.provider_name, status_code=200, code=INCOMPLETE_STREAM),
-        )
+        return ProviderUnavailable(message, provider=self.wire.provider_name, status_code=200, code=INCOMPLETE_STREAM)
 
     def finish(self) -> ResponsesTurnParts:
         """Return the finished turn after ``response.completed``."""

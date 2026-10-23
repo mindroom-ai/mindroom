@@ -1,8 +1,9 @@
 """Bounded retries for transient provider failures in streamed requests, and the stream idle limit.
 
 SDK HTTP retries cannot recover errors delivered inside an established SSE stream, so a failed request
-is reissued here while it has produced nothing the caller could have shown. Earlier tool calls and their
-results stay in the conversation; only the failed request repeats.
+is reissued here until the attempt committed: produced output the caller could have shown, or started a hosted
+tool that acts or costs, which a retry would run again. A stall is decided the same way. Earlier tool calls and
+their results stay in the conversation; only the failed request repeats.
 
 The idle limit ends attempts whose provider sends no event for too long. Adapters report provider data
 without output as ``StreamProgress``, so long tool-call arguments or hosted-tool work keep an attempt alive.
@@ -21,7 +22,7 @@ from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.llm.provider import ReportedUsage
 from mindroom.llm.usage import add_usage
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import commits_attempt, with_carried_usage
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -106,7 +107,7 @@ def retrying_stream(
     *,
     idle_timeout_seconds: float | None,
 ) -> AsyncIterator[StreamEvent]:
-    """Stream ``request``, reissuing it after a retryable failure that came before any visible output.
+    """Stream ``request``, reissuing it after a retryable failure that came before the attempt committed.
 
     Non-streaming requests pass through unchanged, since their callers own deadlines and retry policy, except on a
     route that only streams: it streams every request, so each one gets the stream's retries and idle limit.
@@ -125,7 +126,7 @@ async def _retried(
     budget = _RetryBudget()
     carried: MessageMetrics | None = None
     while True:
-        visible = False
+        committed = False
         usage = ReportedUsage()
         try:
             events = inner.stream(request)
@@ -136,10 +137,10 @@ async def _retried(
                     except StopAsyncIteration:
                         return
                     usage.observe(event)
-                    visible = visible or is_visible_output(event)
+                    committed = committed or commits_attempt(event)
                     yield with_carried_usage(event, carried)
         except ProviderError as error:
-            if visible or (delay := _retry_delay(error, budget, identity.id)) is None:
+            if committed or (delay := _retry_delay(error, budget, identity.id)) is None:
                 raise
             if (report := usage.settle()) is not None:
                 yield report

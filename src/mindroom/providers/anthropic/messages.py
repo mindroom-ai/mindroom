@@ -37,7 +37,7 @@ from pydantic import BaseModel
 
 from mindroom.constants import runtime_env_path
 from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
-from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError
+from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -50,6 +50,7 @@ from mindroom.llm.provider import (
     ToolCallReady,
     TurnCompleted,
     UsageReported,
+    hosted_tool_started,
 )
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
@@ -83,12 +84,7 @@ from mindroom.providers.anthropic.wire import (
     tool_call_from_block,
 )
 from mindroom.providers.assistant_turn import stamp_finished_turn, whole_turn_deltas
-from mindroom.providers.claude_wire_blocks import (
-    SERVER_TOOL_USE_BLOCK_TYPE,
-    TOOL_SEARCH_RESULT_BLOCK_TYPE,
-    TOOL_SEARCH_TOOL_NAME,
-    as_dict,
-)
+from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
 from mindroom.providers.errors import classify_provider_error, google_auth_error, stream_event_error, transport_error
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
@@ -247,7 +243,6 @@ class ClaudeProvider:
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None
-        server_tool_started = False
         try:
             if not request.stream:
                 response = await (
@@ -293,10 +288,9 @@ class ClaudeProvider:
                     elif event.type in _PROVIDER_EVENT_TYPES:
                         # Block starts, tool-call argument pieces, and server-tool blocks carry no output but
                         # show the provider is still working; the SDK's own convenience events repeat them.
-                        server_tool_started = server_tool_started or _starts_server_tool(event)
-                        yield StreamProgress()
+                        yield _progress(event)
         except Exception as error:
-            self._raise_provider_error(error, server_tool_started=server_tool_started)
+            self._raise_provider_error(error)
 
     def _finish(
         self,
@@ -509,12 +503,11 @@ class ClaudeProvider:
             client.project_id = project_id
         return client
 
-    def _raise_provider_error(self, error: Exception, *, server_tool_started: bool) -> NoReturn:
+    def _raise_provider_error(self, error: Exception) -> NoReturn:
         """Translate an SDK, transport, or Google token failure into the shared provider errors; others propagate.
 
         An ``error`` event inside the stream reaches here with the stream's committed 200 status, so its error type
-        classifies it. Once a server tool such as web search or code execution started, a retry would run it again,
-        so the failure is final and carries the code that keeps the media fallback from resending the request.
+        classifies it.
         """
         provider = self.identity.provider_name
         if isinstance(error, anthropic.APIConnectionError | httpx.TransportError):
@@ -530,14 +523,6 @@ class ClaudeProvider:
             mapped = google_auth
         else:
             raise error
-        if server_tool_started and mapped.retryable:
-            msg = f"Claude stream failed after a server tool started: {mapped}"
-            raise ProviderError(
-                msg,
-                provider=provider,
-                status_code=mapped.status_code,
-                code=INCOMPLETE_STREAM,
-            ) from error
         raise mapped from error
 
 
@@ -547,21 +532,19 @@ _USAGE_EVENT_TYPES = frozenset({"message_start", "message_delta"})
 _PROVIDER_EVENT_TYPES = frozenset({"content_block_start", "content_block_delta", "content_block_stop"})
 # The HTTP status the SDK reports for an ``error`` event that arrives after the stream started.
 _COMMITTED_STREAM_STATUS = 200
-# Blocks a retry may produce again: the model's own, a tool search, which only looks up deferred tool definitions, and
-# a compaction, which only summarizes the request's history. Any other block is a server tool at work.
-_REPEATABLE_BLOCK_TYPES = frozenset(
-    {"text", "thinking", "redacted_thinking", "tool_use", TOOL_SEARCH_RESULT_BLOCK_TYPE, "compaction"},
-)
+# The blocks the model writes itself; every other block is a server tool's call or result.
+_MODEL_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
 
 
-def _starts_server_tool(event: Any) -> bool:  # noqa: ANN401 - SDK stream event
-    """Return whether a ``content_block_start`` opens a block of a server-side tool whose rerun would repeat its work."""
-    if event.type != "content_block_start":
-        return False
-    block = event.content_block
-    if block.type == SERVER_TOOL_USE_BLOCK_TYPE:
-        return block.name != TOOL_SEARCH_TOOL_NAME
-    return block.type not in _REPEATABLE_BLOCK_TYPES
+def _progress(event: Any) -> StreamProgress:  # noqa: ANN401 - SDK stream event
+    """Return the progress event of a raw stream event, which commits the attempt when a server tool's block opens.
+
+    A server tool is named by its ``server_tool_use`` block, and any other server block, such as a tool search
+    result or a compaction, by its type.
+    """
+    if event.type != "content_block_start" or (block := event.content_block).type in _MODEL_BLOCK_TYPES:
+        return StreamProgress()
+    return hosted_tool_started(block.name if block.type == SERVER_TOOL_USE_BLOCK_TYPE else block.type)
 
 
 def _event_error_type(body: object) -> str | None:
