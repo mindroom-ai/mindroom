@@ -454,6 +454,20 @@ _CLAUDE_CASES = [
         1,
         1,
     ),
+    # Older Claude models word an input that leaves no room for the output this way.
+    _Case(
+        "http_400_context_limit",
+        _claude_status(
+            400,
+            "invalid_request_error",
+            "input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000, decrease input length or "
+            "`max_tokens` and try again",
+        ),
+        ContextWindowExceeded,
+        CONTEXT_WINDOW,
+        1,
+        1,
+    ),
     _Case(
         "http_413",
         _claude_status(413, "request_too_large", "Request exceeds the size"),

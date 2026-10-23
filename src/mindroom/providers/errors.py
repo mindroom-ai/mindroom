@@ -61,11 +61,13 @@ _CREDENTIAL_MARKERS = ("auth", "api key", "api_key", "apikey")
 
 # Wording providers use when a request does not fit the model's context window (Agno's
 # ``ModelProviderError.CONTEXT_WINDOW_PATTERNS`` without its over-broad ``max_tokens``, plus the
-# payload-size wording OpenAI-compatible servers and Anthropic use).
+# payload-size wording OpenAI-compatible servers and Anthropic use, and older Claude models' "input length and
+# `max_tokens` exceed context limit").
 _CONTEXT_WINDOW_MARKERS = (
     "context_length_exceeded",
     "context window",
     "context length",
+    "context limit",
     "maximum context length",
     "maximum number of tokens",
     "token limit",

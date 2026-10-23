@@ -106,6 +106,7 @@ def test_context_window_detection_reads_the_code_and_the_wording() -> None:
     assert is_context_window_error("x", code="context_length_exceeded")
     assert is_context_window_error("Request too large for gpt-6-astra")
     assert is_context_window_error("This request would exceed the context window")
+    assert is_context_window_error("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000")
     assert not is_context_window_error("max_tokens must be positive")
 
 
