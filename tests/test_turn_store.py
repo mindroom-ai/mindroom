@@ -33,9 +33,9 @@ from mindroom.handled_turns import (
 )
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.storage import (
+    _with_scope_seen_event_ids,
     read_scope_seen_event_ids,
     read_scope_state,
-    update_scope_seen_event_ids,
 )
 from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
 from mindroom.llm.messages import Message
@@ -1397,7 +1397,7 @@ async def test_prepare_redaction_invalidates_legacy_compacted_replay(
         ],
         summary=ScopeSummary(text="The user disclosed REDACTED_SECRET.", updated_at=_EPOCH),
     )
-    update_scope_seen_event_ids(session, scope, ["$user_msg", "$older"])
+    session.metadata = _with_scope_seen_event_ids(session.metadata, scope=scope, event_ids={"$user_msg", "$older"})
     session.metadata = {
         **(session.metadata or {}),
         constants.MINDROOM_COMPACTION_METADATA_KEY: {
@@ -1569,7 +1569,7 @@ async def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(
         ],
         summary=ScopeSummary(text="contains REDACTED_SECRET", updated_at=_EPOCH),
     )
-    update_scope_seen_event_ids(session, scope, [human_event_id])
+    session.metadata = _with_scope_seen_event_ids(session.metadata, scope=scope, event_ids={human_event_id})
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
     await store.record_pending_turn(
@@ -1757,7 +1757,7 @@ async def test_multi_bot_redaction_only_changes_the_history_that_read_the_source
         runs=[],
         summary=ScopeSummary(text="contains REDACTED_SECRET", updated_at=_EPOCH),
     )
-    update_scope_seen_event_ids(owner_session, scope, ["$user_msg"])
+    owner_session.metadata = _with_scope_seen_event_ids(owner_session.metadata, scope=scope, event_ids={"$user_msg"})
     owner_storage = _seeded_storage(tmp_path, owner_session, name="owner")
     owner_store = await _store_with_storage(
         journal_store,
@@ -2615,10 +2615,10 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         ],
     )
     if compacted:
-        update_scope_seen_event_ids(
-            session,
-            scope,
-            _legacy_compacted_event_ids(edited),
+        session.metadata = _with_scope_seen_event_ids(
+            session.metadata,
+            scope=scope,
+            event_ids=set(_legacy_compacted_event_ids(edited)),
         )
         session.summary = ScopeSummary(text="DELETED_EDIT_MARKER", updated_at=_EPOCH)
         session.runs = session.runs[1:]
@@ -2750,10 +2750,10 @@ async def test_deleted_noncurrent_edit_preserves_independent_surviving_run(
     session = ConversationSession(kind="agent", session_id=target.session_id, owner_id="agent", runs=[newest])
     if compacted:
         session.summary = ScopeSummary(text="Independent surviving summary", updated_at=_EPOCH)
-        update_scope_seen_event_ids(
-            session,
-            HistoryScope(kind="agent", scope_id="agent"),
-            ["$user_msg", "$surviving-edit"],
+        session.metadata = _with_scope_seen_event_ids(
+            session.metadata,
+            scope=HistoryScope(kind="agent", scope_id="agent"),
+            event_ids={"$user_msg", "$surviving-edit"},
         )
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
@@ -2987,7 +2987,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
         summary=ScopeSummary(text="DELETED_EDIT_MARKER", updated_at=_EPOCH),
         runs=[later_run] if later_run_names_revision else [],
     )
-    update_scope_seen_event_ids(session, scope, ["$user_msg"])
+    session.metadata = _with_scope_seen_event_ids(session.metadata, scope=scope, event_ids={"$user_msg"})
     _seed_as_older_release(storage, session)
     _as_older_release(tmp_path / "sessions" / "agent.db", "agent")
     if later_run_names_revision:

@@ -454,18 +454,14 @@ def _persist_bound_seen_event_ids(
     session_id: str,
     event_ids: list[str],
 ) -> None:
-    """Record the Matrix events this team turn consumed on the stored session row.
+    """Record the Matrix events this team turn consumed on the stored session row, creating the row if needed.
 
-    The row is re-read and only then written, so the seen ids land without putting the loaded snapshot's fields
-    back over what the run stored.
+    The ids merge into the metadata the row holds, so nothing the run or another writer stored is put back or lost.
     """
     if scope_context is None:
         return
-    session = scope_context.storage.load_session(session_id, "team")
-    if session is None:
-        session = new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=True)
-    if update_scope_seen_event_ids(session, scope_context.scope, event_ids):
-        scope_context.storage.save_session_fields(session, "metadata")
+    session = new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=True)
+    update_scope_seen_event_ids(scope_context.storage, session, scope_context.scope, event_ids)
 
 
 def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[str]:

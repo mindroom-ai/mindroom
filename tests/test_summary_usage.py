@@ -21,6 +21,7 @@ from mindroom.history.types import HistoryScopeState
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
 from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.types import session_state_snapshot
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
     detached_requester_context,
@@ -169,7 +170,7 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
     assert "question" not in json.dumps(summary)
     assert summary["requests"][0]["metrics"]["input_tokens"] == 100
     # Repeated exports and session writes cannot add the same summary twice.
-    storage.save_session_fields(session, "metadata", "session_state")
+    storage.save_session_state(session, session_state_snapshot(session.session_state))
     assert collect_admin_usage(config=config, runtime_paths=paths).totals == report.totals
 
 

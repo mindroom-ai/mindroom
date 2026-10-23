@@ -2809,6 +2809,7 @@ visibility = [
 path = "mindroom.history.runtime"
 depends_on = [
     "mindroom.session_storage.lanes",
+    "mindroom.session_storage.types",
     "mindroom.history.compaction",
     "mindroom.history.native",
     "mindroom.history.policy",

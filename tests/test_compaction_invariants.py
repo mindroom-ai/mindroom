@@ -233,13 +233,8 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
     concurrent_session = storage.load_session("session-1", "agent")
     assert concurrent_session is not None
     concurrent_state = HistoryScopeState(force_compact_before_next_run=True)
-    concurrent_session.metadata = _with_scope_state(
-        concurrent_session.metadata,
-        _SCOPE,
-        HistoryScopeState(force_compact_before_next_run=True),
-    )
-    concurrent_session.runs = [*(concurrent_session.runs or []), _completed_run("run-2")]
-    seed_session(storage, concurrent_session)
+    storage.update_metadata(concurrent_session, lambda metadata: _with_scope_state(metadata, _SCOPE, concurrent_state))
+    storage.save_run(concurrent_session, _completed_run("run-2"), record_usage=True)
 
     seen_states: list[HistoryScopeState] = []
 
@@ -270,8 +265,7 @@ def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(
     concurrent_session = storage.load_session("session-1", "agent")
     assert concurrent_session is not None
     persisted_state = HistoryScopeState(force_compact_before_next_run=True)
-    concurrent_session.metadata = _with_scope_state(concurrent_session.metadata, _SCOPE, persisted_state)
-    seed_session(storage, concurrent_session)
+    storage.update_metadata(concurrent_session, lambda metadata: _with_scope_state(metadata, _SCOPE, persisted_state))
     statements: list[str] = []
     connect = store_module.connect_conversation_database
 

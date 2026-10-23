@@ -14,6 +14,7 @@ from mindroom import constants
 from mindroom.history.storage import (
     _read_scope_history_event_ids,
     _remove_redacted_event_from_history,
+    _with_scope_seen_event_ids,
     read_scope_seen_event_ids,
     update_scope_seen_event_ids,
 )
@@ -126,7 +127,7 @@ def _legacy_session(run_ids: list[str], summary: str, seen_event_ids: list[str])
             "states": {_SCOPE.key: {"compacted_run_ids": ["legacy-gone"]}},
         },
     }
-    update_scope_seen_event_ids(session, _SCOPE, seen_event_ids)
+    session.metadata = _with_scope_seen_event_ids(session.metadata, scope=_SCOPE, event_ids=set(seen_event_ids))
     return session
 
 
@@ -189,8 +190,7 @@ def test_redacting_a_loaded_only_event_keeps_the_summary(storage: ConversationSt
     """A summary provably built without the event survives its redaction."""
     session = _seed(storage, ["r1", "r2"])
     _compact(storage, session, ["r1"], "summary of r1")
-    update_scope_seen_event_ids(session, _SCOPE, ["$team-consumed"])
-    storage.save_session_fields(session, "metadata")
+    update_scope_seen_event_ids(storage, session, _SCOPE, ["$team-consumed"])
 
     assert _redact(storage, session, "$r2")
 
@@ -366,8 +366,7 @@ def test_a_late_save_after_a_legacy_clear_cannot_replay_the_cleared_run(
 def test_team_redaction_without_compaction_keeps_unrelated_runs(storage: ConversationStore) -> None:
     """Seen ids a team records on the session row are not legacy provenance."""
     session = _seed(storage, ["t1", "t2", "t3"])
-    update_scope_seen_event_ids(session, _SCOPE, ["$t1", "$t2", "$t3"])
-    storage.save_session_fields(session, "metadata")
+    update_scope_seen_event_ids(storage, session, _SCOPE, ["$t1", "$t2", "$t3"])
 
     assert _redact(storage, session, "$t3")
 
@@ -381,8 +380,7 @@ def test_rollback_forgets_seen_ids_of_the_removed_runs(storage: ConversationStor
     session = _seed(storage, ["r1", "r2", "r3"])
     _compact(storage, session, ["r1"], "summary of r1")
     _compact(storage, session, ["r2"], "summary of r1 and r2")
-    update_scope_seen_event_ids(session, _SCOPE, ["$r3"])
-    storage.save_session_fields(session, "metadata")
+    update_scope_seen_event_ids(storage, session, _SCOPE, ["$r3"])
 
     assert _redact(storage, session, "$r2")
 
@@ -423,16 +421,16 @@ def test_a_stale_copy_of_a_folded_run_stays_folded(storage: ConversationStore) -
     assert stored.runs == []
 
 
-def test_a_stale_session_row_keeps_the_rolled_back_seen_ids_out(storage: ConversationStore) -> None:
-    """A stale pre-cut session row cannot mark rolled-back messages as seen through the summary rows."""
+def test_a_stale_session_copy_keeps_the_rolled_back_seen_ids_out(storage: ConversationStore) -> None:
+    """A team turn recording consumed ids through a pre-cut copy cannot mark rolled-back messages as seen."""
     session = _seed(storage, ["r1", "r2", "r3"])
     _compact(storage, session, ["r1"], "summary of r1")
     _compact(storage, session, ["r2"], "summary of r1 and r2")
     stale = _stored(storage)
     assert _redact(storage, session, "$r2")
 
-    storage.save_session_fields(stale, "metadata")
+    update_scope_seen_event_ids(storage, stale, _SCOPE, ["$team-consumed"])
 
     stored = _stored(storage)
     assert _summary(stored) == "summary of r1"
-    assert _seen(storage, stored) == {"$r1"}
+    assert _seen(storage, stored) == {"$r1", "$team-consumed"}

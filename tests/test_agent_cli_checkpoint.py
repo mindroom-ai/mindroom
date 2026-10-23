@@ -21,7 +21,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
-from mindroom.session_storage.types import ConversationSession
+from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolValue
 from tests.test_agent_tool_calls import _catalog
@@ -156,7 +156,7 @@ async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_ch
     assert store is not None
     session = catalog.session
     session.session_state["cwd"] = "/repo"
-    store.save_session_fields(session, "session_state")
+    store.save_session_state(session, session_state_snapshot(session.session_state))
     # As in a turn, the run's tools change the session's own state in place.
     catalog.run = replace(catalog.run, session_state=session.session_state)
     persist = persist_to(store, session)

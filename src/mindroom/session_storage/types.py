@@ -16,7 +16,6 @@ type SessionKind = Literal["agent", "team"]
 type Refusal = Literal["removed", "frozen"]
 # What a run save did: wrote the row, or refused it.
 type SaveOutcome = Literal["written"] | Refusal
-type SessionField = Literal["metadata", "session_state"]
 
 
 def session_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
@@ -73,7 +72,6 @@ __all__ = [
     "ConversationSession",
     "Refusal",
     "SaveOutcome",
-    "SessionField",
     "SessionFields",
     "SessionKind",
     "session_state_snapshot",

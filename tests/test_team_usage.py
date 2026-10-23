@@ -122,7 +122,7 @@ def _stored_team(
         runtime_paths=paths,
         execution_identity=None,
     )
-    storage.save_session_fields(session, "metadata", "session_state")
+    storage.ensure_session_row(session)
     # The member is saved twice, as a run saved again at a checkpoint is; its calls count once.
     for run in (leader, member, grandchild, member):
         storage.save_run(session, run, record_usage=True)

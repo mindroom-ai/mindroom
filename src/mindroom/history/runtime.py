@@ -60,6 +60,7 @@ from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.types import session_state_snapshot
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -968,7 +969,7 @@ def _prepare_scope_state_for_run(
             scope=scope,
             update=lambda latest: replace(latest, force_compact_before_next_run=True),
         )
-        storage.save_session_fields(session, "session_state")
+        storage.save_session_state(session, session_state_snapshot(session.session_state))
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
         state = update_scope_state_on_latest(
             storage,

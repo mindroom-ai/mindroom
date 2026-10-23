@@ -477,8 +477,8 @@ def _seed_history(
         team_id=team.scope.scope_id,
         runs=[_completed_team_run("run-earlier", team_id=team.scope.scope_id, messages=list(messages))],
     )
-    update_scope_seen_event_ids(session, team.scope, list(seen_event_ids))
     seed_session(team.storage, session)
+    update_scope_seen_event_ids(team.storage, session, team.scope, list(seen_event_ids))
 
 
 @pytest.mark.asyncio

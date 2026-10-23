@@ -210,7 +210,7 @@ def read_scope_seen_event_ids(
     Loaded runs carry their own ids, the summary rows supply those of compacted
     history, and session metadata adds ids no stored run carries.
     """
-    seen_event_ids = _read_preserved_scope_seen_event_ids(session, scope)
+    seen_event_ids = _read_preserved_scope_seen_event_ids(session.metadata, scope)
     seen_event_ids |= summary_rows.history_event_ids(
         storage,
         session_id=session.session_id,
@@ -241,14 +241,14 @@ def _read_scope_history_event_ids(
     return event_ids
 
 
-def update_scope_seen_event_ids(session: ConversationSession, scope: HistoryScope, event_ids: list[str]) -> bool:
-    """Merge consumed Matrix event ids into one session scope."""
-    existing_seen_ids = _read_preserved_scope_seen_event_ids(session, scope)
-    updated_seen_ids = existing_seen_ids.union(event_id for event_id in event_ids if event_id)
-    if updated_seen_ids == existing_seen_ids:
-        return False
-    session.metadata = _with_scope_seen_event_ids(session.metadata, scope=scope, event_ids=updated_seen_ids)
-    return True
+def update_scope_seen_event_ids(
+    storage: ConversationStore,
+    session: ConversationSession,
+    scope: HistoryScope,
+    event_ids: list[str],
+) -> None:
+    """Merge consumed Matrix event ids into the scope's preserved seen ids on ``session``'s stored row."""
+    storage.update_metadata(session, partial(_with_merged_scope_seen_event_ids, scope=scope, event_ids=event_ids))
 
 
 def remove_runs_answering(storage: ConversationStore, session_id: str, scope: HistoryScope, event_id: str) -> bool:
@@ -554,14 +554,26 @@ def _message_dicts(run: AnyRunRecord) -> list[dict[str, Any]]:
     return [message.to_dict() for message in run.messages]
 
 
-def _read_preserved_scope_seen_event_ids(session: ConversationSession, scope: HistoryScope) -> set[str]:
-    raw_value = _valid_matrix_history_metadata(session.metadata or {})
+def _read_preserved_scope_seen_event_ids(metadata: dict[str, Any] | None, scope: HistoryScope) -> set[str]:
+    raw_value = _valid_matrix_history_metadata(metadata or {})
     raw_states = raw_value.get("states") if raw_value is not None else None
     raw_state = raw_states.get(scope.key) if isinstance(raw_states, dict) else None
     raw_seen_ids = raw_state.get("seen_event_ids") if isinstance(raw_state, dict) else None
     if not isinstance(raw_seen_ids, list):
         return set()
     return {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
+
+
+def _with_merged_scope_seen_event_ids(
+    metadata: dict[str, Any] | None,
+    *,
+    scope: HistoryScope,
+    event_ids: list[str],
+) -> dict[str, Any] | None:
+    """Return ``metadata`` with ``event_ids`` added to the scope's preserved seen ids, as it was when it holds them all."""
+    existing = _read_preserved_scope_seen_event_ids(metadata, scope)
+    merged = existing.union(event_id for event_id in event_ids if event_id)
+    return metadata if merged == existing else _with_scope_seen_event_ids(metadata, scope=scope, event_ids=merged)
 
 
 def _with_scope_seen_event_ids(

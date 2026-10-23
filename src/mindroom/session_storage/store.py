@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.schema import TableNames
-    from mindroom.session_storage.types import Refusal, SaveOutcome, SessionField, SessionKind
+    from mindroom.session_storage.types import Refusal, SaveOutcome, SessionKind
     from mindroom.usage.storage import IndependentUsageKind
 
 # How long an operation waits for another connection's write lock on the database, its migrations included.
@@ -260,22 +260,29 @@ class ConversationStore:
         _record_stored_state(session, created)
         _reconcile(session, saved)
 
-    def save_session_fields(self, session: ConversationSession, *fields: SessionField) -> None:
-        """Write the named fields of ``session`` to its row, creating the row if needed, and leave the rest alone.
-
-        Writing ``session_state`` records a copy of it as ``session.stored_session_state``.
-        """
-        state = session_state_snapshot(session.session_state) if "session_state" in fields else None
-        self._save_fields(session, metadata="metadata" in fields, state=state)
-
     def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
-        """Write ``state`` as the session's ``session_state`` and record it as ``session.stored_session_state``.
+        """Write ``state`` as the session's ``session_state``, creating the row if needed, and leave the rest alone.
 
-        ``state`` is a ``session_state_snapshot`` of the run's state that the caller took before awaiting the
-        database's lane, as the run's tools change the live state in place meanwhile. The session keeps it, so the
-        caller must not change it.
+        ``state`` is a ``session_state_snapshot`` of the run's state, which a caller outside the database's lane takes
+        before awaiting it, as the run's tools change the live state in place meanwhile. It is recorded as
+        ``session.stored_session_state``, so the caller must not change it.
         """
-        self._save_fields(session, metadata=False, state=state)
+        sessions = quote_identifier(self.names.sessions)
+        with self.transaction(write=True) as connection:
+            _ensure_session_row(connection, self.names, session)
+            (stored,) = connection.execute(
+                f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
+                (session.session_id,),
+            ).fetchone()
+            connection.execute(
+                f"UPDATE {sessions} SET session_data = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
+                (
+                    json.dumps({**(_decoded_mapping(stored) or {}), "session_state": state}),
+                    int(time()),
+                    session.session_id,
+                ),
+            )
+        _record_stored_state(session, state)
 
     def update_metadata(
         self,
@@ -305,29 +312,6 @@ class ConversationStore:
                 )
         _record_stored_state(session, created)
         session.metadata = updated
-
-    def _save_fields(self, session: ConversationSession, *, metadata: bool, state: dict[str, Any] | None) -> None:
-        """Write ``session``'s metadata when asked and ``state`` when given, creating the row if needed."""
-        names = self.names
-        with self.transaction(write=True) as connection:
-            created = _ensure_session_row(connection, names, session)
-            assignments: list[str] = ["updated_at = ?"]
-            values: list[object] = [int(time())]
-            if metadata:
-                assignments.append("metadata = ?")
-                values.append(_json_or_null(session.metadata))
-            if state is not None:
-                (stored,) = connection.execute(
-                    f"SELECT session_data FROM {quote_identifier(names.sessions)} WHERE session_id = ?",  # noqa: S608
-                    (session.session_id,),
-                ).fetchone()
-                assignments.append("session_data = ?")
-                values.append(json.dumps({**(_decoded_mapping(stored) or {}), "session_state": state}))
-            connection.execute(
-                f"UPDATE {quote_identifier(names.sessions)} SET {', '.join(assignments)} WHERE session_id = ?",  # noqa: S608
-                (*values, session.session_id),
-            )
-        _record_stored_state(session, created if state is None else state)
 
     def delete_run_subtrees(
         self,
@@ -373,7 +357,8 @@ class ConversationStore:
     def list_updated_sessions(self, kind: SessionKind, owner_id: str, *, since: int) -> list[tuple[str, int]]:
         """Return ``(session_id, updated_at)`` of ``owner_id``'s sessions updated after ``since``, oldest first.
 
-        A session's update time moves when its row is written: a field save, or a run save that records usage.
+        A session's update time moves when its row is written: a state save, a metadata change, or a run save that
+        records usage.
         """
         owner_column = "team_id" if kind == "team" else "agent_id"
         with self.transaction(write=False) as connection:

@@ -112,7 +112,7 @@ def _squad(tmp_path: Path, *, leader: list[list[Any]], member: list[list[Any]], 
         execution_identity=None,
     )
     session = new_scope_session(session_id="session", scope_id="squad", is_team=True)
-    store.save_session_fields(session, "metadata")
+    store.ensure_session_row(session)
     hanging = asyncio.Event()
 
     async def hang() -> None:

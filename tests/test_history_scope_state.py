@@ -75,7 +75,7 @@ def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path, storage
     scope = HistoryScope(kind="team", scope_id="team-123")
     session = _session("session-1")
 
-    assert update_scope_seen_event_ids(session, scope, ["event-1"]) is True
+    update_scope_seen_event_ids(storage, session, scope, ["event-1"])
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
 
     assert read_scope_seen_event_ids(storage, session, scope) == {"event-1"}
@@ -158,7 +158,7 @@ def test_seen_event_ids_match_model_history_visibility(storage: ConversationStor
             created_at=1,
             updated_at=1,
         )
-    update_scope_seen_event_ids(session, scope, ["preserved-event"])
+    update_scope_seen_event_ids(storage, session, scope, ["preserved-event"])
 
     assert read_scope_seen_event_ids(storage, session, scope) == {"completed-event", "preserved-event", "running-event"}
     assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
@@ -272,7 +272,7 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path, storag
             ),
         ],
     )
-    update_scope_seen_event_ids(session, team_scope, ["preserved-team-event"])
+    update_scope_seen_event_ids(storage, session, team_scope, ["preserved-team-event"])
 
     assert read_scope_seen_event_ids(storage, session, agent_scope) == {"agent-event"}
     assert read_scope_seen_event_ids(storage, session, team_scope) == {"team-event", "preserved-team-event"}

@@ -20,7 +20,7 @@ from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.store import ConversationStore, open_conversation_store, persist_to, runs_without
-from mindroom.session_storage.types import ConversationSession
+from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -217,7 +217,7 @@ def test_loaded_runs_drop_their_stored_tool_schemas(store: ConversationStore) ->
         "metadata": {"tools_schema": [{"name": "x"}], "room_id": "!r"},
         "member_responses": [member],
     }
-    store.save_session_fields(_session(kind="team", owner="eng"))
+    store.ensure_session_row(_session(kind="team", owner="eng"))
     _execute(
         store,
         "INSERT INTO code_sessions_runs (run_id, session_id, run_type, team_id, status, run_index, run_data, created_at) "
@@ -841,29 +841,29 @@ def test_load_finds_member_rows_without_scanning_the_session_per_run(
 # --- session rows -----------------------------------------------------------------------------------------------
 
 
-def test_session_fields_write_only_the_named_fields(store: ConversationStore) -> None:
-    """A field save writes only the fields it names and keeps the session totals."""
+def test_session_field_writes_leave_the_other_field_and_the_totals_alone(store: ConversationStore) -> None:
+    """A state save writes only ``session_state``, a metadata update only ``metadata``, and neither moves the totals."""
     _seed(store, [_run("r1", metrics=_usage(10))])
     session = _loaded(store)
-    session.metadata = {"mindroom_matrix_history": {"version": 1}}
     session.session_state = {"mindroom_pending_compaction_scope_keys": ["agent:code"]}
 
-    store.save_session_fields(session, "session_state")
+    store.save_session_state(session, session_state_snapshot(session.session_state))
     reloaded = _loaded(store)
     assert (reloaded.metadata, reloaded.session_state) == (None, session.session_state)
 
-    store.save_session_fields(session, "metadata")
+    store.update_metadata(session, lambda _metadata: {"mindroom_matrix_history": {"version": 1}})
     reloaded = _loaded(store)
     assert (reloaded.metadata, reloaded.session_state) == (session.metadata, session.session_state)
+    assert session.metadata == {"mindroom_matrix_history": {"version": 1}}
     assert _totals(store)["input_tokens"] == 10
 
 
-def test_session_fields_create_a_missing_row(store: ConversationStore) -> None:
-    """A field save on a new conversation creates its row from the session."""
+def test_ensure_session_row_creates_a_missing_row_from_the_session(store: ConversationStore) -> None:
+    """A new conversation's row is created from the session."""
     session = _session()
     session.session_state = {"key": "value"}
 
-    store.save_session_fields(session)
+    store.ensure_session_row(session)
 
     loaded = _loaded(store)
     assert (loaded.owner_id, loaded.user_id, loaded.session_state, loaded.created_at) == (
@@ -912,7 +912,7 @@ async def test_persist_to_writes_back_a_session_state_restored_after_an_earlier_
     _seed(store, [_run("r1")])
     session = _loaded(store)
     session.session_state = {"cwd": "/repo"}
-    store.save_session_fields(session, "session_state")
+    store.save_session_state(session, session_state_snapshot(session.session_state))
     persist = persist_to(store, session)
 
     session.session_state["cwd"] = "/repo/sub"
@@ -932,7 +932,7 @@ async def test_persist_to_retries_a_changed_session_state_whose_write_failed(sto
     _seed(store, [_run("r1")])
     session = _loaded(store)
     session.session_state = {"cwd": "/repo"}
-    store.save_session_fields(session, "session_state")
+    store.save_session_state(session, session_state_snapshot(session.session_state))
     persist = persist_to(store, session)
     _execute(
         store,
@@ -959,13 +959,13 @@ async def test_persist_to_compares_the_state_with_what_the_session_loaded_or_las
 ) -> None:
     """The terminal save compares with the state the store holds for the session: as loaded, or as a write left it.
 
-    A state the turn left alone keeps another writer's, and one a field save stored changed mid-turn and the turn
+    A state the turn left alone keeps another writer's, and one a state save stored changed mid-turn and the turn
     then restored is stored restored.
     """
     _seed(store, [_run("r1")])
     seeded = _loaded(store)
     seeded.session_state = {"cwd": "/repo"}
-    store.save_session_fields(seeded, "session_state")
+    store.save_session_state(seeded, session_state_snapshot(seeded.session_state))
     session = _loaded(store)
     persist = persist_to(store, session)
     _execute(
@@ -977,7 +977,7 @@ async def test_persist_to_compares_the_state_with_what_the_session_loaded_or_las
     assert _loaded(store).session_state == {"cwd": "/other"}
 
     session.session_state["cwd"] = "/repo/sub"
-    store.save_session_fields(session, "session_state")
+    store.save_session_state(session, session_state_snapshot(session.session_state))
     session.session_state["cwd"] = "/repo"
     await persist(_run("r3"))
 
@@ -1037,10 +1037,10 @@ async def test_saves_read_a_session_state_another_thread_keeps_changing(store: C
     changer.start()
     try:
         for index, session in enumerate(sessions):
-            # The terminal save creates the row, and the field save writes the state again.
+            # The terminal save creates the row, and the state save writes the state again.
             await persist_to(store, session)(_run(f"r{index}"))
             assert session.stored_session_state == _row_state(store, session.session_id)
-            store.save_session_fields(session, "session_state")
+            store.save_session_state(session, session_state_snapshot(session.session_state))
             assert session.stored_session_state == _row_state(store, session.session_id)
     finally:
         stop.set()
@@ -1051,8 +1051,8 @@ async def test_saves_read_a_session_state_another_thread_keeps_changing(store: C
 
 
 def test_double_encoded_session_columns_load_and_are_rewritten_once(store: ConversationStore) -> None:
-    """Agno 2 columns encoded twice load, and a field save writes them encoded once."""
-    store.save_session_fields(_session())
+    """Agno 2 columns encoded twice load, and the field writes store them encoded once."""
+    store.ensure_session_row(_session())
     _execute(
         store,
         "UPDATE code_sessions SET session_data = ?, metadata = ? WHERE session_id = 's1'",
@@ -1062,16 +1062,17 @@ def test_double_encoded_session_columns_load_and_are_rewritten_once(store: Conve
     session = _loaded(store)
     assert (session.session_state, session.metadata) == ({"a": 1}, {"k": "v"})
 
-    store.save_session_fields(session, "session_state", "metadata")
+    store.save_session_state(session, session_state_snapshot(session.session_state))
+    store.update_metadata(session, lambda metadata: {**(metadata or {}), "k2": "v2"})
 
     assert _query(store, "SELECT session_data, metadata FROM code_sessions") == [
-        ('{"session_state": {"a": 1}}', '{"k": "v"}'),
+        ('{"session_state": {"a": 1}}', '{"k": "v", "k2": "v2"}'),
     ]
 
 
 def test_unreadable_session_columns_load_as_empty(store: ConversationStore) -> None:
     """One odd session row never fails a load, and a usage save leaves its bytes alone but moves its update time."""
-    store.save_session_fields(_session())
+    store.ensure_session_row(_session())
     _execute(
         store,
         "UPDATE code_sessions SET session_data = 'not json', metadata = '[1]', updated_at = 5 WHERE session_id = 's1'",
@@ -1088,7 +1089,7 @@ def test_unreadable_session_columns_load_as_empty(store: ConversationStore) -> N
 
 def test_json_null_session_data_counts_usage_like_an_empty_row(store: ConversationStore) -> None:
     """Agno wrote ``null`` for a session without data; its runs count in the totals and move its update time."""
-    store.save_session_fields(_session())
+    store.ensure_session_row(_session())
     _execute(store, "UPDATE code_sessions SET session_data = 'null', updated_at = 5 WHERE session_id = 's1'")
 
     store.save_run(_session(), _run("r1", RunStatus.paused, metrics=_usage(3)), record_usage=True)
@@ -1208,9 +1209,9 @@ def test_independent_usage_needs_its_conversation_row(store: ConversationStore) 
 def test_list_updated_sessions_returns_an_owners_sessions_updated_after_the_cursor(store: ConversationStore) -> None:
     """Sessions are listed per kind and owner, oldest update first, strictly after the cursor."""
     for session_id, owner, updated_at in (("a", "code", 10), ("b", "code", 30), ("c", "code", 20), ("d", "other", 40)):
-        store.save_session_fields(_session(session_id, owner=owner))
+        store.ensure_session_row(_session(session_id, owner=owner))
         _execute(store, "UPDATE code_sessions SET updated_at = ? WHERE session_id = ?", updated_at, session_id)
-    store.save_session_fields(_session("t", kind="team", owner="code"))
+    store.ensure_session_row(_session("t", kind="team", owner="code"))
 
     assert store.list_updated_sessions("agent", "code", since=10) == [("c", 20), ("b", 30)]
     assert [session_id for session_id, _ in store.list_updated_sessions("team", "code", since=0)] == ["t"]
