@@ -202,6 +202,7 @@ def _open_scope_factory(log: _AdapterLog) -> Callable[[], AbstractContextManager
             scope=HistoryScope(kind="agent", scope_id="general"),
             storage=Mock(spec=ConversationStore),
             session=None,
+            session_id="session-1",
         )
         return contextlib.nullcontext(log.scope)
 
@@ -746,6 +747,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
                 scope=HistoryScope(kind="team" if team else "agent", scope_id="crew"),
                 storage=storage,
                 session=_stored_session(),
+                session_id="session-1",
             ),
         )
 
@@ -821,6 +823,7 @@ async def test_history_cleanup_repeats_until_a_pass_removes_nothing_new(monkeypa
         scope=HistoryScope(kind="agent", scope_id="general"),
         storage=Mock(spec=ConversationStore),
         session=ConversationSession(session_id="session-1", kind="agent", owner_id="general"),
+        session_id="session-1",
     )
 
     await response_turn_module._remove_history_of_redacted_events(

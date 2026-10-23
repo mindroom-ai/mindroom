@@ -771,10 +771,8 @@ def _attempt_storage(run: TurnRunState, build: AgentBuild, *, session_id: str, a
             session=new_scope_session(session_id=session_id, scope_id=agent_name, is_team=False),
             scope=None,
         )
-    session = scope_context.session
-    if session is None:
-        scope = scope_context.scope
-        session = new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
+    session = scope_context.stored_or_first_session()
+    if scope_context.session is None:
         run.scope_context = replace(scope_context, session=session)
     return _AttemptStorage(store=scope_context.storage, session=session, scope=scope_context.scope)
 
@@ -1080,7 +1078,6 @@ def _memory_conversation(
         or ctx.agent_mode == "minimal"
         or ctx.scheduled_history_budget is not None
         or scope_context is None
-        or scope_context.session_id is None
     ):
         return None
     entity = config.resolve_entity(ctx.entity_label)

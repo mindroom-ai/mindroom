@@ -1,5 +1,6 @@
-"""Stored tool-call shapes earlier releases wrote, read in the current shape wherever stored runs feed a model.
+"""Tool-call shapes earlier releases stored, read in the current shape where stored runs become request messages.
 
+Those are the history a request replays, a compaction's input, and a paused run's resume request.
 The repair returns a new list and replaces, never edits, a message it changes, so the rows a request is built from are
 never rewritten. Replayed history is kept out of storage by its ``from_history`` mark, but a resumed run stores the
 request it sent, so a legacy paused run is stored repaired, in the shape current releases store.

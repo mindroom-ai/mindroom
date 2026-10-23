@@ -284,10 +284,11 @@ def test_untyped_text_names_the_credentials_as_the_provider_classifier_does(text
         ("rate_limit_exceeded: slow down", True),
         ("HTTP 429 Too Many Requests", True),
         ("Quota exceeded for this project", True),
-        # A name that starts with ratelimit or quotaexceeded is one lowercase word that holds the wording.
+        # A name that starts with ratelimit, quotaexceeded, or quotasexceeded is one lowercase word with the wording.
         ("RetryError[<Future state=finished raised RateLimitError>]", True),
         ("The request ratelimited", True),
         ("QuotaExceededError", True),
+        ("QuotasExceededError", True),
         # Any other name is one lowercase word with no wording of its own, with or without a prefix.
         ("RetryError[<Future state=finished raised OpenAIRateLimitError>]", False),
         ("RateError", False),

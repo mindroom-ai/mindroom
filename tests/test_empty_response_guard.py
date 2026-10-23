@@ -123,6 +123,7 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
         scope=HistoryScope(kind="agent", scope_id="general"),
         storage=storage,
         session=session,
+        session_id="session-1",
     )
 
     discard_empty_completed_run(
@@ -159,6 +160,7 @@ def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tm
             scope=HistoryScope(kind="agent", scope_id="general"),
             storage=storage,
             session=live_session,
+            session_id="session-1",
         ),
         session_id="session-1",
         run_id="run-empty",
@@ -191,6 +193,7 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
         scope=HistoryScope(kind="team", scope_id="team_general"),
         storage=storage,
         session=session,
+        session_id="session-1",
     )
 
     discard_empty_completed_run(

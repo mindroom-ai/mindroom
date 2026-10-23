@@ -3639,6 +3639,7 @@ def test_pre_replay_crash_recovery_preserves_prior_persisted_and_active_live_not
                 scope=HistoryScope(kind="agent", scope_id="general"),
                 storage=store,
                 session=session,
+                session_id=session.session_id,
             ),
             entity_name="general",
         )

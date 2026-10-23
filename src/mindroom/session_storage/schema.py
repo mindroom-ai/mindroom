@@ -55,10 +55,10 @@ _RUNS_INDEXED_COLUMNS = (
 
 @dataclass(frozen=True, slots=True)
 class TableNames:
-    """The conversation database ``<storage_name>.db``: its file, and its tables, all named after its sessions table.
+    """The names of one conversation database: its file ``<storage_name>.db`` and its tables.
 
-    This is the one place that pairs a database's name with its file and with its sessions table,
-    ``<storage_name>_sessions``.
+    The tables are named after the sessions table ``<storage_name>_sessions``.
+    This is the one place that pairs a database's name with its file and with that table.
     """
 
     storage_name: str

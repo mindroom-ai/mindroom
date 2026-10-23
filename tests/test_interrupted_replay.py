@@ -405,7 +405,13 @@ def test_an_interrupted_replay_is_saved_as_the_session_its_scope_context_names(t
     if stored:
         seed_session(
             storage,
-            ConversationSession(kind="agent", session_id="session-1", owner_id="test_agent", created_at=1),
+            ConversationSession(
+                kind="agent",
+                session_id="session-1",
+                owner_id="test_agent",
+                created_at=1,
+                runs=[_completed_run("earlier-run", "Earlier answer")],
+            ),
         )
     context = ScopeSessionContext(
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
@@ -425,11 +431,17 @@ def test_an_interrupted_replay_is_saved_as_the_session_its_scope_context_names(t
         run_metadata=None,
     )
 
+    expected_run_ids = ["earlier-run", "cancelled-run"] if stored else ["cancelled-run"]
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
-    [replay] = persisted.runs
+    assert [run.run_id for run in persisted.runs] == expected_run_ids
+    replay = persisted.runs[-1]
     assert isinstance(replay, RunRecord)
-    assert (replay.run_id, replay.session_id, replay.agent_id) == ("cancelled-run", "session-1", "test_agent")
+    assert (replay.session_id, replay.agent_id) == ("session-1", "test_agent")
+    if stored:
+        # The stored session itself receives the run, so a later attempt of the turn replays it.
+        assert context.session is not None
+        assert [run.run_id for run in context.session.runs] == expected_run_ids
 
 
 def test_a_team_scopes_first_interrupted_replay_is_a_team_run(tmp_path: Path) -> None:

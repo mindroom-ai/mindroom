@@ -9,7 +9,7 @@ from itertools import chain
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.history.storage import new_scope_session, run_folded_tool_call_ids
+from mindroom.history.storage import run_folded_tool_call_ids
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.prompt_message_tags import render_msg_tag
@@ -346,25 +346,12 @@ def persist_interrupted_replay(
     run_metadata: Mapping[str, object] | None,
     original_status: RunStatus = RunStatus.cancelled,
 ) -> None:
-    """Persist one interrupted top-level turn from trusted runtime state.
-
-    The scope context names the session saved into: its stored session, else the first one of its scope under the
-    session id the context was opened for. A context that names neither has nothing to save into.
-    """
+    """Persist one interrupted top-level turn from trusted runtime state, into the session its scope context names."""
     if scope_context is None:
         return
-    session = scope_context.session
-    if session is None:
-        if scope_context.session_id is None:
-            return
-        session = new_scope_session(
-            session_id=scope_context.session_id,
-            scope_id=scope_context.scope.scope_id,
-            is_team=scope_context.scope.kind == "team",
-        )
     persist_interrupted_replay_snapshot(
         storage=scope_context.storage,
-        session=session,
+        session=scope_context.stored_or_first_session(),
         run_id=run_id,
         snapshot=build_interrupted_replay_snapshot(
             user_message=user_message,

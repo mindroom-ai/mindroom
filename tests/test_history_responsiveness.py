@@ -86,7 +86,7 @@ async def test_history_sizing_allows_loop_progress(
             non_prompt_tokens=0,
             runtime_paths=paths,
             config=config,
-            scope_context=ScopeSessionContext(scope, storage, session),
+            scope_context=ScopeSessionContext(scope, storage, session, "session"),
         )
 
     prepared = await prepare()
@@ -265,7 +265,7 @@ async def test_forced_compaction_reuses_canonical_history_count(
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, storage, session),
+        scope_context=ScopeSessionContext(scope, storage, session, "session"),
     )
     assert counted_history == [["Hello"]]
     assert prepared.compaction_reply_outcome == "success"
@@ -398,7 +398,7 @@ async def test_cancelled_finalization_finishes_before_the_session_is_reused(
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, storage, session),
+        scope_context=ScopeSessionContext(scope, storage, session, "session"),
     )
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
@@ -537,7 +537,7 @@ async def test_cancelling_preparation_sizing_preserves_input(
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, storage, session),
+        scope_context=ScopeSessionContext(scope, storage, session, "session"),
     )
     task = asyncio.create_task(operation)
     try:

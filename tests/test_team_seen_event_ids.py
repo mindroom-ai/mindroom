@@ -44,8 +44,7 @@ async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_sn
     )
 
     await _persist_bound_seen_event_ids(
-        scope_context=ScopeSessionContext(scope=scope, storage=storage, session=snapshot),
-        session_id="t1",
+        scope_context=ScopeSessionContext(scope=scope, storage=storage, session=snapshot, session_id="t1"),
         event_ids=["$reply", "$unseen"],
     )
     reloaded = storage.load_session("t1", "team")

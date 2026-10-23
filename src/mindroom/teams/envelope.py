@@ -35,7 +35,7 @@ from mindroom.history.mid_turn_compaction import without_fold_records
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import open_bound_scope_session_context
-from mindroom.history.storage import new_scope_session, update_scope_seen_event_ids
+from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
@@ -314,7 +314,7 @@ async def prepare_materialized_team_execution(
 # ---------------------------------------------------------------------------
 
 
-def _team_storage(run: TurnRunState, *, session_id: str) -> TeamStorage | None:
+def _team_storage(run: TurnRunState) -> TeamStorage | None:
     """Return where one attempt's team run is stored; the turn's scope context keeps the session a run first gave it.
 
     A team without a bound scope stores nothing, as Agno's team ran without a database then.
@@ -322,7 +322,7 @@ def _team_storage(run: TurnRunState, *, session_id: str) -> TeamStorage | None:
     scope_context = run.scope_context
     if scope_context is None:
         return None
-    storage = scope_storage(scope_context, session_id=session_id)
+    storage = scope_storage(scope_context)
     if scope_context.session is None:
         run.scope_context = replace(scope_context, session=storage.session)
     return storage
@@ -428,7 +428,7 @@ def run_prepared_team(
 
     The run and its usage are stored in the team scope, a scope without a stored session getting its first one.
     """
-    storage = scope_storage(scope_context, session_id=session_id) if scope_context is not None else None
+    storage = scope_storage(scope_context) if scope_context is not None else None
     leader = _leader_run(
         built,
         prepared,
@@ -450,12 +450,7 @@ def run_prepared_team(
     )
 
 
-async def _persist_bound_seen_event_ids(
-    *,
-    scope_context: ScopeSessionContext | None,
-    session_id: str,
-    event_ids: list[str],
-) -> None:
+async def _persist_bound_seen_event_ids(*, scope_context: ScopeSessionContext | None, event_ids: list[str]) -> None:
     """Record the Matrix events this team turn consumed on the stored session row, creating the row if needed.
 
     The ids merge into the metadata the row holds, so nothing the run or another writer stored is put back or lost.
@@ -464,8 +459,13 @@ async def _persist_bound_seen_event_ids(
     if scope_context is None:
         return
     storage = scope_context.storage
-    session = new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=True)
-    record = partial(update_scope_seen_event_ids, session=session, scope=scope_context.scope, event_ids=event_ids)
+    # A new session names the row to merge into, so the run's loaded session never writes its stale state back.
+    record = partial(
+        update_scope_seen_event_ids,
+        session=scope_context.first_session(),
+        scope=scope_context.scope,
+        event_ids=event_ids,
+    )
     await run_session_storage_operation(lambda: storage, record)
 
 
@@ -638,7 +638,7 @@ class _TeamTurn:
         logger.info("executing_team_response", agent_count=len(members.builds), mode=self.mode.value)
         run_input = prepared.run_input(self.media)
         logger.info("team_prompt_preview", agents=members.display_names, prompt_preview=prepared.prompt_text[:500])
-        storage = _team_storage(run, session_id=self.session_id)
+        storage = _team_storage(run)
         leader = _leader_run(
             built,
             prepared,
@@ -840,7 +840,6 @@ class _TeamTurn:
         if mark_seen and self.ctx.reply_to_event_id:
             await _persist_bound_seen_event_ids(
                 scope_context=run.scope_context,
-                session_id=self.session_id,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
         members = record.ended_member_runs
@@ -899,11 +898,7 @@ class _TeamTurn:
         return get_user_friendly_error_message(error, self.ctx.entity_label, runtime_paths=self.runtime_paths)
 
     def register_notice_storage(self, scope_context: ScopeSessionContext | None) -> None:
-        register_team_notice_storage(
-            scope_context=scope_context,
-            session_id=self.session_id,
-            entity_name=self.entity_name,
-        )
+        register_team_notice_storage(scope_context=scope_context, entity_name=self.entity_name)
 
     def discard_empty_run(self, scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
         ai_runtime.discard_empty_completed_run(
