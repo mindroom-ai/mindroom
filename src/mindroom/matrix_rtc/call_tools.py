@@ -1019,8 +1019,8 @@ def _wrap_tool_function(
             if not authorized:
                 return "Call access was revoked before this tool could run."
             logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
-            await connect()
             try:
+                await connect()
                 with tool_runtime_context(context), helper_usage_owner_context(usage_owner):
                     result = await run_tool_call(function, raw_arguments, call_context, middleware=middleware)
             except Exception as error:
