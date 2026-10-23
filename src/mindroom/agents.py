@@ -148,11 +148,11 @@ class _ToolkitEntry:
     """One toolkit assembled for an agent: the Agno toolkit built for it, what a run offers of it, and its owner.
 
     ``adapted`` holds the functions a run may offer of the toolkit; the steps across toolkits leave functions out of
-    it, never out of the Agno toolkit, and leave a deferred toolkit only those a run offers, while a run drops an
-    eager function that an earlier toolkit's same-named function shadows. ``owner`` is the authored toolkit that
-    approvals and tool jobs name its functions by; ``toolkit`` is the concrete toolkit tool jobs check a call's grant
-    and exclusions by. ``deferral`` is set for a toolkit whose functions stay off the provider request until tool
-    search finds them.
+    it, never out of the Agno toolkit. An eager toolkit keeps a function that an earlier toolkit's same-named
+    function shadows, and each run drops it. A deferred toolkit keeps only the functions a run offers. ``owner`` is
+    the authored toolkit that approvals and tool jobs name its functions by; ``toolkit`` is the concrete toolkit tool
+    jobs check a call's grant and exclusions by. ``deferral`` is set for a toolkit whose functions stay off the
+    provider request until tool search finds them.
     """
 
     toolkit: Toolkit
