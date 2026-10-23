@@ -199,10 +199,11 @@ memory:
 
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
-Before each reply, MindRoom inlines the start of `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
+Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
 An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies, its history is compacted, or MindRoom restarts; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
-Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.
+Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
+Only whole lines are inlined, never part of a line.
 When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
 `memory.file.path` (default unset, relative to the config directory) is a fallback root for team file memory and never moves agent file memory out of the workspace.
 
@@ -307,7 +308,7 @@ memory:
 ## Prompt Curation
 
 Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
-Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger, ask the agent in a visible thread to condense them gradually and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
+Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger or the preload has to withhold part of `MEMORY.md`, ask the agent in a visible thread to condense them gradually, fold corrections into the entries they correct, and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
 
 ```yaml
 agents:
@@ -355,6 +356,7 @@ delete_memory("abc123")
 The tool reaches every agent and team scope visible to the agent, as described in [Memory Scopes](#memory-scopes).
 Search and list results include an ID: Mem0 memory IDs and file-backed `file:<path>:<line>` IDs work with `get_memory`, `update_memory`, and `delete_memory`.
 Semantic file-memory matches use read-only `semantic:<source_file>:<rank>` locators that these functions do not accept.
+After storing, `add_memory` lists up to three similar existing memories with their IDs, so the agent can rewrite an entry the new memory corrects; file memory finds them by keyword even in `semantic` mode, because semantic matches cannot be edited.
 Result metadata includes `search_mode` (`keyword` or `semantic`), showing which search produced each result.
 Failures are returned as readable error messages rather than raised into the conversation.
 

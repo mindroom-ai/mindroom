@@ -91,8 +91,9 @@ async def search_agent_memories(
     runtime_paths: RuntimePaths,
     limit: int = 3,
     execution_identity: ToolExecutionIdentity | None = None,
+    editable: bool = False,
 ) -> MemorySearchOutcome:
-    """Search agent memories including team memories."""
+    """Search agent memories including team memories; ``editable`` returns only IDs update and delete accept."""
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return MemorySearchOutcome(results=[])
     return await backend.search(
@@ -102,6 +103,7 @@ async def search_agent_memories(
         config,
         limit=limit,
         execution_identity=execution_identity,
+        editable=editable,
     )
 
 
@@ -279,8 +281,8 @@ async def build_memory_prompt_parts(
 ) -> MemoryPromptParts:
     """Split stable entrypoint context from turn-local searched memories.
 
-    A turn in ``conversation`` keeps the entrypoint that conversation last sent while entries are only added and its
-    prompt cache may be warm.
+    A turn in ``conversation`` keeps the entrypoint that conversation last sent while its inlined copy only gains lines
+    and its prompt cache may be warm.
     """
     logger.debug("Building enhanced prompt", agent=agent_name)
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:

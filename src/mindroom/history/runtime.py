@@ -26,6 +26,7 @@ from mindroom.history.replay import (
     configured_replay_plan,
     estimate_prompt_visible_history_tokens,
     estimate_request_messages_tokens,
+    estimate_summary_tokens,
     has_effective_persisted_replay,
     log_replay_plan,
     plan_replay_that_fits,
@@ -348,7 +349,9 @@ async def prepare_scope_history(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
         current_history_tokens=current_history_tokens,
-        allow_native_compaction=allow_native_compaction,
+        # Only an active native route compacts between the trigger and hard budgets; without one, text compaction must.
+        allow_native_compaction=native_route is not None,
+        summary_tokens=estimate_summary_tokens(session),
     )
     logger.info(
         "History preparation check",

@@ -57,7 +57,7 @@ def estimate_prompt_visible_history_tokens(
     replay_model: PortableReplayEstimator | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run."""
-    summary_tokens = _summary_tokens(session)
+    summary_tokens = estimate_summary_tokens(session)
     history_messages = _history_messages_for_estimation(
         session=session,
         scope=scope,
@@ -162,7 +162,7 @@ def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
     return Message(**compaction_summary_fields(summary, run_local=run_local))
 
 
-def _summary_tokens(session: ConversationSession) -> int:
+def estimate_summary_tokens(session: ConversationSession) -> int:
     """Estimate the tokens the scope's summary message adds to a request."""
     summary = current_summary_text(session)
     if summary is None:
@@ -257,7 +257,7 @@ def plan_replay_that_fits(
     replay_model: PortableReplayEstimator | None = None,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
-    summary_tokens = _summary_tokens(session)
+    summary_tokens = estimate_summary_tokens(session)
     if summary_tokens > available_history_budget:
         raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
     if current_history_tokens <= available_history_budget:

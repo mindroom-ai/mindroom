@@ -2,7 +2,8 @@
 
 The check measures `MEMORY.md` and the always-loaded context files in the workspace it maintains (`private.context_files`
 for a private agent) with the estimate behind `static_prompt_tokens`.
-When they exceed the trigger, the prompt asks the agent for a bounded cut in a normal visible run.
+When they exceed the trigger, or `MEMORY.md` has more lines than the preload keeps, the prompt asks the agent for a
+bounded cut in a normal visible run.
 Agents told to "clean up" tend to cut most of a file, so verify measures the files again once the run ends and, when
 the result is outside the bounds, asks the agent once to re-check its change.
 Verify never writes the files back, because other conversations with the same agent may write them meanwhile.
@@ -19,7 +20,7 @@ from mindroom.automations.registry import automation
 from mindroom.automations.steps import Ask, AutomationContext, Done, workspace_context_files
 from mindroom.config.automations import MAX_FILE_SHRINK, PromptCurationAutomation
 from mindroom.logging_config import get_logger
-from mindroom.memory import read_scope_memory_files
+from mindroom.memory import entrypoint_withholds_lines, read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.token_budget import estimate_text_tokens
 
@@ -48,6 +49,10 @@ class _CurationPlan:
     # Every memory/ topic file the scan read at fire time, so verify can tell detail moved from detail deleted.
     memory_tokens: int
     curated: Mapping[str, int]
+    # MEMORY.md lines at fire time; the preload withholds lines beyond either memory.file.max_entrypoint_* cap.
+    memory_lines: int
+    max_entrypoint_lines: int
+    max_entrypoint_tokens: int
     upper_tokens: int
     floor_tokens: int
 
@@ -100,7 +105,7 @@ def _plan_curation(
     agent_name: str,
     settings: PromptCurationAutomation,
 ) -> _CurationPlan | None:
-    """Return the plan for a due prompt over the file memory at ``root``, or None while the files are within the trigger.
+    """Return the plan for a due prompt over the file memory at ``root``, or None while the files are within the limits.
 
     Raises ``OSError``, ``ValueError``, or ``UnicodeDecodeError`` for a file that cannot be read safely.
     """
@@ -109,7 +114,10 @@ def _plan_curation(
     }
     curated = {path: _tokens(payload) for path, payload in curated_payloads.items()}
     measured = sum(curated.values())
-    if measured <= settings.trigger_tokens:
+    memory_text = curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8")
+    memory_lines = len(memory_text.splitlines())
+    # Lines the preload withholds never reach the prompt, at any token count.
+    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(memory_text, config):
         return None
     return _CurationPlan(
         agent_name=agent_name,
@@ -118,6 +126,9 @@ def _plan_curation(
         snapshot=curated_payloads,
         memory_tokens=_memory_dir_tokens(root, exclude=curated_payloads),
         curated=curated,
+        memory_lines=memory_lines,
+        max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
+        max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
         floor_tokens=round(measured * (1 - settings.max_reduction)),
     )
@@ -129,6 +140,10 @@ def _curation_prompt(config: Config, plan: _CurationPlan) -> str:
         "PROMPT_CURATION_PROMPT_TEMPLATE",
         measured_tokens=plan.measured_tokens,
         trigger_tokens=plan.settings.trigger_tokens,
+        memory_lines=plan.memory_lines,
+        entrypoint_tokens=plan.curated.get(_ENTRYPOINT, 0),
+        max_entrypoint_lines=plan.max_entrypoint_lines,
+        max_entrypoint_tokens=plan.max_entrypoint_tokens,
         file_sizes=", ".join(f"{path} ({tokens} tokens)" for path, tokens in plan.curated.items()),
         upper_tokens=plan.upper_tokens,
         floor_tokens=plan.floor_tokens,
@@ -174,6 +189,13 @@ def _findings(
         findings.append(f"the files total {total} tokens, below the floor of {plan.floor_tokens}")
     if total >= plan.measured_tokens:
         findings.append(f"the files did not shrink ({total} tokens)")
+    memory_after = after_run.get(_ENTRYPOINT)
+    lines_after = len(memory_after.decode("utf-8").splitlines()) if isinstance(memory_after, bytes) else 0
+    # Shorter lines alone keep the same lines out of the prompt, so a pass over the line cap must remove some.
+    if plan.memory_lines > plan.max_entrypoint_lines and lines_after >= plan.memory_lines:
+        findings.append(
+            f"MEMORY.md still has {lines_after} lines, more than the {plan.max_entrypoint_lines} that reach your prompt",
+        )
     if loss := _content_loss(plan, total):
         findings.append(loss)
     return total, findings
@@ -209,7 +231,7 @@ def _curation_notice(config: Config, plan: _CurationPlan, result: _CurationResul
 
 @automation("prompt_curation", requires_file_memory=True)
 def check_curation(ctx: AutomationContext) -> Ask | None:
-    """Return the prompt asking for a cut, or None while the files are within the trigger."""
+    """Return the prompt asking for a cut, or None while the files are within the limits."""
     if not isinstance(ctx.entry, PromptCurationAutomation):
         msg = f"prompt_curation cannot run the {ctx.entry.name} entry"
         raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
@@ -225,6 +247,7 @@ def check_curation(ctx: AutomationContext) -> Ask | None:
         agent=agent_name,
         # A field named only "tokens" is redacted as a credential.
         file_tokens=plan.measured_tokens,
+        memory_lines=plan.memory_lines,
         target_tokens=plan.upper_tokens,
         floor_tokens=plan.floor_tokens,
     )

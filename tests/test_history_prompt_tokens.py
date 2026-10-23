@@ -9,9 +9,9 @@ from datetime import UTC, datetime
 from mindroom.history.prompt_tokens import _StaticTokenEstimator, build_static_token_estimator
 from mindroom.history.replay import (
     _estimate_history_messages_tokens,
-    _summary_tokens,
     compaction_summary_message,
     estimate_prompt_visible_history_tokens,
+    estimate_summary_tokens,
 )
 from mindroom.history.types import (
     HistoryPolicy,
@@ -251,14 +251,17 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
 
     expected_wrapper = str(compaction_summary_message("merged summary", run_local=False).content)
 
-    assert _summary_tokens(session) == estimate_text_tokens(expected_wrapper)
+    assert estimate_summary_tokens(session) == estimate_text_tokens(expected_wrapper)
     assert estimated_tokens == estimate_text_tokens(expected_wrapper)
     assert estimated_tokens > 0
 
 
 def test_summary_tokens_without_a_summary_are_zero() -> None:
-    assert _summary_tokens(_session("session-1")) == 0
+    assert estimate_summary_tokens(_session("session-1")) == 0
     for text in ("", "   "):
         assert (
-            _summary_tokens(_session("session-1", summary=ScopeSummary(text=text, updated_at=datetime.now(UTC)))) == 0
+            estimate_summary_tokens(
+                _session("session-1", summary=ScopeSummary(text=text, updated_at=datetime.now(UTC)))
+            )
+            == 0
         )
