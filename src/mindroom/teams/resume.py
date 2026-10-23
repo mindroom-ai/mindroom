@@ -73,7 +73,6 @@ if TYPE_CHECKING:
     from mindroom.history.types import ResolvedHistorySettings, ResolvedReplayPlan
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
-    from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord, RunRecord, RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.streaming import ProgressPublisher
@@ -179,18 +178,6 @@ def _route_decisions(
     )
 
 
-def _resume_request(
-    storage: TeamStorage,
-    persisted: TeamRunRecord,
-    *,
-    settings: ResolvedHistorySettings,
-    plan: ResolvedReplayPlan | None,
-) -> list[Message]:
-    """Return the leader's resume request: its stored system message, the summary and history ``plan`` replays, then the rest."""
-    history, summary = replayed_history(storage.session, storage.scope, settings, plan)
-    return build_resume_request(paused=persisted.messages, summary=summary, history=history)
-
-
 @dataclass(frozen=True)
 class TeamResume:
     """Continue one paused team run under a turn's hooks and storage; the ``ContinueRun`` the delegation driver calls.
@@ -223,10 +210,12 @@ class TeamResume:
             if requirement.member_run_id is not None and key in decided:
                 add_approval_receipt_reader(requirement.member_run_id)
         session = self.storage.session
+        # The leader's resume request: its stored system message, the summary and history ``plan`` replays, the rest.
+        history, summary = replayed_history(session, self.storage.scope, self.settings, self.plan)
         return continue_team(
             self.spec,
             paused,
-            _resume_request(self.storage, paused, settings=self.settings, plan=self.plan),
+            build_resume_request(paused=paused.messages, summary=summary, history=history),
             approved=routed.approved,
             denied=routed.denied,
             external_results=routed.external_results,
@@ -313,19 +302,6 @@ def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirem
     if member_id is None:
         return "team", call_id
     return f"agent:{presentation.resolve_member_id(member_id, requirement.member_agent_name)}", call_id
-
-
-def _show_unshown_handovers(attempt: TeamAttempt, record: TeamRunRecord) -> None:
-    """Add to each resumed run's slot what the run hands over and its events did not show (``show_unshown_handover``).
-
-    The leader's goes to the consensus and each member run's to its member's slot, as Agno's resume added their
-    content: a run that pauses again without text adds its paused notice, and a member run that fails adds the reason
-    its run recorded, credentials redacted, also after text it streamed and when its record still holds the content
-    it had before the pause. A run without content adds nothing, where Agno's resume added its messages' text, which
-    repeated what the run wrote before the pause.
-    """
-    for run in (record, *record.ended_member_runs):
-        attempt.show_unshown_handover(run)
 
 
 def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
@@ -550,7 +526,11 @@ async def continue_paused_team_run(
                         if attempt.apply(event):
                             await publish_team_presentation(progress, presentation)
             continued = attempt.records.terminal(entity_name)
-            _show_unshown_handovers(attempt, continued)
+            # Each resumed run's slot shows what the run hands over and its events did not show, as Agno's resume added
+            # their content: a paused notice, or a failed member run's reason. A run without content adds nothing,
+            # where Agno's resume repeated its messages' text from before the pause.
+            for run in (continued, *continued.ended_member_runs):
+                attempt.show_unshown_handover(run)
             paused = paused_attempt_from_response(
                 continued,
                 fallback_session_id=session_id,
