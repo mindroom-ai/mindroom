@@ -98,7 +98,10 @@ _SCRIPTED = ModelIdentity(id="scripted", provider="test", provider_name="test")
 
 @dataclass
 class _ScriptedModel:
-    """Provider double that plays a fixed tool-call script, then answers, recording what each request sent."""
+    """Provider double that plays a fixed tool-call script, then answers, recording what each request sent.
+
+    Like every adapter, it stamps each turn it finishes with its model.
+    """
 
     script: list[_Call | list[_Call]] = field(default_factory=list)
     identity: ModelIdentity = _SCRIPTED
@@ -137,7 +140,9 @@ class _ScriptedModel:
         usage = MessageMetrics(input_tokens=input_tokens, output_tokens=3, total_tokens=input_tokens + 3)
         yield UsageReported(usage)
         if not self.script:
-            yield TurnCompleted(message=Message(role="assistant", content="Done.", metrics=usage), stop_reason="end")
+            done = Message(role="assistant", content="Done.", metrics=usage)
+            stamp_model(done, self.identity)
+            yield TurnCompleted(message=done, stop_reason="end")
             return
         step = self.script.pop(0)
         calls = [
@@ -149,6 +154,7 @@ class _ScriptedModel:
             for index, (name, arguments) in enumerate(step if isinstance(step, list) else [step])
         ]
         message = Message(role="assistant", content="", tool_calls=calls, metrics=usage)
+        stamp_model(message, self.identity)
         cut_off = len(self.requests) in self.cut_off_requests
         yield TurnCompleted(message=message, stop_reason="output_limit" if cut_off else "tool_use")
 
