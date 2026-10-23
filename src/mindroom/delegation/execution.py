@@ -546,25 +546,6 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
         state.pending_requirements.append(requirement.to_dict())
 
 
-async def _resolved_child_tool(
-    source: DelegationPendingTool,
-    call_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> ToolExecution | None:
-    """Read the exact approved attempt, even after the child starts another run."""
-    response = await read_child_run(source.child, config, runtime_paths)
-    if response is None:
-        return None
-    for tool in response.tools or ():
-        if tool.tool_call_id == source.tool_call_id and not tool.is_paused:
-            projected = deepcopy(tool)
-            projected.tool_call_id = call_id
-            return projected
-    return None
-
-
 async def _complete_approved_child_tools(
     pending_tools: list[dict[str, object]],
     tool_sources: Mapping[str, DelegationPendingTool],
@@ -573,17 +554,20 @@ async def _complete_approved_child_tools(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> None:
-    """Publish each resumed tool's retained result in the parent's live trace."""
+    """Publish each resumed tool's retained result in the parent's live trace, under the call id the parent shows.
+
+    Each result is read from the exact approved attempt, even after the child starts another run.
+    """
     for pending_tool in pending_tools:
         call_id = str(pending_tool["tool_call_id"])
-        completed_tool = await _resolved_child_tool(
-            tool_sources[call_id],
-            call_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-        if completed_tool is not None:
-            on_event(ToolCompleted(completed_tool))
+        source = tool_sources[call_id]
+        response = await read_child_run(source.child, config, runtime_paths)
+        for tool in (response.tools or ()) if response is not None else ():
+            if tool.tool_call_id == source.tool_call_id and not tool.is_paused:
+                projected = deepcopy(tool)
+                projected.tool_call_id = call_id
+                on_event(ToolCompleted(projected))
+                break
 
 
 def _settle_pending_child_tools(
@@ -1121,7 +1105,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     )
     if isinstance(target, str):
         return resolve_result(target)
-    model = target.model
 
     # Recheck current authorization and output policy, including resumed calls.
     authorization = authorize_delegation(
@@ -1132,7 +1115,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         runtime_paths=runtime_paths,
         execution_identity=caller_identity,
         depth=delegation_depth,
-        model=model,
+        model=target.model,
     )
     output_request = None
     if not isinstance(authorization, str):
@@ -1234,7 +1217,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             runtime_paths=runtime_paths,
             depth=delegation_depth,
             budget_monitor=current_budget_monitor(),
-            model=model,
+            model=target.model,
             agent_mode=target.agent_mode,
             previous=target.previous_child,
             parent_tool_call_id=tool.tool_call_id,
