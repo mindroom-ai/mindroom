@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
@@ -22,14 +22,6 @@ _MANUAL_COMPACTION_SUCCESS_MESSAGE = "Compaction will run before the next reply 
 logger = get_logger(__name__)
 
 
-@dataclass(frozen=True)
-class _ManualCompactionRequestResult:
-    """Result of scheduling compaction for the next reply."""
-
-    message: str
-    session_state: dict[str, object] | None = None
-
-
 def request_compaction_before_next_reply(
     *,
     scope: HistoryScope,
@@ -42,8 +34,12 @@ def request_compaction_before_next_reply(
     room_id: str | None = None,
     session_state: dict[str, object] | None = None,
     record_pending_scope_in_session_state: bool = False,
-) -> _ManualCompactionRequestResult:
-    """Schedule text compaction before the next reply in ``scope``, the history scope the running entity stores to."""
+) -> str:
+    """Schedule text compaction before the next reply in ``scope``, the history scope the running entity stores to.
+
+    Return the message the caller reports. ``record_pending_scope_in_session_state`` also records the request in
+    ``session_state``, the dict the run's tools share, in place.
+    """
     with open_resolved_scope_session_context(
         scope=scope,
         agent_name=agent_name,
@@ -54,7 +50,7 @@ def request_compaction_before_next_reply(
         create_session_if_missing=True,
     ) as scope_context:
         if scope_context is None:
-            return _ManualCompactionRequestResult("Error: Current agent has no history scope. Cannot compact context.")
+            return "Error: Current agent has no history scope. Cannot compact context."
 
         runtime_model, compaction_config = _resolve_active_compaction_settings(
             scope=scope,
@@ -74,10 +70,7 @@ def request_compaction_before_next_reply(
         )
         unavailable = describe_compaction_unavailability(execution_plan)
         if unavailable is not None:
-            return _ManualCompactionRequestResult(
-                f"Error: Compaction is unavailable for this scope because {unavailable}.",
-                session_state=session_state,
-            )
+            return f"Error: Compaction is unavailable for this scope because {unavailable}."
 
         session = scope_context.session
         # create_session_if_missing opens a new session when none is stored yet.
@@ -89,18 +82,14 @@ def request_compaction_before_next_reply(
             update=lambda latest: replace(latest, force_compact_before_next_run=True),
         )
 
-        next_session_state = session_state
         if record_pending_scope_in_session_state:
-            next_session_state = add_pending_force_compaction_scope(session_state, scope_context.scope)
+            add_pending_force_compaction_scope(session_state, scope_context.scope)
         logger.info(
             "Manual compaction scheduled",
             agent=agent_name,
             scope=scope_context.scope.key,
         )
-        return _ManualCompactionRequestResult(
-            _MANUAL_COMPACTION_SUCCESS_MESSAGE,
-            session_state=next_session_state,
-        )
+        return _MANUAL_COMPACTION_SUCCESS_MESSAGE
 
 
 def _resolve_active_compaction_settings(

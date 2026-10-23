@@ -254,7 +254,6 @@ def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Pa
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
-    session_state: dict[str, object] = {}
 
     result = request_compaction_before_next_reply(
         scope=_AGENT_SCOPE,
@@ -263,15 +262,13 @@ def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Pa
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-        session_state=session_state,
     )
 
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is True
-    assert result.message == COMPACT_CONTEXT_SUCCESS
-    assert result.session_state is session_state
+    assert result == COMPACT_CONTEXT_SUCCESS
 
 
 @pytest.mark.asyncio
@@ -848,7 +845,7 @@ def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_after_th
         config=config,
         execution_identity=identity,
     )
-    assert result.message == COMPACT_CONTEXT_SUCCESS
+    assert result == COMPACT_CONTEXT_SUCCESS
     team_scope = HistoryScope(kind="team", scope_id="squad")
 
     update_scope_seen_event_ids(storage, team_copy, team_scope, ["$consumed"])
