@@ -12,7 +12,10 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any, LiteralString, cast
+
+from mindroom.session_storage.schema import TableNames, table_names
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -140,18 +143,25 @@ def _decode_json_columns(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 @contextmanager
-def _sqlite_query(path: Path) -> Iterator[_Query]:
-    """Open one SQLite database read-only and yield a query function returning dict rows."""
+def _read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open one SQLite database read-only."""
     connection = sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True, timeout=1.0)
     connection.row_factory = sqlite3.Row
     try:
-
-        def query(sql: str, params: Sequence[object]) -> list[dict[str, Any]]:
-            return [dict(row) for row in connection.execute(sql, tuple(params))]
-
-        yield query
+        yield connection
     finally:
         connection.close()
+
+
+def _dict_rows(connection: sqlite3.Connection, sql: str, params: Sequence[object]) -> list[dict[str, Any]]:
+    return [dict(row) for row in connection.execute(sql, tuple(params))]
+
+
+@contextmanager
+def _sqlite_query(path: Path) -> Iterator[_Query]:
+    """Open one SQLite database read-only and yield a query function returning dict rows."""
+    with _read_only_connection(path) as connection:
+        yield partial(_dict_rows, connection)
 
 
 @contextmanager
@@ -285,26 +295,24 @@ def _read_run_database(
     conditions: Sequence[str],
     params: Sequence[object],
 ) -> tuple[int, list[dict[str, Any]]]:
-    """Return how many runs match and the newest `_MAX_RUNS` of each table, oldest first."""
+    """Return how many runs match and the newest `_MAX_RUNS` of the database's runs table, oldest first.
+
+    A conversation database `<name>.db` holds the tables of the sessions table `<name>_sessions`.
+    """
     where = " OR ".join(conditions)
-    matches = 0
-    runs: list[dict[str, Any]] = []
-    with _sqlite_query(database) as query:
-        tables = [row["name"] for row in query("SELECT name FROM sqlite_master WHERE type = 'table'", [])]
-        for table in sorted(name for name in tables if name.endswith("_runs")):
-            columns = {row["name"] for row in query(f'PRAGMA table_info("{table}")', [])}
-            if not {"run_id", "session_id", "run_data", "created_at"} <= columns:
-                continue
-            # Table names come from sqlite_master; values are placeholders.
-            matches += query(f'SELECT COUNT(*) AS matches FROM "{table}" WHERE {where}', params)[0]["matches"]  # noqa: S608
-            rows = query(
-                f'SELECT * FROM "{table}" WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?',  # noqa: S608
-                [*params, _MAX_RUNS],
-            )
-            runs.extend(
-                {"database": str(database), "table": table, **_decode_json_columns(row)} for row in reversed(rows)
-            )
-    return matches, runs
+    runs_table = TableNames(f"{database.stem}_sessions").runs
+    with _read_only_connection(database) as connection:
+        if runs_table not in table_names(connection):
+            return 0, []
+        # The table name comes from the database's file name; values are placeholders.
+        [counted] = _dict_rows(connection, f'SELECT COUNT(*) AS matches FROM "{runs_table}" WHERE {where}', params)  # noqa: S608
+        rows = _dict_rows(
+            connection,
+            f'SELECT * FROM "{runs_table}" WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?',  # noqa: S608
+            [*params, _MAX_RUNS],
+        )
+    runs = [{"database": str(database), "table": runs_table, **_decode_json_columns(row)} for row in reversed(rows)]
+    return counted["matches"], runs
 
 
 def _record_matches(record: Mapping[str, Any], ids: _DebugReportIds) -> bool:
