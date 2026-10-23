@@ -291,20 +291,9 @@ def _base_params(settings: ResponsesSettings, request: ModelRequest, store: bool
     if isinstance(response_format, type) and issubclass(response_format, BaseModel):
         text["format"] = _text_format(response_format, strict=settings.strict_output)
     params = {
+        **settings.request_fields(),
         "include": copy.deepcopy(settings.include),
-        "max_output_tokens": settings.max_output_tokens,
-        "max_tool_calls": settings.max_tool_calls,
-        "metadata": settings.metadata,
-        "parallel_tool_calls": settings.parallel_tool_calls,
         "store": store,
-        "temperature": settings.temperature,
-        "top_p": settings.top_p,
-        "truncation": settings.truncation,
-        "user": settings.user,
-        "service_tier": settings.service_tier,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-        "extra_body": settings.extra_body,
         "reasoning": reasoning,
         "text": text or None,
     }

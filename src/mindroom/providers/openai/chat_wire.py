@@ -278,65 +278,6 @@ def _cerebras_response_format(response_format: Mapping[str, Any], *, strict: boo
     return prepared
 
 
-def _openai_params(settings: ChatSettings, response_format: object) -> dict[str, Any]:
-    return {
-        "store": settings.store,
-        "reasoning_effort": settings.reasoning_effort,
-        "verbosity": settings.verbosity,
-        "frequency_penalty": settings.frequency_penalty,
-        "logit_bias": settings.logit_bias,
-        "logprobs": settings.logprobs,
-        "top_logprobs": settings.top_logprobs,
-        "max_tokens": settings.max_tokens,
-        "max_completion_tokens": settings.max_completion_tokens,
-        "presence_penalty": settings.presence_penalty,
-        "seed": settings.seed,
-        "stop": settings.stop,
-        "temperature": settings.temperature,
-        "user": settings.user,
-        "top_p": settings.top_p,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-        "extra_body": settings.extra_body,
-        "metadata": settings.metadata,
-        "service_tier": settings.service_tier,
-        "response_format": response_format,
-    }
-
-
-def _groq_params(settings: ChatSettings, response_format: object) -> dict[str, Any]:
-    return {
-        "frequency_penalty": settings.frequency_penalty,
-        "logit_bias": settings.logit_bias,
-        "logprobs": settings.logprobs,
-        "max_tokens": settings.max_tokens,
-        "presence_penalty": settings.presence_penalty,
-        "response_format": response_format,
-        "seed": settings.seed,
-        "stop": settings.stop,
-        "temperature": settings.temperature,
-        "top_logprobs": settings.top_logprobs,
-        "top_p": settings.top_p,
-        "user": settings.user,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-    }
-
-
-def _cerebras_params(settings: ChatSettings, response_format: object) -> dict[str, Any]:
-    return {
-        "max_completion_tokens": settings.max_completion_tokens,
-        "repetition_penalty": settings.repetition_penalty,
-        "temperature": settings.temperature,
-        "top_p": settings.top_p,
-        "top_k": settings.top_k,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-        "extra_body": settings.extra_body,
-        "response_format": response_format,
-    }
-
-
 def _deepseek_thinking(params: dict[str, Any], settings: ChatSettings, model_id: str) -> None:
     """Enable thinking for thinking-capable DeepSeek ids unless the config turns it off."""
     thinking = settings.use_thinking if settings.use_thinking is not None else model_id != "deepseek-chat"
@@ -395,12 +336,12 @@ def _dialect_params(
     else:
         prepared = _json_schema_format(response_format, strict=settings.strict_output)
     if wire.dialect == "groq":
-        params = _groq_params(settings, prepared)
+        fields = settings.groq_request_fields()
     elif wire.dialect == "cerebras":
-        params = _cerebras_params(settings, prepared)
+        fields = settings.cerebras_request_fields()
     else:
-        params = _openai_params(settings, prepared)
-    return {key: value for key, value in params.items() if value is not None}
+        fields = settings.openai_request_fields()
+    return {key: value for key, value in {**fields, "response_format": prepared}.items() if value is not None}
 
 
 def _add_tools(
