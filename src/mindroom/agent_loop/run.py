@@ -112,7 +112,7 @@ def resume_agent(
     messages: list[Message],
     *,
     approved: Sequence[ApprovedCall] = (),
-    denied: Mapping[str, str] = {},
+    denied: Mapping[str, str | None] = {},
     external_results: Mapping[str, str] = {},
     ctx: RunContext,
     hooks: LoopHooks = NO_HOOKS,
@@ -125,8 +125,8 @@ def resume_agent(
     must be covered once: a confirmation by one approved call whose name and argument digest match or by a denial,
     an external execution by its result; anything else raises ``ValueError`` here, before any call runs, and
     ``paused`` is left unchanged. Approved calls run from their stored arguments and announce themselves as tool
-    events; denied calls answer with their note; external results answer as they are. The returned stream ends as
-    ``run_agent``'s does.
+    events; denied calls answer with their reason, or the default note when it is None; external results answer as
+    they are. The returned stream ends as ``run_agent``'s does.
     """
     plan = plan_resume(spec, paused, approved=approved, denied=denied, external_results=external_results)
     return resume_planned(
@@ -154,7 +154,7 @@ def plan_resume(
     paused: RunRecord,
     *,
     approved: Sequence[ApprovedCall] = (),
-    denied: Mapping[str, str] = {},
+    denied: Mapping[str, str | None] = {},
     external_results: Mapping[str, str] = {},
 ) -> ResumePlan:
     """Check and record the decisions for a resume of ``paused`` without running anything; see ``resume_agent``.
@@ -234,7 +234,7 @@ def decide_requirements(
     record: AnyRunRecord,
     *,
     approved: Sequence[ApprovedCall],
-    denied: Mapping[str, str],
+    denied: Mapping[str, str | None],
     external_results: Mapping[str, str],
 ) -> list[RunRequirement]:
     """Apply the decisions to the calls the record waits for and return their requirements, in record order.

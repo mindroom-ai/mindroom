@@ -301,6 +301,24 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     assert paused.requirements[0].member_agent_name == "researcher"
 
 
+@pytest.mark.parametrize(
+    ("reason", "note"),
+    [("Alice declined it.", "Alice declined it."), (None, "Not approved by requester")],
+)
+def test_a_denial_is_recorded_with_the_reason_given_or_the_default_note(reason: str | None, note: str) -> None:
+    """The model is told the requester's reason, or that the call was not approved when there is none."""
+    requirement = RunRequirement(ToolExecution(tool_call_id="call", tool_name="dangerous", requires_confirmation=True))
+
+    [decided] = response_turn_module.apply_exact_approval_decisions(
+        [requirement],
+        decisions={"call": False},
+        denial_reasons={"call": reason},
+    )
+
+    assert decided.confirmation_note == note
+    assert decided.tool_execution.confirmation_note == note
+
+
 def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
     """A paused call without durable identity must fail closed instead of being silently skipped."""
     invalid_tool = ToolExecution(tool_name="missing-id", requires_confirmation=True)

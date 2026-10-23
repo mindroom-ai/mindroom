@@ -45,7 +45,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.llm.request_context import bind_llm_request_log_context
-from mindroom.llm.runs import DENIED_WITHOUT_REASON, RunRequirement, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRequirement, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
@@ -137,7 +137,7 @@ def apply_exact_approval_decisions(
         if decisions[tool_call_id]:
             requirement.confirm()
         else:
-            requirement.reject(denial_reasons[tool_call_id] or DENIED_WITHOUT_REASON)
+            requirement.reject(denial_reasons[tool_call_id])
     return pending
 
 

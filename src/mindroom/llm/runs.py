@@ -102,7 +102,7 @@ class ToolExecution:
 
 
 # The note the model receives for a call its requester denied without giving a reason.
-DENIED_WITHOUT_REASON = "Not approved by requester"
+_DENIED_WITHOUT_REASON = "Not approved by requester"
 
 
 @dataclass
@@ -145,11 +145,12 @@ class RunRequirement:
         self.confirmation = True
         self.tool_execution.confirmed = True
 
-    def reject(self, note: str | None = None) -> None:
-        """Deny the call with an optional note shown to the model."""
+    def reject(self, note: str | None) -> None:
+        """Deny the call; the model is told ``note``, or that the requester did not approve when it gave none."""
         if not self.needs_confirmation:
             msg = "This requirement does not require confirmation"
             raise ValueError(msg)
+        note = note or _DENIED_WITHOUT_REASON
         self.confirmation = False
         self.confirmation_note = note
         self.tool_execution.confirmed = False
@@ -411,7 +412,6 @@ def run_record_from_dict(data: Mapping[str, Any]) -> AnyRunRecord:
 
 
 __all__ = [
-    "DENIED_WITHOUT_REASON",
     "AnyRunRecord",
     "RunRecord",
     "RunRequirement",

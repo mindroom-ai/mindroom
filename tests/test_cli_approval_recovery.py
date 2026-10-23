@@ -327,12 +327,20 @@ def _actions(name: str, entrypoint, **flags) -> AdaptedToolkit:
     return AdaptedToolkit(name="actions", functions=(adapt_function(function),), instructions=None)
 
 
+# A decision the requester took on a call, as (approved, the reason given, the note the call is denied with).
+APPROVED = (True, None, None)
+DENIED = (False, "Denied", "Denied")
+DENIED_WITHOUT_A_REASON = (False, None, "Not approved by requester")
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("approved", [True, False])
+@pytest.mark.parametrize(("approved", "reason", "denial"), [APPROVED, DENIED, DENIED_WITHOUT_A_REASON])
 @pytest.mark.parametrize("control", [None, "after-toolcall", "next-turn", "invalid"])
 async def test_restart_resolves_hidden_call_and_never_replays_parent(
     tmp_path: Path,
     approved: bool,
+    reason: str | None,
+    denial: str | None,
     control: str | None,
 ) -> None:
     """Real prepared execution keeps arguments, while normal response gets an honest notice."""
@@ -451,7 +459,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
             paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
             runtime_context=runtime,
             decisions={"hidden": approved},
-            denial_reasons={"hidden": "Denied"},
+            denial_reasons={"hidden": reason},
             tool_trace_collector=[],
             refresh_scheduler=None,
             authorize=authorize,
@@ -472,14 +480,14 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     assert trace[0].toolkit_name == "actions"
     assert "⏳" not in follow_up.presentation.final_text()
     if not approved:
-        assert trace[0].result_preview == "Denied"
+        assert trace[0].result_preview == denial
     else:
         # The hidden call's own start and completion reach the continued reply live.
         assert published[-1].tool_trace[0].type == "tool_call_completed"
     assert effects == (["exact\nargument"] if approved else [])
     notice = follow_up.ctx.transient_enrichment_items[0].text
     assert "interrupted" in notice
-    assert ((control_result if control else "action result") if approved else "Denied") in notice
+    assert ((control_result if control else "action result") if approved else denial) in notice
     saved = store.get_run("run")
     assert saved is not None
     assert saved.metadata["mindroom_replay_state"] == "interrupted"
@@ -598,10 +606,12 @@ def _outer_bash_approval(arguments: dict[str, object]) -> RunRequirement:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("approved", [True, False])
+@pytest.mark.parametrize(("approved", "reason", "denial"), [APPROVED, DENIED, DENIED_WITHOUT_A_REASON])
 async def test_restart_settles_outer_bash_approval_without_running_it(
     tmp_path: Path,
     approved: bool,
+    reason: str | None,
+    denial: str | None,
 ) -> None:
     """A shell approval rule on the outer Bash recovers as an honest notice, never a replay."""
     runtime = _helper_runtime(tmp_path, tools=["shell"])
@@ -658,7 +668,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
             paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
             runtime_context=runtime,
             decisions={"bash": approved},
-            denial_reasons={"bash": "Denied"},
+            denial_reasons={"bash": reason},
             tool_trace_collector=[],
             refresh_scheduler=None,
             authorize=AsyncMock(),
@@ -668,9 +678,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
     trace = follow_up.presentation.tool_trace
     assert [(entry.tool_call_id, entry.type) for entry in trace] == [("bash", "tool_call_completed")]
     assert not marker.exists()
-    assert ("saved command was not resumed" if approved else "Denied") in follow_up.ctx.transient_enrichment_items[
-        0
-    ].text
+    assert ("saved command was not resumed" if approved else denial) in follow_up.ctx.transient_enrichment_items[0].text
 
 
 @pytest.mark.asyncio

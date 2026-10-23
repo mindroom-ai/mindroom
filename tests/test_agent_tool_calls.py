@@ -657,9 +657,17 @@ async def test_authorization_is_rechecked_under_dispatch_lock(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("approved", [True, False])
-async def test_exact_native_confirmation_resumes_prepared_call(tmp_path: Path, approved: bool) -> None:
-    """Only the exact resolved native requirement releases a prepared call."""
+@pytest.mark.parametrize(
+    ("approved", "reason", "denial"),
+    [(True, None, None), (False, "Denied", "Denied"), (False, None, "Not approved by requester")],
+)
+async def test_exact_native_confirmation_resumes_prepared_call(
+    tmp_path: Path,
+    approved: bool,
+    reason: str | None,
+    denial: str | None,
+) -> None:
+    """Only the exact resolved native requirement releases a prepared call; a denial fails it with its note."""
     seen = []
 
     def action(value: int) -> int:
@@ -674,7 +682,7 @@ async def test_exact_native_confirmation_resumes_prepared_call(tmp_path: Path, a
     if approved:
         requirement.confirm()
     else:
-        requirement.reject("Denied")
+        requirement.reject(reason)
     resumed = [
         event
         async for event in agent_tool_calls.execute_agent_tool_call(
@@ -686,6 +694,7 @@ async def test_exact_native_confirmation_resumes_prepared_call(tmp_path: Path, a
     ]
     assert seen == ([3] if approved else [])
     assert resumed[-1].kind == ("completed" if approved else "failed")
+    assert approved or resumed[-1].execution.result == denial
     assert binding.function.requires_confirmation is True
     for changed in (4, 3.0):
         with pytest.raises(ValueError, match="exact"):

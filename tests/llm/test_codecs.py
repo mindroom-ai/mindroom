@@ -282,19 +282,29 @@ def test_run_requirement_round_trips_agno_dict() -> None:
     assert RunRequirement.from_dict(expected).to_dict() == expected
 
 
-@pytest.mark.parametrize("decision", ["confirm", "reject", "reject_with_note"])
+@pytest.mark.parametrize("decision", ["confirm", "reject_with_note"])
 def test_run_requirement_confirmation_updates_match_agno(decision: str) -> None:
     owned = RunRequirement.from_dict(agno("run_requirement"))
     if decision == "confirm":
         owned.confirm()
-    elif decision == "reject":
-        owned.reject()
     else:
         owned.reject("Not approved by requester")
 
     assert owned.to_dict() == expected_requirement_dict(agno("run_requirement_decided")[decision])
     assert owned.is_resolved() is True
     assert owned.needs_confirmation is False
+
+
+@pytest.mark.parametrize("reason", [None, ""])
+def test_run_requirement_denied_without_a_reason_tells_the_model_it_was_not_approved(reason: str | None) -> None:
+    """Agno stored no note here, which left the model a tool message without content; the owned record always has one."""
+    owned = RunRequirement.from_dict(agno("run_requirement"))
+
+    owned.reject(reason)
+
+    assert owned.confirmation_note == "Not approved by requester"
+    assert owned.tool_execution.confirmation_note == "Not approved by requester"
+    assert owned.to_dict() == expected_requirement_dict(agno("run_requirement_decided")["reject_with_note"])
 
 
 def test_run_requirement_external_result_matches_agno() -> None:

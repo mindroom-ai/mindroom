@@ -127,7 +127,7 @@ class _RoutedDecisions:
     """The resume's decisions routed to the calls the paused team waits for, by ``TeamCallKey``."""
 
     approved: dict[TeamCallKey, ApprovedCall]
-    denied: dict[TeamCallKey, str]
+    denied: dict[TeamCallKey, str | None]
     external_results: dict[TeamCallKey, str]
 
 
