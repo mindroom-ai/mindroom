@@ -872,8 +872,11 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     db.close()
 
 
-def test_a_request_replaying_from_a_checkpoint_that_skips_runs_records_no_basis(tmp_path: Path) -> None:
-    """A run that checkpointed before waiting for approval sorts after the turns it waited for, which replay then skips."""
+def test_native_requests_record_the_history_they_replay(tmp_path: Path) -> None:
+    """A request replaying from a checkpoint that skips runs records an empty basis; unknown history counts as covering.
+
+    A run that checkpointed before waiting for approval sorts after the turns it waited for, which replay then skips.
+    """
     config, _ = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
@@ -904,17 +907,34 @@ def test_a_request_replaying_from_a_checkpoint_that_skips_runs_records_no_basis(
     settings = model.native_compaction
     assert settings is not None
 
-    def resumed(basis: str) -> RunOutput:
+    def resumed(basis: str | None, *, route: str = settings.route, run_id: str = "resumed") -> RunOutput:
         response = ModelResponse(content="Done")
         items = [{"type": "compaction", "encrypted_content": "checkpoint"}]
-        record_native_checkpoint(response, items, replace(settings, basis=basis))
+        record_native_checkpoint(response, items, replace(settings, route=route, basis=basis))
         answer = Message(role="assistant", content="Done", provider_data=response.provider_data)
-        return _completed_run("resumed", messages=[Message(role="user", content="Go"), answer])
+        return _completed_run(run_id, messages=[Message(role="user", content="Go"), answer])
 
     covering = resumed(replay_basis(None, [first, waited]))
     assert configured_basis([first, waited, covering]) == replay_basis(None, [first, waited, covering])
     skipping = resumed(replay_basis(None, [first]))
     assert configured_basis([first, waited, skipping]) == ""
+    # A checkpoint recorded before bases existed counts as covering, as native replay assumes.
+    unknown = resumed(None)
+    assert configured_basis([first, waited, unknown]) == replay_basis(None, [first, waited, unknown])
+    # Replay starts from the latest checkpoint on its own route, so one on another route does not vouch for it.
+    elsewhere = resumed(replay_basis(None, [first, waited, skipping]), route="other-route", run_id="elsewhere")
+    assert configured_basis([first, waited, skipping, elsewhere]) == ""
+
+    # An approval continuation records what the paused request replayed, so its checkpoints stay reusable.
+    paused_basis = configured_basis([first])
+    waiting = ModelResponse(content="Waiting for approval")
+    record_native_checkpoint(waiting, [], model.native_compaction)
+    answer = Message(role="assistant", content=waiting.content, provider_data=waiting.provider_data)
+    paused = _completed_run("paused", messages=[Message(role="user", content="Go"), answer])
+    rebuilt = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    restore_native_history(rebuilt, persisted_run=paused, session=None)
+    assert rebuilt.native_compaction is not None
+    assert rebuilt.native_compaction.basis == paused_basis
 
 
 @pytest.mark.asyncio

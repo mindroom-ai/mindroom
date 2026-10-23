@@ -482,11 +482,20 @@ async def test_a_fallback_too_small_for_the_checkpoint_summarizes_the_history_it
             checkpointed_answer({"type": "compaction", "content": "word " * 10_000}, replay_basis(None, [run_1])),
         ],
     )
+    # Too large to share the fallback's input with the first two runs, so it needs a chunk of its own.
+    run_3 = _completed_run(
+        "run-3",
+        messages=[
+            Message(role="user", content="run-3 question " + "filler " * 5_000),
+            Message(role="assistant", content="ok"),
+        ],
+    )
     fallback = SummaryModel(FakeModel(id="fallback-model-id", provider="fake"), "fallback", 4_000)
     summary_mock = AsyncMock(
         side_effect=[
             ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
             SessionSummary(summary="fallback summary"),
+            SessionSummary(summary="final summary"),
         ],
     )
 
@@ -494,13 +503,15 @@ async def test_a_fallback_too_small_for_the_checkpoint_summarizes_the_history_it
         summary, _ = await summarize_runs(
             _summarizer(input_budget_tokens=30_000, fallback=fallback),
             None,
-            [run_1, run_2],
+            [run_1, run_2, run_3],
         )
 
-    assert summary == "fallback summary"
-    fallback_input = summary_mock.await_args_list[1].kwargs["summary_input"]
-    assert "run-1 question" in fallback_input
-    assert "run-2 question" in fallback_input
+    assert summary == "final summary"
+    inputs = [call.kwargs["summary_input"] for call in summary_mock.await_args_list]
+    assert "run-1 question" in inputs[1]
+    assert "run-2 question" in inputs[1]
+    assert "run-3 question" not in inputs[1]
+    assert "run-3 question" in inputs[2]
 
 
 @pytest.mark.asyncio

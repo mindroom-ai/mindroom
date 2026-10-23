@@ -79,6 +79,9 @@ def restore_native_history(
     )
     if model.native_compaction is not None and saved is not None and model.native_compaction.route != saved.route:
         model.configure_native_compaction(threshold=None)
+    elif model.native_compaction is not None and saved is not None:
+        # The continuation replays at least what the paused request did, so its checkpoints cover that history.
+        model.native_compaction = replace(model.native_compaction, basis=saved.basis)
 
 
 def _history_generation(session: AgentSession | TeamSession | None) -> str:
