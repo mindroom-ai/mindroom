@@ -454,7 +454,9 @@ class ClaudeProvider:
             return AsyncAnthropic(**kwargs)
         if self.route == "vertexai_claude":
             return self._vertex_client(kwargs)
-        return _bedrock_client(kwargs)
+        from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle  # noqa: PLC0415 - optional aws_bedrock extra
+
+        return AsyncAnthropicBedrockMantle(**kwargs)
 
     def _route_client_kwargs(self) -> dict[str, Any]:
         """Return the credentials and endpoint of this route, before ``client_params`` and the HTTP client."""
@@ -586,12 +588,6 @@ def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
         "aws_session_token": credentials.token,
         "aws_region": settings.aws_region or settings.session.region_name,
     }
-
-
-def _bedrock_client(kwargs: dict[str, Any]) -> AsyncAnthropicBedrockMantle:
-    from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle  # noqa: PLC0415 - optional aws_bedrock extra
-
-    return AsyncAnthropicBedrockMantle(**kwargs)
 
 
 def _claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> Capabilities:
