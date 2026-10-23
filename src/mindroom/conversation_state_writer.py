@@ -64,10 +64,10 @@ class ConversationStateWriter:
         if self.deps.agent_name in config.teams:
             return HistoryScope(kind="team", scope_id=self.deps.agent_name)
         registry = entity_identity_registry(config, self.deps.runtime_paths)
-        member_names: list[str] = []
-        for matrix_id in team_agents:
-            member_name = registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
-            member_names.append(member_name)
+        member_names = [
+            registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
+            for matrix_id in team_agents
+        ]
         scope_id = (
             ad_hoc_team_scope_id(
                 member_names,
@@ -87,10 +87,9 @@ class ConversationStateWriter:
     ) -> ConversationStore:
         """Open the conversation store of one exact persisted history scope."""
         config = self.deps.runtime.config
-        normalized_scope = (
-            self.history_scope() if scope is None else HistoryScope(kind=scope.kind, scope_id=scope.scope_id)
-        )
-        if normalized_scope == self.history_scope() and normalized_scope.kind == "agent":
+        own_scope = self.history_scope()
+        scope = own_scope if scope is None else scope
+        if scope == own_scope and scope.kind == "agent":
             return create_session_storage(
                 agent_name=self.deps.agent_name,
                 config=config,
@@ -98,37 +97,12 @@ class ConversationStateWriter:
                 execution_identity=execution_identity,
             )
         return create_scope_session_storage(
-            agent_name=normalized_scope.scope_id if normalized_scope.kind == "agent" else self.deps.agent_name,
-            scope=normalized_scope,
+            agent_name=scope.scope_id if scope.kind == "agent" else self.deps.agent_name,
+            scope=scope,
             config=config,
             runtime_paths=self.deps.runtime_paths,
             execution_identity=execution_identity,
         )
-
-    def _persist_response_event_id_in_session_run(
-        self,
-        *,
-        storage: ConversationStore,
-        session_id: str,
-        session_type: SessionKind,
-        run_id: str,
-        response_event_id: str,
-    ) -> None:
-        """Persist Matrix response linkage onto the run that produced it."""
-        session = storage.load_session(session_id, session_type)
-        if session is None:
-            return
-        for run in session.runs:
-            if run.run_id != run_id:
-                continue
-            metadata = dict(run.metadata or {})
-            if metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
-                return
-            metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
-            linked_run = copy(run)
-            linked_run.metadata = metadata
-            storage.save_runs(session, [linked_run])
-            return
 
     async def apersist_response_event_id_in_session_run(
         self,
@@ -139,15 +113,17 @@ class ConversationStateWriter:
         run_id: str,
         response_event_id: str,
     ) -> None:
-        """Persist response linkage off-loop in the session target's FIFO lane."""
+        """Persist Matrix response linkage onto the run that produced it, off-loop in the session target's FIFO lane."""
 
         def persist(storage: ConversationStore) -> None:
-            self._persist_response_event_id_in_session_run(
-                storage=storage,
-                session_id=session_id,
-                session_type=session_type,
-                run_id=run_id,
-                response_event_id=response_event_id,
-            )
+            session = storage.load_session(session_id, session_type)
+            if session is None:
+                return
+            run = next((run for run in session.runs if run.run_id == run_id), None)
+            if run is None or (run.metadata or {}).get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
+                return
+            linked_run = copy(run)
+            linked_run.metadata = {**(run.metadata or {}), MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: response_event_id}
+            storage.save_runs(session, [linked_run])
 
         await run_session_storage_operation(create_storage, persist)

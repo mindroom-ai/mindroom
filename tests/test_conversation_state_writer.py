@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+import pytest
+
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -24,7 +26,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path) -> None:
     """Response linkage belongs in run metadata, not assistant-role content."""
     run = RunRecord(
         run_id="run-1",
@@ -57,8 +60,8 @@ def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path)
         ),
     )
 
-    writer._persist_response_event_id_in_session_run(
-        storage=storage,
+    await writer.apersist_response_event_id_in_session_run(
+        create_storage=lambda: create_state_storage("test_agent", tmp_path),
         session_id="session-1",
         session_type="agent",
         run_id="run-1",
