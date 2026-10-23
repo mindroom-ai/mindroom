@@ -446,7 +446,7 @@ async def _resume(
     paused: RunRecord,
     *,
     approved: Sequence[ApprovalCall] = (),
-    denied: dict[str, str] | None = None,
+    denied: dict[str, str | None] | None = None,
     external_results: dict[str, str] | None = None,
     hooks: LoopHooks = NO_HOOKS,
 ) -> tuple[list[Any], RunRecord, _Store]:
@@ -511,6 +511,17 @@ async def test_a_denied_call_resumes_into_agno_s_rejected_row() -> None:
     assert _comparable(record.to_dict(), paused=paused) == _comparable(expected, paused=paused)
     assert not any(isinstance(event, ToolStarted | ToolCompleted) for event in events)
     assert model.requests[0].messages[-1].content == "Alice declined the multiplication."
+
+
+@pytest.mark.asyncio
+async def test_a_call_denied_without_a_reason_tells_the_model_it_was_not_approved() -> None:
+    paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
+    model = _model("code-model", answer("I did not multiply.", usage(260, 9, time_to_first_token=0.25)))
+
+    _, record, _ = await _resume(_agent(model, [_gated_calculator()]), paused, denied={"call-multiply": None})
+
+    assert model.requests[0].messages[-1].content == "Not approved by requester"
+    assert record.tools[0].confirmation_note == "Not approved by requester"  # type: ignore[index]
 
 
 @pytest.mark.asyncio

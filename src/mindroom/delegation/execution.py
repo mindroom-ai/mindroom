@@ -51,7 +51,10 @@ from mindroom.delegation.sessions import (
     subagent_liveness,
 )
 from mindroom.delegation.state import (
+    CONTINUE_SUBAGENT,
+    DELEGATION_FUNCTIONS,
     DELEGATION_STATE_KEY,
+    RUN_SUBAGENT,
     DelegationChild,
     DelegationPendingTool,
     DelegationState,
@@ -151,7 +154,7 @@ class _ChildOutcome:
     """Retained outcome and executable ownership observed by its actual envelope."""
 
     response: RunRecord
-    toolkit_owners: Mapping[tuple[str, str], str | None]
+    toolkit_owners: Mapping[tuple[str, str], str]
 
 
 @dataclass(frozen=True)
@@ -166,15 +169,11 @@ class _DelegationTarget:
     model: str | None = None
 
 
-# The delegate tools run outside the loop: the driver runs the child and continues the parent with its result.
-_DELEGATION_TOOL_NAMES = frozenset({"run_subagent", "continue_subagent"})
-
-
 def _external_requirements(response: AnyRunRecord) -> list[RunRequirement]:
     return [
         requirement
         for requirement in response.requirements or ()
-        if requirement.needs_external_execution and requirement.tool_execution.tool_name in _DELEGATION_TOOL_NAMES
+        if requirement.needs_external_execution and requirement.tool_execution.tool_name in DELEGATION_FUNCTIONS
     ]
 
 
@@ -185,7 +184,7 @@ def has_delegation_state(response: AnyRunRecord) -> bool:
 
 def _delegation_call(requirement: RunRequirement) -> bool:
     tool = requirement.tool_execution
-    return tool.tool_name in _DELEGATION_TOOL_NAMES and bool(tool.external_execution_required)
+    return tool.tool_name in DELEGATION_FUNCTIONS and bool(tool.external_execution_required)
 
 
 def answered_delegation_calls(response: AnyRunRecord) -> dict[tuple[str | None, str], str]:
@@ -606,7 +605,7 @@ def _prepare_delegation_output(
     runtime_paths: RuntimePaths,
     identity: ToolExecutionIdentity,
     raw_path: object,
-    tool_name: str = "run_subagent",
+    tool_name: str = RUN_SUBAGENT,
 ) -> ToolOutputFileRequest | dict[str, object] | None:
     """Resolve the caller's output policy without scaffolding or reconciling its workspace."""
     storage = resolve_agent_storage(caller, config, runtime_paths, execution_identity=identity)
@@ -872,7 +871,7 @@ async def _resolve_delegation_target(
 ) -> _DelegationTarget | str:
     """Resolve fresh/follow-up arguments, returning a user-facing rejection if invalid."""
     args = tool.tool_args or {}
-    if tool.tool_name == "continue_subagent":
+    if tool.tool_name == CONTINUE_SUBAGENT:
         return await _resolve_follow_up_target(
             args,
             retained,
@@ -1140,7 +1139,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             runtime_paths,
             caller_identity,
             args.get(OUTPUT_PATH_ARGUMENT),
-            tool_name=tool.tool_name or "run_subagent",
+            tool_name=tool.tool_name or RUN_SUBAGENT,
         )
         if isinstance(prepared_output, dict):
             authorization = json.dumps(prepared_output)
@@ -1173,7 +1172,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         resolve_result = partial(resolve_result, output_request=output_request)
 
     # Approval and the before hook must settle before a child can start.
-    gated = tool_may_require_approval(config, tool.tool_name or "run_subagent")
+    gated = tool_may_require_approval(config, tool.tool_name or RUN_SUBAGENT)
     approved_here = card_decision is True
     if gated and retained is None and not approved_here and state.gates.get(requirement_key) is not False:
         # Saved gates live in session storage that worker code can write, so only an approval
@@ -1203,7 +1202,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         state.hooks[requirement.id] = await before_delegation(
             execution_identity=caller_identity,
             arguments=args,
-            tool_name=tool.tool_name or "run_subagent",
+            tool_name=tool.tool_name or RUN_SUBAGENT,
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -1261,7 +1260,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 # The reply records a background child's call before its job starts, as for any managed call: the
                 # child's own tools run unrecorded in its job, so a restart's account names the delegation.
                 record_return = (
-                    await record_call(tool.tool_name or "run_subagent", args) if background is not None else None
+                    await record_call(tool.tool_name or RUN_SUBAGENT, args) if background is not None else None
                 )
                 if fresh:
                     await start_child_turn(

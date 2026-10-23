@@ -21,7 +21,7 @@ from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
 from mindroom.llm.events import RunFinished
 from mindroom.llm.request_context import RequestAttribution
-from mindroom.llm.runs import DENIED_WITHOUT_REASON, RunRecord
+from mindroom.llm.runs import RunRecord
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.response_turn import stream_with_llm_request_log_context
 from mindroom.session_storage.store import persist_to
@@ -51,14 +51,15 @@ type ContinueRun[R: AnyRunRecord] = Callable[[R, ResumeDecisions, ResumeEvents |
 
 @dataclass(frozen=True, slots=True)
 class ResumeDecisions:
-    """What one resume answers: the approved calls, the denied calls with their notes, and the external results.
+    """What one resume answers: the approved calls, the denied calls with the reasons given, and the external results.
 
+    A denial's reason is None when the requester gave none; the denied run records its default note.
     ``external_results`` holds what an externally executed call (a delegation) returned, by the member whose run
     waits for it, None for the run's own call, and the call id.
     """
 
     approved: tuple[ApprovalCall, ...] = ()
-    denied: Mapping[str, str] = field(default_factory=dict)
+    denied: Mapping[str, str | None] = field(default_factory=dict)
     external_results: Mapping[tuple[str | None, str], str] = field(default_factory=dict)
 
 
@@ -70,11 +71,7 @@ def approval_decisions(
     """Return the decisions one approval generation took on ``calls``, by the call ids ``decisions`` names."""
     return ResumeDecisions(
         approved=tuple(call for call in calls if decisions.get(call.tool_call_id)),
-        denied={
-            call_id: denial_reasons.get(call_id) or DENIED_WITHOUT_REASON
-            for call_id, approved in decisions.items()
-            if not approved
-        },
+        denied={call_id: denial_reasons.get(call_id) for call_id, approved in decisions.items() if not approved},
     )
 
 

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.llm.runs import DENIED_WITHOUT_REASON, RunRequirement, ToolExecution
+from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
@@ -117,12 +117,17 @@ class PreparedAgentToolCatalog:
     _closed: bool = field(default=False, init=False)
     _closes: list[ToolkitClose] = field(default_factory=list, init=False)
 
+    def __post_init__(self) -> None:
+        """Refuse a run without a session, which the catalog's checkpoints and delegations need."""
+        if self.run.session is None:
+            msg = "A tool catalog needs a run that belongs to a session"
+            raise ValueError(msg)
+
     @property
     def session(self) -> ConversationSession:
         """Return the session the turn's run is stored to, which the catalog's checkpoints and delegations write."""
-        if self.run.session is None:
-            msg = "A tool catalog needs a run that belongs to a session"
-            raise RuntimeError(msg)
+        # RunContext is frozen, and construction refused a run without a session.
+        assert self.run.session is not None
         return self.run.session
 
     @contextmanager
@@ -419,8 +424,8 @@ async def _execute_agent_tool_call(
         if requirement is not None:
             _check_resolves(requirement, binding, call_id, arguments)
             if not requirement.confirmation:
-                note = requirement.confirmation_note or DENIED_WITHOUT_REASON
-                yield _failure(binding, call_id, arguments, note)
+                assert requirement.confirmation_note is not None, "a denial records its note"
+                yield _failure(binding, call_id, arguments, requirement.confirmation_note)
                 return
         try:
             validate_tool_arguments(dict(binding.function.parameters), arguments)

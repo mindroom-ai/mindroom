@@ -134,7 +134,7 @@ def continue_team(
     messages: list[Message],
     *,
     approved: Mapping[TeamCallKey, ApprovedCall] = {},
-    denied: Mapping[TeamCallKey, str] = {},
+    denied: Mapping[TeamCallKey, str | None] = {},
     external_results: Mapping[TeamCallKey, str] = {},
     ctx: RunContext,
     hooks: LoopHooks = NO_HOOKS,
@@ -265,7 +265,7 @@ class _Decided:
     """The decisions that fall to one run of the team: the leader's own or one member's."""
 
     approved: tuple[ApprovedCall, ...]
-    denied: dict[str, str]
+    denied: dict[str, str | None]
     external_results: dict[str, str]
 
 
@@ -274,7 +274,7 @@ class _TeamDecisions:
     """The resume's decisions by ``TeamCallKey``, handed out run by run so a stray decision is caught."""
 
     approved: Mapping[TeamCallKey, ApprovedCall]
-    denied: Mapping[TeamCallKey, str]
+    denied: Mapping[TeamCallKey, str | None]
     external_results: Mapping[TeamCallKey, str]
     consumed: set[TeamCallKey] = field(default_factory=set)
 

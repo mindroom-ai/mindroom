@@ -6,7 +6,7 @@ import time
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
-from mindroom.delegation.state import DelegationHookState
+from mindroom.delegation.state import RUN_SUBAGENT, DelegationHookState
 from mindroom.hooks import HookRegistry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
@@ -34,7 +34,7 @@ async def before_delegation(
     *,
     execution_identity: ToolExecutionIdentity,
     arguments: dict[str, Any],
-    tool_name: str = "run_subagent",
+    tool_name: str = RUN_SUBAGENT,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> DelegationHookState:

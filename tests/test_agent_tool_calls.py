@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.tool_system.invocation import ToolMiddleware, ToolNext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _toolkit(name: str, *tools: Callable[..., object], instructions: str | None = None) -> AdaptedToolkit:
@@ -53,16 +54,8 @@ def _function(entrypoint: Callable[..., object], **flags: object) -> AdaptedTool
     return AdaptedToolkit(name="actions", functions=(adapt_function(function),), instructions=None)
 
 
-async def _catalog(
-    tmp_path: Path,
-    toolkits: Sequence[AdaptedToolkit],
-    *,
-    owners: Mapping[str, str | None] | None = None,
-    include: Callable[[Any], bool] | None = None,
-    middleware: Sequence[ToolMiddleware] = (),
-    tool_call_limit: int | None = None,
-) -> agent_tool_calls.PreparedAgentToolCatalog:
-    runtime = make_test_tool_runtime_context(
+def _runtime(tmp_path: Path) -> ToolRuntimeContext:
+    return make_test_tool_runtime_context(
         agent_name="helper",
         target=MessageTarget("!room:test", "$thread", "$thread", "$event", "session"),
         requester_id="@alice:test",
@@ -72,11 +65,22 @@ async def _catalog(
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
+
+
+async def _catalog(
+    tmp_path: Path,
+    toolkits: Sequence[AdaptedToolkit],
+    *,
+    owners: Mapping[str, str] | None = None,
+    include: Callable[[Any], bool] | None = None,
+    middleware: Sequence[ToolMiddleware] = (),
+    tool_call_limit: int | None = None,
+) -> agent_tool_calls.PreparedAgentToolCatalog:
     session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
     catalog = agent_tool_calls.PreparedAgentToolCatalog(
         agent_name="helper",
         run=RunContext(run_id="run", session_id="session", user_id="@alice:test", session=session),
-        runtime_context=runtime,
+        runtime_context=_runtime(tmp_path),
         middleware=middleware,
         tool_call_limit=tool_call_limit,
     )
@@ -94,6 +98,16 @@ async def _events(
 ) -> list[agent_tool_calls.AgentToolCallEvent]:
     binding = await catalog.bind(ToolKey(toolkit, function))
     return [event async for event in agent_tool_calls.execute_agent_tool_call(binding, "inner-id", arguments or {})]
+
+
+def test_a_catalog_cannot_be_built_for_a_run_without_a_session(tmp_path: Path) -> None:
+    """A run no store keeps has no session for the catalog's checkpoints and delegations, so it fails at once."""
+    with pytest.raises(ValueError, match="belongs to a session"):
+        agent_tool_calls.PreparedAgentToolCatalog(
+            agent_name="helper",
+            run=RunContext(run_id="run", session_id="session", user_id="@alice:test"),
+            runtime_context=_runtime(tmp_path),
+        )
 
 
 @pytest.mark.asyncio
@@ -657,9 +671,17 @@ async def test_authorization_is_rechecked_under_dispatch_lock(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("approved", [True, False])
-async def test_exact_native_confirmation_resumes_prepared_call(tmp_path: Path, approved: bool) -> None:
-    """Only the exact resolved native requirement releases a prepared call."""
+@pytest.mark.parametrize(
+    ("approved", "reason", "denial"),
+    [(True, None, None), (False, "Denied", "Denied"), (False, None, "Not approved by requester")],
+)
+async def test_exact_native_confirmation_resumes_prepared_call(
+    tmp_path: Path,
+    approved: bool,
+    reason: str | None,
+    denial: str | None,
+) -> None:
+    """Only the exact resolved native requirement releases a prepared call; a denial fails it with its note."""
     seen = []
 
     def action(value: int) -> int:
@@ -674,7 +696,7 @@ async def test_exact_native_confirmation_resumes_prepared_call(tmp_path: Path, a
     if approved:
         requirement.confirm()
     else:
-        requirement.reject("Denied")
+        requirement.reject(reason)
     resumed = [
         event
         async for event in agent_tool_calls.execute_agent_tool_call(
@@ -686,6 +708,7 @@ async def test_exact_native_confirmation_resumes_prepared_call(tmp_path: Path, a
     ]
     assert seen == ([3] if approved else [])
     assert resumed[-1].kind == ("completed" if approved else "failed")
+    assert approved or resumed[-1].execution.result == denial
     assert binding.function.requires_confirmation is True
     for changed in (4, 3.0):
         with pytest.raises(ValueError, match="exact"):
