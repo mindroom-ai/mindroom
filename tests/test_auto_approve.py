@@ -1,4 +1,4 @@
-"""Behavioral coverage for per-thread YOLO windows that skip tool approval."""
+"""Behavioral coverage for per-thread auto-approve windows that skip tool approval."""
 
 from __future__ import annotations
 
@@ -13,12 +13,17 @@ import nio
 import pytest
 from agno.models.response import ToolExecution
 
-from mindroom.approval import yolo
+from mindroom.approval import auto_approve_windows
+from mindroom.approval.auto_approve_windows import (
+    auto_approve_expires_at,
+    end_auto_approve,
+    room_auto_approve_windows,
+    start_auto_approve,
+)
 from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.response import plan_approval_calls
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
-from mindroom.approval.yolo import end_yolo, room_yolo_windows, start_yolo, yolo_expires_at
-from mindroom.commands import yolo_commands
+from mindroom.commands import auto_approve_commands
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, command_parser, get_command_help
 from mindroom.config.approval import ToolApprovalConfig
@@ -40,16 +45,18 @@ HUMAN = "@human:localhost"
 
 def _start(runtime_paths: RuntimePaths, **overrides: object) -> datetime:
     scope = {"room_id": ROOM_ID, "thread_id": THREAD_ID, "requester_id": HUMAN, "duration": timedelta(minutes=30)}
-    return start_yolo(runtime_paths, **{**scope, **overrides})  # type: ignore[arg-type]
+    return start_auto_approve(runtime_paths, **{**scope, **overrides})  # type: ignore[arg-type]
 
 
-def test_yolo_window_is_scoped_to_room_thread_and_requester(tmp_path: Path) -> None:
+def test_auto_approve_window_is_scoped_to_room_thread_and_requester(tmp_path: Path) -> None:
     """A window covers only the conversation and the person that started it, until it ends."""
     runtime_paths = test_runtime_paths(tmp_path)
     expires_at = _start(runtime_paths)
 
     assert timedelta(minutes=29) < expires_at - datetime.now(UTC) <= timedelta(minutes=30)
-    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) == expires_at
+    assert (
+        auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) == expires_at
+    )
     for room_id, thread_id, requester_id in (
         ("!other:localhost", THREAD_ID, HUMAN),
         (ROOM_ID, "$other", HUMAN),
@@ -58,37 +65,40 @@ def test_yolo_window_is_scoped_to_room_thread_and_requester(tmp_path: Path) -> N
         (None, THREAD_ID, HUMAN),
         (ROOM_ID, THREAD_ID, None),
     ):
-        assert yolo_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=requester_id) is None
+        assert (
+            auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=requester_id)
+            is None
+        )
 
     other_thread = _start(runtime_paths, thread_id="$other")
     _start(runtime_paths, room_id="!elsewhere:localhost")
     assert [
         (window.thread_id, window.requester_id, window.expires_at)
-        for window in room_yolo_windows(runtime_paths, ROOM_ID)
+        for window in room_auto_approve_windows(runtime_paths, ROOM_ID)
     ] == [
         ("$other", HUMAN, other_thread),
         (THREAD_ID, HUMAN, expires_at),
     ]
-    assert end_yolo(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is True
-    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
-    assert end_yolo(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is False
+    assert end_auto_approve(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is True
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    assert end_auto_approve(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is False
 
 
-def test_yolo_window_expires_and_survives_unreadable_records(tmp_path: Path) -> None:
+def test_auto_approve_window_expires_and_survives_unreadable_records(tmp_path: Path) -> None:
     """An elapsed window no longer applies, and corrupt records never read as active."""
     runtime_paths = test_runtime_paths(tmp_path)
     _start(runtime_paths, duration=timedelta(seconds=-1))
-    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
 
-    path = yolo._store_path(runtime_paths)
+    path = auto_approve_windows._store_path(runtime_paths)
     path.write_text('{"x": {"expires_at": "soon", "set_at": "now"}, "y": {"expires_at": "2999-01-01T00:00:00"}}')
-    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
     path.write_text("not json")
-    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
     path.write_text('{"not a scope": {"expires_at": "2999-01-01T00:00:00+00:00", "set_at": "now"}}')
-    assert room_yolo_windows(runtime_paths, ROOM_ID) == []
+    assert room_auto_approve_windows(runtime_paths, ROOM_ID) == []
     _start(runtime_paths)
-    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is not None
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is not None
 
 
 async def _plan(runtime_paths: RuntimePaths, tool: ToolExecution, *, requester_id: str, thread_id: str) -> object:
@@ -107,7 +117,7 @@ async def _plan(runtime_paths: RuntimePaths, tool: ToolExecution, *, requester_i
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approval_type", [POLICY_CONFIRMATION_APPROVAL_TYPE, None])
-async def test_yolo_window_approves_every_gated_call_of_its_requester(
+async def test_auto_approve_window_approves_every_gated_call_of_its_requester(
     tmp_path: Path,
     approval_type: str | None,
 ) -> None:
@@ -131,7 +141,7 @@ async def test_yolo_window_approves_every_gated_call_of_its_requester(
 
 
 @pytest.mark.asyncio
-async def test_yolo_window_that_ends_during_the_policy_check_approves_nothing(
+async def test_auto_approve_window_that_ends_during_the_policy_check_approves_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -140,7 +150,7 @@ async def test_yolo_window_that_ends_during_the_policy_check_approves_nothing(
     _start(runtime_paths)
 
     async def evaluate(*_args: object) -> tuple[bool, float]:
-        end_yolo(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+        end_auto_approve(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
         return True, 60.0
 
     monkeypatch.setattr("mindroom.approval.response.evaluate_tool_approval", evaluate)
@@ -155,7 +165,7 @@ async def test_yolo_window_that_ends_during_the_policy_check_approves_nothing(
 
 
 @pytest.mark.asyncio
-async def test_yolo_window_never_approves_for_a_requester_who_cannot_approve(tmp_path: Path) -> None:
+async def test_auto_approve_window_never_approves_for_a_requester_who_cannot_approve(tmp_path: Path) -> None:
     """A call whose requester is no person stays denied even when a window names that ID."""
     runtime_paths = test_runtime_paths(tmp_path)
     _start(runtime_paths, requester_id="not-a-matrix-id")
@@ -166,15 +176,20 @@ async def test_yolo_window_never_approves_for_a_requester_who_cannot_approve(tmp
     assert call.decision is ApprovalDecision.DENIED
 
 
-def test_yolo_command_parsing_and_help() -> None:
-    """`!yolo` parses with and without arguments, and help explains it."""
-    for message, args_text in (("!yolo", ""), ("!YOLO 30m", "30m"), ("!yolo 45", "45"), ("!yolo  off ", "off")):
+def test_auto_approve_command_parsing_and_help() -> None:
+    """`!auto_approve` parses with and without arguments, and help explains it."""
+    for message, args_text in (
+        ("!auto_approve", ""),
+        ("!Auto-Approve 30m", "30m"),
+        ("!auto_approve 45", "45"),
+        ("!auto_approve  off ", "off"),
+    ):
         command = command_parser.parse(message)
         assert command is not None
-        assert command.type is CommandType.YOLO
+        assert command.type is CommandType.AUTO_APPROVE
         assert command.args == {"args_text": args_text}
-    assert "**YOLO Command**" in get_command_help("yolo")
-    assert "!yolo" in get_command_help()
+    assert "**Auto-approve Command**" in get_command_help("auto_approve")
+    assert "!auto_approve" in get_command_help()
 
 
 @dataclass(frozen=True)
@@ -224,113 +239,122 @@ async def _send(
 
 
 @pytest.mark.asyncio
-async def test_yolo_command_starts_shows_and_ends_the_thread_window(tmp_path: Path) -> None:
+async def test_auto_approve_command_starts_shows_and_ends_the_thread_window(tmp_path: Path) -> None:
     """The command starts a window for its sender's thread, reports it, and ends it."""
-    reply, runtime_paths = await _send(tmp_path, "!yolo 2h")
-    expires_at = yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve 2h")
+    expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
     assert expires_at is not None
     assert timedelta(minutes=119) < expires_at - datetime.now(UTC) <= timedelta(hours=2)
-    assert reply.startswith(f"⚠️ YOLO mode is on in this thread until {expires_at:%Y-%m-%d %H:%M} UTC")
+    assert reply.startswith(f"⚠️ Auto-approve is on in this thread until {expires_at:%Y-%m-%d %H:%M} UTC")
 
-    reply, _ = await _send(tmp_path, "!yolo")
-    assert reply.startswith("⚠️ YOLO mode is on in this thread until")
+    reply, _ = await _send(tmp_path, "!auto_approve")
+    assert reply.startswith("⚠️ Auto-approve is on in this thread until")
 
-    reply, _ = await _send(tmp_path, "!yolo off")
-    assert reply == "✅ YOLO mode is off. Tool calls in this thread ask for approval again."
-    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    reply, _ = await _send(tmp_path, "!auto_approve off")
+    assert reply == "✅ Auto-approve is off. Tool calls in this thread ask for approval again."
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
 
-    reply, _ = await _send(tmp_path, "!yolo")
-    assert reply.startswith("YOLO mode is off in this thread.")
-    reply, _ = await _send(tmp_path, "!yolo off")
-    assert reply == "YOLO mode is not on in this thread."
+    reply, _ = await _send(tmp_path, "!auto_approve")
+    assert reply.startswith("Auto-approve is off in this thread.")
+    reply, _ = await _send(tmp_path, "!auto_approve off")
+    assert reply == "Auto-approve is not on in this thread."
 
 
 @pytest.mark.asyncio
-async def test_yolo_command_publishes_the_rooms_open_windows_for_clients(tmp_path: Path) -> None:
+async def test_auto_approve_command_publishes_the_rooms_open_windows_for_clients(tmp_path: Path) -> None:
     """Starting and ending a window rewrite the router's room state from the stored windows."""
     client = AsyncMock(user_id="@mindroom_router:localhost")
     client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id=ROOM_ID)
 
-    await _send(tmp_path, "!yolo 30", client=client)
+    await _send(tmp_path, "!auto_approve 30", client=client)
 
     runtime_paths = test_runtime_paths(tmp_path)
-    expires_at = yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+    expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
     assert expires_at is not None
     client.room_put_state.assert_awaited_once_with(
         room_id=ROOM_ID,
-        event_type="io.mindroom.yolo",
+        event_type="io.mindroom.auto_approve",
         content={"windows": [{"thread_id": THREAD_ID, "requester_id": HUMAN, "expires_at": expires_at.isoformat()}]},
         state_key="@mindroom_router:localhost",
     )
     client.room_put_state.reset_mock()
-    await _send(tmp_path, "!yolo off", client=client)
+    await _send(tmp_path, "!auto_approve off", client=client)
     assert client.room_put_state.await_args.kwargs["content"] == {"windows": []}
 
 
 @pytest.mark.asyncio
-async def test_yolo_command_replies_when_publishing_its_state_fails(tmp_path: Path) -> None:
+async def test_auto_approve_command_replies_when_publishing_its_state_fails(tmp_path: Path) -> None:
     """A refused or failed state write leaves the window on and the confirmation sent."""
     client = AsyncMock(user_id="@mindroom_router:localhost")
     client.room_put_state.side_effect = nio.exceptions.RemoteProtocolError("connection reset")
 
-    reply, runtime_paths = await _send(tmp_path, "!yolo 30", client=client)
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve 30", client=client)
 
-    assert reply.startswith("⚠️ YOLO mode is on in this thread until")
-    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is not None
+    assert reply.startswith("⚠️ Auto-approve is on in this thread until")
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is not None
 
 
 @pytest.mark.asyncio
-async def test_yolo_command_names_the_whole_room_in_a_room_without_threads_and_uses_local_time(tmp_path: Path) -> None:
+async def test_auto_approve_command_names_the_whole_room_in_a_room_without_threads_and_uses_local_time(
+    tmp_path: Path,
+) -> None:
     """A room-mode window covers the room, and its end shows in the configured timezone."""
     reply, runtime_paths = await _send(
         tmp_path,
-        "!yolo 30",
+        "!auto_approve 30",
         config=Config(timezone="Europe/Amsterdam"),
         room_mode=True,
     )
 
-    expires_at = yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=None, requester_id=HUMAN)
+    expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=None, requester_id=HUMAN)
     assert expires_at is not None
     local = expires_at.astimezone(ZoneInfo("Europe/Amsterdam"))
-    assert reply.startswith(f"⚠️ YOLO mode is on in this room until {local:%Y-%m-%d %H:%M %Z}: ")
-    reply, _ = await _send(tmp_path, "!yolo off", room_mode=True)
-    assert reply == "✅ YOLO mode is off. Tool calls in this room ask for approval again."
+    assert reply.startswith(f"⚠️ Auto-approve is on in this room until {local:%Y-%m-%d %H:%M %Z}: ")
+    reply, _ = await _send(tmp_path, "!auto_approve off", room_mode=True)
+    assert reply == "✅ Auto-approve is off. Tool calls in this room ask for approval again."
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("duration", "expected"), [("45", timedelta(minutes=45)), ("1440", timedelta(hours=24))])
-async def test_yolo_command_reads_a_bare_number_as_minutes(tmp_path: Path, duration: str, expected: timedelta) -> None:
-    """`!yolo 45` starts a 45-minute window."""
-    _reply, runtime_paths = await _send(tmp_path, f"!yolo {duration}")
+async def test_auto_approve_command_reads_a_bare_number_as_minutes(
+    tmp_path: Path,
+    duration: str,
+    expected: timedelta,
+) -> None:
+    """`!auto_approve 45` starts a 45-minute window."""
+    _reply, runtime_paths = await _send(tmp_path, f"!auto_approve {duration}")
 
-    expires_at = yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+    expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
     assert expires_at is not None
     assert expected - timedelta(minutes=1) < expires_at - datetime.now(UTC) <= expected
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("duration", ["0", "0m", "1441", "25h", "99999999999999999999h", "forever", "30s"])
-async def test_yolo_command_rejects_durations_outside_one_minute_to_a_day(tmp_path: Path, duration: str) -> None:
+async def test_auto_approve_command_rejects_durations_outside_one_minute_to_a_day(
+    tmp_path: Path,
+    duration: str,
+) -> None:
     """Durations must name minutes or hours between one minute and 24 hours."""
-    reply, runtime_paths = await _send(tmp_path, f"!yolo {duration}")
+    reply, runtime_paths = await _send(tmp_path, f"!auto_approve {duration}")
 
     assert reply.startswith("❌ Choose a duration from 1 minute to 24 hours")
-    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
 
 
 @pytest.mark.asyncio
-async def test_yolo_command_needs_the_person_in_person(tmp_path: Path) -> None:
+async def test_auto_approve_command_needs_the_person_in_person(tmp_path: Path) -> None:
     """An agent cannot start a window for its human, and non-person requesters cannot start one."""
-    reply, runtime_paths = await _send(tmp_path, "!yolo 30m", acts_for_requester=True)
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve 30m", acts_for_requester=True)
     assert reply == "❌ Agents cannot run this command for you. Send it yourself."
-    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
 
-    reply, _ = await _send(tmp_path, "!yolo 30m", requester_user_id="not-a-matrix-id")
-    assert reply == "❌ Only a person can turn on YOLO mode."
+    reply, _ = await _send(tmp_path, "!auto_approve 30m", requester_user_id="not-a-matrix-id")
+    assert reply == "❌ Only a person can turn on auto-approve."
 
 
 @pytest.mark.asyncio
-async def test_yolo_command_approves_cards_already_waiting_in_the_thread(
+async def test_auto_approve_command_approves_cards_already_waiting_in_the_thread(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -338,10 +362,10 @@ async def test_yolo_command_approves_cards_already_waiting_in_the_thread(
     manager = MagicMock(spec=ApprovalManager)
     manager.pending_card_event_ids = AsyncMock(return_value=("$card-1", "$card-2"))
     approve = AsyncMock(side_effect=[True, False])
-    monkeypatch.setattr(yolo_commands, "get_approval_store", lambda: manager)
-    monkeypatch.setattr(yolo_commands, "handle_tool_approval_action", approve)
+    monkeypatch.setattr(auto_approve_commands, "get_approval_store", lambda: manager)
+    monkeypatch.setattr(auto_approve_commands, "handle_tool_approval_action", approve)
 
-    reply, _ = await _send(tmp_path, "!yolo 30m")
+    reply, _ = await _send(tmp_path, "!auto_approve 30m")
 
     assert "Approved 1 waiting tool call." in reply
     manager.pending_card_event_ids.assert_awaited_once_with(

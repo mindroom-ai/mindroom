@@ -14,12 +14,12 @@ from urllib.parse import urlsplit
 
 from mindroom.access_policy import resolve_responder_access
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.tool_approval import (
     BackgroundScriptToolOrigin,
     ToolApprovalDecision,
     resolve_tool_approval_approver,
 )
-from mindroom.approval.yolo import yolo_expires_at
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.custom_tools.script import bind_script_run_manager
@@ -327,7 +327,7 @@ class _LiveScriptRuntimeResolver:
                 reason="Background script approval requires a human Matrix requester.",
             )
         if (
-            yolo_expires_at(
+            auto_approve_expires_at(
                 context.runtime_paths,
                 room_id=context.room_id,
                 thread_id=context.resolved_thread_id,

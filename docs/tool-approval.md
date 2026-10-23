@@ -61,14 +61,14 @@ It covers the original call, matching pending calls, and later calls for the sam
 It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves, background-script approvals, or scheduled calls.
 The requester can stop auto-approval from the originating card, and any config change or room membership change ends matching grants; calls already approved still run.
 
-### YOLO Mode
+### Auto-Approve Everything
 
-Send `!yolo 30` (minutes) or `!yolo 2h` in a thread to run every tool call you request there without approval cards, for 1 minute up to 24 hours.
+Send `!auto_approve 30` (minutes) or `!auto_approve 2h` in a thread to run every tool call you request there without approval cards, for 1 minute up to 24 hours.
 It covers every agent and team in that thread, script rules, tools that ask for their own confirmation, background jobs, and background scripts, and turning it on approves the cards already waiting for you there.
 Other people in the thread still approve their own calls, an agent cannot turn it on for you, and a tool call scheduled to run later still asks when it is scheduled.
 In a room that uses `thread_mode: room`, the window covers the whole room.
-`!yolo` shows when the window ends and `!yolo off` ends it early; restarts and config reloads keep it.
-MindRoom Chat shows the open window in the thread header in rooms where the router may send the `io.mindroom.yolo` state event, which the rooms MindRoom creates allow.
+`!auto_approve` shows when the window ends and `!auto_approve off` ends it early; restarts and config reloads keep it.
+MindRoom Chat shows the open window in the thread header in rooms where the router may send the `io.mindroom.auto_approve` state event, which the rooms MindRoom creates allow.
 
 ## Approval Card Contents
 

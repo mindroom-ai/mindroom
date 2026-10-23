@@ -20,8 +20,8 @@ from agno.tools import Toolkit
 
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
-from mindroom.approval.yolo import start_yolo
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
@@ -515,7 +515,7 @@ async def test_a_call_its_policy_approves_waits_like_any_call(tmp_path: Path, mo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("window_thread", ["reply", "other"])
-async def test_a_job_call_skips_its_card_only_inside_the_requesters_yolo_window(
+async def test_a_job_call_skips_its_card_only_inside_the_requesters_auto_approve_window(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     window_thread: str,
@@ -525,7 +525,7 @@ async def test_a_job_call_skips_its_card_only_inside_the_requesters_yolo_window(
         threaded = replace(run.owner, thread_id="$thread", resolved_thread_id="$thread")
         run.context = _delegate_runtime_context(run.config, run.paths, execution_identity=threaded)
         assert threaded.requester_id is not None
-        start_yolo(
+        start_auto_approve(
             run.paths,
             room_id=run.context.room_id,
             thread_id="$thread" if window_thread == "reply" else "$other",

@@ -11,6 +11,7 @@ from mindroom.authorization import (
     responder_candidate_entities_with_membership_refresh,
 )
 from mindroom.commands import config_confirmation
+from mindroom.commands.auto_approve_commands import handle_auto_approve_command
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.desktop_commands import (
     DesktopCommandScope,
@@ -23,7 +24,6 @@ from mindroom.commands.model_commands import handle_model_command, handle_struct
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.commands.room_model_commands import handle_room_model_command
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
-from mindroom.commands.yolo_commands import handle_yolo_command
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import (
     configured_routable_entity_ids_for_room,
@@ -86,7 +86,7 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.MODE,
         CommandType.ROOM_MODEL,
         CommandType.THREAD_MODE,
-        CommandType.YOLO,
+        CommandType.AUTO_APPROVE,
         CommandType.ENCRYPT,
     },
 )
@@ -631,8 +631,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             sender_user_id=_room_admin_sender(context, event, requester_user_id),
         )
 
-    elif command.type == CommandType.YOLO:
-        response_text = await handle_yolo_command(
+    elif command.type == CommandType.AUTO_APPROVE:
+        response_text = await handle_auto_approve_command(
             command.args.get("args_text", ""),
             config=context.config,
             runtime_paths=context.runtime_paths,

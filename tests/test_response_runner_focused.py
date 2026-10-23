@@ -46,9 +46,9 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt as approval_receipt
+from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
 from mindroom.approval.tool_owners import toolkit_owners_for_agents
-from mindroom.approval.yolo import start_yolo
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -3555,10 +3555,10 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("yolo_thread_id", "card_expected"), [("$thread", False), ("$other", True)])
-async def test_first_pause_skips_the_card_inside_the_requesters_yolo_window_of_the_reply_thread(
+@pytest.mark.parametrize(("window_thread_id", "card_expected"), [("$thread", False), ("$other", True)])
+async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_window_of_the_reply_thread(
     tmp_path: Path,
-    yolo_thread_id: str,
+    window_thread_id: str,
     card_expected: bool,
 ) -> None:
     """A reply's gated call runs unasked only when the window names the thread that reply answers in."""
@@ -3569,10 +3569,10 @@ async def test_first_pause_skips_the_card_inside_the_requesters_yolo_window_of_t
     runner = unwrap_extracted_collaborator(bot._response_runner)
     await _admit_approval_source(runner.deps.approval_store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    start_yolo(
+    start_auto_approve(
         runner.deps.runtime_paths,
         room_id="!room:localhost",
-        thread_id=yolo_thread_id,
+        thread_id=window_thread_id,
         requester_id="@user:localhost",
         duration=timedelta(minutes=5),
     )
@@ -4399,7 +4399,7 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
 
 
 @pytest.mark.parametrize(
-    ("gated_tools", "yolo_thread_id", "expected_text", "expected_state", "expected_cards"),
+    ("gated_tools", "window_thread_id", "expected_text", "expected_state", "expected_cards"),
     [
         (set(), None, None, "ready", []),
         ({"conditional_write"}, None, "Waiting for approval: `conditional_write`", "waiting", ["conditional_write"]),
@@ -4419,13 +4419,13 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
             ["conditional_read", "conditional_write"],
         ),
     ],
-    ids=["automatic", "mixed", "human", "yolo", "yolo-elsewhere"],
+    ids=["automatic", "mixed", "human", "auto-approve", "auto-approve-elsewhere"],
 )
 @pytest.mark.asyncio
 async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     tmp_path: Path,
     gated_tools: set[str],
-    yolo_thread_id: str | None,
+    window_thread_id: str | None,
     expected_text: str | None,
     expected_state: str,
     expected_cards: list[str],
@@ -4433,11 +4433,11 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     """Every chained generation must durably expose only its unresolved calls; the reply thread's window has none."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    if yolo_thread_id is not None:
-        start_yolo(
+    if window_thread_id is not None:
+        start_auto_approve(
             runner.deps.runtime_paths,
             room_id="!room:localhost",
-            thread_id=yolo_thread_id,
+            thread_id=window_thread_id,
             requester_id="@user:localhost",
             duration=timedelta(minutes=5),
         )

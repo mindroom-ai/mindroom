@@ -22,8 +22,8 @@ from httpx import ASGITransport, AsyncClient
 import mindroom.workers.runtime as workers_runtime_module
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
+from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
-from mindroom.approval.yolo import start_yolo
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.event_journal import BackgroundApprovalDecision
@@ -4796,11 +4796,11 @@ async def test_live_resolver_rebuilds_exact_context_and_worker_authority(
 
 
 @pytest.mark.asyncio
-async def test_live_resolver_approves_without_a_card_inside_the_requesters_yolo_window(
+async def test_live_resolver_approves_without_a_card_inside_the_requesters_auto_approve_window(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A background script call of the requester's YOLO thread runs without publishing an approval card."""
+    """A background script call of the requester's auto-approve thread runs without publishing an approval card."""
     runtime_paths = _runtime_paths(tmp_path)
     run = _run(runtime_paths)
     context = SimpleNamespace(
@@ -4824,7 +4824,7 @@ async def test_live_resolver_approves_without_a_card_inside_the_requesters_yolo_
         "mindroom.orchestration.script_runtime.resolve_tool_approval_approver",
         lambda *_args: run.owner_user_id,
     )
-    start_yolo(
+    start_auto_approve(
         runtime_paths,
         room_id=run.room_id,
         thread_id=run.thread_root_event_id,

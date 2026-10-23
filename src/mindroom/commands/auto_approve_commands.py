@@ -1,4 +1,4 @@
-"""Chat handling for the `!yolo` command, which skips tool approval in one thread for a while."""
+"""Chat handling for the `!auto_approve` command, which skips tool approval in one thread for a while."""
 
 from __future__ import annotations
 
@@ -9,11 +9,17 @@ from zoneinfo import ZoneInfo
 
 import nio
 
+from mindroom.approval.auto_approve_windows import (
+    AUTO_APPROVE_MAX_DURATION,
+    auto_approve_expires_at,
+    end_auto_approve,
+    room_auto_approve_windows,
+    start_auto_approve,
+)
 from mindroom.approval.inbound import handle_tool_approval_action
 from mindroom.approval.manager import get_approval_store
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
-from mindroom.approval.yolo import YOLO_MAX_DURATION, end_yolo, room_yolo_windows, start_yolo, yolo_expires_at
-from mindroom.matrix.event_types import YOLO_WINDOWS_EVENT_TYPE
+from mindroom.matrix.event_types import AUTO_APPROVE_WINDOWS_EVENT_TYPE
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -24,7 +30,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-_USAGE = "Usage: `!yolo <minutes>`, `!yolo <hours>h`, `!yolo off`, or `!yolo` to show the current window"
+_USAGE = "Usage: `!auto_approve <minutes>`, `!auto_approve <hours>h`, `!auto_approve off`, or `!auto_approve` to show the current window"
 # A bare number counts minutes; five digits already exceed the longest window.
 _DURATION = re.compile(r"^(\d{1,5})\s*(m|min|mins|minutes?|h|hr|hrs|hours?)?$")
 
@@ -55,21 +61,21 @@ async def _publish_windows(
                 "requester_id": window.requester_id,
                 "expires_at": window.expires_at.isoformat(),
             }
-            for window in room_yolo_windows(runtime_paths, room_id)
+            for window in room_auto_approve_windows(runtime_paths, room_id)
         ],
     }
     try:
         response = await client.room_put_state(
             room_id=room_id,
-            event_type=YOLO_WINDOWS_EVENT_TYPE,
+            event_type=AUTO_APPROVE_WINDOWS_EVENT_TYPE,
             content=content,
             state_key=client.user_id,
         )
     except Exception:
-        logger.warning("Publishing YOLO windows failed", room_id=room_id, exc_info=True)
+        logger.warning("Publishing auto-approve windows failed", room_id=room_id, exc_info=True)
         return
     if not isinstance(response, nio.RoomPutStateResponse):
-        logger.warning("YOLO windows state was refused", room_id=room_id, response=str(response))
+        logger.warning("Auto-approve windows state was refused", room_id=room_id, response=str(response))
 
 
 async def _approve_pending_cards(
@@ -107,7 +113,7 @@ async def _approve_pending_cards(
     return approved
 
 
-async def handle_yolo_command(
+async def handle_auto_approve_command(
     args_text: str,
     *,
     config: Config,
@@ -119,32 +125,37 @@ async def handle_yolo_command(
     logger: structlog.stdlib.BoundLogger,
     membership_index: AgentReplyMembershipIndex,
 ) -> str:
-    """Show, start, or end the requester's YOLO window in this conversation, and publish the room's windows."""
+    """Show, start, or end the requester's auto-approve window in this conversation, and publish the room's windows."""
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_user_id)
     if approver_id is None:
-        return "❌ Only a person can turn on YOLO mode."
+        return "❌ Only a person can turn on auto-approve."
     requested = args_text.strip().lower()
     # A room without threads is one conversation, so its window covers the whole room.
     place = "this thread" if thread_id is not None else "this room"
 
     if not requested:
-        expires_at = yolo_expires_at(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
+        expires_at = auto_approve_expires_at(
+            runtime_paths,
+            room_id=room.room_id,
+            thread_id=thread_id,
+            requester_id=approver_id,
+        )
         return (
-            f"YOLO mode is off in {place}.\n\n{_USAGE}"
+            f"Auto-approve is off in {place}.\n\n{_USAGE}"
             if expires_at is None
-            else f"⚠️ YOLO mode is on in {place} until {_until(expires_at, config)}.\n\nUse `!yolo off` to end it."
+            else f"⚠️ Auto-approve is on in {place} until {_until(expires_at, config)}.\n\nUse `!auto_approve off` to end it."
         )
 
     if requested == "off":
-        if not end_yolo(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id):
-            return f"YOLO mode is not on in {place}."
+        if not end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id):
+            return f"Auto-approve is not on in {place}."
         await _publish_windows(client, runtime_paths, room.room_id, logger)
-        return f"✅ YOLO mode is off. Tool calls in {place} ask for approval again."
+        return f"✅ Auto-approve is off. Tool calls in {place} ask for approval again."
 
     duration = _parse_duration(requested)
-    if duration is None or not timedelta(minutes=1) <= duration <= YOLO_MAX_DURATION:
+    if duration is None or not timedelta(minutes=1) <= duration <= AUTO_APPROVE_MAX_DURATION:
         return f"❌ Choose a duration from 1 minute to 24 hours, such as `30` or `2h`.\n\n{_USAGE}"
-    expires_at = start_yolo(
+    expires_at = start_auto_approve(
         runtime_paths,
         room_id=room.room_id,
         thread_id=thread_id,
@@ -163,7 +174,7 @@ async def handle_yolo_command(
     )
     approved_text = f" Approved {approved} waiting tool call{'s' if approved != 1 else ''}." if approved else ""
     return (
-        f"⚠️ YOLO mode is on in {place} until {_until(expires_at, config)}: "
+        f"⚠️ Auto-approve is on in {place} until {_until(expires_at, config)}: "
         f"tool calls you request here run without asking for approval.{approved_text}\n\n"
-        "Use `!yolo off` to end it."
+        "Use `!auto_approve off` to end it."
     )

@@ -8,5 +8,5 @@ BACKGROUND_JOBS_EVENT_TYPE = "io.mindroom.background_jobs"
 # Each entity publishes its runtime's origin and whether it has a worker computer, keyed by its own user ID, so
 # MindRoom Chat finds its MindRoom server without a typed URL.
 MINDROOM_SERVER_EVENT_TYPE = "io.mindroom.server"
-# The router publishes the room's open `!yolo` windows as state keyed by its own user ID, for a client indicator.
-YOLO_WINDOWS_EVENT_TYPE = "io.mindroom.yolo"
+# The router publishes the room's open `!auto_approve` windows as state keyed by its own user ID, for a client indicator.
+AUTO_APPROVE_WINDOWS_EVENT_TYPE = "io.mindroom.auto_approve"

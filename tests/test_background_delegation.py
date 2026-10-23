@@ -20,9 +20,9 @@ from agno.tools.function import Function
 
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import toolkit_owners_for_agents
-from mindroom.approval.yolo import start_yolo
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -677,7 +677,7 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("window_thread", ["$thread", "$other"])
-async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_yolo_window(
+async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_auto_approve_window(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     window_thread: str,
@@ -700,7 +700,7 @@ async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_yol
     cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
     cards.decision.set_result(BackgroundApprovalDecision("denied", "No."))
     monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
-    start_yolo(
+    start_auto_approve(
         paths,
         room_id="!room:example.org",
         thread_id=window_thread,

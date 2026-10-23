@@ -10,13 +10,13 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.failure import prepare_approval_failure
 from mindroom.approval.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
     resolve_tool_approval_approver,
 )
-from mindroom.approval.yolo import yolo_expires_at
 from mindroom.cancellation import cancel_source_from_failure_reason
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
@@ -208,7 +208,7 @@ async def plan_approval_calls(
 ) -> _ApprovalPausePlan:
     """Evaluate policy once and normalize exact calls with integer deadlines.
 
-    The approver's YOLO window in the conversation approves every call that would ask them.
+    The approver's auto-approve window in the conversation approves every call that would ask them.
     """
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
     decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
@@ -225,12 +225,13 @@ async def plan_approval_calls(
         )
         requires_approval = requires_approval or tool_authored_confirmation
         # Read after the awaited policy, so a window that ended meanwhile approves nothing.
-        yolo = requires_approval and (
-            yolo_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id) is not None
+        window_open = requires_approval and (
+            auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id)
+            is not None
         )
         decisions[tool_call_id] = (
             ContinuationDecision.APPROVED
-            if not requires_approval or yolo
+            if not requires_approval or window_open
             else None
             if approver_id is not None
             else ContinuationDecision.DENIED,

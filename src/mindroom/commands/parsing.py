@@ -30,7 +30,7 @@ class CommandType(Enum):
     MODEL = "model"  # Per-thread model override command
     ROOM_MODEL = "room_model"  # Room-level model override command
     THREAD_MODE = "thread_mode"  # Room-level thread mode override command
-    YOLO = "yolo"  # Per-thread window that skips tool approval
+    AUTO_APPROVE = "auto_approve"  # Per-thread window that skips tool approval
     ENCRYPT = "encrypt"  # Room encryption enablement command
     E2EE = "e2ee"  # Encryption diagnostics command
     HI = "hi"  # Welcome message command
@@ -62,8 +62,8 @@ _COMMAND_DOCS = {
         "!thread_mode [room|thread|reset|show]",
         "Show or switch the thread mode used in the current room (room admin only)",
     ),
-    CommandType.YOLO: (
-        "!yolo [<minutes>|<hours>h|off]",
+    CommandType.AUTO_APPROVE: (
+        "!auto_approve [<minutes>|<hours>h|off]",
         "Run your tool calls in this thread without approval for a while, or show or end that window",
     ),
     CommandType.ENCRYPT: (
@@ -145,7 +145,7 @@ class _CommandParser:
     MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
     ROOM_MODEL_PATTERN = re.compile(r"^!room[_-]?model(?:\s+(.+))?$", re.IGNORECASE)
     THREAD_MODE_PATTERN = re.compile(r"^!thread[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
-    YOLO_PATTERN = re.compile(r"^!yolo(?:\s+(.+))?$", re.IGNORECASE)
+    AUTO_APPROVE_PATTERN = re.compile(r"^!auto[_-]?approve(?:\s+(.+))?$", re.IGNORECASE)
     ENCRYPT_PATTERN = re.compile(r"^!encrypt(?:\s+(.+))?$", re.IGNORECASE)
     E2EE_PATTERN = re.compile(r"^!e2ee$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
@@ -282,9 +282,13 @@ class _CommandParser:
                 raw_text=message,
             )
 
-        match = self.YOLO_PATTERN.match(message)
+        match = self.AUTO_APPROVE_PATTERN.match(message)
         if match:
-            return Command(type=CommandType.YOLO, args={"args_text": (match.group(1) or "").strip()}, raw_text=message)
+            return Command(
+                type=CommandType.AUTO_APPROVE,
+                args={"args_text": (match.group(1) or "").strip()},
+                raw_text=message,
+            )
 
         match = self.ENCRYPT_PATTERN.match(message)
         if match:
@@ -530,16 +534,16 @@ How it works:
 - The override is stored in MindRoom runtime state, not config.yaml
 - Only Matrix room admins can set or reset the override"""
 
-    if topic == "yolo":
-        return """**YOLO Command**
+    if topic in {"auto_approve", "auto-approve", "autoapprove"}:
+        return """**Auto-approve Command**
 
-Usage: `!yolo [<minutes>|<hours>h|off]` - Run your tool calls in this thread without approval for a while
+Usage: `!auto_approve [<minutes>|<hours>h|off]` - Run your tool calls in this thread without approval for a while
 
 **Examples:**
-- `!yolo 30` - Skip approval cards for your tool calls in this thread for 30 minutes
-- `!yolo 2h` - Do the same for 2 hours (at most 24 hours)
-- `!yolo` - Show when the current window ends
-- `!yolo off` - End the window now
+- `!auto_approve 30` - Skip approval cards for your tool calls in this thread for 30 minutes
+- `!auto_approve 2h` - Do the same for 2 hours (at most 24 hours)
+- `!auto_approve` - Show when the current window ends
+- `!auto_approve off` - End the window now
 
 How it works:
 - Every tool call you request in this thread runs without an approval card until the window ends
