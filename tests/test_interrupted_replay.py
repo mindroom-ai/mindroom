@@ -395,10 +395,7 @@ def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> N
 
 def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_path: Path) -> None:
     """Interrupted replay persistence must merge against the latest stored session state."""
-    storage = create_state_storage(
-        "test_agent",
-        tmp_path,
-    )
+    storage = create_state_storage("test_agent", tmp_path)
     seed_session(
         storage,
         ConversationSession(
@@ -752,10 +749,7 @@ def test_turn_recorder_keeps_seed_metadata_when_runtime_metadata_is_missing() ->
 
 def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_path: Path) -> None:
     """Even hard-cancelled turns with no observed assistant state should persist one interrupted record."""
-    storage = create_state_storage(
-        "test_agent",
-        tmp_path,
-    )
+    storage = create_state_storage("test_agent", tmp_path)
     snapshot = build_interrupted_replay_snapshot(
         user_message="Please continue",
         user_message_is_structured=False,

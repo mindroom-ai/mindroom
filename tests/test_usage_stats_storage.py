@@ -224,10 +224,7 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
 
 def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) -> None:
     """The adapter reads the exact JSON representation written by MindRoom's Agno storage."""
-    storage = create_state_storage(
-        "code",
-        tmp_path,
-    )
+    storage = create_state_storage("code", tmp_path)
     seed_session(
         storage,
         ConversationSession(

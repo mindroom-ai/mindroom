@@ -733,10 +733,7 @@ def test_daily_usage_returns_empty_breakdown_without_retained_runs(
 def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool) -> None:
     paths = _paths(tmp_path)
     config = Config(agents={"code": AgentConfig(display_name="Code")})
-    storage = create_state_storage(
-        "code",
-        paths.storage_root / "agents" / "code",
-    )
+    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
     first_day = int(datetime(2026, 9, 14, tzinfo=UTC).timestamp())
     metrics = RunMetrics(
         input_tokens=17,
@@ -969,10 +966,7 @@ def test_migration_keeps_valid_usage_beside_a_malformed_counter(tmp_path: Path) 
 def test_unusable_model_details_preserve_daily_totals(tmp_path: Path, details: object) -> None:
     paths = _paths(tmp_path)
     config = Config(agents={"code": AgentConfig(display_name="Code")})
-    storage = create_state_storage(
-        "code",
-        paths.storage_root / "agents" / "code",
-    )
+    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
     storage.save_run(
         ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
         RunRecord(

@@ -99,10 +99,7 @@ def seed_private_usage(
             worker_key=resolved.execution.worker_key,
             requester_id=requester,
         )
-    storage = create_state_storage(
-        agent,
-        resolved.session_state_root,
-    )
+    storage = create_state_storage(agent, resolved.session_state_root)
     seed_session(
         storage,
         ConversationSession(

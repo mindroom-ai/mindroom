@@ -102,10 +102,7 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
     """Both tool entry points expose daily tokens only when explicitly requested."""
     context = _context(tmp_path, administrators=["@alice:example.test"])
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
-    storage = create_state_storage(
-        "usage",
-        context.runtime_paths.storage_root / "agents" / "usage",
-    )
+    storage = create_state_storage("usage", context.runtime_paths.storage_root / "agents" / "usage")
     seed_session(
         storage,
         ConversationSession(

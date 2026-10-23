@@ -396,10 +396,7 @@ def _notice_count(
 
 
 def _queued_notice_storage(tmp_path: Path) -> ConversationStore:
-    return create_state_storage(
-        "queued_notice",
-        tmp_path,
-    )
+    return create_state_storage("queued_notice", tmp_path)
 
 
 async def _after_batch(

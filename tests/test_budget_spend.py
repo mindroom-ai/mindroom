@@ -267,10 +267,7 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
     config = _config()
     paths = _paths(tmp_path)
     model = build_model_provider(config, paths, "astra").identity
-    storage = create_state_storage(
-        "code",
-        paths.storage_root / "agents" / "code",
-    )
+    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
     metrics = RunMetrics(
         input_tokens=1_000_000,
         output_tokens=100_000,
@@ -349,10 +346,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         messages=[request(started)],
         metrics=metrics(1_000_000),
     )
-    storage = create_state_storage(
-        "code",
-        paths.storage_root / "agents" / "code",
-    )
+    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
     with monkeypatch.context() as clock:
         clock.setattr("mindroom.session_storage.store.time", lambda: started)
         session = seed_session(
