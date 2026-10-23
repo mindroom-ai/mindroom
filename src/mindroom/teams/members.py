@@ -371,29 +371,6 @@ def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
     return run_as_member
 
 
-def _resolve_team_instance_id(
-    *,
-    member_names: Sequence[str],
-    config: Config,
-    team_display_name: str,
-    configured_team_name: str | None,
-    scope_context: ScopeSessionContext | None,
-    execution_identity: ToolExecutionIdentity | None,
-) -> str:
-    """Return the team id for scoped and no-session team runs."""
-    if scope_context is not None:
-        return scope_context.scope.scope_id
-    bound_scope = resolve_bound_team_scope_context(
-        member_names=member_names,
-        config=config,
-        team_name=configured_team_name,
-        execution_identity=execution_identity,
-    )
-    if bound_scope is not None:
-        return bound_scope.scope.scope_id
-    return team_display_name
-
-
 @dataclass(frozen=True)
 class BuiltTeam:
     """One team ready to run: its spec, the tool-call policy the leader's own tools run under, and the team's jobs.
@@ -428,14 +405,16 @@ def build_team_spec(
     """
     model = build_model_provider(config, runtime_paths, model_name, execution_identity=execution_identity)
     team_view = config.resolve_entity(configured_team_name)
-    team_id = _resolve_team_instance_id(
-        member_names=members.requested_agent_names,
-        config=config,
-        team_display_name=team_display_name,
-        configured_team_name=configured_team_name,
-        scope_context=scope_context,
-        execution_identity=execution_identity,
-    )
+    if scope_context is not None:
+        team_id = scope_context.scope.scope_id
+    else:
+        bound_scope = resolve_bound_team_scope_context(
+            member_names=members.requested_agent_names,
+            config=config,
+            team_name=configured_team_name,
+            execution_identity=execution_identity,
+        )
+        team_id = bound_scope.scope.scope_id if bound_scope is not None else team_display_name
     jobs = team_background_jobs(config, runtime_paths, execution_identity)
     leader_toolkits = () if jobs is None else (jobs.controls,)
     team_members = tuple(
