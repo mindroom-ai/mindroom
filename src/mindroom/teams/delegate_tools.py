@@ -146,8 +146,9 @@ def collaborate_result_text(
     Blocking, a piece is the member's result labeled with its name, as Agno's non-stream broadcast gave it. A paused
     member contributes Agno's notice and its requirements reach the team run.
     """
-    # TODO(simplify): Pieces join with no separator, and only blocking pieces are labeled, by a third result rule
-    # (``_labeled_result``). Label every piece by one rule and separate pieces with blank lines. Models would notice.
+    # TODO(simplify): Pieces join with no separator, and a finished member's piece is labeled only without streaming,
+    # by a third result rule (``_labeled_result``). Label every piece by one rule and separate pieces with blank lines.
+    # Models would notice.
     pieces: list[str] = []
     for member, child in zip(members, children, strict=True):
         if child.status is RunStatus.paused:
