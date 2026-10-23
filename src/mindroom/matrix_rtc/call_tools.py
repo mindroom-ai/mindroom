@@ -928,29 +928,19 @@ def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild
         # The loop pauses a run for these flags before any tool-call policy can refuse the call.
         return replace(function, requires_confirmation=False, external_execution=False, approval_type=None)
 
+    async def refuse(call: ToolCall, call_next: ToolNext) -> object:
+        if call.function.name in refused:
+            logger.info("call_tool_blocked_needs_text_chat", tool=call.function.name)
+            return _TEXT_CHAT_REQUIRED_MESSAGE
+        return await call_next(call.arguments)
+
     toolkits = tuple(
         replace(toolkit, functions=tuple(callable_in_a_call(function) for function in toolkit.functions))
         for toolkit in build.spec.toolkits
     )
     # A call's turns run their tools inline, so job admission runs every call in place; the refusal answers before
     # the rest of the policy sees the call.
-    return replace(
-        build,
-        spec=replace(build.spec, toolkits=toolkits),
-        tool_policy=(_text_chat_refusal(frozenset(refused)), *build.tool_policy),
-    )
-
-
-def _text_chat_refusal(names: frozenset[str]) -> ToolMiddleware:
-    """Answer a call of one of ``names`` with the text-chat notice before any other policy sees it."""
-
-    async def refuse(call: ToolCall, call_next: ToolNext) -> object:
-        if call.function.name in names:
-            logger.info("call_tool_blocked_needs_text_chat", tool=call.function.name)
-            return _TEXT_CHAT_REQUIRED_MESSAGE
-        return await call_next(call.arguments)
-
-    return refuse
+    return replace(build, spec=replace(build.spec, toolkits=toolkits), tool_policy=(refuse, *build.tool_policy))
 
 
 def matrix_message_available_during_call(config: Config, agent_name: str) -> bool:
