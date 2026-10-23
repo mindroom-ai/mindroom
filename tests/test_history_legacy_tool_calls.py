@@ -26,12 +26,17 @@ def _stored_run(*messages: dict[str, Any]) -> RunRecord:
     return run
 
 
-def _history(run: RunRecord, *, max_tool_calls: int | None = None) -> list[Message]:
+def _history(
+    run: RunRecord,
+    *,
+    max_messages: int | None = None,
+    max_tool_calls: int | None = None,
+) -> list[Message]:
     return scope_history_messages(
         [run],
         scope=_SCOPE,
         num_history_runs=None,
-        num_history_messages=None,
+        num_history_messages=max_messages,
         max_tool_calls_from_history=max_tool_calls,
     )
 
@@ -77,6 +82,18 @@ def test_the_tool_call_window_counts_only_calls_that_replay() -> None:
     )
 
     assert _calls_and_results(_history(run, max_tool_calls=1)) == ([_CALL], ["call_1"])
+
+
+def test_the_message_window_counts_only_messages_that_replay() -> None:
+    run = _stored_run(
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "tool_calls": [_PLACEHOLDER, _CALL]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+        {"role": "assistant", "content": "It is sunny."},
+    )
+
+    assert [message.role for message in _history(run, max_messages=4)] == ["user", "assistant", "tool", "assistant"]
 
 
 def test_a_paused_run_resumes_without_its_placeholders() -> None:

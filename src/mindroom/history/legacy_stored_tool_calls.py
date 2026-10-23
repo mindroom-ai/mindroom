@@ -29,8 +29,10 @@ __all__ = ["repair_legacy_tool_calls"]
 # Legacy format: Streamed OpenAI history retained id-only tool placeholders and their orphan tool results.
 # Last legacy release: v2026.7.172; replacement: v2026.7.173 filtered sparse placeholders during writes.
 # Handling: Remove each placeholder and its matching result, for every route, where stored history and a paused run
-# become request messages, before the tool-call window counts results, preserving unchanged message identities.
+# become request messages, before the message and tool-call windows count them, preserving unchanged message
+# identities.
 # Coverage: tests/test_history_legacy_tool_calls.py::test_placeholders_and_their_results_never_replay,
+# tests/test_history_legacy_tool_calls.py::test_the_message_window_counts_only_messages_that_replay,
 # tests/test_history_legacy_tool_calls.py::test_the_tool_call_window_counts_only_calls_that_replay,
 # tests/test_history_legacy_tool_calls.py::test_a_paused_run_resumes_without_its_placeholders,
 # tests/providers/test_provider_families.py::test_every_family_replays_the_tool_calls_any_provider_stored
