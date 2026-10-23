@@ -295,23 +295,15 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         msg = f"{exc} ({path})"
         raise PluginValidationError(msg) from exc
 
-    tools_module = data.get("tools_module")
-    if tools_module is not None and not isinstance(tools_module, str):
-        msg = f"Plugin tools_module must be a string: {path}"
-        logger.error("Plugin tools_module must be a string", path=str(path))
-        raise PluginValidationError(msg)
-
-    hooks_module = data.get("hooks_module")
-    if hooks_module is not None and not isinstance(hooks_module, str):
-        msg = f"Plugin hooks_module must be a string: {path}"
-        logger.error("Plugin hooks_module must be a string", path=str(path))
-        raise PluginValidationError(msg)
-
-    oauth_module = data.get("oauth_module")
-    if oauth_module is not None and not isinstance(oauth_module, str):
-        msg = f"Plugin oauth_module must be a string: {path}"
-        logger.error("Plugin oauth_module must be a string", path=str(path))
-        raise PluginValidationError(msg)
+    modules: dict[str, str | None] = {}
+    for field in ("tools_module", "hooks_module", "oauth_module"):
+        module = data.get(field)
+        if module is not None and not isinstance(module, str):
+            event = f"Plugin {field} must be a string"
+            logger.error(event, path=str(path))
+            msg = f"{event}: {path}"
+            raise PluginValidationError(msg)
+        modules[field] = module
 
     raw_skills = data.get("skills", [])
     if raw_skills is None:
@@ -321,13 +313,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         logger.error("Plugin skills must be a list of strings", path=str(path))
         raise PluginValidationError(msg)
 
-    return _PluginManifest(
-        name=normalized_name,
-        tools_module=tools_module,
-        hooks_module=hooks_module,
-        oauth_module=oauth_module,
-        skills=raw_skills,
-    )
+    return _PluginManifest(name=normalized_name, skills=raw_skills, **modules)
 
 
 def _resolve_module_path(root: Path, module_path: str | None, *, kind: str) -> Path | None:
