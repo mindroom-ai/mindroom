@@ -94,15 +94,12 @@ def _with_prompt_cache_ladder(body: dict[str, Any], cache_control: dict[str, str
     if marker_budget <= 0:
         return body
     prepared = dict(body)
-    messages = prepared["messages"]
-    if messages:
-        marked_messages, markers_added = mark_message_cache_rungs(
-            messages,
-            cache_control,
-            min(MESSAGE_RUNG_COUNT, marker_budget),
-        )
-        prepared["messages"] = marked_messages
-        marker_budget -= markers_added
+    prepared["messages"], markers_added = mark_message_cache_rungs(
+        body["messages"],
+        cache_control,
+        min(MESSAGE_RUNG_COUNT, marker_budget),
+    )
+    marker_budget -= markers_added
     if marker_budget > 0:
         marked_tools, tools_marked = mark_last_tool(prepared.get("tools"), cache_control)
         if tools_marked:
