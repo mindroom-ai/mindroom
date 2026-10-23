@@ -54,14 +54,17 @@ EMPTY_REQUEST = ModelRequest(messages=())
 class LoopState:
     """What a pre-request hook sees and may change before one model request.
 
-    ``messages`` is the live list the loop sends and appends to, so a hook rewrites it in place; ``tools`` are the
-    definitions this request offers; ``record`` is the running run, whose tool executions and requirements the loop
+    ``messages`` is the live list the loop sends and appends to, so a hook rewrites it in place; ``offered`` holds the
+    functions that answer the run's calls; ``tools`` are the definitions this request offers, which start as the
+    offered functions' own and which a hook may extend (the wait budget job admission accepts) or replace (a skill
+    review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions and requirements the loop
     fills as it goes; ``loop_start_ids`` are the ids of the messages the loop started with; ``request_template``
     carries the per-run request settings, which a hook may replace for the rest of the run (mid-turn compaction
     turning the provider's compaction off after it compacted as text).
     """
 
     messages: list[Message]
+    offered: PreparedTools
     tools: tuple[ToolSpec, ...]
     run: RunContext
     record: AnyRunRecord
@@ -177,6 +180,7 @@ async def run_model_loop(
     assert metrics is not None
     state = LoopState(
         messages=messages,
+        offered=tools,
         tools=tools.specs(),
         run=run,
         record=record,
@@ -187,7 +191,7 @@ async def run_model_loop(
     max_requests = None if tool_call_limit is None else tool_call_limit + _EXTRA_MODEL_REQUESTS
     progress = _Progress()
     if resumed is not None:
-        async for event in _answer_resumed(resumed, state, tools, progress, hooks):
+        async for event in _answer_resumed(resumed, state, progress, hooks):
             yield event
     while not (progress.stopped or progress.paused):
         outbound = await _before_request(hooks, state, max_requests=max_requests)
@@ -210,7 +214,7 @@ async def run_model_loop(
         yield RequestCompleted(model_id=identity.id, provider=identity.provider_name, usage=message.metrics)
         if not message.tool_calls:
             break
-        async for event in _run_tool_batch(message, turn.stop_reason, state, tools, progress, hooks, tool_call_limit):
+        async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, tool_call_limit):
             yield event
     if hooks.on_loop_end is not None and progress.last_request is not None:
         hooks.on_loop_end(state, progress.last_request)
@@ -269,7 +273,6 @@ async def _run_tool_batch(
     message: Message,
     stop_reason: StopReason | None,
     state: LoopState,
-    tools: PreparedTools,
     progress: _Progress,
     hooks: LoopHooks,
     tool_call_limit: int | None,
@@ -281,10 +284,10 @@ async def _run_tool_batch(
         progress.stopped = await _answer_batch(state.messages, answers, hooks.after_tool_batch)
         return
     if hooks.rewrite_tool_calls is not None:
-        message.tool_calls = hooks.rewrite_tool_calls(message.tool_calls, tools.functions)
+        message.tool_calls = hooks.rewrite_tool_calls(message.tool_calls, state.offered.functions)
     batch = plan_tool_batch(
         message.tool_calls,
-        tools.functions,
+        state.offered.functions,
         state.messages,
         calls_so_far=progress.calls_so_far,
         tool_call_limit=tool_call_limit,
@@ -308,7 +311,6 @@ async def _run_tool_batch(
 async def _answer_resumed(
     decided: Sequence[RunRequirement],
     state: LoopState,
-    tools: PreparedTools,
     progress: _Progress,
     hooks: LoopHooks,
 ) -> AsyncIterator[ToolStarted | ToolCompleted]:
@@ -323,7 +325,7 @@ async def _answer_resumed(
         execution = requirement.tool_execution
         if requirement.confirmation is True:
             assert execution.tool_name is not None
-            function = tools.functions[execution.tool_name]
+            function = state.offered.functions[execution.tool_name]
             async for event in _run_approved(function, execution, state.run, hooks, results):
                 yield event
         elif requirement.confirmation is False:

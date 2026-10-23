@@ -9,6 +9,7 @@ import pytest
 
 from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.ai import stream_agent_response
 from mindroom.approval import receipt as approval_receipt
 from mindroom.approval.receipt import (
@@ -547,6 +548,7 @@ def _state_stub() -> object:
 
     return LoopState(
         messages=[Message(role="system", content="rules")],
+        offered=PreparedTools(functions={}, instructions=()),
         tools=(),
         run=context(),
         record=RunRecord(run_id="run-1"),

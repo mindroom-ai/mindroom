@@ -14,7 +14,7 @@ import pytest
 from mindroom.agent_cli.bash import MinimalBashTools
 from mindroom.agent_cli.checkpoint import BatchCheckpoint, save_cli_session
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState
-from mindroom.agent_loop.tools import PlannedCall
+from mindroom.agent_loop.tools import PlannedCall, PreparedTools
 from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import Message
@@ -58,6 +58,7 @@ async def _capture(checkpoint: BatchCheckpoint, record: RunRecord, messages: lis
     ]
     state = LoopState(
         messages=messages,
+        offered=PreparedTools(functions={}, instructions=()),
         tools=(),
         run=checkpoint.catalog.run,
         record=record,

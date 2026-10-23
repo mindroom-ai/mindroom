@@ -18,7 +18,7 @@ import pytest
 import structlog
 from agno.tools import Toolkit
 
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, LoopState, SendRequest
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
@@ -52,6 +52,7 @@ from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, count_model_replies, render_transcript
+from mindroom.tool_jobs.execution import project_definitions
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT
@@ -1473,8 +1474,17 @@ async def _answer(
     run_id: str = "r1",
     model_name: str = "default",
     settings: ModelRequest = EMPTY_REQUEST,
+    managed: frozenset[str] = frozenset(),
 ) -> None:
-    """Run one response on the owned loop with the skill review's capture installed, as a counting response does."""
+    """Run one response on the owned loop with the skill review's capture installed, as a counting response does.
+
+    The functions named in ``managed`` can become jobs, so the response's requests offer their wait budget.
+    """
+
+    async def offer_wait_budget(state: LoopState) -> SendRequest:
+        state.tools = project_definitions(state.tools, managed)
+        return SendRequest()
+
     agent = AgentSpec(
         id="mind",
         name="Mind",
@@ -1482,7 +1492,10 @@ async def _answer(
         system_message=Message(role="system", content="You are Mind, a deployment assistant."),
         toolkits=(AdaptedToolkit(name="agent", functions=tuple(tools), instructions=None),),
     )
-    hooks = LoopHooks(on_loop_end=capture_final_request(capture, model, run_id=run_id, model_name=model_name))
+    hooks = LoopHooks(
+        before_request=(offer_wait_budget,),
+        on_loop_end=capture_final_request(capture, model, run_id=run_id, model_name=model_name),
+    )
     await collect(
         run_agent(
             agent,
@@ -1550,6 +1563,27 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.request_breakdown is not None
     assert {row.kind for row in report.request_breakdown} == {"skill_learning"}
+
+
+@pytest.mark.asyncio
+async def test_the_fork_offers_the_run_s_own_definitions_without_the_wait_budget_of_its_jobs(tmp_path: Path) -> None:
+    """A reply whose calls can become jobs offers their wait budget; the fork offers the definitions its run declares.
+
+    The review answers its calls with its own skill functions, which take no wait budget, so skill_manage writes
+    the skill instead of refusing an argument it does not accept.
+    """
+    config, paths = _learning_agent_with_a_skill(tmp_path)
+    model = _model()
+    capture = SkillReviewCapture()
+    tools = _agent_tools(config, paths, [])
+    await _answer(model, capture, tools, managed=frozenset(tool.name for tool in tools))
+    model.script = [("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED})]
+    await _review(config, paths, captured=capture.latest)
+    sent, forked = model.received[:2]
+    offered = {tool.name: tool for tool in sent.tools}
+    assert "background_after" in offered["skill_manage"].parameters["properties"]
+    assert forked.tools == tuple(sorted((tool.definition() for tool in tools), key=lambda tool: tool.name))
+    assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
 
 
 @pytest.mark.asyncio
