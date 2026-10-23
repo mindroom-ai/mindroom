@@ -34,43 +34,27 @@ from mindroom.api.openai_request_parsing import (
     AUTO_MODEL_NAME,
     RESERVED_MODEL_NAMES,
     TEAM_MODEL_PREFIX,
+    ChatMessage,
+    convert_messages,
+    derive_session_id,
     openai_compatible_agent_names,
+    openai_incompatible_agents,
     parse_chat_completion_body,
     validate_chat_request,
-)
-from mindroom.api.openai_request_parsing import (
-    ChatMessage as _ChatMessage,
-)
-from mindroom.api.openai_request_parsing import (
-    convert_messages as _convert_messages,
-)
-from mindroom.api.openai_request_parsing import (
-    derive_session_id as _derive_session_id,
-)
-from mindroom.api.openai_request_parsing import (
-    openai_incompatible_agents as _openai_incompatible_agents,
 )
 from mindroom.api.openai_streaming_protocol import (
     SSE_DONE,
     CompletionStreamState,
+    OpenAIJSONResponse,
+    OpenAIStreamingResponse,
+    error_response,
     extract_agent_stream_failure,
     extract_stream_text,
     finalize_pending_tools,
     format_stream_tool_event,
+    is_error_response,
     new_completion_id,
     sse_chunk,
-)
-from mindroom.api.openai_streaming_protocol import (
-    OpenAIJSONResponse as _OpenAIJSONResponse,
-)
-from mindroom.api.openai_streaming_protocol import (
-    OpenAIStreamingResponse as _OpenAIStreamingResponse,
-)
-from mindroom.api.openai_streaming_protocol import (
-    error_response as _error_response,
-)
-from mindroom.api.openai_streaming_protocol import (
-    is_error_response as _is_error_response,
 )
 from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
@@ -172,7 +156,7 @@ def _attach_openai_completion_lock_release(
     completion_lock: asyncio.Lock,
     budget_monitor: BudgetMonitor | None,
 ) -> JSONResponse | StreamingResponse:
-    if not isinstance(response, (_OpenAIJSONResponse, _OpenAIStreamingResponse)):
+    if not isinstance(response, (OpenAIJSONResponse, OpenAIStreamingResponse)):
         _release_openai_completion_lock(completion_lock)
         msg = f"OpenAI completion response must use a finalizer-safe response class, got {type(response).__name__}"
         raise TypeError(msg)
@@ -231,7 +215,7 @@ class _ChatCompletionChoice(BaseModel):
     """A single choice in a chat completion response."""
 
     index: int = 0
-    message: _ChatMessage
+    message: ChatMessage
     finish_reason: str = "stop"
 
 
@@ -367,9 +351,9 @@ def _authenticate_request(  # noqa: PLR0911
             # A completion runs an agent with its tools, so a rebound or cross-site page must not trigger one.
             rejection = open_access_rejection(request.headers, request.method, runtime_paths)
             if rejection is not None:
-                return _error_response(rejection.status_code, rejection.detail, code="permission_denied")
+                return error_response(rejection.status_code, rejection.detail, code="permission_denied")
             return _AuthenticatedCaller(session_namespace="noauth", requester_id=None)
-        return _error_response(
+        return error_response(
             401,
             "OpenAI-compatible API keys are not configured",
             code="invalid_api_key",
@@ -378,7 +362,7 @@ def _authenticate_request(  # noqa: PLR0911
     valid_keys = {k.strip() for k in keys_env.split(",") if k.strip()}
 
     if not authorization or not authorization.startswith("Bearer "):
-        return _error_response(
+        return error_response(
             401,
             "Missing or invalid Authorization header",
             code="invalid_api_key",
@@ -386,7 +370,7 @@ def _authenticate_request(  # noqa: PLR0911
 
     token = authorization.removeprefix("Bearer ").strip()
     if token not in valid_keys:
-        return _error_response(401, "Invalid API key", code="invalid_api_key")
+        return error_response(401, "Invalid API key", code="invalid_api_key")
 
     requester_id = _api_key_requester(token, runtime_paths)
     if isinstance(requester_id, JSONResponse):
@@ -406,7 +390,7 @@ def _api_key_requester(token: str, runtime_paths: RuntimePaths) -> JSONResponse 
         mappings = TypeAdapter(dict[StrictStr, StrictStr]).validate_json(mappings_env)
         validate_concrete_matrix_user_ids(list(set(mappings.values())), field_name="API requesters")
     except (ValueError, TypeError):
-        return _error_response(503, "Invalid API requester configuration", error_type="server_error")
+        return error_response(503, "Invalid API requester configuration", error_type="server_error")
     return mappings.get(token)
 
 
@@ -429,9 +413,9 @@ def _parse_chat_request(
     if validation_error:
         return validation_error
 
-    prompt, thread_history = _convert_messages(req.messages)
+    prompt, thread_history = convert_messages(req.messages)
     if not prompt:
-        return _error_response(400, "No user message content found in messages")
+        return error_response(400, "No user message content found in messages")
 
     return req, config, runtime_paths, prompt, thread_history
 
@@ -447,7 +431,7 @@ def _requester_authority(
         return None
     requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
     if not is_human_requester_id(requester_id, config, runtime_paths):
-        return _error_response(403, "API requester must be a human identity", code="permission_denied")
+        return error_response(403, "API requester must be a human identity", code="permission_denied")
     trigger_runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
 
     def current_config() -> Config | None:
@@ -501,9 +485,9 @@ async def _resolve_auto_route(
     if authority is not None:
         available = [name for name in available if _requester_allows_model(name, authority)]
         if not available:
-            return _error_response(403, "No agents are authorized for this requester", code="permission_denied")
+            return error_response(403, "No agents are authorized for this requester", code="permission_denied")
     if not available:
-        return _error_response(
+        return error_response(
             500,
             "No OpenAI-compatible agents configured for auto-routing",
             error_type="server_error",
@@ -515,7 +499,7 @@ async def _resolve_auto_route(
         logger.warning("Auto-routing failed, falling back", agent=routed)
         return routed
     if selection.entity_name is None:
-        return _error_response(
+        return error_response(
             400,
             "No suitable agent for this request; choose a model explicitly or rephrase the request",
             code="no_suitable_responder",
@@ -585,7 +569,7 @@ async def list_models(
     for team_name, team_config in (config.teams or {}).items():
         if not _requester_allows_model(f"{TEAM_MODEL_PREFIX}{team_name}", authority):
             continue
-        if _openai_incompatible_agents(team_config.agents, config):
+        if openai_incompatible_agents(team_config.agents, config):
             continue
         models.append(
             _ModelObject(
@@ -668,13 +652,13 @@ async def _chat_completions(  # noqa: C901, PLR0912
         agent_name = result
 
     if not _requester_allows_model(agent_name, authority):
-        return _error_response(403, "This requester is not authorized for the model", code="permission_denied")
+        return error_response(403, "This requester is not authorized for the model", code="permission_denied")
 
     activity.responder = agent_name
     activity.requester_id = authority.requester_id if authority is not None else None
 
     # Derive a key-namespaced session ID from request headers or fallback UUID.
-    session_id = _derive_session_id(agent_name, request, session_namespace)
+    session_id = derive_session_id(agent_name, request, session_namespace)
     if authority is not None:
         requester_digest = hashlib.sha256(authority.requester_id.encode()).hexdigest()
         session_id = f"requester:{requester_digest}:{session_id}"
@@ -853,9 +837,9 @@ async def _non_stream_completion(
     )
 
     # Detect error responses from ai_response()
-    if _is_error_response(response_text):
+    if is_error_response(response_text):
         logger.warning("AI response returned error", model=agent_name, session_id=session_id, error=response_text)
-        return _error_response(500, "Agent execution failed", error_type="server_error")
+        return error_response(500, "Agent execution failed", error_type="server_error")
 
     logger.info("Chat completion sent", model=agent_name, stream=False, session_id=session_id)
     response = _ChatCompletionResponse(
@@ -864,12 +848,12 @@ async def _non_stream_completion(
         model=agent_name,
         choices=[
             _ChatCompletionChoice(
-                message=_ChatMessage(role="assistant", content=response_text),
+                message=ChatMessage(role="assistant", content=response_text),
             ),
         ],
         usage=_usage_from_run_metadata(run_metadata),
     )
-    return _OpenAIJSONResponse(content=response.model_dump())
+    return OpenAIJSONResponse(content=response.model_dump())
 
 
 # ---------------------------------------------------------------------------
@@ -919,7 +903,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
     first_event = await anext(aiter(stream), None)
     if first_event is None:
         await stream.aclose()
-        return _error_response(500, "Agent returned empty response", error_type="server_error")
+        return error_response(500, "Agent returned empty response", error_type="server_error")
 
     first_error = extract_agent_stream_failure(first_event)
     if first_error is not None:
@@ -930,7 +914,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
             error=first_error,
         )
         await stream.aclose()
-        return _error_response(500, "Agent execution failed", error_type="server_error")
+        return error_response(500, "Agent execution failed", error_type="server_error")
 
     state = CompletionStreamState.begin(agent_name)
     stream_completed = False
@@ -993,7 +977,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
         finally:
             await stream.aclose()
 
-    response = _OpenAIStreamingResponse(
+    response = OpenAIStreamingResponse(
         event_generator(),
         media_type="text/event-stream",
     )
@@ -1130,7 +1114,7 @@ async def _prepare_team_turn(
             )
     except Exception:
         logger.exception("Team build failed", team=team_name)
-        return _error_response(500, "Team execution failed", error_type="server_error")
+        return error_response(500, "Team execution failed", error_type="server_error")
 
     logger.info(
         "Team streaming request" if stream else "Team completion request",
@@ -1154,7 +1138,7 @@ async def _prepare_team_turn(
         )
     except Exception:
         logger.exception("Team member preparation failed", team=team_name)
-        return _error_response(500, "Team execution failed", error_type="server_error")
+        return error_response(500, "Team execution failed", error_type="server_error")
     return built, prepared
 
 
@@ -1226,16 +1210,16 @@ async def _non_stream_team_completion(
                         records.collect(event)
         except Exception:
             logger.exception("Team execution failed", team=team_name)
-            return _error_response(500, "Team execution failed", error_type="server_error")
+            return error_response(500, "Team execution failed", error_type="server_error")
         record = records.terminal(team_name)
         # The member and consensus document of the blocking Matrix reply, as Agno's blocking team reply rendered it on
         # both surfaces; API clients replay this text as history. A run in which nobody wrote anything gives empty
         # text, as it did with Agno, where the Matrix reply falls back to the leader's own messages.
         response_text = format_team_response(record, record.ended_member_runs)
 
-        if _is_error_response(response_text):
+        if is_error_response(response_text):
             logger.warning("Team response returned error", team=team_name, error=response_text)
-            return _error_response(500, "Team execution failed", error_type="server_error")
+            return error_response(500, "Team execution failed", error_type="server_error")
 
         logger.info("Team completion sent", team=team_name, stream=False)
         result = _ChatCompletionResponse(
@@ -1244,12 +1228,12 @@ async def _non_stream_team_completion(
             model=model_id,
             choices=[
                 _ChatCompletionChoice(
-                    message=_ChatMessage(role="assistant", content=response_text),
+                    message=ChatMessage(role="assistant", content=response_text),
                 ),
             ],
             usage=_usage_from_team_output(record, record.ended_member_runs),
         )
-        return _OpenAIJSONResponse(content=result.model_dump())
+        return OpenAIJSONResponse(content=result.model_dump())
 
 
 async def _stream_team_completion(  # noqa: C901
@@ -1337,11 +1321,11 @@ async def _stream_team_completion(  # noqa: C901
         except Exception:
             logger.exception("Team execution failed", team=team_name)
             await _cleanup()
-            return _error_response(500, "Team execution failed", error_type="server_error")
+            return error_response(500, "Team execution failed", error_type="server_error")
 
         if first_event is None:
             await _cleanup()
-            return _error_response(500, "Team returned empty response", error_type="server_error")
+            return error_response(500, "Team returned empty response", error_type="server_error")
 
         state = CompletionStreamState.begin(model_id)
         stream_completed = False
@@ -1367,7 +1351,7 @@ async def _stream_team_completion(  # noqa: C901
             finally:
                 await _cleanup()
 
-        response = _OpenAIStreamingResponse(
+        response = OpenAIStreamingResponse(
             _event_generator(),
             media_type="text/event-stream",
         )

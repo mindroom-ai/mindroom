@@ -42,13 +42,8 @@ from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
-from mindroom.api.openai_compat import (
-    _ChatMessage,
-    _convert_messages,
-    _derive_session_id,
-    _is_error_response,
-)
-from mindroom.api.openai_request_parsing import _extract_content_text
+from mindroom.api.openai_request_parsing import ChatMessage, _extract_content_text, convert_messages, derive_session_id
+from mindroom.api.openai_streaming_protocol import is_error_response
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
@@ -677,7 +672,7 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
         patch("mindroom.api.openai_compat._load_config", side_effect=_capture_load_config),
         patch(
             "mindroom.api.openai_compat._non_stream_completion",
-            new=AsyncMock(return_value=openai_compat._OpenAIJSONResponse({"ok": True})),
+            new=AsyncMock(return_value=openai_compat.OpenAIJSONResponse({"ok": True})),
         ),
         TestClient(app) as client,
     ):
@@ -842,8 +837,8 @@ def test_openai_incompatible_agents_is_order_independent_for_cycles() -> None:
         router=RouterConfig(model="default"),
     )
 
-    assert openai_compat._openai_incompatible_agents(["a", "b"], config) == ["a", "b"]
-    assert openai_compat._openai_incompatible_agents(["b", "a"], config) == ["b", "a"]
+    assert openai_compat.openai_incompatible_agents(["a", "b"], config) == ["a", "b"]
+    assert openai_compat.openai_incompatible_agents(["b", "a"], config) == ["b", "a"]
 
 
 # ---------------------------------------------------------------------------
@@ -1796,7 +1791,7 @@ class TestStreamingCompletion:
                 model_name="default",
             )
 
-        assert isinstance(response, openai_compat._OpenAIStreamingResponse)
+        assert isinstance(response, openai_compat.OpenAIStreamingResponse)
         sent: list[bytes] = []
 
         async def receive() -> dict[str, object]:
@@ -2220,23 +2215,23 @@ class TestAuthentication:
 
 
 class TestMessageConversion:
-    """Tests for _convert_messages()."""
+    """Tests for convert_messages()."""
 
     def test_simple_user_message(self) -> None:
         """Single user message becomes prompt with no history."""
-        messages = [_ChatMessage(role="user", content="Hello")]
-        prompt, history = _convert_messages(messages)
+        messages = [ChatMessage(role="user", content="Hello")]
+        prompt, history = convert_messages(messages)
         assert prompt == "Hello"
         assert history is None
 
     def test_multi_turn_conversation(self) -> None:
         """Multi-turn conversation splits into history + prompt."""
         messages = [
-            _ChatMessage(role="user", content="Hi"),
-            _ChatMessage(role="assistant", content="Hello!"),
-            _ChatMessage(role="user", content="How are you?"),
+            ChatMessage(role="user", content="Hi"),
+            ChatMessage(role="assistant", content="Hello!"),
+            ChatMessage(role="user", content="How are you?"),
         ]
-        prompt, history = _convert_messages(messages)
+        prompt, history = convert_messages(messages)
         assert prompt == "How are you?"
         assert history == [
             ResolvedVisibleMessage.synthetic(sender="user", body="Hi", event_id="$openai-1", timestamp=1),
@@ -2246,10 +2241,10 @@ class TestMessageConversion:
     def test_system_message_prepended(self) -> None:
         """System message is prepended to prompt."""
         messages = [
-            _ChatMessage(role="system", content="You are helpful."),
-            _ChatMessage(role="user", content="Hello"),
+            ChatMessage(role="system", content="You are helpful."),
+            ChatMessage(role="user", content="Hello"),
         ]
-        prompt, history = _convert_messages(messages)
+        prompt, history = convert_messages(messages)
         assert "You are helpful." in prompt
         assert "Hello" in prompt
         assert history is None
@@ -2257,22 +2252,22 @@ class TestMessageConversion:
     def test_developer_role_treated_as_system(self) -> None:
         """Developer role is treated same as system."""
         messages = [
-            _ChatMessage(role="developer", content="Be concise."),
-            _ChatMessage(role="user", content="Hello"),
+            ChatMessage(role="developer", content="Be concise."),
+            ChatMessage(role="user", content="Hello"),
         ]
-        prompt, _ = _convert_messages(messages)
+        prompt, _ = convert_messages(messages)
         assert "Be concise." in prompt
         assert "Hello" in prompt
 
     def test_tool_messages_skipped(self) -> None:
         """Tool role messages are skipped."""
         messages = [
-            _ChatMessage(role="user", content="Run search"),
-            _ChatMessage(role="assistant", content="I'll search for that."),
-            _ChatMessage(role="tool", content="Search results: ..."),
-            _ChatMessage(role="user", content="Thanks"),
+            ChatMessage(role="user", content="Run search"),
+            ChatMessage(role="assistant", content="I'll search for that."),
+            ChatMessage(role="tool", content="Search results: ..."),
+            ChatMessage(role="user", content="Thanks"),
         ]
-        prompt, history = _convert_messages(messages)
+        prompt, history = convert_messages(messages)
         assert prompt == "Thanks"
         # tool message should not appear in history
         assert history is not None
@@ -2281,7 +2276,7 @@ class TestMessageConversion:
     def test_multimodal_content(self) -> None:
         """Multimodal content extracts text parts."""
         messages = [
-            _ChatMessage(
+            ChatMessage(
                 role="user",
                 content=[
                     {"type": "text", "text": "What is this?"},
@@ -2290,43 +2285,43 @@ class TestMessageConversion:
                 ],
             ),
         ]
-        prompt, _ = _convert_messages(messages)
+        prompt, _ = convert_messages(messages)
         assert "What is this?" in prompt
         assert "Describe it." in prompt
 
     def test_none_content_skipped(self) -> None:
         """Messages with None content are skipped."""
         messages = [
-            _ChatMessage(role="assistant", content=None),
-            _ChatMessage(role="user", content="Hello"),
+            ChatMessage(role="assistant", content=None),
+            ChatMessage(role="user", content="Hello"),
         ]
-        prompt, history = _convert_messages(messages)
+        prompt, history = convert_messages(messages)
         assert prompt == "Hello"
         assert history is None
 
     def test_only_system_messages(self) -> None:
         """Only system messages become the prompt."""
         messages = [
-            _ChatMessage(role="system", content="Be helpful."),
+            ChatMessage(role="system", content="Be helpful."),
         ]
-        prompt, history = _convert_messages(messages)
+        prompt, history = convert_messages(messages)
         assert prompt == "Be helpful."
         assert history is None
 
     def test_conversation_ending_with_assistant(self) -> None:
         """Prompt uses last user message even when conversation ends with assistant."""
         messages = [
-            _ChatMessage(role="user", content="Hi"),
-            _ChatMessage(role="assistant", content="Hello! How can I help?"),
+            ChatMessage(role="user", content="Hi"),
+            ChatMessage(role="assistant", content="Hello! How can I help?"),
         ]
-        prompt, history = _convert_messages(messages)
+        prompt, history = convert_messages(messages)
         # Last user message is "Hi", not the trailing assistant message
         assert prompt == "Hi"
         assert history is None
 
     def test_empty_messages(self) -> None:
         """Empty messages returns empty prompt."""
-        prompt, history = _convert_messages([])
+        prompt, history = convert_messages([])
         assert prompt == ""
         assert history is None
 
@@ -2347,7 +2342,7 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
         assert not completion_lock.locked()
         events.append("background")
 
-    response = openai_compat._OpenAIJSONResponse(
+    response = openai_compat.OpenAIJSONResponse(
         content={"ok": True},
         background=BackgroundTask(existing_background),
     )
@@ -2408,7 +2403,7 @@ async def test_openai_stream_response_runs_background_when_client_closes_after_d
     async def background() -> None:
         events.append("background")
 
-    response = openai_compat._OpenAIStreamingResponse(
+    response = openai_compat.OpenAIStreamingResponse(
         body(),
         media_type="text/event-stream",
         background=BackgroundTask(background),
@@ -2450,7 +2445,7 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
     async def background() -> None:
         events.append("background")
 
-    streaming_response = openai_compat._OpenAIStreamingResponse(
+    streaming_response = openai_compat.OpenAIStreamingResponse(
         body(),
         media_type="text/event-stream",
         background=BackgroundTask(background),
@@ -2497,7 +2492,7 @@ async def test_openai_stream_response_skips_background_on_asgi20_disconnect_befo
     async def background() -> None:
         events.append("background")
 
-    streaming_response = openai_compat._OpenAIStreamingResponse(
+    streaming_response = openai_compat.OpenAIStreamingResponse(
         body(),
         media_type="text/event-stream",
         background=BackgroundTask(background),
@@ -2535,7 +2530,7 @@ async def test_openai_json_response_skips_background_when_send_fails() -> None:
         events.append("background")
 
     response = openai_compat._attach_openai_completion_lock_release(
-        openai_compat._OpenAIJSONResponse(
+        openai_compat.OpenAIJSONResponse(
             content={"ok": True},
             background=BackgroundTask(background),
         ),
@@ -2568,7 +2563,7 @@ async def test_openai_error_response_releases_lock_when_send_fails() -> None:
     completion_lock = asyncio.Lock()
     await completion_lock.acquire()
     response = openai_compat._attach_openai_completion_lock_release(
-        openai_compat._error_response(500, "failed", error_type="server_error"),
+        openai_compat.error_response(500, "failed", error_type="server_error"),
         completion_lock,
         None,
     )
@@ -2630,7 +2625,7 @@ def test_unauthenticated_session_namespace_ignores_the_authorization_header(app_
 
 
 class TestSessionIdDerivation:
-    """Tests for _derive_session_id()."""
+    """Tests for derive_session_id()."""
 
     @staticmethod
     def _mock_request(headers: dict[str, str] | None = None) -> Request:
@@ -2643,21 +2638,21 @@ class TestSessionIdDerivation:
     def test_explicit_session_id_header(self) -> None:
         """X-Session-Id header takes highest priority (namespaced with the caller's key)."""
         request = self._mock_request({"X-Session-Id": "my-session"})
-        sid = _derive_session_id("general", request, "noauth")
+        sid = derive_session_id("general", request, "noauth")
         assert sid == "noauth:my-session"
 
     def test_explicit_session_id_namespaced_by_key(self) -> None:
         """Different key namespaces produce different session IDs for one X-Session-Id."""
         request = self._mock_request({"X-Session-Id": "sess"})
-        sid1 = _derive_session_id("general", request, "key-1-digest")
-        sid2 = _derive_session_id("general", request, "key-2-digest")
+        sid1 = derive_session_id("general", request, "key-1-digest")
+        sid2 = derive_session_id("general", request, "key-2-digest")
         assert sid1 == "key-1-digest:sess"
         assert sid2 == "key-2-digest:sess"
 
     def test_librechat_conversation_id(self) -> None:
         """X-LibreChat-Conversation-Id header is used when no X-Session-Id."""
         request = self._mock_request({"X-LibreChat-Conversation-Id": "conv-123"})
-        sid = _derive_session_id("general", request, "noauth")
+        sid = derive_session_id("general", request, "noauth")
         assert sid == "noauth:conv-123:general"
 
     def test_session_id_takes_priority_over_librechat(self) -> None:
@@ -2668,29 +2663,29 @@ class TestSessionIdDerivation:
                 "X-LibreChat-Conversation-Id": "libre",
             },
         )
-        sid = _derive_session_id("general", request, "noauth")
+        sid = derive_session_id("general", request, "noauth")
         assert "explicit" in sid
         assert "libre" not in sid
 
     def test_fallback_generates_ephemeral_session_id(self) -> None:
         """Fallback generates an ephemeral namespaced session ID."""
         request = self._mock_request()
-        sid1 = _derive_session_id("general", request, "noauth")
+        sid1 = derive_session_id("general", request, "noauth")
         assert sid1.startswith("noauth:ephemeral:")
         assert len(sid1) > len("noauth:ephemeral:")
 
     def test_fallback_is_not_deterministic(self) -> None:
         """Fallback IDs differ across requests to avoid cross-chat collisions."""
         request = self._mock_request()
-        sid1 = _derive_session_id("general", request, "noauth")
-        sid2 = _derive_session_id("general", request, "noauth")
+        sid1 = derive_session_id("general", request, "noauth")
+        sid2 = derive_session_id("general", request, "noauth")
         assert sid1 != sid2
 
     def test_fallback_ignores_user_message_content(self, app_client: TestClient) -> None:
         """Without explicit conversation IDs, each request gets a distinct session ID."""
         session_ids: list[str] = []
 
-        original_derive = _derive_session_id
+        original_derive = derive_session_id
 
         def capture_session_id(*args: object, **kwargs: object) -> str:
             sid = original_derive(*args, **kwargs)
@@ -2699,7 +2694,7 @@ class TestSessionIdDerivation:
 
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat._derive_session_id", side_effect=capture_session_id),
+            patch("mindroom.api.openai_compat.derive_session_id", side_effect=capture_session_id),
         ):
             mock_ai.return_value = "Response"
 
@@ -2735,7 +2730,7 @@ class TestSessionIdDerivation:
 
 
 class TestErrorDetection:
-    """Tests for _is_error_response()."""
+    """Tests for is_error_response()."""
 
     @pytest.mark.parametrize(
         "text",
@@ -2748,7 +2743,7 @@ class TestErrorDetection:
     )
     def test_detects_error_prefixes(self, text: str) -> None:
         """Detects all error emoji prefixes."""
-        assert _is_error_response(text) is True
+        assert is_error_response(text) is True
 
     @pytest.mark.parametrize(
         "text",
@@ -2760,7 +2755,7 @@ class TestErrorDetection:
     )
     def test_detects_agent_prefix_errors(self, text: str) -> None:
         """Detects errors with [agent_name] prefix."""
-        assert _is_error_response(text) is True
+        assert is_error_response(text) is True
 
     @pytest.mark.parametrize(
         "text",
@@ -2773,15 +2768,15 @@ class TestErrorDetection:
     )
     def test_detects_raw_provider_errors(self, text: str) -> None:
         """Detects raw provider error strings surfaced by agno."""
-        assert _is_error_response(text) is True
+        assert is_error_response(text) is True
 
     def test_normal_response_not_error(self) -> None:
         """Normal response text is not detected as error."""
-        assert _is_error_response("Hello! How can I help you?") is False
+        assert is_error_response("Hello! How can I help you?") is False
 
     def test_empty_string_not_error(self) -> None:
         """Empty string is not detected as error."""
-        assert _is_error_response("") is False
+        assert is_error_response("") is False
 
 
 # ---------------------------------------------------------------------------
