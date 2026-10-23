@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.usage.legacy_usage_storage import legacy_request_model
 from mindroom.usage.stats_storage import (
-    TOKEN_FIELDS,
     UsageModelMetrics,
     UsageRunNode,
     UsageSessionRow,
@@ -22,7 +21,7 @@ from mindroom.usage.stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
-from mindroom.usage.storage import SYSTEM_USAGE_ENTITY
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, TOKEN_FIELDS
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping

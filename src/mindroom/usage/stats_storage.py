@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     from mindroom.usage.storage import UsageKind
 
 __all__ = [
-    "TOKEN_FIELDS",
     "UsageModelMetrics",
     "UsageRequestMetrics",
     "UsageRunNode",
