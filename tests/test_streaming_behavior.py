@@ -1514,7 +1514,7 @@ class TestStreamingBehavior:
             _ = (args, kwargs)
             send_times.append(clock)
             # The model streams on while the edit is in flight, so every edit lands behind the live text.
-            streaming._update("x")
+            streaming._update("x" * 41)
             mock_response = MagicMock()
             mock_response.__class__ = nio.RoomSendResponse
             mock_response.event_id = "$fast_stream"
@@ -1529,9 +1529,9 @@ class TestStreamingBehavior:
 
         gaps = [later - earlier for earlier, later in pairwise(send_times)]
         assert len(gaps) >= 3
-        # Each edit waits for 100 characters it has not shown: the one that arrived
-        # in flight plus 25 deltas of 4, which comes before the 1 s interval.
-        assert gaps == [pytest.approx(25 * delta_seconds)] * len(gaps)
+        # Each edit waits for 100 characters it has not shown: the 41 that arrived
+        # in flight plus 15 deltas of 4, which comes before the 1 s interval.
+        assert gaps == [pytest.approx(15 * delta_seconds)] * len(gaps)
 
     @pytest.mark.asyncio
     async def test_stale_nonterminal_send_does_not_strand_newer_text(self) -> None:
@@ -1539,6 +1539,7 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
         first_send_started = asyncio.Event()
         allow_first_send_to_finish = asyncio.Event()
+        first_send_landed = asyncio.Event()
         second_yield_started = asyncio.Event()
         send_count = 0
 
@@ -1563,6 +1564,7 @@ class TestStreamingBehavior:
             update_char_threshold=1,
             min_char_update_interval=0.35,
             max_idle=0.25,
+            visible_progress_callback=lambda _body, _trace: first_send_landed.set(),
         )
         streaming.last_update = float("-inf")
 
@@ -1587,17 +1589,20 @@ class TestStreamingBehavior:
             clock = 100.2
             allow_first_send_to_finish.set()
             await consume_task
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            # The delivery owner records the landed edit and declines the queued "B" request
+            # without yielding, so both have happened once this wait returns.
+            await first_send_landed.wait()
 
-            assert shutdown_error is None
             # The edit that just landed restarts the throttle window; only "B" is pending.
             assert mock_client.room_send.call_count == 1
             assert streaming.chars_since_last_update == 1
 
             # A later request with no new text delivers it once the window has passed.
             clock = 100.6
-            await streaming._throttled_send(mock_client, progress_hint=True)
+            _queue_delivery_request(delivery_queue, progress_hint=True)
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
+        assert shutdown_error is None
         assert mock_client.room_send.call_count == 2
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
