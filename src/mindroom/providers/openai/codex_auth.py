@@ -51,15 +51,12 @@ def normalize_codex_model_id(model_id: str) -> str:
 def borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str | None]:
     """Return a valid Codex CLI ChatGPT access token and optional account id."""
     auth_path = _codex_auth_path(codex_home=codex_home)
-    _, tokens = _read_codex_auth(auth_path)
-    usable_token = _usable_access_token(tokens)
-    if usable_token is not None:
+    if (usable_token := _usable_access_token(_read_codex_auth(auth_path)[1])) is not None:
         return usable_token
 
     with advisory_file_lock(auth_path.with_name(f"{auth_path.name}.lock")):
         auth, tokens = _read_codex_auth(auth_path)
-        usable_token = _usable_access_token(tokens)
-        if usable_token is not None:
+        if (usable_token := _usable_access_token(tokens)) is not None:
             return usable_token
 
         refresh_token = tokens.get("refresh_token")

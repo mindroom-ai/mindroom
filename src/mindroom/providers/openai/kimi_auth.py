@@ -42,16 +42,12 @@ def normalize_kimi_model_id(model_id: str) -> str:
 def borrow_kimi_token(*, kimi_home: str | Path | None = None) -> str:
     """Return a valid Kimi Code CLI OAuth access token, refreshing it when expired."""
     credentials_path = _kimi_credentials_path(kimi_home=kimi_home)
-    credentials = _read_kimi_credentials(credentials_path)
-
-    usable_token = _usable_access_token(credentials)
-    if usable_token is not None:
+    if (usable_token := _usable_access_token(_read_kimi_credentials(credentials_path))) is not None:
         return usable_token
 
     with advisory_file_lock(credentials_path.with_name(f"{credentials_path.name}.lock")):
         credentials = _read_kimi_credentials(credentials_path)
-        usable_token = _usable_access_token(credentials)
-        if usable_token is not None:
+        if (usable_token := _usable_access_token(credentials)) is not None:
             return usable_token
 
         refresh_token = credentials.get("refresh_token")
