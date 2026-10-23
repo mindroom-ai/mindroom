@@ -51,7 +51,7 @@ def golden_stores() -> list[GoldenStore]:
         GoldenStore(
             label=label,
             db_path=spec["db_path"],
-            names=TableNames(Path(spec["db_path"]).stem),
+            names=TableNames.of_database(Path(spec["db_path"])),
             sessions=cast("dict[str, SessionKind]", spec["sessions"]),
         )
         for label, spec in stores.items()

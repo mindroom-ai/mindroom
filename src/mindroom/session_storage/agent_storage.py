@@ -32,15 +32,14 @@ def create_state_storage(storage_name: str, state_root: Path) -> ConversationSto
     database gains its usage ledger, then its summary rows, and only then does the owned store open it. Every
     store leaves the prompt roles out of the runs it writes.
     """
+    names = TableNames(storage_name)
+    db_path = names.database_path(state_root)
     with session_storage_preflight(
         state_root,
         storage_name=storage_name,
         timeout_seconds=BUSY_TIMEOUT_SECONDS,
     ):
-        db_dir = state_root / "sessions"
-        db_dir.mkdir(parents=True, exist_ok=True)
-        db_path = db_dir / f"{storage_name}.db"
-        names = TableNames(storage_name)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         migrate_usage_database(db_path, names)
         migrate_to_summary_rows(db_path, names)
         return open_conversation_store(db_path, names, prompt_roles=prompt_roles_for_history_storage())

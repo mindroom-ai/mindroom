@@ -35,7 +35,6 @@ USAGE_KINDS: frozenset[str] = frozenset({"run", *get_args(IndependentUsageKind._
 
 SYSTEM_USAGE_ENTITY = "system:internal"
 SYSTEM_USAGE_STORAGE_NAME = "system"
-SYSTEM_USAGE_RELATIVE_PATH = "system/sessions/system.db"
 
 TOKEN_FIELDS = (
     "input_tokens",

@@ -1,4 +1,4 @@
-"""Table names and layout of a conversation database.
+"""File and table names and layout of a conversation database.
 
 The sessions and runs tables keep the layout Agno 3 created, column for column and index for index, so
 databases written before and after Agno's removal are the same files. The summary-row, removed-run, and
@@ -15,6 +15,7 @@ from mindroom.usage.storage import quote_identifier, usage_table_name, usage_tab
 
 if TYPE_CHECKING:
     import sqlite3
+    from pathlib import Path
 
 # The columns of Agno 3's sessions table, which the schema preflight requires of an existing database.
 SESSION_COLUMNS = (
@@ -38,6 +39,8 @@ _SESSION_COLUMN_SQL = (
     "workflow_id VARCHAR, user_id VARCHAR, session_data JSON, agent_data JSON, team_data JSON, workflow_data JSON, "
     "metadata JSON, summary JSON, created_at BIGINT NOT NULL, updated_at BIGINT"
 )
+_SESSIONS_DIRECTORY = "sessions"
+_DATABASE_SUFFIX = ".db"
 _RUNS_INDEXED_COLUMNS = (
     "session_id",
     "run_type",
@@ -52,12 +55,27 @@ _RUNS_INDEXED_COLUMNS = (
 
 @dataclass(frozen=True, slots=True)
 class TableNames:
-    """The tables of the conversation database ``<storage_name>.db``, all named after its sessions table.
+    """The conversation database ``<storage_name>.db``: its file, and its tables, all named after its sessions table.
 
-    This is the one place that pairs a database's name with its sessions table, ``<storage_name>_sessions``.
+    This is the one place that pairs a database's name with its file and with its sessions table,
+    ``<storage_name>_sessions``.
     """
 
     storage_name: str
+
+    @classmethod
+    def of_database(cls, database: Path) -> TableNames:
+        """Return the names of the database held in the file ``database``, the inverse of ``database_path``."""
+        return cls(database.name.removesuffix(_DATABASE_SUFFIX))
+
+    def database_path(self, state_root: Path) -> Path:
+        """Return the file ``<state_root>/sessions/<storage_name>.db`` of the database under ``state_root``."""
+        directory = state_root / _SESSIONS_DIRECTORY
+        database = directory / f"{self.storage_name}{_DATABASE_SUFFIX}"
+        if not self.storage_name or database.parent != directory:
+            msg = "Session storage name must identify a file directly inside its sessions directory"
+            raise ValueError(msg)
+        return database
 
     @property
     def sessions(self) -> str:

@@ -38,13 +38,10 @@ def session_storage_preflight(
     timeout_seconds: float,
 ) -> Iterator[None]:
     """Inspect and, if necessary, archive one owned sessions directory before use."""
-    db_dir = state_root / "sessions"
-    db_file = db_dir / f"{storage_name}.db"
-    if not storage_name or db_file.parent != db_dir:
-        msg = "Session storage name must identify a file directly inside its sessions directory"
-        raise ValueError(msg)
-
-    session_table = TableNames(storage_name).sessions
+    names = TableNames(storage_name)
+    db_file = names.database_path(state_root)
+    db_dir = db_file.parent
+    session_table = names.sessions
     with _recovery_lock(state_root, timeout_seconds=timeout_seconds):
         if _existing_session_database(db_dir, db_file):
             try:
