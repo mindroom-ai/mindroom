@@ -10,6 +10,7 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.failure import prepare_approval_failure
 from mindroom.approval.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
@@ -202,8 +203,13 @@ async def plan_approval_calls(
     runtime_paths: RuntimePaths,
     requester_id: str,
     toolkit_owners: Mapping[tuple[str, str], str | None],
+    room_id: str | None,
+    thread_id: str | None,
 ) -> _ApprovalPausePlan:
-    """Evaluate policy once and normalize exact calls with integer deadlines."""
+    """Evaluate policy once and normalize exact calls with integer deadlines.
+
+    The approver's auto-approve window in the conversation approves every call that would ask them.
+    """
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
     decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
     for tool, tool_call_id, tool_name, invoking_agent in identified:
@@ -218,12 +224,17 @@ async def plan_approval_calls(
             tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
         )
         requires_approval = requires_approval or tool_authored_confirmation
+        # Read after the awaited policy, so a window that ended meanwhile approves nothing.
+        window_open = requires_approval and (
+            auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id)
+            is not None
+        )
         decisions[tool_call_id] = (
-            None
-            if requires_approval and approver_id is not None
-            else ContinuationDecision.DENIED
-            if requires_approval
-            else ContinuationDecision.APPROVED,
+            ContinuationDecision.APPROVED
+            if not requires_approval or window_open
+            else None
+            if approver_id is not None
+            else ContinuationDecision.DENIED,
             timeout_seconds,
             requires_approval,
         )
@@ -381,6 +392,8 @@ class ApprovalResponseCoordinator:
             runtime_paths=self.runtime_paths,
             requester_id=current.requester_id,
             toolkit_owners=paused.toolkit_owners,
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
         )
         approval_pending = plan.waiting_text is not None
         visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()

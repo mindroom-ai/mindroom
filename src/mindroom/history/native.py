@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.history.replay import compaction_summary_message, current_summary_text
-from mindroom.native_compaction import NativeCompactionModel, recorded_native_settings
+from mindroom.native_compaction import NativeCompactionModel, recorded_native_settings, request_replay_basis
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
@@ -23,8 +26,12 @@ def configure_native_history(
     history_settings: ResolvedHistorySettings,
     session: AgentSession | TeamSession | None,
     allowed: bool,
+    runs: Sequence[RunOutput | TeamRunOutput] = (),
 ) -> NativeCompactionModel | None:
-    """Enable native requests only when they preserve the scope's authored semantics."""
+    """Enable native requests only when they preserve the scope's authored semantics.
+
+    ``runs`` are the scope's visible runs, which these requests replay after the summary.
+    """
     if not isinstance(model, NativeCompactionModel):
         return None
     model.configure_portable_replay(enabled=plan.hard_replay_budget_tokens is not None)
@@ -46,6 +53,10 @@ def configure_native_history(
         history_generation=_history_generation(session),
         allow_authored=enabled,
     )
+    if model.native_compaction is not None:
+        summary = current_summary_text(session) if session is not None else None
+        basis = request_replay_basis(summary, runs, model.native_compaction.route)
+        model.native_compaction = replace(model.native_compaction, basis=basis)
     return model
 
 
@@ -68,6 +79,9 @@ def restore_native_history(
     )
     if model.native_compaction is not None and saved is not None and model.native_compaction.route != saved.route:
         model.configure_native_compaction(threshold=None)
+    elif model.native_compaction is not None and saved is not None:
+        # The continuation replays at least what the paused request did, so its checkpoints cover that history.
+        model.native_compaction = replace(model.native_compaction, basis=saved.basis)
 
 
 def _history_generation(session: AgentSession | TeamSession | None) -> str:

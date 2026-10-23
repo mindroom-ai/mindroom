@@ -317,7 +317,7 @@ export function UnconfiguredRooms() {
                       key={roomId}
                       className={cn(
                         "flex min-w-0 items-center gap-3 rounded-lg px-2 py-3 transition-colors cursor-pointer",
-                        isSelected ? "bg-primary/10" : "hover:bg-muted/30",
+                        isSelected ? "bg-active" : "hover:bg-secondary",
                       )}
                       onClick={() =>
                         toggleRoomSelection(entity.agent_id, roomId)

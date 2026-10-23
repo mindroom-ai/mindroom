@@ -494,6 +494,16 @@ def test_create_item_posts_the_fields(tmp_path: Path, monkeypatch: pytest.Monkey
     assert result["item"]["fields"]["Title"] == "Widget"
 
 
+def test_a_refused_create_reports_graphs_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    refusal = {"error": {"code": "invalidRequest", "message": "Field 'Colour' is not recognized"}}
+    tools, _graph = _tools(tmp_path, monkeypatch, _list_then(refusal, status=400))
+
+    result = _payload(tools.microsoft_sharepoint_create_item(SITE, LIST, FIELDS, LIST_URL))
+
+    assert (result["status"], result["code"], result["status_code"]) == ("error", "graph_error", 400)
+    assert (result["graph_code"], result["graph_message"]) == ("invalidRequest", "Field 'Colour' is not recognized")
+
+
 def test_update_item_patches_only_the_given_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     answer = {"@odata.etag": '"abc,4"', "Title": "Widget", "Color": "Fuchsia", "Quantity": 934}
     tools, graph = _tools(tmp_path, monkeypatch, _list_then(answer))

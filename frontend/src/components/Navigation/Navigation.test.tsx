@@ -85,6 +85,16 @@ describe("Navigation", () => {
     ).toHaveAttribute("aria-current", "page");
   });
 
+  it("shows the MindRoom brand in the desktop sidebar as a home link", () => {
+    renderNavigation("/agents");
+
+    const sidebar = screen.getByRole("complementary", { name: "MindRoom" });
+    const home = within(sidebar).getByRole("link", { name: "MindRoom home" });
+
+    expect(home).toHaveAttribute("href", "/dashboard");
+    expect(home.querySelector('img[src="/logo.svg"]')).not.toBeNull();
+  });
+
   it("keeps every application route reachable", () => {
     renderNavigation();
 

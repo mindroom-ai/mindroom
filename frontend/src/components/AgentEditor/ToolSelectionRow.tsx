@@ -33,9 +33,7 @@ export function ToolSelectionRow({
   onToggleSettings,
 }: ToolSelectionRowProps) {
   const activeClass =
-    isActive && showSettings
-      ? "bg-blue-50 dark:bg-blue-500/10"
-      : "hover:bg-gray-50 dark:hover:bg-white/5";
+    isActive && showSettings ? "bg-active" : "hover:bg-secondary";
 
   return (
     <div className={`rounded-lg p-2 transition-colors ${activeClass}`}>
@@ -71,7 +69,7 @@ export function ToolSelectionRow({
               {hasOverrides && (
                 <Badge
                   variant="secondary"
-                  className="flex-shrink-0 text-[10px] uppercase tracking-wide"
+                  className="flex-shrink-0 text-[11px]"
                 >
                   Customized
                 </Badge>
@@ -101,7 +99,7 @@ export function ToolSelectionRow({
           {isChecked && showSettings && (
             <Button
               type="button"
-              variant={isActive ? "secondary" : "ghost"}
+              variant={isActive ? "outline" : "ghost"}
               size="sm"
               onClick={onToggleSettings}
               className="h-8 px-2"

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import {
   type ColumnDef,
   type ExpandedState,
@@ -18,30 +18,16 @@ import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
 import type { AgentConnections, ConnectionStatus } from "./types";
 import type { McpSelectionState } from "./useMcpSelection";
 
-/** Whether each agent's account is connected, by agent and provider, once its status has loaded. */
-type ConnectedAccounts = Record<string, boolean>;
-
-type AgentTableRow = AgentConnections & {
-  mcp: McpSelectionState;
-  accounts: ConnectedAccounts;
-};
-
-const accountKey = (agentName: string, provider: string) =>
-  `${agentName}/${provider}`;
+type AgentTableRow = AgentConnections & { mcp: McpSelectionState };
 
 /**
  * How many of an agent's accounts and keys are set, out of all of them: its
- * connectable services plus its egress services. A service counts as connected
- * by the catalog, until its status loads (when the agent is opened) and says
- * otherwise, as after a connect or disconnect, and again once the catalog is
- * read anew.
+ * connectable services plus its egress services, as its state says.
  */
 function accountCounts(agent: AgentTableRow) {
   const keys = keyCounts(agent.egress_services ?? []);
   const connectedServices = agent.services.filter(
-    (service) =>
-      agent.accounts[accountKey(agent.agent_name, service.provider)] ??
-      service.connected,
+    (service) => service.connected === true,
   );
   return {
     set: keys.set + connectedServices.length,
@@ -113,6 +99,16 @@ const columns: ColumnDef<AgentTableRow>[] = [
       const { set, total } = accountCounts(row.original);
       const count = row.original.tools.length;
       const tools = `${count} ${count === 1 ? "tool" : "tools"}`;
+      // The agent's state fills in `egress_services`, null included, so nothing is counted before it arrives.
+      if (row.original.egress_services === undefined)
+        return (
+          <span className="text-muted-foreground tabular-nums">
+            {tools} /{" "}
+            {row.original.state_unavailable
+              ? "Could not check accounts"
+              : "Checking accounts…"}
+          </span>
+        );
       // An agent that shows no keys, as while Agent Keys is off, counts only accounts.
       const counted = Array.isArray(row.original.egress_services)
         ? total === 1
@@ -184,7 +180,7 @@ const columns: ColumnDef<AgentTableRow>[] = [
  */
 function AgentEgress({ agent }: { agent: AgentConnections }) {
   const services = agent.egress_services;
-  // An array, even an empty one, marks an agent that can use egress credentials.
+  // An array, even an empty one, marks an agent that can use egress credentials; nothing shows until its state loads.
   if (!Array.isArray(services)) return null;
   // Nobody who can change none of an agent's services manages it; with no services there is no telling.
   const viewOnly =
@@ -210,33 +206,22 @@ export function AgentTable({
   mcp,
   refreshVersion,
   onConnectionChange,
+  onAccountStatus,
 }: {
   agents: AgentConnections[];
   mcp: McpSelectionState;
   refreshVersion: number;
   onConnectionChange: () => void;
+  /** Told each time one of an agent's account statuses loads. */
+  onAccountStatus: (
+    agentName: string,
+    provider: string,
+    status: ConnectionStatus,
+  ) => void;
 }) {
   const [expanded, setExpanded] = useState<ExpandedState>({});
   const [search, setSearch] = useState("");
   const [scope, setScope] = useState("all");
-  const [accounts, setAccounts] = useState<ConnectedAccounts>({});
-  // Statuses count only until the catalog arrives again: an agent that is
-  // closed cannot load its status again, so a fresh catalog replaces them,
-  // and a status that loads after it still corrects it.
-  const [accountsCatalog, setAccountsCatalog] = useState(agents);
-  if (accountsCatalog !== agents) {
-    setAccountsCatalog(agents);
-    setAccounts({});
-  }
-  const onAccountStatus = useCallback(
-    (agentName: string, provider: string, status: ConnectionStatus) =>
-      setAccounts((known) =>
-        known[accountKey(agentName, provider)] === status.connected
-          ? known
-          : { ...known, [accountKey(agentName, provider)]: status.connected },
-      ),
-    [],
-  );
   const data = useMemo(
     () =>
       agents
@@ -252,8 +237,8 @@ export function AgentTable({
                   )
                 : true,
         )
-        .map((agent) => ({ ...agent, mcp, accounts })),
-    [agents, scope, mcp, accounts],
+        .map((agent) => ({ ...agent, mcp })),
+    [agents, scope, mcp],
   );
   const table = useReactTable({
     data,

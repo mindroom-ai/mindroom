@@ -11,7 +11,7 @@ For the hosted multi-tenant platform (platform and instance charts), see [SaaS P
 | Tuwunel | `cluster/k8s/tuwunel/` | Standalone Tuwunel homeserver (MindRoom fork) to pair with the runtime chart |
 | Client | `cluster/k8s/client/` | Standalone MindRoom web client behind unprivileged nginx, for clusters that already provide a homeserver, ingress, and TLS |
 | MatrixRTC | `cluster/k8s/matrixrtc/` | Optional LiveKit SFU and MatrixRTC authorization service for [voice calls](https://docs.mindroom.chat/voice-calls/), proxied by the client chart |
-| Instance | `cluster/k8s/instance/` | One hosted MindRoom runtime with bundled dashboard/API and Matrix/Synapse, deployed by the SaaS platform |
+| Instance | `cluster/k8s/instance/` | One hosted MindRoom runtime with bundled dashboard/API and a Tuwunel Matrix homeserver, deployed by the SaaS platform |
 | Platform | `cluster/k8s/platform/` | SaaS control plane (API, frontend, provisioner) |
 
 ## Prerequisites

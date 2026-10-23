@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, replace
@@ -19,6 +20,7 @@ from mindroom.api.auth import (
     authenticate_user,
     dashboard_cors_origins,
     login_redirect_for_request,
+    oauth_callback_hostname,
     verify_user,
 )
 from mindroom.api.credentials_oauth_flows import (
@@ -86,6 +88,7 @@ from mindroom.oauth.service import (
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
 )
+from mindroom.origins import dashboard_origin
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     build_agent_toolkit_worker_target,
@@ -223,7 +226,12 @@ async def _client_config_resolution_for_request(
         resolution is None
         or resolution.custom
         or is_oauth_loopback_hostname(request.url.hostname)
-        or _dynamic_client_matches_hosted_callback(resolution, provider, runtime_paths, request.url.hostname)
+        or _dynamic_client_matches_hosted_callback(
+            resolution,
+            provider,
+            runtime_paths,
+            oauth_callback_hostname(request),
+        )
     ):
         return resolution
     if reject_remote_provisioned:
@@ -705,11 +713,15 @@ def _oauth_browser_error_response(
 
 
 def _validated_opener_origin(origin: str | None, provider: OAuthProvider, runtime_paths: RuntimePaths) -> str | None:
-    """Return `origin` when a popup's last page may post to it: its completion origin or a dashboard CORS origin.
+    """Return `origin` when a popup's last page may post to it: its completion, dashboard, or dashboard CORS origin.
 
     The dashboard's CORS `*` allows every origin to call the API, never to receive this message, so it adds none.
     """
-    allowed = {_oauth_success_origin(provider, runtime_paths), *dashboard_cors_origins(runtime_paths)} - {"*"}
+    allowed = {
+        _oauth_success_origin(provider, runtime_paths),
+        dashboard_origin(runtime_paths),
+        *dashboard_cors_origins(runtime_paths),
+    } - {"*", None}
     return origin if origin in allowed else None
 
 
@@ -1199,6 +1211,18 @@ def personal_connection_view(result: OAuthStatusResponse, *, can_manage: bool) -
     )
 
 
+async def _credentials_usable(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    credentials: dict[str, object],
+) -> bool:
+    """Check stored credentials against the OAuth client, whose credential file is read in a thread."""
+    if not credentials:
+        # Without credentials the check reads nothing, so it stays on the loop.
+        return oauth_credentials_usable(provider, runtime_paths, credentials)
+    return await asyncio.to_thread(oauth_credentials_usable, provider, runtime_paths, credentials)
+
+
 async def connection_status(
     request: Request,
     context: OAuthCredentialContext,
@@ -1208,16 +1232,17 @@ async def connection_status(
 ) -> OAuthStatusResponse:
     """Load connection state after the caller has authorized the credential target.
 
-    `refresh=False` skips the token refresh, so a listing never waits on the provider's token endpoint.
+    `refresh=False` skips the token refresh, so a listing never waits on the provider's token endpoint, and reads a
+    scope that never stored anything as not connected without creating its store.
     `bootstrap_client=False` reads only the stored OAuth client and never bootstraps one over the network: `connected`
     is the same (it uses the stored client either way), and `has_client_config` stays false until a client is stored.
     """
     provider, runtime_paths = context.provider, context.runtime_paths
-    credential_status: OAuthCredentialsStatus = await load_oauth_credentials_status(context)
+    credential_status: OAuthCredentialsStatus = await load_oauth_credentials_status(context, create_store=refresh)
     credentials = credential_status.credentials or {}
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     client_config_resolution = (
-        provider.client_config_resolution(runtime_paths)
+        await asyncio.to_thread(provider.client_config_resolution, runtime_paths)
         if has_service_account_config or not bootstrap_client
         else await _client_config_resolution_for_request(
             request,
@@ -1227,7 +1252,7 @@ async def connection_status(
         )
     )
     has_client_config = client_config_resolution is not None
-    credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+    credentials_usable = await _credentials_usable(provider, runtime_paths, credentials)
     if refresh and credentials_usable and has_client_config and not has_service_account_config:
         try:
             refreshed_credentials = await refresh_oauth_credentials(context)
@@ -1238,10 +1263,10 @@ async def connection_status(
                 error_type=type(exc).__name__,
             )
             credentials = (await load_oauth_credentials_snapshot(context)).credentials or {}
-            credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+            credentials_usable = await _credentials_usable(provider, runtime_paths, credentials)
         else:
             credentials = refreshed_credentials or {}
-            credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+            credentials_usable = await _credentials_usable(provider, runtime_paths, credentials)
     connected = has_service_account_config or credentials_usable
     if client_config_resolution is not None:
         client_config_service = client_config_resolution.service

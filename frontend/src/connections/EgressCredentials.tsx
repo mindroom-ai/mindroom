@@ -414,6 +414,7 @@ function AgentSection({
   const rowAgent: RowAgent = {
     displayName: agent.agent_display_name,
     shared: agent.shared,
+    scope: agent.scope,
     managers: agent.managers,
     services: agent.services,
   };

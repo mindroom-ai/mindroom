@@ -82,6 +82,14 @@ class PersonalRoomRosterMismatchError(PersonalRoomValidationError):
         self.unexpected_user_ids = tuple(sorted(unexpected_user_ids))
 
 
+class _PersonalRoomWelcomeDeviceError(PersonalRoomValidationError):
+    """A pending welcome belongs to a Matrix device this agent no longer uses, so no retry may send it.
+
+    The welcome's transaction ID deduplicates only on its device, and the runtime never logs in to an earlier device
+    again, so only restoring that device's credentials and store would let it go out.
+    """
+
+
 @dataclass
 class PersonalRoomService:
     """Keep only personal-room lifecycle state; execution remains in the normal bot."""
@@ -393,7 +401,8 @@ class PersonalRoomService:
         if record.adoption is None:
             # The owner may bring in any MindRoom agent: history visibility keeps
             # what came before its invite hidden, and agent access rules still
-            # apply. An imported room keeps its exact attested roster instead.
+            # apply. An imported room may share its history, so an agent outside
+            # its attested roster is removed instead.
             permitted_members.update(filter(self._is_agent, joined_or_invited))
         else:
             expected_creator = record.adoption.creator_user_id
@@ -429,9 +438,9 @@ class PersonalRoomService:
             raise PersonalRoomValidationError(msg)
         guests = joined_or_invited - permitted_members
         if guests:
-            # Only a room this agent created is removed from; an imported room
-            # keeps its exact attested roster and fails closed instead.
-            if record.adoption is not None:
+            # An imported room holding a person outside its attested roster
+            # fails closed instead; only MindRoom's own agents are removed from it.
+            if record.adoption is not None and not all(map(self._is_agent, guests)):
                 raise PersonalRoomRosterMismatchError(record.room_id, guests)
             await self._remove_guests(record, guests, state)
             roster.update(dict.fromkeys(guests, "leave"))
@@ -451,7 +460,7 @@ class PersonalRoomService:
         guests: set[str],
         state: dict[tuple[str, str], dict],
     ) -> None:
-        """Remove people other than the owner, then tell the room why once."""
+        """Remove members the room does not permit, then tell the room why once."""
         assert record.room_id is not None
         client = self._client()
         for user_id in sorted(guests):
@@ -480,14 +489,14 @@ class PersonalRoomService:
             logger.warning("Personal-room guest removal notice failed", room_id=record.room_id)
 
     async def guest_membership_event(self, room: nio.MatrixRoom, user_id: str, membership: str) -> None:
-        """Remove a person the owner brought into a personal room as soon as it is seen.
+        """Remove a person the owner brought into a personal room, or an agent from an imported one, once seen.
 
         Never raises: a raising member callback would hold this room's event
         lane, so a failed removal is retried in the background instead.
         """
-        if membership not in {"invite", "join", "knock"} or self._settings() is None or self._is_agent(user_id):
+        if membership not in {"invite", "join", "knock"} or self._settings() is None:
             return
-        path = await self._owner_record_path(room, excluding=user_id)
+        path = await self._owner_record_path(room, excluding=user_id, imported=self._is_agent(user_id))
         if path is None or await self._remove_guests_now(path, room.room_id):
             return
         pending = self._guest_removal_retries.get(room.room_id)
@@ -512,8 +521,8 @@ class PersonalRoomService:
         if tasks:
             await asyncio.wait(tasks, timeout=timeout_seconds)
 
-    async def _owner_record_path(self, room: nio.MatrixRoom, *, excluding: str) -> Path | None:
-        """Return the record of the member whose personal room this is, if any.
+    async def _owner_record_path(self, room: nio.MatrixRoom, *, excluding: str, imported: bool) -> Path | None:
+        """Return the record of the member whose created or imported personal room this is, if any.
 
         Read without the owner's lock, which is only taken once a record
         matches, so a shared room never waits behind an unrelated provisioning.
@@ -529,7 +538,7 @@ class PersonalRoomService:
             except Exception:
                 logger.exception("Personal-room record invalid", record=path.name)
                 continue
-            if record is not None and record.room_id == room.room_id and record.adoption is None:
+            if record is not None and record.room_id == room.room_id and (record.adoption is not None) == imported:
                 return path
         return None
 
@@ -538,8 +547,15 @@ class PersonalRoomService:
         try:
             async with async_exclusive_file_lock(path.with_suffix(".lock")):
                 record = await run_blocking_until_complete(read_personal_room, path)
-                if record is not None and record.room_id == room_id and record.adoption is None:
+                if record is not None and record.room_id == room_id:
                     await self._validate_room(record)
+        except PersonalRoomRosterMismatchError as error:
+            # Expected until a person changes the room, so no traceback and no retry.
+            logger.warning(
+                "Personal-room imported roster has unattested members",
+                room_id=room_id,
+                unexpected_user_ids=error.unexpected_user_ids,
+            )
         except Exception:
             logger.exception("Personal-room guest removal failed", room_id=room_id)
             return False
@@ -617,7 +633,7 @@ class PersonalRoomService:
             return
         if record.welcome_device_id != client.device_id or not client.device_id:
             msg = "Personal-room pending welcome belongs to a different Matrix device"
-            raise RuntimeError(msg)
+            raise _PersonalRoomWelcomeDeviceError(msg)
         delivered = await send_message_result(
             client,
             record.room_id,

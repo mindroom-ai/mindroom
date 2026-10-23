@@ -26,7 +26,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.mcp_gateway import accounts, external_auth
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
-from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt_key
+from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt_key
 from tests.api.test_mcp_gateway_api import (
     MCP_HEADERS,
     ORIGIN,
@@ -193,8 +193,8 @@ def credential(
     clock: list[float],
 ) -> Callable[..., dict[str, str]]:
     """Sign real JWTs; only replace the remote JWKS wire response."""
-    key = _trusted_upstream_jwt_key()
-    keys = _trusted_upstream_jwks(key)
+    key = trusted_upstream_jwt_key()
+    keys = trusted_upstream_jwks(key)
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: keys)
     serial = 0
 

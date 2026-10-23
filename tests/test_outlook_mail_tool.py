@@ -37,10 +37,15 @@ DRAFT_PATH = f"/v1.0/me/messages/{DRAFT_ID}"
 GRAPH = "https://graph.microsoft.com/v1.0"
 NEXT_MESSAGES = "/me/messages?$top=25&$skiptoken=page2"
 NEXT_ATTACHMENTS = f"/me/messages/{MESSAGE_ID}/attachments?$skiptoken=page2"
+SHARED = "support@contoso.com"
+SHARED_PREFIX = f"/v1.0/users/{SHARED}/"
+# Graph may name a mailbox in a next link by its object id instead of the address the request used.
+SHARED_ID = "7f3c2b1a-0000-4000-8000-00000000abcd"
 READ_FUNCTIONS = (
     "outlook_mail_search",
     "outlook_mail_get_message",
     "outlook_mail_download_attachment",
+    "outlook_mail_get_automatic_replies",
 )
 WRITE_FUNCTIONS = (
     "outlook_mail_create_draft",
@@ -48,6 +53,7 @@ WRITE_FUNCTIONS = (
     "outlook_mail_reply",
     "outlook_mail_mark_read",
     "outlook_mail_move",
+    "outlook_mail_set_automatic_replies",
 )
 
 
@@ -136,7 +142,9 @@ class _Graph:
             f"{MESSAGE_PATH}/attachments/{ATTACHMENT_ID}/$value": httpx.Response(200, content=self.content),
         }
         not_found = httpx.Response(404, json={"error": {"code": "ErrorItemNotFound"}})
-        return routes.get(unquote(request.url.path), not_found) if request.method == "GET" else not_found
+        # A shared mailbox holds the same messages as the requester's own in this fake.
+        path = unquote(request.url.path).replace(SHARED_PREFIX, "/v1.0/me/", 1)
+        return routes.get(path, not_found) if request.method == "GET" else not_found
 
 
 def _tools(
@@ -199,11 +207,35 @@ def test_registered_metadata_declares_a_primary_runtime_path_tool() -> None:
 def test_provider_requests_mail_scopes_on_the_shared_app() -> None:
     provider = outlook_mail_oauth_provider()
 
-    assert provider.scopes == ("Mail.ReadWrite", "Mail.Send", "User.Read", "offline_access")
+    assert provider.scopes == (
+        "Mail.ReadWrite",
+        "Mail.Send",
+        "Mail.ReadWrite.Shared",
+        "Mail.Send.Shared",
+        "MailboxSettings.ReadWrite",
+        "User.Read",
+        "offline_access",
+    )
     assert provider.credential_service == "outlook_mail_oauth"
     assert provider.tool_config_service == "outlook_mail"
     assert provider.shared_client_config_services == ("microsoft_oauth_client",)
     assert provider.requester_scoped_credentials is True
+
+
+def test_a_connection_without_the_new_scopes_asks_to_reconnect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = FakeGraph(_Graph()).install(monkeypatch)
+    paths = runtime_paths(tmp_path)
+    manager = save_client_config(paths)
+    publish_grant(outlook_mail_oauth_provider(), manager, scopes=["Mail.ReadWrite", "Mail.Send", "User.Read"])
+    tools = OutlookMailTools(runtime_paths=paths, credentials_manager=manager, worker_target=worker_target())
+
+    result = _payload(tools.outlook_mail_search())
+
+    assert result["oauth_connection_required"] is True
+    assert graph.requests == []
 
 
 def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -869,3 +901,461 @@ def test_graph_errors_keep_their_codes(
         assert result["retry_after_seconds"] == 7
     else:
         assert result["graph_code"] == response.json()["error"]["code"]
+
+
+def _shared_reply_graph() -> _Graph:
+    mail = _Graph()
+    mail.write = _reply_draft()
+    mail.override = lambda request: httpx.Response(204) if request.method == "DELETE" else None
+    return mail
+
+
+@pytest.mark.parametrize(
+    ("call", "requests"),
+    [
+        (lambda tools: tools.outlook_mail_search(mailbox=SHARED), [("GET", "messages")]),
+        (
+            lambda tools: tools.outlook_mail_search(query="plan", folder="inbox", mailbox=SHARED),
+            [("GET", "mailFolders/inbox/messages")],
+        ),
+        (
+            lambda tools: tools.outlook_mail_get_message(MESSAGE_ID, mailbox=SHARED),
+            [("GET", f"messages/{MESSAGE_ID}"), ("GET", f"messages/{MESSAGE_ID}/attachments")],
+        ),
+        (
+            lambda tools: tools.outlook_mail_download_attachment(MESSAGE_ID, ATTACHMENT_ID, mailbox=SHARED),
+            [
+                ("GET", f"messages/{MESSAGE_ID}/attachments/{ATTACHMENT_ID}"),
+                ("GET", f"messages/{MESSAGE_ID}/attachments/{ATTACHMENT_ID}/$value"),
+            ],
+        ),
+        (
+            lambda tools: tools.outlook_mail_create_draft(["sam@contoso.com"], "s", "b", mailbox=SHARED),
+            [("POST", "messages")],
+        ),
+        (
+            lambda tools: tools.outlook_mail_send(["sam@contoso.com"], "s", "b", mailbox=SHARED),
+            [("POST", "sendMail")],
+        ),
+        (
+            lambda tools: tools.outlook_mail_reply(
+                MESSAGE_ID,
+                ["sam@contoso.com", "team@contoso.com"],
+                "Thanks",
+                mailbox=SHARED,
+            ),
+            [("POST", f"messages/{MESSAGE_ID}/createReply"), ("POST", f"messages/{DRAFT_ID}/send")],
+        ),
+        (
+            lambda tools: tools.outlook_mail_mark_read(MESSAGE_ID, mailbox=SHARED),
+            [("PATCH", f"messages/{MESSAGE_ID}")],
+        ),
+        (
+            lambda tools: tools.outlook_mail_move(MESSAGE_ID, "archive", mailbox=SHARED),
+            [("POST", f"messages/{MESSAGE_ID}/move")],
+        ),
+    ],
+)
+def test_every_mail_function_acts_in_the_mailbox_it_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    call: Callable[[OutlookMailTools], str],
+    requests: list[tuple[str, str]],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _shared_reply_graph())
+
+    result = _payload(call(tools))
+
+    assert result["status"] == "ok"
+    assert result["mailbox"] == SHARED
+    assert [(request.method, unquote(request.url.path)) for request in graph.requests] == [
+        (method, f"{SHARED_PREFIX}{path}") for method, path in requests
+    ]
+
+
+def test_results_name_no_mailbox_for_the_requesters_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    assert "mailbox" not in _payload(tools.outlook_mail_send(["sam@contoso.com"], "s", "b"))
+    assert "mailbox" not in _payload(tools.outlook_mail_search())
+
+
+def test_a_guest_sign_in_name_is_escaped_as_one_path_segment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    tools.outlook_mail_search(mailbox="alex_fabrikam.com#EXT#@contoso.onmicrosoft.com")
+
+    [request] = graph.requests
+    assert (
+        request.url.raw_path.split(b"?")[0]
+        == b"/v1.0/users/alex_fabrikam.com%23EXT%23@contoso.onmicrosoft.com/messages"
+    )
+
+
+@pytest.mark.parametrize(
+    "mailbox",
+    [
+        "",
+        "me",
+        "support",
+        "a@b@contoso.com",
+        "support@contoso.com/../me",
+        "x" * 250 + "@contoso.com",
+        "a?b@c.com",
+        f" {SHARED}",
+        f"{SHARED}\u200b",
+        3,
+    ],
+)
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda tools, mailbox: tools.outlook_mail_search(mailbox=mailbox),
+        lambda tools, mailbox: tools.outlook_mail_get_message(MESSAGE_ID, mailbox=mailbox),
+        lambda tools, mailbox: tools.outlook_mail_download_attachment(MESSAGE_ID, ATTACHMENT_ID, mailbox=mailbox),
+        lambda tools, mailbox: tools.outlook_mail_create_draft(["sam@contoso.com"], "s", "b", mailbox=mailbox),
+        lambda tools, mailbox: tools.outlook_mail_send(["sam@contoso.com"], "s", "b", mailbox=mailbox),
+        lambda tools, mailbox: tools.outlook_mail_reply(MESSAGE_ID, ["sam@contoso.com"], "Thanks", mailbox=mailbox),
+        lambda tools, mailbox: tools.outlook_mail_mark_read(MESSAGE_ID, mailbox=mailbox),
+        lambda tools, mailbox: tools.outlook_mail_move(MESSAGE_ID, "archive", mailbox=mailbox),
+    ],
+)
+def test_a_malformed_mailbox_is_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mailbox: object,
+    call: Callable[[OutlookMailTools, object], str],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    result = _payload(call(tools, mailbox))
+
+    assert (result["code"], "mailbox" in result["message"]) == ("invalid_argument", True)
+    assert "mailbox" not in result
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda tools: tools.outlook_mail_search(limit=0, mailbox=SHARED),
+        lambda tools: tools.outlook_mail_search(page_token=NEXT_MESSAGES, mailbox=SHARED),
+        lambda tools: tools.outlook_mail_get_message("a/b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_download_attachment(MESSAGE_ID, "a/b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_create_draft([], "s", "b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_send(["not-an-email"], "s", "b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_reply(MESSAGE_ID, ["sam@contoso.com"], " ", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_mark_read("a/b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_move(MESSAGE_ID, "a/b", mailbox=SHARED),
+    ],
+)
+def test_a_refused_call_with_a_mailbox_names_the_mailbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    call: Callable[[OutlookMailTools], str],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    result = _payload(call(tools))
+
+    assert result["code"] in {"invalid_argument", "invalid_page_token"}
+    assert result["mailbox"] == SHARED
+    assert graph.requests == []
+
+
+def test_a_graph_error_in_a_shared_mailbox_names_the_mailbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    result = _payload(tools.outlook_mail_get_message("AAMk-missing=", mailbox=SHARED))
+
+    assert (result["code"], result["graph_code"], result["mailbox"]) == ("not_found", "ErrorItemNotFound", SHARED)
+
+
+def test_a_shared_mailbox_reply_to_a_recipient_not_named_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mail = _shared_reply_graph()
+    mail.write = _reply_draft(toRecipients=[{"emailAddress": {"address": "desk@outside.example"}}], ccRecipients=[])
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    refused = _payload(tools.outlook_mail_reply(MESSAGE_ID, ["alex@contoso.com"], "Thanks", mailbox=SHARED))
+
+    assert (refused["code"], refused["recipients"]) == ("recipients_mismatch", ["desk@outside.example"])
+    assert refused["mailbox"] == SHARED
+    assert [(request.method, unquote(request.url.path)) for request in graph.requests] == [
+        ("POST", f"{SHARED_PREFIX}messages/{MESSAGE_ID}/createReply"),
+        ("DELETE", f"{SHARED_PREFIX}messages/{DRAFT_ID}"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "graph_owner",
+    [
+        f"/users/{SHARED}",
+        f"/users/{SHARED.replace('@', '%40')}",
+        f"/users('{SHARED_ID}')",
+        f"/users({SHARED_ID})",
+        f"/users/{SHARED_ID}",
+    ],
+)
+def test_a_shared_mailbox_page_token_names_that_mailbox_and_continues_there(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    graph_owner: str,
+) -> None:
+    mail = _Graph()
+    next_link = f"{GRAPH}{graph_owner}/mailFolders('inbox')/messages?$top=25&$skiptoken=page2"
+    mail.override = lambda request: (
+        httpx.Response(200, json={"value": [], "@odata.nextLink": next_link})
+        if request.url.path.endswith("/inbox/messages") and "$skiptoken" not in request.url.params
+        else None
+    )
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    token = _payload(tools.outlook_mail_search(folder="inbox", mailbox=SHARED))["next_page_token"]
+    tools.outlook_mail_search(mailbox=SHARED, page_token=token)
+
+    assert token == f"/users/{SHARED}/mailFolders('inbox')/messages?$top=25&$skiptoken=page2"
+    continued = graph.requests[-1]
+    assert unquote(continued.url.path) == f"{SHARED_PREFIX}mailFolders('inbox')/messages"
+    assert dict(continued.url.params) == {"$top": "25", "$skiptoken": "page2"}
+
+
+def test_an_own_mailbox_page_token_that_graph_names_by_user_id_comes_back_as_me(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mail = _Graph()
+    mail.override = lambda _request: httpx.Response(
+        200,
+        json={"value": [], "@odata.nextLink": f"{GRAPH}/users/{SHARED_ID}/messages?$skip=25"},
+    )
+    tools, _graph = _tools(tmp_path, monkeypatch, mail)
+
+    next_page = _payload(tools.outlook_mail_search())["next_page_token"]
+
+    assert next_page == "/me/messages?$skip=25"
+
+
+@pytest.mark.parametrize(
+    ("page_token", "mailbox"),
+    [
+        (f"/users/{SHARED}/messages?$skip=25", None),
+        (f"/users/{SHARED}/messages?$skip=25", "billing@contoso.com"),
+        (f"/users/{SHARED}.evil/messages?$skip=25", SHARED),
+        (f"/users('{SHARED}')/messages?$skip=25", None),
+        (f"/users/{SHARED_ID}/messages?$skip=25", None),
+        (f"/users/{SHARED_ID}/messages?$skip=25", SHARED),
+        ("/me/messages?$skip=25", SHARED),
+    ],
+)
+def test_a_page_token_of_another_mailbox_is_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page_token: str,
+    mailbox: str | None,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    assert _payload(tools.outlook_mail_search(mailbox=mailbox, page_token=page_token))["code"] == "invalid_page_token"
+    assert graph.requests == []
+
+
+def test_shared_mailbox_attachment_pages_stay_in_that_mailbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mail = _Graph()
+    next_link = f"{GRAPH}/users('{SHARED_ID}')/messages('{MESSAGE_ID}')/attachments?$skiptoken=page2"
+    first = {"value": [_attachment(id="first")], "@odata.nextLink": next_link}
+    second = {"value": [_attachment(id="second")]}
+    mail.override = lambda request: (
+        httpx.Response(200, json=second if "$skiptoken" in request.url.params else first)
+        if request.url.path.endswith("/attachments")
+        else None
+    )
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    message = _payload(tools.outlook_mail_get_message(MESSAGE_ID, mailbox=SHARED))["message"]
+
+    assert [attachment["id"] for attachment in message["attachments"]] == ["first", "second"]
+    assert unquote(graph.requests[-1].url.path) == f"{SHARED_PREFIX}messages('{MESSAGE_ID}')/attachments"
+
+
+def _automatic_replies(**overrides: object) -> dict[str, object]:
+    return {
+        "status": "scheduled",
+        "externalAudience": "all",
+        "scheduledStartDateTime": {"dateTime": "2026-11-02T08:00:00.0000000", "timeZone": "UTC"},
+        "scheduledEndDateTime": {"dateTime": "2026-11-06T17:00:00.0000000", "timeZone": "UTC"},
+        "internalReplyMessage": "<html>\n<body>\n<p>Out until Friday.<br>\nAsk Sam.</p></body>\n</html>\n",
+        "externalReplyMessage": "<html>\n<body>\n<p>I reply on my return.</p></body>\n</html>\n",
+        **overrides,
+    }
+
+
+def test_get_automatic_replies_reads_the_requesters_own_setting_as_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mail = _Graph()
+    mail.override = lambda _request: httpx.Response(200, json=_automatic_replies())
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    result = _payload(tools.outlook_mail_get_automatic_replies())
+
+    [request] = graph.requests
+    assert (request.method, request.url.path) == ("GET", "/v1.0/me/mailboxSettings/automaticRepliesSetting")
+    assert result["automatic_replies"] == {
+        "status": "scheduled",
+        "external_audience": "all",
+        "scheduled_start": "2026-11-02T08:00:00Z",
+        "scheduled_end": "2026-11-06T17:00:00Z",
+        "internal_message": "Out until Friday.\nAsk Sam.",
+        "external_message": "I reply on my return.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("graph_status", "graph_audience", "status", "audience"),
+    [
+        ("alwaysEnabled", "none", "alwaysEnabled", "internal_only"),
+        ("Scheduled", "None", "scheduled", "internal_only"),
+        ("disabled", "ContactsOnly", "disabled", "contactsOnly"),
+        ("AlwaysEnabled", "All", "alwaysEnabled", "all"),
+    ],
+)
+def test_get_automatic_replies_reports_values_the_setter_takes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    graph_status: str,
+    graph_audience: str,
+    status: str,
+    audience: str,
+) -> None:
+    # Graph's examples write these values in either case.
+    mail = _Graph()
+    setting = _automatic_replies(status=graph_status, externalAudience=graph_audience)
+    mail.override = lambda _request: httpx.Response(200, json=setting)
+    tools, _graph = _tools(tmp_path, monkeypatch, mail)
+
+    result = _payload(tools.outlook_mail_get_automatic_replies())["automatic_replies"]
+
+    assert (result["status"], result["external_audience"]) == (status, audience)
+
+
+def test_set_automatic_replies_schedules_plain_text_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mail = _Graph()
+    mail.write = httpx.Response(200, json={"automaticRepliesSetting": _automatic_replies()})
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    result = _payload(
+        tools.outlook_mail_set_automatic_replies(
+            "scheduled",
+            internal_message="Out until Friday.\nAsk <Sam> & co.",
+            external_message="I reply on my return.",
+            start="2026-11-02T09:00:00",
+            end="2026-11-06T18:00",
+            time_zone="W. Europe Standard Time",
+            external_audience="contactsOnly",
+        ),
+    )
+
+    [request] = graph.requests
+    assert (request.method, request.url.path) == ("PATCH", "/v1.0/me/mailboxSettings")
+    assert _body(request) == {
+        "automaticRepliesSetting": {
+            "status": "scheduled",
+            "internalReplyMessage": "Out until Friday.<br>Ask &lt;Sam&gt; &amp; co.",
+            "externalReplyMessage": "I reply on my return.",
+            "externalAudience": "contactsOnly",
+            "scheduledStartDateTime": {"dateTime": "2026-11-02T09:00:00", "timeZone": "W. Europe Standard Time"},
+            "scheduledEndDateTime": {"dateTime": "2026-11-06T18:00:00", "timeZone": "W. Europe Standard Time"},
+        },
+    }
+    assert result["automatic_replies"]["status"] == "scheduled"
+    assert result["automatic_replies"]["internal_message"] == "Out until Friday.\nAsk Sam."
+
+
+@pytest.mark.parametrize(
+    ("arguments", "setting"),
+    [
+        ({"status": "disabled"}, {"status": "disabled"}),
+        ({"status": "disabled", "external_message": ""}, {"status": "disabled", "externalReplyMessage": ""}),
+        (
+            {"status": "alwaysEnabled", "internal_message": "Away", "external_audience": "internal_only"},
+            {"status": "alwaysEnabled", "internalReplyMessage": "Away", "externalAudience": "none"},
+        ),
+        (
+            {"status": "alwaysEnabled", "internal_message": "", "external_message": "Away", "external_audience": "all"},
+            {
+                "status": "alwaysEnabled",
+                "internalReplyMessage": "",
+                "externalReplyMessage": "Away",
+                "externalAudience": "all",
+            },
+        ),
+    ],
+)
+def test_set_automatic_replies_sends_only_the_fields_given(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, object],
+    setting: dict[str, object],
+) -> None:
+    mail = _Graph()
+    mail.write = httpx.Response(200, json={"automaticRepliesSetting": _automatic_replies(status=arguments["status"])})
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    assert _payload(tools.outlook_mail_set_automatic_replies(**arguments))["status"] == "ok"  # type: ignore[arg-type]
+
+    [request] = graph.requests
+    assert _body(request) == {"automaticRepliesSetting": setting}
+
+
+# Arguments that turn automatic replies on and name everything senders get.
+ON = {"status": "alwaysEnabled", "internal_message": "Away", "external_message": "Away", "external_audience": "all"}
+PERIOD = {"start": "2026-11-02T09:00:00", "end": "2026-11-06T18:00:00"}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {**ON, "status": "on"},
+        {**ON, "status": ["alwaysEnabled"]},
+        {**ON, **PERIOD, "status": "Scheduled"},
+        {**ON, "status": "scheduled"},
+        {**ON, "status": "scheduled", "start": PERIOD["start"]},
+        {**ON, "status": "scheduled", "start": PERIOD["start"], "end": PERIOD["start"]},
+        {**ON, **PERIOD, "status": "scheduled", "start": "2026-11-02T09:00:00+01:00"},
+        {**ON, **PERIOD, "status": "scheduled", "start": "next monday"},
+        {**ON, **PERIOD, "status": "scheduled", "time_zone": "Mars/Base;"},
+        {**ON, **PERIOD},
+        {"status": "disabled", "end": PERIOD["end"]},
+        {**ON, "external_audience": "everyone"},
+        {**ON, "external_audience": "none"},
+        {**ON, "external_audience": ["all"]},
+        {**ON, "internal_message": 3},
+        {**ON, "external_message": ["Away"]},
+        # Turning replies on names everything senders get, so an approval card shows it.
+        {"status": "alwaysEnabled"},
+        {**ON, "internal_message": None},
+        {**ON, "external_audience": None},
+        {**ON, "external_message": None},
+        {**ON, "external_audience": "contactsOnly", "external_message": None},
+        {**ON, **PERIOD, "status": "scheduled", "internal_message": None},
+    ],
+)
+def test_set_automatic_replies_refuses_malformed_arguments_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, object],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    assert _payload(tools.outlook_mail_set_automatic_replies(**arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert graph.requests == []

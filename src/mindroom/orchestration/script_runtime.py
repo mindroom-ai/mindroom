@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from mindroom.access_policy import resolve_responder_access
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.tool_approval import (
     BackgroundScriptToolOrigin,
     ToolApprovalDecision,
@@ -325,6 +326,16 @@ class _LiveScriptRuntimeResolver:
                 approved=False,
                 reason="Background script approval requires a human Matrix requester.",
             )
+        if (
+            auto_approve_expires_at(
+                context.runtime_paths,
+                room_id=context.room_id,
+                thread_id=context.resolved_thread_id,
+                requester_id=approver_user_id,
+            )
+            is not None
+        ):
+            return ToolApprovalDecision(approved=True)
         approvals = self.approval_provider()
         if approvals is None:
             return ToolApprovalDecision(approved=False, reason="Tool approval runtime is not ready.")

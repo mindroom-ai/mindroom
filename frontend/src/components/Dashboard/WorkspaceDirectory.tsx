@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Download, Search, X } from "lucide-react";
+import { Check, Download, Search, X } from "lucide-react";
 
 import { EntityAvatar } from "@/components/shared/EntityAvatar";
 import { Button } from "@/components/ui/button";
@@ -104,7 +104,7 @@ function WorkspaceDirectorySkeleton() {
         </div>
         <Skeleton className="h-9 w-32" />
       </div>
-      <div className="workspace-surface overflow-hidden rounded-xl border border-border bg-card">
+      <div className="overflow-hidden rounded-xl border border-border bg-card">
         <div className="flex gap-2 border-b border-border p-3">
           <Skeleton className="h-9 flex-1" />
           <Skeleton className="h-9 w-28" />
@@ -135,9 +135,7 @@ function DetailRow({
 }) {
   return (
     <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-3 border-t border-border py-2.5 first:border-t-0">
-      <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </dt>
+      <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
       <dd className="min-w-0 break-words text-sm text-foreground">
         {children}
       </dd>
@@ -537,7 +535,7 @@ export function WorkspaceDirectory() {
         </Button>
       </header>
 
-      <section className="workspace-surface overflow-hidden rounded-xl border border-border bg-card">
+      <section className="overflow-hidden rounded-xl border border-border bg-card">
         <div className="flex flex-col gap-2 border-b border-border p-3 sm:flex-row">
           <label className="relative min-w-0 flex-1">
             <span className="sr-only">Search workspace</span>
@@ -598,7 +596,7 @@ export function WorkspaceDirectory() {
                     name={selectedEntity.display_name}
                   />
                   <div className="min-w-0">
-                    <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">
                       {KIND_LABELS[selection.kind]} details
                     </p>
                     <h3 className="break-words text-lg font-semibold">
@@ -669,8 +667,8 @@ export function WorkspaceDirectory() {
                       onClick={() =>
                         setSelection({ kind: item.kind, id: item.id })
                       }
-                      className={`flex w-full items-center gap-3 border-b border-border px-4 py-2 text-left transition-colors last:border-b-0 hover:bg-muted/60 focus-visible:relative focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
-                        isSelected ? "bg-primary/8" : ""
+                      className={`flex w-full items-center gap-3 border-b border-border px-4 py-2 text-left transition-colors last:border-b-0 focus-visible:relative focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
+                        isSelected ? "bg-active" : "hover:bg-secondary"
                       }`}
                     >
                       <EntityAvatar
@@ -684,7 +682,7 @@ export function WorkspaceDirectory() {
                             <span className="text-sm font-medium text-foreground">
                               {item.name}
                             </span>
-                            <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                            <span className="text-[11px] font-medium text-muted-foreground">
                               {KIND_LABELS[item.kind]}
                             </span>
                           </span>
@@ -696,6 +694,12 @@ export function WorkspaceDirectory() {
                           {item.metadata}
                         </span>
                       </span>
+                      {isSelected && (
+                        <Check
+                          aria-hidden="true"
+                          className="h-4 w-4 shrink-0 text-foreground"
+                        />
+                      )}
                     </button>
                   );
                 })}

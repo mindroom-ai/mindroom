@@ -12,7 +12,7 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 - Core dev against local Matrix + DB
   - Commands: `just local-matrix-up`, `just local-matrix-down`, or `just local-matrix-logs`, then `mindroom run`
   - Destructive reset: stop the backend, run `just local-matrix-reset`, then `just local-matrix-up` and `mindroom run`.
-    Reset deletes this Compose project's containers, networks, and volumes (local accounts, rooms, messages, and media), the selected runtime's `matrix_state.yaml`, and repository `tmp/`.
+    Reset deletes this Compose project's containers, networks, and volumes (local accounts, rooms, messages, and media), the selected runtime's state bound to that homeserver (`matrix_state.yaml`, `encryption_keys/`, `sync_continuity/`, the event journal in `tracking/`, and the agents' personal-room and invited-room records), and repository `tmp/`.
     It resolves storage like `mindroom run`: `MINDROOM_STORAGE_PATH` in the environment takes precedence over the selected config's `.env`, then storage defaults to `mindroom_data/` beside that config.
     If the backend uses `--config` or `--storage-path`, supply the matching `MINDROOM_CONFIG_PATH` or `MINDROOM_STORAGE_PATH` environment value when resetting.
     Relative environment paths are resolved from the repository root; relative storage paths in `.env` are resolved from the selected config directory.
@@ -49,7 +49,7 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 
 Use kind to spin up a throwaway local K8s cluster and install the platform chart for smoke testing and development.
 
-The `just cluster-kind-*` recipes require `just`, Nix (`nix-shell`), and a running Docker daemon.
+The `just cluster-kind-*` recipes require `just`, Nix (`nix-shell`), and a running Docker 28 or newer daemon.
 Each recipe enters `cluster/k8s/kind/shell.nix`, which supplies `kind`, `kubectl`, Helm, and the Docker client.
 
 - Quickstart with Nix:
@@ -61,7 +61,7 @@ Each recipe enters `cluster/k8s/kind/shell.nix`, which supplies `kind`, `kubectl
     - Backend: `just cluster-kind-port-backend` -> http://localhost:8000
     - Frontend: `just cluster-kind-port-frontend` -> http://localhost:3000
 
-With `kind`, `kubectl`, Helm, and Docker already installed, use the direct script from the repository root:
+With `kind`, `kubectl`, Helm, and Docker 28 or newer already installed, use the direct script from the repository root:
 
 ```bash
 bash cluster/k8s/kind/start-fresh.sh

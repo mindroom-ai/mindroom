@@ -10,7 +10,7 @@ import secrets
 import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
-from urllib.parse import quote, unquote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import jwt
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
@@ -30,7 +30,7 @@ from mindroom.matrix.identity import (
     try_parse_historical_matrix_user_id,
     validate_email_to_matrix_mapping,
 )
-from mindroom.origins import deployment_origin, normalized_origin
+from mindroom.origins import dashboard_origin, deployment_origin, normalized_origin
 from mindroom.tool_system.dependencies import (
     auto_install_enabled,
     auto_install_optional_extra_for_import_retry,
@@ -108,20 +108,6 @@ class _SupabaseClientProtocol(Protocol):
 
 
 @dataclass(frozen=True)
-class _TrustedUpstreamJwtSettings:
-    """Signed assertion settings for trusted-upstream auth."""
-
-    require_jwt: bool = False
-    header: str | None = None
-    jwks_url: str | None = None
-    audience: str | None = None
-    issuer: str | None = None
-    email_claim: str = "email"
-    user_id_claim: str | None = None
-    matrix_user_id_claim: str | None = None
-
-
-@dataclass(frozen=True)
 class _TrustedUpstreamJwtIdentity:
     """Identity claims verified from the upstream JWT."""
 
@@ -132,15 +118,18 @@ class _TrustedUpstreamJwtIdentity:
 
 @dataclass(frozen=True)
 class _TrustedUpstreamAuthSettings:
-    """Trusted reverse-proxy/browser identity settings for hosted deployments."""
+    """Settings for the signed assertion in which a deployment-owned gateway names the browser user."""
 
     enabled: bool = False
-    user_id_header: str | None = None
-    email_header: str | None = None
-    matrix_user_id_header: str | None = None
+    jwt_header: str | None = None
+    jwks_url: str | None = None
+    audience: str | None = None
+    issuer: str | None = None
+    email_claim: str = "email"
+    user_id_claim: str | None = None
+    matrix_user_id_claim: str | None = None
     email_to_matrix_user_id_template: str | None = None
     email_domain: str | None = None
-    jwt: _TrustedUpstreamJwtSettings = field(default_factory=_TrustedUpstreamJwtSettings)
 
 
 @dataclass(frozen=True)
@@ -152,6 +141,7 @@ class _ApiAuthSettings:
     account_id: str | None
     mindroom_api_key: str | None
     public_url: str | None = None
+    dashboard_origin: str | None = None
     platform_sso_url: str | None = None
     platform_sso_secret: str | None = None
     trusted_upstream: _TrustedUpstreamAuthSettings = field(default_factory=_TrustedUpstreamAuthSettings)
@@ -169,15 +159,26 @@ class ApiAuthState:
 
 def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> _ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
+    trusted_upstream = _build_trusted_upstream_auth_settings(runtime_paths)
+    dashboard = dashboard_origin(runtime_paths)
+    # Only a gateway's signed identity reaches both hosts; dashboard sign-ins and Connections sessions stay on one.
+    if dashboard is not None and not trusted_upstream.enabled:
+        msg = "MINDROOM_DASHBOARD_URL requires trusted upstream auth (MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED)"
+        raise ValueError(msg)
+    public = normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL"))
+    if dashboard is not None and (public is None or urlsplit(public).netloc == urlsplit(dashboard).netloc):
+        msg = "MINDROOM_DASHBOARD_URL must name another host or port than MINDROOM_PUBLIC_URL, which must be set"
+        raise ValueError(msg)
     return _ApiAuthSettings(
         supabase_url=runtime_paths.env_value("SUPABASE_URL"),
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
         account_id=account_id,
         mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
         public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+        dashboard_origin=dashboard,
         platform_sso_url=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_URL"),
         platform_sso_secret=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_SECRET"),
-        trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
+        trusted_upstream=trusted_upstream,
     )
 
 
@@ -210,34 +211,27 @@ def _build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> _Trust
     """Read trusted-upstream auth settings from one runtime context."""
     return _TrustedUpstreamAuthSettings(
         enabled=runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"),
-        user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER"),
-        email_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER"),
-        matrix_user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"),
+        jwt_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER"),
+        jwks_url=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL"),
+        audience=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE"),
+        issuer=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER"),
+        email_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM") or "email",
+        user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"),
+        matrix_user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"),
         email_to_matrix_user_id_template=_env_text(
             runtime_paths,
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
         ),
         email_domain=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"),
-        jwt=_TrustedUpstreamJwtSettings(
-            require_jwt=runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT"),
-            header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER"),
-            jwks_url=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL"),
-            audience=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE"),
-            issuer=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER"),
-            email_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM") or "email",
-            user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"),
-            matrix_user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"),
-        ),
     )
 
 
 def _build_trusted_upstream_jwt_client(settings: _TrustedUpstreamAuthSettings) -> PyJWKClient | None:
-    """Return a short-lived JWKS cache for strict trusted-upstream auth."""
-    jwt_settings = settings.jwt
-    if not settings.enabled or not jwt_settings.require_jwt or jwt_settings.jwks_url is None:
+    """Return a short-lived JWKS cache for trusted-upstream auth."""
+    if not settings.enabled or settings.jwks_url is None:
         return None
     return PyJWKClient(
-        jwt_settings.jwks_url,
+        settings.jwks_url,
         cache_keys=False,
         cache_jwk_set=True,
         lifespan=_TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS,
@@ -306,33 +300,11 @@ def _is_standalone_public_path(path: str) -> bool:
     return path in _STANDALONE_PUBLIC_PATHS
 
 
-def _get_configured_header(request: Request, header_name: str | None) -> str | None:
-    """Return a stripped configured header value when present."""
-    if header_name is None:
-        return None
-    value = request.headers.get(header_name)
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
-def _validated_trusted_upstream_email_to_matrix_template(
-    settings: _TrustedUpstreamAuthSettings,
-    *,
-    require_email_header: bool,
-) -> str | None:
+def _validated_trusted_upstream_email_to_matrix_template(settings: _TrustedUpstreamAuthSettings) -> str | None:
     """Return the configured email-to-Matrix template after validating it."""
     template = settings.email_to_matrix_user_id_template
     if template is None:
         return None
-    if require_email_header and settings.email_header is None:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Trusted upstream email-to-Matrix template is set but MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is not set"
-            ),
-        )
     try:
         validate_email_to_matrix_mapping(template, settings.email_domain)
     except ValueError as exc:
@@ -345,30 +317,11 @@ def _validated_trusted_upstream_email_to_matrix_template(
     return template
 
 
-def _derive_trusted_upstream_matrix_user_id(
-    settings: _TrustedUpstreamAuthSettings,
-    email: str | None,
-    template: str | None,
-) -> str | None:
-    """Derive a Matrix user ID from a trusted email identity when configured."""
-    if template is None:
-        return None
-    if email is None:
-        raise HTTPException(
-            status_code=401,
-            detail=f"Missing trusted upstream email header: {settings.email_header}",
-        )
-    try:
-        return matrix_user_id_from_email(email, template, settings.email_domain)
-    except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Invalid trusted upstream email identity") from exc
-
-
 def _trusted_upstream_required_jwt_setting(value: str | None, env_name: str) -> str:
     if value is None:
         raise HTTPException(
             status_code=500,
-            detail=f"Trusted upstream strict JWT auth is enabled but {env_name} is not set",
+            detail=f"Trusted upstream auth is enabled but {env_name} is not set",
         )
     return value
 
@@ -385,8 +338,8 @@ async def _verified_trusted_upstream_jwt_claims(
     algorithms: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Verify one configured upstream JWT and return its claims."""
-    token = _get_configured_header(request, header)
-    if token is None:
+    token = (request.headers.get(header) or "").strip()
+    if not token:
         raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
     if len(token.encode("utf-8")) > _JWT_MAX_BYTES:
         raise HTTPException(status_code=401, detail=invalid_detail)
@@ -416,39 +369,23 @@ async def _verified_trusted_upstream_jwt_identity(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
     jwt_client: PyJWKClient | None,
-) -> _TrustedUpstreamJwtIdentity | None:
-    """Return verified upstream identity claims when strict mode is enabled."""
-    jwt_settings = settings.jwt
-    if not jwt_settings.require_jwt:
-        return None
-
-    header = _trusted_upstream_required_jwt_setting(
-        jwt_settings.header,
-        "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER",
-    )
-    audience = _trusted_upstream_required_jwt_setting(
-        jwt_settings.audience,
-        "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE",
-    )
-    issuer = _trusted_upstream_required_jwt_setting(
-        jwt_settings.issuer,
-        "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER",
-    )
-    _trusted_upstream_required_jwt_setting(
-        jwt_settings.jwks_url,
-        "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL",
-    )
+) -> _TrustedUpstreamJwtIdentity:
+    """Return the identity claims the gateway signed for this request."""
+    header = _trusted_upstream_required_jwt_setting(settings.jwt_header, "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER")
+    audience = _trusted_upstream_required_jwt_setting(settings.audience, "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE")
+    issuer = _trusted_upstream_required_jwt_setting(settings.issuer, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER")
+    _trusted_upstream_required_jwt_setting(settings.jwks_url, "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL")
     if jwt_client is None:
         raise HTTPException(
             status_code=500,
-            detail="Trusted upstream strict JWT auth is enabled but JWKS validation is not configured",
+            detail="Trusted upstream auth is enabled but JWKS validation is not configured",
         )
 
-    required_claims = ["exp", "iss", "aud", jwt_settings.email_claim]
-    if jwt_settings.user_id_claim is not None:
-        required_claims.append(jwt_settings.user_id_claim)
-    if jwt_settings.matrix_user_id_claim is not None:
-        required_claims.append(jwt_settings.matrix_user_id_claim)
+    required_claims = ["exp", "iss", "aud", settings.email_claim]
+    if settings.user_id_claim is not None:
+        required_claims.append(settings.user_id_claim)
+    if settings.matrix_user_id_claim is not None:
+        required_claims.append(settings.matrix_user_id_claim)
     claims = await _verified_trusted_upstream_jwt_claims(
         request,
         jwt_client,
@@ -459,15 +396,15 @@ async def _verified_trusted_upstream_jwt_identity(
         invalid_detail="Invalid trusted upstream JWT",
     )
 
-    email = _trusted_upstream_jwt_string_claim(claims, jwt_settings.email_claim)
+    email = _trusted_upstream_jwt_string_claim(claims, settings.email_claim)
     user_id = (
-        _trusted_upstream_jwt_string_claim(claims, jwt_settings.user_id_claim)
-        if jwt_settings.user_id_claim is not None
+        _trusted_upstream_jwt_string_claim(claims, settings.user_id_claim)
+        if settings.user_id_claim is not None
         else None
     )
     matrix_user_id = (
-        _trusted_upstream_jwt_string_claim(claims, jwt_settings.matrix_user_id_claim)
-        if jwt_settings.matrix_user_id_claim is not None
+        _trusted_upstream_jwt_string_claim(claims, settings.matrix_user_id_claim)
+        if settings.matrix_user_id_claim is not None
         else None
     )
     return _TrustedUpstreamJwtIdentity(email=email, user_id=user_id, matrix_user_id=matrix_user_id)
@@ -480,113 +417,42 @@ def _trusted_upstream_jwt_string_claim(claims: dict[str, Any], claim_name: str) 
     return claim.strip()
 
 
-def _verified_trusted_upstream_identity(
-    user_id: str,
-    email: str | None,
-    jwt_identity: _TrustedUpstreamJwtIdentity | None,
-) -> tuple[str, str | None]:
-    """Return trusted identity headers after checking strict JWT consistency."""
-    if jwt_identity is None:
-        return user_id, email
-
-    verified_user_id = jwt_identity.user_id or jwt_identity.email
-    if user_id != verified_user_id:
-        raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
-    if email is not None and email != jwt_identity.email:
-        raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
-    if email is None:
-        email = jwt_identity.email
-    return user_id, email
-
-
-def _verified_trusted_upstream_matrix_user_id(
+def _trusted_upstream_matrix_user_id(
     settings: _TrustedUpstreamAuthSettings,
-    matrix_user_id: str | None,
-    email: str | None,
-    jwt_identity: _TrustedUpstreamJwtIdentity | None,
+    identity: _TrustedUpstreamJwtIdentity,
 ) -> str | None:
-    """Return a Matrix identity only when it is trusted for the active auth mode."""
-    parsed_matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id)
-    if matrix_user_id is not None and parsed_matrix_user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
-
-    if jwt_identity is None:
-        if parsed_matrix_user_id is not None:
-            return parsed_matrix_user_id
-        email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(
-            settings,
-            require_email_header=True,
-        )
-        return _derive_trusted_upstream_matrix_user_id(settings, email, email_to_matrix_template)
-
-    if jwt_identity.matrix_user_id is not None:
-        verified_matrix_user_id = try_parse_historical_matrix_user_id(jwt_identity.matrix_user_id)
-        if verified_matrix_user_id is None:
+    """Return the signed Matrix claim, else the Matrix user the email template names, else None."""
+    if settings.matrix_user_id_claim is not None:
+        matrix_user_id = try_parse_historical_matrix_user_id(identity.matrix_user_id)
+        if matrix_user_id is None:
             raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
-        if parsed_matrix_user_id is not None and parsed_matrix_user_id != verified_matrix_user_id:
-            raise HTTPException(
-                status_code=401,
-                detail="Trusted upstream Matrix identity does not match JWT claim",
-            )
-        return verified_matrix_user_id
-
-    email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(
-        settings,
-        require_email_header=False,
-    )
-    derived_matrix_user_id = _derive_trusted_upstream_matrix_user_id(settings, email, email_to_matrix_template)
-    if derived_matrix_user_id is not None:
-        if parsed_matrix_user_id is not None and parsed_matrix_user_id != derived_matrix_user_id:
-            raise HTTPException(
-                status_code=401,
-                detail="Trusted upstream Matrix identity does not match verified email",
-            )
-        return derived_matrix_user_id
-
-    if parsed_matrix_user_id is not None:
-        raise HTTPException(status_code=401, detail="Trusted upstream Matrix identity is not signed")
-    return None
+        return matrix_user_id
+    template = _validated_trusted_upstream_email_to_matrix_template(settings)
+    if template is None:
+        return None
+    try:
+        return matrix_user_id_from_email(identity.email, template, settings.email_domain)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid trusted upstream email identity") from exc
 
 
 async def _trusted_upstream_auth_user(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
-    jwt_client: PyJWKClient | None = None,
+    jwt_client: PyJWKClient | None,
 ) -> dict[str, Any] | None:
-    """Return the trusted-upstream auth user for this request when configured."""
+    """Return the browser user the gateway's signed assertion names, when trusted upstream auth is on."""
     if not settings.enabled:
         return None
-    if settings.user_id_header is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Trusted upstream auth is enabled but MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER is not set",
-        )
-
-    user_id = _get_configured_header(request, settings.user_id_header)
-    if user_id is None:
-        raise HTTPException(
-            status_code=401,
-            detail=f"Missing trusted upstream identity header: {settings.user_id_header}",
-        )
-
-    jwt_identity = await _verified_trusted_upstream_jwt_identity(request, settings, jwt_client)
-    email = _get_configured_header(request, settings.email_header)
-    user_id, email = _verified_trusted_upstream_identity(user_id, email, jwt_identity)
-    matrix_user_id = _get_configured_header(request, settings.matrix_user_id_header)
-    parsed_matrix_user_id = _verified_trusted_upstream_matrix_user_id(
-        settings,
-        matrix_user_id,
-        email,
-        jwt_identity,
-    )
-
-    auth_user = {
-        "user_id": user_id,
-        "email": email,
+    identity = await _verified_trusted_upstream_jwt_identity(request, settings, jwt_client)
+    auth_user: dict[str, Any] = {
+        "user_id": identity.user_id or identity.email,
+        "email": identity.email,
         "auth_source": "trusted_upstream",
     }
-    if parsed_matrix_user_id is not None:
-        auth_user["matrix_user_id"] = parsed_matrix_user_id
+    matrix_user_id = _trusted_upstream_matrix_user_id(settings, identity)
+    if matrix_user_id is not None:
+        auth_user["matrix_user_id"] = matrix_user_id
     return auth_user
 
 
@@ -776,7 +642,8 @@ def _is_offsite_candidate(candidate: str) -> bool:
     return candidate.replace("\\", "/").startswith("//")
 
 
-def _request_path_with_query(request: Request) -> str:
+def request_path_with_query(request: Request) -> str:
+    """Return this request's path with its query string, for a redirect back to it."""
     path = request.url.path
     query = request.url.query
     return f"{path}?{query}" if query else path
@@ -829,7 +696,7 @@ def _platform_redirect_target(request: Request, auth_settings: _ApiAuthSettings,
     origin = normalized_origin(auth_settings.public_url)
     if origin is None:
         return str(request.url)
-    path = sanitize_next_path(next_path or _request_path_with_query(request))
+    path = sanitize_next_path(next_path or request_path_with_query(request))
     return f"{origin}{path}"
 
 
@@ -846,7 +713,7 @@ def login_redirect_for_request(request: Request, *, next_path: str | None = None
         redirect_to = quote(_platform_redirect_target(request, auth_settings, next_path), safe="")
         return RedirectResponse(f"{auth_settings.platform_sso_url}?redirect_to={redirect_to}")
     if auth_settings.mindroom_api_key:
-        login_target = sanitize_next_path(next_path or _request_path_with_query(request))
+        login_target = sanitize_next_path(next_path or request_path_with_query(request))
         return RedirectResponse(f"/login?{urlencode({'next': login_target})}")
     return None
 
@@ -1066,7 +933,7 @@ async def require_connections_user(request: Request) -> dict[str, Any]:
         request.scope["auth_user"] = auth_user
     else:
         settings = _request_auth_state(request).settings.trusted_upstream
-        if not settings.enabled or not settings.jwt.require_jwt:
+        if not settings.enabled:
             # Without a signed upstream identity, only a portal session can authenticate, so ask the page to sign in.
             raise HTTPException(status_code=401, detail="Connections sign-in required")
         auth_user = await _require_signed_matrix_user(request, label="Connections")
@@ -1078,13 +945,12 @@ async def require_connections_user(request: Request) -> dict[str, Any]:
 
 
 def trusted_upstream_email_to_matrix_user_id(request: Request) -> Callable[[str], str | None] | None:
-    """Return how a signed upstream login turns an email into its Matrix user, or None when the email does not decide it."""
+    """Return how the email-to-Matrix template turns an email into its Matrix user, or None when the email does not decide it."""
     settings = _request_auth_state(request).settings.trusted_upstream
-    # In `_verified_trusted_upstream_matrix_user_id`, a signed Matrix claim wins over the email template, which then
-    # names no one; a Matrix header must agree with the template under strict JWT.
-    if not settings.enabled or not settings.jwt.require_jwt or settings.jwt.matrix_user_id_claim is not None:
+    # In `_trusted_upstream_matrix_user_id`, a signed Matrix claim wins over the email template, which then names no one.
+    if settings.enabled and settings.matrix_user_id_claim is not None:
         return None
-    template = _validated_trusted_upstream_email_to_matrix_template(settings, require_email_header=False)
+    template = _validated_trusted_upstream_email_to_matrix_template(settings)
     if template is None:
         return None
 
@@ -1135,17 +1001,14 @@ async def _require_service_jwt(
     """Require a trusted-upstream service assertion for one dedicated audience and client ID."""
     auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     settings = auth_state.settings.trusted_upstream
-    jwt_settings = settings.jwt
     audience = _env_text(auth_state.runtime_paths, audience_env)
     client_id = _env_text(auth_state.runtime_paths, client_id_env)
     if (
         not settings.enabled
-        or settings.user_id_header is None
-        or not jwt_settings.require_jwt
-        or jwt_settings.header is None
-        or jwt_settings.jwks_url is None
-        or jwt_settings.audience is None
-        or jwt_settings.issuer is None
+        or settings.jwt_header is None
+        or settings.jwks_url is None
+        or settings.audience is None
+        or settings.issuer is None
         or audience is None
         or client_id is None
         or auth_state.trusted_upstream_jwt_client is None
@@ -1155,9 +1018,9 @@ async def _require_service_jwt(
     claims = await _verified_trusted_upstream_jwt_claims(
         request,
         auth_state.trusted_upstream_jwt_client,
-        header=jwt_settings.header,
+        header=settings.jwt_header,
         audience=audience,
-        issuer=jwt_settings.issuer,
+        issuer=settings.issuer,
         algorithms=("RS256",),
         required_claims=("exp", "iat", "iss", "aud", "type", "common_name", "sub"),
         invalid_detail=invalid_detail,
@@ -1175,7 +1038,7 @@ async def _require_service_jwt(
 async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[str, Any]:
     auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     settings = auth_state.settings.trusted_upstream
-    if not settings.enabled or not settings.jwt.require_jwt:
+    if not settings.enabled:
         raise HTTPException(status_code=403, detail=f"{label} require trusted signed authentication")
     auth_user = await _trusted_upstream_auth_user(request, settings, auth_state.trusted_upstream_jwt_client)
     matrix_user_id = auth_user.get("matrix_user_id") if auth_user is not None else None
@@ -1183,6 +1046,31 @@ async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[s
         raise HTTPException(status_code=403, detail=f"{label} require a verified Matrix identity")
     request.scope["auth_user"] = auth_user
     return cast("dict[str, Any]", auth_user)
+
+
+def _reached_dashboard_host(request: Request, settings: _ApiAuthSettings) -> bool:
+    """Return whether this request reached the dashboard's own host, which startup keeps apart from the public one."""
+    # Behind a TLS-terminating proxy the request's scheme may differ from the browser's, but its Host header,
+    # port included, does not.
+    dashboard = settings.dashboard_origin
+    return dashboard is not None and request.url.netloc.lower() == urlsplit(dashboard).netloc
+
+
+def dashboard_host_public_origin(request: Request) -> str | None:
+    """Return the public origin when this request reached the dashboard's own host from `MINDROOM_DASHBOARD_URL`."""
+    settings = _request_auth_state(request).settings
+    return normalized_origin(settings.public_url) if _reached_dashboard_host(request, settings) else None
+
+
+def dashboard_link(request: Request) -> str:
+    """Return where administrators open the dashboard: `MINDROOM_DASHBOARD_URL` when set, else this origin's `/`."""
+    return f"{_request_auth_state(request).settings.dashboard_origin or ''}/"
+
+
+def oauth_callback_hostname(request: Request) -> str | None:
+    """Return the host an OAuth flow started here returns to: the public one when started on the dashboard's host."""
+    public = dashboard_host_public_origin(request)
+    return urlsplit(public).hostname if public is not None else request.url.hostname
 
 
 def require_same_origin(
@@ -1210,6 +1098,9 @@ def _require_browser_mutation_origin(
     origin = deployment_origin(settings.public_url, str(request.base_url))
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
+    # A dashboard on its own host sends that host's origin there.
+    if settings.dashboard_origin is not None and _reached_dashboard_host(request, settings):
+        origin = settings.dashboard_origin
     require_same_origin(request, origin)
 
 

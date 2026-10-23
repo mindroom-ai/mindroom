@@ -599,6 +599,7 @@ def test_transcript_refusals_explain_their_cause(
     assert (result["status"], result["code"], result["graph_code"]) == ("error", code, graph_code)
     assert phrase in result["message"]
     assert "Graph says no." not in result["message"]
+    assert result["graph_message"] == "Graph says no."
 
 
 def test_a_tenant_without_speaker_attribution_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

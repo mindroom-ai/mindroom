@@ -68,6 +68,16 @@ Services with an `oauth_provider` reuse the scope's native OAuth connections wit
 The tool already tells the agent about the broker, so listing it is the opt-in instead of a separate config field, and one rule decides for the sandbox proxy, the pages, and the request log, so they cannot disagree.
 A call without a configured agent gets no broker environment, because nothing shows that it opted in.
 
+**A connected account is used only after an explicit, per-service opt-in that states the approval bypass.**
+The tool opt-in says an agent may use Agent Keys, not that a user wants a connected account to work without the approvals of its native tools.
+Without a second opt-in, connecting a tool whose writes ask for approval silently gave the agent's commands the same account with its full scopes.
+So the broker reads a connection for a service only while an opt-in names that service and the connection's provider, for its token and for the status behind placeholders and the agent tool alike, and enabling one requires acknowledging that commands skip the tools' approvals.
+The egress pages still show whether an account is connected, through the Connections portal's own status reader, so a user can see what allowing it would use.
+The opt-in lives in the store of the connection it unlocks, and the broker and both APIs resolve that store through one function, so an opt-in cannot unlock another requester's or scope's account; a round-trip test per scope kind guards this.
+Requester-scoped providers get one opt-in per requester and service name, covering all of that requester's agents, because the account itself is the requester's.
+It names the provider, not the account: it covers whatever account of that provider the scope connects, a later connection made for the tools included, until someone stops it, and it does not apply while the service's `oauth_provider` names another provider.
+Rejected: keeping connections already in use working after the upgrade, because that would silently keep the bypass this removes.
+
 **Requester-scoped accounts (GitHub, Atlassian) are used only in a requester's own sandbox.**
 In a shared sandbox, every requester's commands run together, so one user's code could act with another's account.
 A shared sandbox can opt in with `oauth_on_shared_workers`, which only administrators can set.

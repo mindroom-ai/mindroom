@@ -19,11 +19,11 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth import reset as oauth_reset
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.api.test_api import (
-    _trusted_upstream_jwks,
-    _trusted_upstream_jwt,
-    _trusted_upstream_jwt_key,
-    _trusted_upstream_strict_jwt_env,
+from tests.api.conftest import (
+    trusted_upstream_env,
+    trusted_upstream_jwks,
+    trusted_upstream_jwt,
+    trusted_upstream_jwt_key,
 )
 from tests.api.test_oauth_api import (
     _publish_config,
@@ -80,14 +80,14 @@ def workspace_portal(
     enforce_turn_authorization: None,  # noqa: ARG001
 ) -> dict[str, Any]:
     """Serve the real signed Connections API with a real workspace plugin."""
-    key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
+    key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(key))
     monkeypatch.setattr(
         "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
     )
     env = {
-        **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
+        **trusted_upstream_env(),
         "MINDROOM_CONNECTIONS_AGENT": "personal",
         "MINDROOM_PUBLIC_URL": "https://chat.example",
     }
@@ -136,8 +136,7 @@ def workspace_portal(
     providers = load_oauth_providers(config, paths, skip_broken_plugins=False)
     headers = {
         name: {
-            "X-Trusted-User": name,
-            "X-Trusted-Jwt": _trusted_upstream_jwt(
+            "X-Trusted-Jwt": trusted_upstream_jwt(
                 key,
                 user_id=name,
                 email=f"{name}@example.org",

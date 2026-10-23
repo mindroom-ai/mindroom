@@ -17,6 +17,7 @@ import pytest
 from nio.durable import DurableSyncConfig, RecordKind, SyncBatch, SyncRecord
 from nio.durable.transport import HttpError
 
+from mindroom import bot as bot_module
 from mindroom.background_tasks import run_coroutine_until_complete, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_room_lifecycle import BotRoomLifecycle
@@ -44,6 +45,12 @@ if TYPE_CHECKING:
     from nio.durable import DurableSync
 
     from mindroom.event_journal.store import PrincipalStore
+
+
+@pytest.fixture(autouse=True)
+def _no_server_state_publication(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These bots join through real Matrix clients pointed at no homeserver; the published server is tested elsewhere."""
+    monkeypatch.setattr(bot_module, "publish_server_state", AsyncMock())
 
 
 @pytest.mark.asyncio

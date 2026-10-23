@@ -1622,6 +1622,8 @@ class ResponseRunner:
                 runtime_paths=self.deps.runtime_paths,
                 requester_id=requester_id,
                 toolkit_owners=paused.toolkit_owners,
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
             )
             approval_pending = plan.waiting_text is not None
             visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()

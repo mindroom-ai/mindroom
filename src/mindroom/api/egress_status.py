@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Literal
 
@@ -13,7 +14,13 @@ from mindroom.api import config_lifecycle, oauth
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS
 from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_PLACEHOLDER_PREFIXES, EgressService
 from mindroom.egress_broker.env import egress_broker_enabled
-from mindroom.egress_broker.oauth_source import oauth_status, shared_worker_oauth, shared_worker_unavailable_status
+from mindroom.egress_broker.oauth_reuse import oauth_reuse_enabled
+from mindroom.egress_broker.oauth_source import (
+    broker_credential_context,
+    oauth_connection_for_display,
+    shared_worker_oauth,
+    shared_worker_unavailable_status,
+)
 from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthStatus, service_status
 from mindroom.egress_broker.user_services import (
@@ -47,6 +54,55 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 RESTRICT_ONLY_KEY_REFUSAL = "This service only limits paths and never sends a key, so it cannot store one"
+
+# Service status loads that may run at once on one event loop, across every egress listing on it. A load can hold an
+# OAuth store's SQLite connection open between its thread steps, so this bounds the open connections and file
+# descriptors however large the config is and however many listings overlap. It is about the width of asyncio's
+# default thread pool (at most 32 workers), which runs each load's file reads.
+_STATUS_LOAD_LIMIT = 32
+_status_load_limits: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _status_load_limit() -> asyncio.Semaphore:
+    """Return the running loop's shared limit on concurrent status loads."""
+    loop = asyncio.get_running_loop()
+    limit = _status_load_limits.get(loop)
+    if limit is None:
+        limit = _status_load_limits[loop] = asyncio.Semaphore(_STATUS_LOAD_LIMIT)
+    return limit
+
+
+async def load_concurrently[Result](
+    loads: Iterable[Callable[[], Awaitable[Result]]],
+    *,
+    limited: bool = False,
+) -> list[Result]:
+    """Run `loads` at once and return their results in order; the first failure cancels and drains the rest.
+
+    A listing awaits many thread and OAuth store hops per service, and in series each one resumes behind the event
+    loop's other work. That failure is raised itself, not as an exception group, so callers handle what a single load
+    raises. Each `limited` load runs under the loop's shared limit (`_STATUS_LOAD_LIMIT`); use it for complete service
+    status loads only, never for a load that waits on limited loads of its own.
+    """
+    limit = _status_load_limit() if limited else None
+
+    async def run(load: Callable[[], Awaitable[Result]]) -> Result:
+        if limit is None:
+            return await load()
+        async with limit:
+            return await load()
+
+    try:
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(run(load)) for load in loads]
+    except BaseExceptionGroup as errors:
+        first = errors.exceptions[0]
+    else:
+        return [task.result() for task in tasks]
+    # Raised outside the handler, so its cause and context stay the load's own.
+    raise first
 
 
 async def require_egress_broker_enabled(request: Request) -> None:
@@ -266,11 +322,23 @@ class PutSecretRequest(BaseModel):
     secret: str
 
 
+class OAuthReuseRequest(BaseModel):
+    """Body that lets Agent Keys use a service's connected account.
+
+    The account's tools ask for approval before they write, but the agent's shell and python then act as the account
+    with its full access and no prompts, so the caller must confirm that (`acknowledge_approval_bypass`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledge_approval_bypass: Literal[True]
+
+
 class EgressSourceStatus(BaseModel):
     """Which secret sources a service has in one scope.
 
     `configured` is true when either source is available. `active_source` says which source the broker uses: an
-    explicit key wins over OAuth.
+    explicit key wins over an OAuth connection, which counts only once Agent Keys may use it (`oauth.reuse_enabled`).
     """
 
     configured: bool
@@ -291,16 +359,19 @@ async def egress_oauth_status(
     manager: CredentialsManager,
     can_manage: bool,
     connection_status: Callable[[OAuthProvider], Awaitable[oauth.OAuthStatusResponse]],
+    reuse_target: Callable[[OAuthProvider], ResolvedWorkerTarget | None],
 ) -> OAuthStatus | None:
     """Return a service's OAuth status as the broker sees it, or None without a provider the registry knows.
 
     `connection_status` loads the provider's state without a token refresh, so a stalled provider never stalls a page:
-    the personal page passes the helper behind the portal's status route, the admin panel the dashboard's. A provider
-    the broker refuses in a shared sandbox (`shared_worker_oauth`) is reported unavailable before any state is read.
+    the personal page passes the helper behind the portal's status route, the admin panel the dashboard's.
+    `reuse_target` returns the target whose connection that status shows, where `reuse_enabled` is read through
+    `broker_credential_context` as the broker reads it. A provider the broker refuses in a shared sandbox
+    (`shared_worker_oauth`) is reported unavailable before any state is read.
     Without a service account the status is what the Connections portal shows the same viewer; requester-scoped
     connections (GitHub, Atlassian) belong to the requester, so every user of the agent manages their own. A service
-    account is not a token the broker can inject, so with one `connected` only reflects a stored personal connection
-    that the broker would still use, and nothing is connectable. Any failure to read one provider's state, the worker
+    account is not a token the broker can inject, so with one `connected` and `account_label` only reflect a stored
+    personal connection, which the broker uses once allowed, and nothing is connectable. Any failure to read one provider's state, the worker
     backend check included, shows that service as not connectable instead of failing the page.
     """
     provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service)
@@ -316,24 +387,20 @@ async def egress_oauth_status(
         if access == "refused":
             return shared_worker_unavailable_status(provider, runtime_paths)
         result = await connection_status(provider)
+        context = broker_credential_context(provider, config, runtime_paths, manager, reuse_target(provider))
+        reuse_enabled = await asyncio.to_thread(oauth_reuse_enabled, context, name, provider.id)
         if result.has_service_account_config:
-            stored = await asyncio.to_thread(
-                oauth_status,
-                provider.id,
-                worker_target,
-                service=name,
-                config=config,
-                runtime_paths=runtime_paths,
-                credentials_manager=manager,
-            )
+            # Shown whether or not Agent Keys may use it, so the user can allow or disconnect it.
+            connected, account_label = await asyncio.to_thread(oauth_connection_for_display, context)
             status = OAuthStatus(
                 provider=result.provider,
                 display_name=result.display_name,
-                connected=stored is not None and stored.connected,
-                account_label=None,
+                connected=connected,
+                account_label=account_label,
                 can_connect=False,
                 reset_required=result.reset_required,
                 service_account=True,
+                reuse_enabled=reuse_enabled,
             )
         else:
             view: oauth.PersonalConnectionView = oauth.personal_connection_view(
@@ -347,6 +414,7 @@ async def egress_oauth_status(
                 account_label=view.account_label,
                 can_connect=view.can_connect,
                 reset_required=view.reset_required,
+                reuse_enabled=reuse_enabled,
             )
     except Exception as exc:
         # OAuth provider code, plugin providers included, can raise anything.

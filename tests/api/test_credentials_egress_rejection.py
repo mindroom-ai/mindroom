@@ -22,6 +22,8 @@ if TYPE_CHECKING:
         ("POST", "/api/credentials/other_service/copy-from/egress_github", None),
         ("GET", "/api/credentials/egress_github/status", None),
         ("POST", "/api/credentials/egress_github/test", None),
+        ("GET", "/api/credentials/egress__oauth_reuse", None),
+        ("POST", "/api/credentials/egress__oauth_reuse", {"credentials": {"services": {}}}),
     ],
 )
 def test_generic_routes_reject_egress_services(

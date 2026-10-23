@@ -6,6 +6,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +20,7 @@ from agno.tools.function import Function
 
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.cancellation import request_task_cancel
@@ -32,6 +34,7 @@ from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.execution import drive_delegations
+from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import prepare_child_turn, start_child_turn
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_recovery_lock
@@ -670,6 +673,78 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
         await runtime.shutdown()
         for storage in storages:
             storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window_thread", ["$thread", "$other"])
+async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_auto_approve_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    window_thread: str,
+) -> None:
+    """A delegated child asks in its job's conversation, so the requester's window there approves its call."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        "@alice:example.org",
+        "!room:example.org",
+        "$thread",
+        "$thread",
+        "p",
+    )
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
+    cards.decision.set_result(BackgroundApprovalDecision("denied", "No."))
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+    start_auto_approve(
+        paths,
+        room_id="!room:example.org",
+        thread_id=window_thread,
+        requester_id="@alice:example.org",
+        duration=timedelta(minutes=5),
+    )
+
+    async def write_report() -> str:
+        return "Report written"
+
+    function = Function.from_callable(write_report)
+    function.requires_confirmation = True
+    function.owning_toolkit = "file"
+    child = job_child()
+    agent = Agent(
+        name=child.child_agent_name,
+        id=child.child_agent_name,
+        tools=[function],
+        model=DelegationModel(id="test", responses=[ModelResponse(tool_calls=[_call("write_report", "w")])]),
+    )
+    response = await agent.arun("Report", session_id=child.session_id, run_id=child.run_id)
+    finish = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await finish.wait()
+        return BackgroundOutcome("completed", "done")
+
+    await start_delegation_job(runtime, child, owner=identity, operation=operation)
+    try:
+        decisions, _reasons, _calls = await request_child_approvals(
+            child,
+            response,
+            toolkit_owners_for_agents([agent]),
+            owner=identity,
+            config=config,
+            runtime_paths=paths,
+        )
+    finally:
+        finish.set()
+        await runtime.shutdown()
+
+    inside = window_thread == "$thread"
+    assert decisions == {"w": inside}
+    assert len(cards.requested) == (0 if inside else 1)
 
 
 def _child_policy_config(rules: list[ApprovalRuleConfig]) -> Config:

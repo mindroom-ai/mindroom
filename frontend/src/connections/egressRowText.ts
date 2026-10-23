@@ -5,6 +5,7 @@ import type {
   EgressCredentialService,
   EgressOAuthStatus,
   EgressRuleSummary,
+  EgressScope,
   EgressServiceSource,
 } from "./types";
 
@@ -15,6 +16,8 @@ export interface RowAgent {
   displayName: string;
   /** A shared or unscoped agent: everyone using it shares its keys and accounts. */
   shared: boolean;
+  /** Whose store its keys and accounts live in; every `unscoped` agent shares the global one. */
+  scope?: EgressScope;
   /** The credential managers' Matrix IDs; the dashboard, whose operator manages every service, leaves them out. */
   managers?: string[];
   /** Every service of the agent: disconnecting a provider names the ones that use it. */
@@ -93,7 +96,9 @@ export function statusLabel(service: EgressCredentialService): string {
         ? "Using API key"
         : keySavedLabel(service.key_updated_at);
     // The row names the account below the status label.
-    if (service.active_source === "oauth") return "Connected";
+    if (service.active_source === "oauth") return "Using connected account";
+    if (oauth.connected && !oauth.reuse_enabled)
+      return "Connected for tools only";
     return oauth.reset_required ? "Reset required" : "Not set";
   }
   if (!service.configured) return "Not set";
@@ -144,11 +149,19 @@ export function serviceHosts(service: EgressCredentialService): string[] {
 
 /** What happens to requests to its hosts while the service has no key or account; null once it has, and for a limit. */
 export function unsetNote(service: EgressCredentialService): string | null {
-  return service.configured ||
-    service.restrict_only ||
-    service.rules.length === 0
-    ? null
-    : "Requests are refused until a key is set.";
+  if (service.configured || service.restrict_only || service.rules.length === 0)
+    return null;
+  const oauth = service.oauth;
+  // An account Agent Keys can use stops refusals as well as a key does. A service account is
+  // never one, but a personal account connected before it still is.
+  if (oauth) {
+    if (oauth.connected && !oauth.reset_required)
+      return "Requests are refused until a key is set or this account is used for Agent Keys.";
+    // The server only says an account can be connected where this viewer may connect one.
+    if (!oauth.service_account && (oauth.can_connect || oauth.reset_required))
+      return "Requests are refused until a key is set or an account is connected.";
+  }
+  return "Requests are refused until a key is set.";
 }
 
 /**

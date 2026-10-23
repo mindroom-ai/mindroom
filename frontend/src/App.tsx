@@ -202,7 +202,7 @@ function AppContent() {
 
     if (!isAuthError && canRecoverInvalidConfig) {
       return (
-        <div className="app-shell flex h-screen items-center justify-center">
+        <div className="flex h-screen items-center justify-center">
           <div className="glass-overlay mx-4 w-full max-w-4xl space-y-4 rounded-xl p-5 md:p-6">
             <div className="space-y-2">
               <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
@@ -273,7 +273,7 @@ function AppContent() {
     }
 
     return (
-      <div className="app-shell flex h-screen items-center justify-center">
+      <div className="flex h-screen items-center justify-center">
         <div className="glass-overlay mx-4 w-full max-w-md rounded-xl p-6">
           <div className="flex items-center mb-4">
             <span className="text-3xl mr-3">🔒</span>
@@ -286,7 +286,7 @@ function AppContent() {
           {!isAuthError && validationIssues.length > 0 && (
             <div className="mb-6 rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
               <p className="font-medium">Current configuration is invalid.</p>
-              <p className="mt-1 text-destructive/80">
+              <p className="mt-1">
                 Fix the reported issues in <code>config.yaml</code> or the
                 referenced plugin manifests, then retry loading the dashboard.
               </p>
@@ -317,24 +317,20 @@ function AppContent() {
                     <li>Request access from your administrator</li>
                     <li>Return to your dashboard</li>
                   </ul>
-                  <a
-                    href={`${getPlatformUrl()}/dashboard`}
-                    className="block w-full text-center px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
-                  >
-                    Go to Dashboard
-                  </a>
+                  <Button asChild className="w-full">
+                    <a href={`${getPlatformUrl()}/dashboard`}>
+                      Go to Dashboard
+                    </a>
+                  </Button>
                 </>
               ) : (
                 <>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
                     Please log in to access this MindRoom instance.
                   </p>
-                  <a
-                    href={`${getPlatformUrl()}/auth/login`}
-                    className="block w-full text-center px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
-                  >
-                    Log In
-                  </a>
+                  <Button asChild className="w-full">
+                    <a href={`${getPlatformUrl()}/auth/login`}>Log In</a>
+                  </Button>
                 </>
               )}
             </div>
@@ -342,12 +338,12 @@ function AppContent() {
 
           {!isAuthError && (
             <div className="space-y-3">
-              <button
+              <Button
+                className="w-full"
                 onClick={() => window.location.reload()}
-                className="w-full px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
               >
                 Retry
-              </button>
+              </Button>
               <p className="text-sm text-gray-500 dark:text-gray-400 text-center">
                 If the problem persists, please contact support.
               </p>
@@ -359,48 +355,42 @@ function AppContent() {
   }
 
   return (
-    <div className="app-shell relative flex h-screen flex-col overflow-hidden">
+    <div className="relative flex h-screen overflow-hidden">
       <a
         href="#main-content"
-        className="glass-control fixed left-3 top-3 z-[100] -translate-y-16 px-3 py-2 text-sm font-medium focus:translate-y-0"
+        className="fixed left-3 top-3 z-[100] -translate-y-16 rounded-md bg-card px-3 py-2 text-sm font-medium focus:translate-y-0 focus:shadow-lg"
       >
         Skip to content
       </a>
-      <header className="shell-toolbar relative z-20 flex h-15 shrink-0 items-center justify-between gap-3 px-3.5 md:h-16 md:px-6">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <Navigation mode="mobile" />
-          <h1 className="flex min-w-0 items-center gap-2.5">
+      <Navigation mode="desktop" />
+
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b px-2 md:px-6">
+          <div className="flex min-w-0 items-center gap-2">
+            <Navigation mode="mobile" />
             <img
               src="/logo.svg"
               alt="MindRoom logo"
-              className="h-7 w-7 shrink-0"
+              className="h-7 w-7 shrink-0 md:hidden"
             />
-            <span className="hidden text-sm font-semibold tracking-tight sm:inline">
-              MindRoom
-            </span>
-          </h1>
-          <span aria-hidden="true" className="hidden text-border sm:inline">
-            /
-          </span>
-          <span className="truncate text-sm text-muted-foreground">
-            {currentNavItem.label}
-          </span>
-        </div>
+            <h1 className="truncate text-base font-semibold">
+              {currentNavItem.label}
+            </h1>
+          </div>
 
-        <div className="flex shrink-0 items-center gap-1.5">
-          {isDirty && (
-            <span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex">
-              <span className="h-1.5 w-1.5 rounded-full bg-primary" />
-              Draft
-            </span>
-          )}
-          <SyncStatus status={syncStatus} compact className="sm:hidden" />
-          <SyncStatus status={syncStatus} className="hidden sm:flex" />
-          <ThemeToggle className="glass-control h-9 w-9" />
-        </div>
-      </header>
+          <div className="flex shrink-0 items-center gap-1.5 md:gap-3">
+            {isDirty && (
+              <span className="hidden items-center gap-1.5 rounded-full bg-accent px-2.5 py-1 text-xs font-medium text-accent-foreground sm:flex">
+                <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                Draft
+              </span>
+            )}
+            <SyncStatus status={syncStatus} compact className="sm:hidden" />
+            <SyncStatus status={syncStatus} className="hidden sm:flex" />
+            <ThemeToggle />
+          </div>
+        </header>
 
-      <div className="relative z-10 flex min-h-0 flex-1 flex-col">
         {configUsesIncludes && (
           <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-100 sm:px-6">
             This configuration is composed from multiple files via{" "}
@@ -444,7 +434,7 @@ function AppContent() {
               <p className="font-medium">
                 This draft still has configuration validation issues.
               </p>
-              <p className="text-destructive/80">
+              <p>
                 Resolve the reported issues in the draft below, then save to
                 replace <code>config.yaml</code>.
               </p>
@@ -463,218 +453,215 @@ function AppContent() {
           </div>
         )}
 
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          <Navigation mode="desktop" />
-          <main
-            id="main-content"
-            tabIndex={-1}
-            className="workspace-surface min-w-0 flex-1 overflow-hidden"
-          >
-            <div className="relative flex h-full flex-col">
-              <RoutePanel
-                active={currentTab === "dashboard"}
-                label="Dashboard"
-                className="min-h-0 flex-1 overflow-auto"
-              >
-                <div className="min-h-full">
-                  <Dashboard />
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="workspace-surface min-w-0 flex-1 overflow-hidden"
+        >
+          <div className="relative flex h-full flex-col">
+            <RoutePanel
+              active={currentTab === "dashboard"}
+              label="Dashboard"
+              className="min-h-0 flex-1 overflow-auto"
+            >
+              <div className="min-h-full">
+                <Dashboard />
+              </div>
+            </RoutePanel>
+
+            <RoutePanel
+              active={currentTab === "usage"}
+              label="Usage"
+              className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
+            >
+              <Usage />
+            </RoutePanel>
+
+            <RoutePanel
+              active={currentTab === "budgets"}
+              label="Budgets"
+              className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
+            >
+              <Budgets />
+            </RoutePanel>
+
+            <RoutePanel
+              active={currentTab === "agents"}
+              label="Agents"
+              className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+            >
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
+                <div
+                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                    selectedAgentId ? "hidden lg:block" : "block"
+                  }`}
+                >
+                  <AgentList />
                 </div>
-              </RoutePanel>
+                <div
+                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                    selectedAgentId ? "block" : "hidden lg:block"
+                  }`}
+                >
+                  <AgentEditor />
+                </div>
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "usage"}
-                label="Usage"
-                className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
-              >
-                <Usage />
-              </RoutePanel>
+            <RoutePanel
+              active={currentTab === "teams"}
+              label="Teams"
+              className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+            >
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
+                <div
+                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                    selectedTeamId ? "hidden lg:block" : "block"
+                  }`}
+                >
+                  <TeamList />
+                </div>
+                <div
+                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                    selectedTeamId ? "block" : "hidden lg:block"
+                  }`}
+                >
+                  <TeamEditor />
+                </div>
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "budgets"}
-                label="Budgets"
-                className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
-              >
-                <Budgets />
-              </RoutePanel>
-
-              <RoutePanel
-                active={currentTab === "agents"}
-                label="Agents"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
-              >
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
+            <RoutePanel
+              active={currentTab === "rooms"}
+              label="Rooms"
+              className="rooms-workspace min-h-0 flex-1 overflow-y-auto p-3 md:p-5 lg:overflow-hidden"
+            >
+              <div className="rooms-stack flex min-h-full flex-col gap-3 sm:gap-4 lg:h-full lg:min-h-0">
+                <RoomAdmins />
+                <div className="rooms-layout grid grid-cols-1 gap-3 sm:gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-12">
                   <div
-                    className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                      selectedAgentId ? "hidden lg:block" : "block"
+                    className={`col-span-1 overflow-visible lg:col-span-4 lg:h-full lg:overflow-hidden ${
+                      selectedRoomId ? "hidden lg:block" : "block"
                     }`}
                   >
-                    <AgentList />
+                    <RoomList />
                   </div>
                   <div
-                    className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                      selectedAgentId ? "block" : "hidden lg:block"
+                    className={`col-span-1 overflow-visible lg:col-span-8 lg:h-full lg:overflow-hidden ${
+                      selectedRoomId ? "block" : "hidden lg:block"
                     }`}
                   >
-                    <AgentEditor />
+                    <RoomEditor
+                      key={
+                        selectedRoomId === null
+                          ? "no-room"
+                          : `room:${selectedRoomId}`
+                      }
+                    />
                   </div>
                 </div>
-              </RoutePanel>
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "teams"}
-                label="Teams"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
-              >
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                  <div
-                    className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                      selectedTeamId ? "hidden lg:block" : "block"
-                    }`}
-                  >
-                    <TeamList />
-                  </div>
-                  <div
-                    className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                      selectedTeamId ? "block" : "hidden lg:block"
-                    }`}
-                  >
-                    <TeamEditor />
-                  </div>
-                </div>
-              </RoutePanel>
+            <RoutePanel
+              active={currentTab === "schedules"}
+              label="Schedules"
+              className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+            >
+              <div className="h-full overflow-hidden">
+                <Schedules />
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "rooms"}
-                label="Rooms"
-                className="rooms-workspace min-h-0 flex-1 overflow-y-auto p-3 md:p-5 lg:overflow-hidden"
-              >
-                <div className="rooms-stack flex min-h-full flex-col gap-3 sm:gap-4 lg:h-full lg:min-h-0">
-                  <RoomAdmins />
-                  <div className="rooms-layout grid grid-cols-1 gap-3 sm:gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-12">
-                    <div
-                      className={`col-span-1 overflow-visible lg:col-span-4 lg:h-full lg:overflow-hidden ${
-                        selectedRoomId ? "hidden lg:block" : "block"
-                      }`}
-                    >
-                      <RoomList />
-                    </div>
-                    <div
-                      className={`col-span-1 overflow-visible lg:col-span-8 lg:h-full lg:overflow-hidden ${
-                        selectedRoomId ? "block" : "hidden lg:block"
-                      }`}
-                    >
-                      <RoomEditor
-                        key={
-                          selectedRoomId === null
-                            ? "no-room"
-                            : `room:${selectedRoomId}`
-                        }
-                      />
-                    </div>
-                  </div>
-                </div>
-              </RoutePanel>
+            <RoutePanel
+              active={currentTab === "unconfigured-rooms"}
+              label="External rooms"
+              className="min-h-0 flex-1 overflow-y-auto p-3 md:p-5"
+            >
+              <UnconfiguredRooms />
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "schedules"}
-                label="Schedules"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
-              >
-                <div className="h-full overflow-hidden">
-                  <Schedules />
-                </div>
-              </RoutePanel>
+            <RoutePanel
+              active={currentTab === "models"}
+              label="Models"
+              className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+            >
+              <div className="h-full overflow-hidden">
+                <ModelConfig />
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "unconfigured-rooms"}
-                label="External rooms"
-                className="min-h-0 flex-1 overflow-y-auto p-3 md:p-5"
-              >
-                <UnconfiguredRooms />
-              </RoutePanel>
+            <RoutePanel
+              active={currentTab === "memory"}
+              label="Memory"
+              className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+            >
+              <div className="h-full overflow-hidden">
+                <MemoryConfig />
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "models"}
-                label="Models"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
-              >
-                <div className="h-full overflow-hidden">
-                  <ModelConfig />
-                </div>
-              </RoutePanel>
+            <RoutePanel
+              active={currentTab === "knowledge"}
+              label="Knowledge"
+              className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+            >
+              <div className="h-full overflow-hidden">
+                <Knowledge />
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "memory"}
-                label="Memory"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
-              >
-                <div className="h-full overflow-hidden">
-                  <MemoryConfig />
-                </div>
-              </RoutePanel>
+            <RoutePanel
+              active={currentTab === "credentials"}
+              label="Credentials"
+              className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+            >
+              <div className="h-full overflow-hidden">
+                <Credentials />
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "knowledge"}
-                label="Knowledge"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
-              >
-                <div className="h-full overflow-hidden">
-                  <Knowledge />
-                </div>
-              </RoutePanel>
+            <RoutePanel
+              active={currentTab === "voice"}
+              label="Voice"
+              className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+            >
+              <div className="h-full overflow-auto">
+                <VoiceConfig />
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "credentials"}
-                label="Credentials"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
-              >
-                <div className="h-full overflow-hidden">
-                  <Credentials />
-                </div>
-              </RoutePanel>
+            <RoutePanel
+              active={currentTab === "integrations"}
+              label="Tools"
+              className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
+            >
+              <div className="h-full overflow-auto">
+                <Integrations />
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "voice"}
-                label="Voice"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
-              >
-                <div className="h-full overflow-auto">
-                  <VoiceConfig />
-                </div>
-              </RoutePanel>
+            <RoutePanel
+              active={currentTab === "skills"}
+              label="Skills"
+              className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+            >
+              <div className="h-full overflow-hidden">
+                <Skills />
+              </div>
+            </RoutePanel>
 
-              <RoutePanel
-                active={currentTab === "integrations"}
-                label="Tools"
-                className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
-              >
-                <div className="h-full overflow-auto">
-                  <Integrations />
-                </div>
-              </RoutePanel>
-
-              <RoutePanel
-                active={currentTab === "skills"}
-                label="Skills"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
-              >
-                <div className="h-full overflow-hidden">
-                  <Skills />
-                </div>
-              </RoutePanel>
-
-              <RoutePanel
-                active={currentTab === "settings"}
-                label="Settings"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
-              >
-                <div className="h-full overflow-hidden">
-                  <Settings />
-                </div>
-              </RoutePanel>
-            </div>
-          </main>
-        </div>
+            <RoutePanel
+              active={currentTab === "settings"}
+              label="Settings"
+              className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+            >
+              <div className="h-full overflow-hidden">
+                <Settings />
+              </div>
+            </RoutePanel>
+          </div>
+        </main>
       </div>
     </div>
   );

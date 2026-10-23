@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +14,7 @@ from agno.models.message import Message, MessageMetrics
 from agno.models.response import ModelResponse
 from structlog.testing import capture_logs
 
+from mindroom import llm_request_logging
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
 from mindroom.llm_request_logging import (
@@ -262,6 +265,53 @@ async def test_llm_request_logging_uses_post_defer_wire_tools(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_llm_request_record_is_built_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """Serializing a long conversation must not block the loop; recorded wire tools are not normalized twice."""
+    model = _DeferredWireModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+    loop_thread = threading.get_ident()
+    build_threads: list[int] = []
+    normalized: list[object] = []
+    message_payloads = llm_request_logging._request_message_payloads
+    json_safe = llm_request_logging._json_safe
+
+    def payloads(messages: list[Message]) -> object:
+        build_threads.append(threading.get_ident())
+        return message_payloads(messages)
+
+    def tracked_json_safe(value: object) -> object:
+        normalized.append(value)
+        return json_safe(value)
+
+    monkeypatch.setattr(llm_request_logging, "_request_message_payloads", payloads)
+    monkeypatch.setattr(llm_request_logging, "_json_safe", tracked_json_safe)
+    tools = [{"name": "always_available"}]
+    request_kwargs = {"messages": [Message(role="user", content="hi")], "tools": tools}
+
+    if stream:
+        assert [chunk.content async for chunk in model.ainvoke_stream(**request_kwargs)] == ["ok"]
+    else:
+        await model.ainvoke(**request_kwargs)
+
+    [entry] = _read_log_entries(tmp_path)
+    assert [(message["role"], message["content"]) for message in entry["messages"]] == [("user", "hi")]
+    assert entry["tools"] == tools
+    assert len(build_threads) == 1
+    assert build_threads[0] != loop_thread
+    assert sum(value == tools for value in normalized) == 1
+
+
+@pytest.mark.asyncio
 async def test_llm_request_logging_records_claude_native_wire_tools(tmp_path: Path) -> None:
     """Claude logs should match the final native-search array passed to its SDK."""
     model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
@@ -399,6 +449,31 @@ async def test_llm_request_logging_redacts_sensitive_values_before_jsonl_write(t
     assert entry["callback_url"] == (
         "https://example.test/oauth/callback?code=***redacted***&state=***redacted***&keep=1"
     )
+
+
+def test_concurrent_large_records_each_land_on_their_own_line(tmp_path: Path) -> None:
+    """Records larger than one buffered write, written by concurrent model calls, never share a line."""
+    path = tmp_path / "llm-requests.jsonl"
+    writers = 8
+    records_per_writer = 10
+    padding = "x" * (2 * max(io.DEFAULT_BUFFER_SIZE, tmp_path.stat().st_blksize))
+    start = threading.Barrier(writers)
+
+    def write(writer: int) -> None:
+        start.wait()
+        for index in range(records_per_writer):
+            llm_request_logging._write_jsonl_line(path, {"writer": writer, "index": index, "padding": padding})
+
+    threads = [threading.Thread(target=write, args=(writer,)) for writer in range(writers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert sorted((record["writer"], record["index"]) for record in records) == [
+        (writer, index) for writer in range(writers) for index in range(records_per_writer)
+    ]
 
 
 @pytest.mark.asyncio

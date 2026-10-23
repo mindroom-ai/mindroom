@@ -162,12 +162,12 @@ def test_registered_metadata_declares_a_primary_runtime_oauth_tool() -> None:
     assert metadata.consumes_workspace_paths is False
 
 
-def test_provider_requests_only_calendar_read_write() -> None:
+def test_provider_requests_own_and_shared_calendar_read_write() -> None:
     provider = outlook_calendar_oauth_provider()
 
     assert provider.id == "outlook_calendar"
     assert provider.display_name == "Outlook Calendar"
-    assert provider.scopes == ("Calendars.ReadWrite", "User.Read", "offline_access")
+    assert provider.scopes == ("Calendars.ReadWrite", "Calendars.ReadWrite.Shared", "User.Read", "offline_access")
     assert provider.credential_service == "outlook_calendar_oauth"
     assert provider.shared_client_config_services == ("microsoft_oauth_client",)
     assert provider.requester_scoped_credentials is True
@@ -995,3 +995,427 @@ def test_get_free_busy_reports_a_graph_refusal(tmp_path: Path, monkeypatch: pyte
         400,
         "ErrorInvalidTimeZoneId",
     )
+
+
+OWNER = "kim@contoso.com"
+OWNER_EVENTS = f"/users/{OWNER}/calendar/calendarView"
+OWNER_FUNCTIONS = (
+    "outlook_calendar_list_calendars",
+    "outlook_calendar_list_events",
+    "outlook_calendar_get_event",
+    "outlook_calendar_create_event",
+    "outlook_calendar_update_event",
+    "outlook_calendar_delete_event",
+)
+
+
+def _owner_call(tools: OutlookCalendarTools, name: str, owner: object, **extra: object) -> dict[str, Any]:
+    """Call one function that takes calendar_owner with otherwise valid arguments."""
+    arguments: dict[str, dict[str, object]] = {
+        "outlook_calendar_list_calendars": {},
+        "outlook_calendar_list_events": {"start": "2026-10-21", "end": "2026-10-22"},
+        "outlook_calendar_get_event": {"event_id": EVENT_ID},
+        "outlook_calendar_create_event": {
+            "subject": "Sync",
+            "start": "2026-10-21T09:00:00",
+            "end": "2026-10-21T10:00:00",
+        },
+        "outlook_calendar_update_event": {"event_id": EVENT_ID, "subject": "Moved"},
+        "outlook_calendar_delete_event": {"event_id": EVENT_ID},
+    }
+    return _payload(getattr(tools, name)(**{**arguments[name], **extra}, calendar_owner=owner))
+
+
+def test_only_the_calendar_functions_take_a_calendar_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch)
+
+    for name in TOOL_METADATA["outlook_calendar"].function_names:
+        parameters = Function.from_callable(getattr(tools, name)).to_dict()["parameters"]["properties"]
+        assert ("calendar_owner" in parameters) == (name in OWNER_FUNCTIONS), name
+        if name in OWNER_FUNCTIONS:
+            description = " ".join(parameters["calendar_owner"]["description"].split())
+            assert "shared their calendar with the requester or made them a delegate" in description, name
+
+
+def test_owner_descriptions_name_whose_calendar_and_who_is_told(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch)
+
+    assert "is_organizer and my_response describe that person" in _description(tools, "outlook_calendar_list_events")
+    assert "invitations from that person" in _description(tools, "outlook_calendar_create_event")
+    for name in ("outlook_calendar_create_event", "outlook_calendar_update_event", "outlook_calendar_delete_event"):
+        assert "whose calendar it is" in _description(tools, name), name
+
+
+def test_list_calendars_reads_the_owners_mailbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calendar = {"id": CALENDAR_ID, "name": "Calendar", "owner": {"name": "Kim", "address": OWNER}, "canEdit": True}
+    page = {"value": [calendar], "@odata.nextLink": f"{GRAPH}/users/kim%40contoso.com/calendars?$skiptoken=page2"}
+    routes = {("GET", f"/users/{OWNER}/calendars"): httpx.Response(200, json=page)}
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(tools.outlook_calendar_list_calendars(calendar_owner=OWNER))
+
+    assert result["calendar_owner"] == OWNER
+    assert result["calendars"][0]["owner"] == {"name": "Kim", "email": OWNER}
+    # The token names the mailbox as the call did, whichever way Graph's link names it.
+    assert result["next_page_token"] == f"/users/{OWNER}/calendars?$skiptoken=page2"
+    [request] = graph.requests
+    assert request.url.raw_path.split(b"?")[0] == b"/v1.0/users/kim@contoso.com/calendars"
+
+
+@pytest.mark.parametrize(
+    ("calendar", "view_path"),
+    [(None, OWNER_EVENTS), (CALENDAR_ID, f"/users/{OWNER}/calendars/{CALENDAR_ID}/calendarView")],
+)
+def test_list_events_reads_the_owners_calendar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calendar: str | None,
+    view_path: str,
+) -> None:
+    graph_next = f"{GRAPH}/users('6f1c2d3e-0000-4000-8000-000000000001')/calendar/calendarView?$top=50&$skip=50"
+    page = {"value": [_graph_event()], "@odata.nextLink": graph_next}
+    routes = {("GET", view_path): httpx.Response(200, json=page)}
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(
+        tools.outlook_calendar_list_events("2026-10-21", "2026-10-22", calendar=calendar, calendar_owner=OWNER),
+    )
+
+    assert result == {
+        "status": "ok",
+        "tool": "outlook_calendar",
+        "events": [EVENT_SUMMARY],
+        "next_page_token": f"{OWNER_EVENTS}?$top=50&$skip=50",
+        "calendar_owner": OWNER,
+    }
+    [request] = graph.requests
+    assert request.headers["prefer"] == 'outlook.timezone="UTC"'
+    assert request.url.params["startDateTime"] == "2026-10-21T00:00:00Z"
+
+
+@pytest.mark.parametrize("owner", [OWNER, "Kim@Contoso.COM"])
+def test_list_events_follows_a_page_token_of_the_same_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+) -> None:
+    routes = {("GET", OWNER_EVENTS): httpx.Response(200, json={"value": []})}
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+    page_token = f"{OWNER_EVENTS}?$top=10&$skip=10"
+
+    result = _payload(tools.outlook_calendar_list_events("", "", page_token=page_token, calendar_owner=owner))
+
+    assert result["next_page_token"] is None
+    [request] = graph.requests
+    assert request.url.path == f"/v1.0{OWNER_EVENTS}"
+    assert dict(request.url.params) == {"$top": "10", "$skip": "10"}
+
+
+def test_own_listing_tokens_name_the_requesters_mailbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    graph_next = f"{GRAPH}/users/6f1c2d3e-0000-4000-8000-000000000001/calendar/calendarView?$skip=10"
+    routes = {
+        ("GET", "/me/calendar/calendarView"): httpx.Response(200, json={"value": [], "@odata.nextLink": graph_next}),
+    }
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    next_page = _payload(tools.outlook_calendar_list_events("2026-10-21", "2026-10-22"))["next_page_token"]
+    _payload(tools.outlook_calendar_list_events("", "", page_token=next_page))
+
+    assert next_page == "/me/calendar/calendarView?$skip=10"
+    assert [request.url.path for request in graph.requests] == ["/v1.0/me/calendar/calendarView"] * 2
+
+
+@pytest.mark.parametrize(
+    ("owner", "page_token"),
+    [
+        (OWNER, NEXT_EVENTS),
+        (OWNER, "/users/sam@contoso.com/calendar/calendarView?$skip=10"),
+        (OWNER, f"/users/{OWNER}.example/calendar/calendarView?$skip=10"),
+        (OWNER, f"/users('{OWNER}')/calendar/calendarView?$skip=10"),
+        (OWNER, f"/users/{OWNER}/messages?$skiptoken=abc"),
+        (None, f"{OWNER_EVENTS}?$skip=10"),
+        (None, f"/users('{OWNER}')/calendar/calendarView?$skip=10"),
+    ],
+)
+def test_list_events_refuses_a_page_token_of_another_mailbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str | None,
+    page_token: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch)
+
+    result = _payload(tools.outlook_calendar_list_events("", "", page_token=page_token, calendar_owner=owner))
+
+    assert result["code"] == "invalid_page_token"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("owner", "page_token"),
+    [
+        (OWNER, NEXT_CALENDARS),
+        (OWNER, "/users/sam@contoso.com/calendars?$skiptoken=page2"),
+        (None, f"/users/{OWNER}/calendars?$skiptoken=page2"),
+    ],
+)
+def test_list_calendars_refuses_a_page_token_of_another_mailbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str | None,
+    page_token: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch)
+
+    result = _payload(tools.outlook_calendar_list_calendars(page_token=page_token, calendar_owner=owner))
+
+    assert result["code"] == "invalid_page_token"
+    assert graph.requests == []
+
+
+def test_list_calendars_follows_a_page_token_of_the_same_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    routes = {("GET", f"/users/{OWNER}/calendars"): httpx.Response(200, json={"value": []})}
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(
+        tools.outlook_calendar_list_calendars(
+            page_token=f"/users/{OWNER}/calendars?$skiptoken=p2",
+            calendar_owner=OWNER,
+        ),
+    )
+
+    assert result == {
+        "status": "ok",
+        "tool": "outlook_calendar",
+        "calendars": [],
+        "next_page_token": None,
+        "calendar_owner": OWNER,
+    }
+    assert graph.requests[0].url.params["$skiptoken"] == "p2"
+
+
+def test_get_event_reads_the_owners_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    event = _graph_event(body={"contentType": "text", "content": "Agenda"})
+    routes = {("GET", f"/users/{OWNER}/events/{EVENT_ID}"): httpx.Response(200, json=event)}
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(tools.outlook_calendar_get_event(EVENT_ID, calendar_owner=OWNER))
+
+    assert result["event"] == {**EVENT_SUMMARY, "body": "Agenda", "truncated": False}
+    assert result["calendar_owner"] == OWNER
+    assert graph.requests[0].headers["prefer"] == 'outlook.body-content-type="text"'
+
+
+@pytest.mark.parametrize(
+    ("calendar", "calendar_path"),
+    [(None, f"/users/{OWNER}/calendar"), (CALENDAR_ID, f"/users/{OWNER}/calendars/{CALENDAR_ID}")],
+)
+def test_create_event_on_the_owners_calendar_uses_its_meeting_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calendar: str | None,
+    calendar_path: str,
+) -> None:
+    providers = {
+        "defaultOnlineMeetingProvider": "teamsForBusiness",
+        "allowedOnlineMeetingProviders": ["teamsForBusiness"],
+    }
+    routes = {
+        ("GET", calendar_path): httpx.Response(200, json=providers),
+        ("POST", f"{calendar_path}/events"): httpx.Response(201, json=_graph_event()),
+    }
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(
+        tools.outlook_calendar_create_event(
+            "Sync",
+            "2026-10-21T09:00:00",
+            "2026-10-21T10:00:00",
+            calendar=calendar,
+            attendees=["sam@contoso.com"],
+            is_online_meeting=True,
+            calendar_owner=OWNER,
+        ),
+    )
+
+    assert result["event"] == EVENT_SUMMARY
+    assert result["calendar_owner"] == OWNER
+    lookup, create = graph.requests
+    assert (lookup.method, lookup.url.path) == ("GET", f"/v1.0{calendar_path}")
+    assert (create.method, create.url.path) == ("POST", f"/v1.0{calendar_path}/events")
+    assert _body(create)["attendees"] == [{"emailAddress": {"address": "sam@contoso.com"}, "type": "required"}]
+    assert _body(create)["onlineMeetingProvider"] == "teamsForBusiness"
+
+
+def test_create_event_on_the_owners_calendar_without_a_meeting_provider_sends_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    providers = {"defaultOnlineMeetingProvider": "unknown", "allowedOnlineMeetingProviders": []}
+    routes = {
+        ("GET", "/me/calendar"): httpx.Response(200, json={"defaultOnlineMeetingProvider": "teamsForBusiness"}),
+        ("GET", f"/users/{OWNER}/calendar"): httpx.Response(200, json=providers),
+    }
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _owner_call(tools, "outlook_calendar_create_event", OWNER, is_online_meeting=True)
+
+    assert result["code"] == "online_meeting_unavailable"
+    assert result["calendar_owner"] == OWNER
+    assert [(request.method, request.url.path) for request in graph.requests] == [
+        ("GET", f"/v1.0/users/{OWNER}/calendar"),
+    ]
+
+
+def test_update_event_checks_the_owners_event_before_replacing_its_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_path = f"/users/{OWNER}/events/{EVENT_ID}"
+    routes = {
+        ("GET", f"/me/events/{EVENT_ID}"): httpx.Response(200, json={"isOnlineMeeting": False}),
+        ("GET", event_path): httpx.Response(200, json={"isOnlineMeeting": True}),
+    }
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(tools.outlook_calendar_update_event(EVENT_ID, body="New agenda", calendar_owner=OWNER))
+
+    assert result["code"] == "online_meeting_body"
+    assert result["calendar_owner"] == OWNER
+    assert [(request.method, request.url.path) for request in graph.requests] == [("GET", f"/v1.0{event_path}")]
+
+
+def test_update_event_patches_the_owners_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    event_path = f"/users/{OWNER}/events/{EVENT_ID}"
+    routes = {
+        ("GET", event_path): httpx.Response(200, json={"isOnlineMeeting": False}),
+        ("PATCH", event_path): httpx.Response(200, json=_graph_event(subject="Moved")),
+    }
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(tools.outlook_calendar_update_event(EVENT_ID, body="Agenda", calendar_owner=OWNER))
+
+    assert result["event"]["subject"] == "Moved"
+    assert result["calendar_owner"] == OWNER
+    assert [(request.method, request.url.path) for request in graph.requests] == [
+        ("GET", f"/v1.0{event_path}"),
+        ("PATCH", f"/v1.0{event_path}"),
+    ]
+
+
+def test_delete_event_deletes_the_owners_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    routes = {("DELETE", f"/users/{OWNER}/events/{EVENT_ID}"): httpx.Response(204)}
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(tools.outlook_calendar_delete_event(EVENT_ID, calendar_owner=OWNER))
+
+    assert result == {
+        "status": "ok",
+        "tool": "outlook_calendar",
+        "deleted": True,
+        "event_id": EVENT_ID,
+        "calendar_owner": OWNER,
+    }
+    assert graph.calls() == [f"DELETE graph.microsoft.com/v1.0/users/{OWNER}/events/{EVENT_ID}"]
+
+
+@pytest.mark.parametrize("name", OWNER_FUNCTIONS)
+@pytest.mark.parametrize(
+    "owner",
+    [
+        "",
+        "  ",
+        "kim",
+        "me",
+        "kim@contoso.com/calendar",
+        "kim@contoso.com?x=1",
+        f" {OWNER} ",
+        f"{OWNER}\u202e",
+        "kim\\x@contoso.com",
+        "kim\x00@contoso.com",
+        f"{'k' * 250}@contoso.com",
+        5,
+        ["a@b.co"],
+    ],
+)
+def test_a_calendar_owner_that_is_not_an_address_is_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    owner: object,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch)
+
+    result = _owner_call(tools, name, owner)
+
+    assert result["code"] == "invalid_argument"
+    assert result["message"] == "calendar_owner must be an email address or sign-in name, such as kim@contoso.com."
+    assert "calendar_owner" not in result
+    assert graph.requests == []
+
+
+def test_a_guest_calendar_owner_is_escaped_as_one_path_segment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guest = "kim_fabrikam.com#EXT#@contoso.onmicrosoft.com"
+    routes = {("GET", f"/users/{guest}/events/{EVENT_ID}"): httpx.Response(200, json=_graph_event())}
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(tools.outlook_calendar_get_event(EVENT_ID, calendar_owner=guest))
+
+    assert result["calendar_owner"] == guest
+    [request] = graph.requests
+    assert request.url.raw_path.split(b"?")[0] == (
+        f"/v1.0/users/kim_fabrikam.com%23EXT%23@contoso.onmicrosoft.com/events/{EVENT_ID}".encode()
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "bad"),
+    [
+        ("outlook_calendar_list_calendars", {"page_token": "/me/messages?$top=1"}),
+        ("outlook_calendar_list_events", {"limit": 0}),
+        ("outlook_calendar_get_event", {"event_id": "a/b"}),
+        ("outlook_calendar_create_event", {"attendees": ["not-an-email"]}),
+        ("outlook_calendar_update_event", {"event_id": "a/b"}),
+        ("outlook_calendar_delete_event", {"event_id": "a/b"}),
+    ],
+)
+def test_a_refused_call_with_a_calendar_owner_names_the_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    bad: dict[str, object],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch)
+
+    result = _owner_call(tools, name, OWNER, **bad)
+
+    assert result["code"] in {"invalid_argument", "invalid_page_token"}
+    assert result["calendar_owner"] == OWNER
+    assert graph.requests == []
+
+
+def test_a_calendar_that_is_not_shared_reports_graphs_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    routes = {
+        ("GET", OWNER_EVENTS): httpx.Response(
+            403,
+            json={
+                "error": {"code": "ErrorAccessDenied", "message": "Access is denied. Check credentials and try again."},
+            },
+        ),
+    }
+    tools, _graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _owner_call(tools, "outlook_calendar_list_events", OWNER)
+
+    assert (result["code"], result["graph_code"]) == ("forbidden", "ErrorAccessDenied")
+    assert result["graph_message"] == "Access is denied. Check credentials and try again."
+    assert result["calendar_owner"] == OWNER

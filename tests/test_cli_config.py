@@ -2952,6 +2952,33 @@ class TestRunErrorHandling:
         assert "GOOGLE_APPLICATION_CREDENTIALS is invalid" in result.output
         assert "Traceback" not in result.output
 
+    @pytest.mark.parametrize(
+        ("dashboard_url", "message"),
+        [
+            ("https://admin.example.org", "Error: MINDROOM_DASHBOARD_URL requires trusted upstream auth"),
+            # The value is echoed as text, never read as console markup.
+            ("http://admin.example.org/[/x]", "'http://admin.example.org/[/x]'"),
+        ],
+    )
+    def test_run_refuses_dashboard_auth_settings_it_cannot_serve(
+        self,
+        tmp_path: Path,
+        dashboard_url: str,
+        message: str,
+    ) -> None:
+        """Dashboard auth settings MindRoom cannot serve stop startup with their message, before anything runs."""
+        cfg = tmp_path / "config.yaml"
+        _write_minimal_runtime_config(cfg)
+        mock_main = AsyncMock()
+
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = _invoke_with_runtime(["run"], cfg, env={"MINDROOM_DASHBOARD_URL": dashboard_url})
+
+        assert result.exit_code == 1
+        assert message in result.output
+        assert isinstance(result.exception, SystemExit)
+        mock_main.assert_not_called()
+
     def test_avatars_generate_reports_avatar_generation_failure(
         self,
         tmp_path: Path,
@@ -3205,10 +3232,7 @@ class TestRunApiFlags:
             ((), {"SUPABASE_URL": "https://supabase.example.test", "SUPABASE_ANON_KEY": "anon-key"}, None),
             (
                 (),
-                {
-                    "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-                    "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-User",
-                },
+                {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"},
                 None,
             ),
             (("--api-host", "127.0.0.1"), {}, None),
@@ -3256,8 +3280,18 @@ class TestRunApiFlags:
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api"] is False
 
-    def test_run_custom_port_and_host(self, tmp_path: Path) -> None:
-        """Run --api-port and --api-host are forwarded to bot main."""
+    @pytest.mark.parametrize(("operator_port", "port"), [(None, "9000"), ("8800", "8800")])
+    def test_run_custom_port_and_host(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        operator_port: str | None,
+        port: str,
+    ) -> None:
+        """Run --api-port and --api-host reach bot main, and the port is MINDROOM_PORT unless the operator set one.
+
+        The default OpenID audience, OAuth callbacks, and the server Chat finds then name the port the API serves on.
+        """
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
@@ -3265,12 +3299,17 @@ class TestRunApiFlags:
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
         )
+        if operator_port is None:
+            monkeypatch.delenv("MINDROOM_PORT", raising=False)
+        else:
+            monkeypatch.setenv("MINDROOM_PORT", operator_port)
         mock_main = AsyncMock()
         with patch("mindroom.orchestrator.main", mock_main):
             result = _invoke_with_runtime(["run", "--api-port", "9000", "--api-host", "127.0.0.1"], cfg)
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
+        assert mock_main.call_args.kwargs["runtime_paths"].env_value("MINDROOM_PORT") == port
 
     def test_run_config_path_updates_runtime_paths(
         self,

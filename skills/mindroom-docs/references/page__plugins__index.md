@@ -277,6 +277,10 @@ def greeter_tools() -> type[Toolkit]:
     return GreeterTools
 ```
 
+A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
+A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.
+Other parameters receive a model's `"none"`, `"null"`, `"true"`, or `"false"` string, in any case, as `None` or a boolean.
+
 Assign the tool to agents like any built-in tool:
 
 ```yaml

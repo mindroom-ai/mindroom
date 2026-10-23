@@ -1,9 +1,14 @@
-import { Agent, AgentPoliciesByAgent, Config } from "@/types/config";
+import {
+  Agent,
+  AgentConfig,
+  AgentPoliciesByAgent,
+  Config,
+} from "@/types/config";
 import { ConfigValidationIssue } from "@/lib/configValidation";
 import type { ToolEntry } from "@/lib/toolEntry";
 
-export type RawAgentConfig = Omit<Agent, "id" | "tools"> & {
-  tools: ToolEntry[];
+export type RawAgentConfig = Omit<AgentConfig, "tools"> & {
+  tools?: ToolEntry[];
 };
 
 export type RawDefaultsConfig = Omit<

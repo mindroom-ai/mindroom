@@ -1,0 +1,89 @@
+{{- $instanceSecretName := include "mindroom.instanceSecretName" .Values -}}
+{{- $instanceSecretHash := include "mindroom.instanceSecretHash" .Values -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tuwunel-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: tuwunel
+    customer: {{ .Values.customer | quote }}
+spec:
+  replicas: 1
+  # Tuwunel locks its database, so a new pod can start only after the old one stops.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tuwunel
+      customer: {{ .Values.customer | quote }}
+  template:
+    metadata:
+      labels:
+        app: tuwunel
+        customer: {{ .Values.customer | quote }}
+      annotations:
+        mindroom.ai/tuwunel-config-hash: {{ include (print $.Template.BasePath "/configmap-tuwunel.yaml") . | sha256sum | quote }}
+        mindroom.ai/instance-secret-hash: {{ $instanceSecretHash | quote }}
+    spec:
+      # Tuwunel never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      # Tuwunel reads TUWUNEL_* variables as config, which service links would add for this Service.
+      enableServiceLinks: false
+      # Lets a database migration step finish on shutdown.
+      terminationGracePeriodSeconds: 1800
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: tuwunel
+        image: {{ .Values.tuwunel_image | default "ghcr.io/mindroom-ai/mindroom-tuwunel:latest" }}
+        imagePullPolicy: {{ .Values.tuwunel_image_pull_policy | default "Always" }}
+        ports:
+        - containerPort: 8008
+          name: http
+        env:
+        - name: TUWUNEL_CONFIG
+          value: /etc/tuwunel/tuwunel.toml
+        volumeMounts:
+        - name: tuwunel-data
+          mountPath: /data
+        - name: tuwunel-config
+          mountPath: /etc/tuwunel/tuwunel.toml
+          subPath: tuwunel.toml
+          readOnly: true
+        - name: mindroom-secrets
+          mountPath: /etc/mindroom-secrets
+          readOnly: true
+        resources:
+          {{- toYaml (.Values.tuwunelResources | default (dict)) | nindent 10 }}
+        # The image runs Tuwunel as root, so it gets no capabilities and cannot gain privileges.
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+        readinessProbe:
+          httpGet:
+            path: /_matrix/client/versions
+            port: http
+          periodSeconds: 5
+          failureThreshold: 120
+      volumes:
+      - name: tuwunel-data
+        persistentVolumeClaim:
+          claimName: tuwunel-storage-{{ .Values.customer }}
+      - name: tuwunel-config
+        configMap:
+          name: tuwunel-config-{{ .Values.customer }}
+      - name: mindroom-secrets
+        secret:
+          secretName: {{ $instanceSecretName }}
+          # Mount only the files Tuwunel reads; an existing Secret without OIDC may lack the client secret.
+          optional: true
+          items:
+          - key: matrix_registration_shared_secret
+            path: matrix_registration_shared_secret
+          - key: matrix_oidc_client_secret
+            path: matrix_oidc_client_secret

@@ -20,6 +20,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_wor
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -68,7 +69,18 @@ class TestMemoryTools:
             runtime_paths=runtime_paths_for(config),
         )
 
+    @pytest.fixture
+    def similar_lookup(self) -> Iterator[AsyncMock]:
+        """Keep add_memory's similar-memory lookup off the real default mem0 backend."""
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=MemorySearchOutcome(results=[]),
+        ) as mock_search:
+            yield mock_search
+
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("similar_lookup")
     async def test_add_memory(self, tools: MemoryTools) -> None:
         """Test that add_memory stores content via add_agent_memory."""
         with patch("mindroom.custom_tools.memory.add_agent_memory", new_callable=AsyncMock) as mock_add:
@@ -87,7 +99,12 @@ class TestMemoryTools:
             assert "dark mode" in result
 
     @pytest.mark.asyncio
-    async def test_add_memory_uses_stored_execution_identity(self, storage_path: Path, config: Config) -> None:
+    async def test_add_memory_uses_stored_execution_identity(
+        self,
+        storage_path: Path,
+        config: Config,
+        similar_lookup: AsyncMock,
+    ) -> None:
         """MemoryTools should forward the constructor-bound execution identity without ambient context."""
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
@@ -110,8 +127,10 @@ class TestMemoryTools:
             await tools.add_memory("Remember this")
 
         assert mock_add.await_args.kwargs["execution_identity"] == execution_identity
+        assert similar_lookup.await_args.kwargs["execution_identity"] == execution_identity
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("similar_lookup")
     async def test_add_memory_error(self, tools: MemoryTools) -> None:
         """Test that add_memory handles errors gracefully."""
         with patch(
@@ -125,6 +144,7 @@ class TestMemoryTools:
             assert "DB down" in result
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("similar_lookup")
     async def test_add_memory_redacts_provider_error(self, tools: MemoryTools) -> None:
         """A rejected embedder key never reaches Matrix-visible tool output."""
         secret = "sk-secret-add"  # noqa: S105
@@ -172,6 +192,67 @@ class TestMemoryTools:
         assert any(memory.get("memory") == "Tool memory stays canonical" for memory in memories)
         assert not (storage_path / "shared-memory" / "agent_general" / "MEMORY.md").exists()
         assert (agent_workspace_root_path(storage_path, "general") / "MEMORY.md").exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("search_mode", ["keyword", "semantic"])
+    async def test_add_memory_lists_similar_existing_memories(
+        self,
+        storage_path: Path,
+        config: Config,
+        search_mode: str,
+    ) -> None:
+        """A new memory should point at related existing entries so corrections update them instead of piling up.
+
+        A healthy semantic index returns read-only locators, so the lookup must still find the editable entry.
+        The agent rewrites a listed entry whole with update_memory, so the reply shows each one in full, and it never
+        asks to delete an entry the reply does not show.
+        """
+        config.memory.backend = "file"
+        config.memory.search.mode = search_mode
+        config.agents["general"].memory_backend = "file"
+        tools = MemoryTools(
+            agent_name="general",
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        existing_text = (
+            "The weekly standup is on Mondays at 09:30 in room 4B, hosted by the platform team; agenda items go in the "
+            "shared doc by Friday, the demo slot is the last ten minutes, and remote attendees join the video room"
+        )
+        semantic_hit = {"id": "semantic:memory/notes.md:0", "memory": existing_text}
+
+        with patch(
+            "mindroom.memory._file_backend.search_semantic_file_memories",
+            new_callable=AsyncMock,
+            return_value=[semantic_hit],
+        ):
+            await tools.add_memory(existing_text)
+            existing = (await tools.list_memories()).splitlines()[1]
+            existing_id = existing.split("[id=", 1)[1].split("]", 1)[0]
+
+            result = await tools.add_memory("The weekly standup moved to Tuesdays")
+
+        assert result.startswith("Memorized: The weekly standup moved to Tuesdays\n")
+        assert f"[id={existing_id}] {existing_text}" in result
+        assert result.count("moved to Tuesdays") == 1
+        assert "update_memory" in result
+        assert "delete_memory" not in result
+
+    @pytest.mark.asyncio
+    async def test_add_memory_reply_stays_plain_when_the_similar_lookup_fails(self, tools: MemoryTools) -> None:
+        """A failed similar-memory lookup never fails the add."""
+        with (
+            patch("mindroom.custom_tools.memory.add_agent_memory", new_callable=AsyncMock),
+            patch(
+                "mindroom.custom_tools.memory.search_agent_memories",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("index down"),
+            ),
+        ):
+            result = await tools.add_memory("The user prefers dark mode")
+
+        assert result == "Memorized: The user prefers dark mode"
 
     @pytest.mark.asyncio
     async def test_search_memories(self, tools: MemoryTools) -> None:

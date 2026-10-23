@@ -606,9 +606,9 @@ export function Budgets() {
     <div className="mx-auto w-full max-w-6xl space-y-6 p-2 pb-8 sm:p-4">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex items-center gap-2">
-          <Wallet className="h-5 w-5 text-primary" aria-hidden="true" />
+          <Wallet className="h-5 w-5" aria-hidden="true" />
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">Budgets</h1>
+            <h2 className="text-2xl font-bold tracking-tight">Budgets</h2>
             <p className="mt-1 text-sm text-muted-foreground">
               Monthly spending caps per user
             </p>

@@ -113,7 +113,7 @@ export function EnhancedConfigDialog({
             href={url}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-blue-500 dark:text-blue-400 underline hover:text-blue-600 dark:hover:text-blue-300"
+            className="text-primary underline underline-offset-2"
           >
             {linkText}
           </a>
@@ -540,7 +540,7 @@ export function EnhancedConfigDialog({
           {docsUrl && (
             <Button
               variant="outline"
-              className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-950/20 dark:to-amber-950/20 hover:from-orange-100 hover:to-amber-100 dark:hover:from-orange-950/30 dark:hover:to-amber-950/30 border-orange-200 dark:border-orange-800"
+              className="w-full flex items-center justify-center gap-2"
               onClick={() => window.open(docsUrl, "_blank")}
             >
               <ExternalLink className="h-4 w-4" />
@@ -586,7 +586,7 @@ export function EnhancedConfigDialog({
                       {index > 0 && <Separator className="my-4" />}
 
                       {field.type === "boolean" ? (
-                        <div className="flex items-center space-x-3 p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
+                        <div className="flex items-center space-x-3 p-3 rounded-lg hover:bg-secondary transition-all duration-200">
                           <Checkbox
                             id={field.name}
                             checked={configValues[field.name] === true}

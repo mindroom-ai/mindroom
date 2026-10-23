@@ -1077,9 +1077,7 @@ export function ModelConfig() {
           >
             {keyDisplay.label}
             {keyDisplay.maskedKey && (
-              <span className="ml-1 font-mono opacity-80">
-                {keyDisplay.maskedKey}
-              </span>
+              <span className="ml-1 font-mono">{keyDisplay.maskedKey}</span>
             )}
           </Badge>
           {keyDisplay.copyable && modelName && provider && (

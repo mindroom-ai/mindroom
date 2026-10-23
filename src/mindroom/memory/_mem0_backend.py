@@ -438,6 +438,7 @@ class Mem0MemoryBackend:
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
+        editable: bool = False,  # noqa: ARG002 - every mem0 ID is editable
     ) -> MemorySearchOutcome:
         """Search mem0 memories visible to an agent.
 

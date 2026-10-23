@@ -15,14 +15,17 @@ import {
   pressInDialog,
 } from "@/test/egressServiceTestKit";
 import { Connections } from "./Connections";
-import type { ConnectionService, EgressCredentialService } from "./types";
+import type {
+  AgentConnections,
+  ConnectionService,
+  EgressCredentialService,
+} from "./types";
 
 const service: ConnectionService = {
   icon: null,
   provider: "mail",
   is_shared: false,
   can_manage: true,
-  connected: false,
   display_name: "Mail",
   description: "Read your email.",
   tools: ["mail"],
@@ -168,7 +171,7 @@ describe("brokered API keys on agent cards", () => {
     expect(screen.queryByRole("link", { name: "Manage services" })).toBeNull();
   });
 
-  it("shows no API key section when the catalog sends null for the agent", async () => {
+  it("shows no API key section when the agent's state sends null", async () => {
     installEgress(null);
     render(<Connections />);
     await expandAgent();
@@ -225,18 +228,15 @@ describe("brokered API keys on agent cards", () => {
   describe("one account in both sections", () => {
     // The Mail tool and the Gmail key service use the same account.
     let connected: boolean;
-    let catalogRequests: number;
     beforeEach(() => {
       connected = true;
-      catalogRequests = 0;
       const disconnect = async () => {
         connected = false;
         return json({ status: "disconnected", provider: "mail" });
       };
       installApi({
-        "/api/connections": async () => {
-          catalogRequests += 1;
-          return json(
+        "/api/connections": async () =>
+          json(
             withEgress([
               {
                 ...egressService,
@@ -252,8 +252,7 @@ describe("brokered API keys on agent cards", () => {
                 }),
               },
             ]),
-          );
-        },
+          ),
         "/api/connections/agents/personal/mail/status": async () =>
           json({
             ...status,
@@ -274,7 +273,9 @@ describe("brokered API keys on agent cards", () => {
       await pressInDialog("Disconnect");
 
       expect(await screen.findByText("0 of 1 set")).toBeInTheDocument();
-      expect(catalogRequests).toBe(2);
+      // The change reloads the agent's state; the catalog itself is read once.
+      expect(requests("/api/connections/agents/personal/state")).toBe(2);
+      expect(requests("/api/connections")).toBe(1);
     });
   });
 });
@@ -325,11 +326,49 @@ const installEgress = (egress_services: unknown[] | null) =>
     "/api/connections": async () => json(withEgress(egress_services)),
   });
 
+type FixtureAgent = AgentConnections & {
+  services: (ConnectionService & { connected?: boolean })[];
+};
+
+/**
+ * A catalog fixture also spells out each agent's state, as the page shows it
+ * once merged: whether each service is `connected` and the agent's
+ * `egress_services`. The catalog route serves the fixture without them, and
+ * an agent's state route serves them, read from the fixture anew each time.
+ */
+async function fixtureRoute(response: Response, agentName?: string) {
+  const fixture = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { agents: FixtureAgent[] } | null;
+  if (!response.ok || !fixture) return response;
+  const { agents } = fixture;
+  if (agentName === undefined)
+    return json({
+      agents: agents.map(({ egress_services: _keys, ...agent }) => ({
+        ...agent,
+        services: agent.services.map(({ connected: _set, ...item }) => item),
+      })),
+    });
+  const agent = agents.find((item) => item.agent_name === agentName)!;
+  return json({
+    connected: Object.fromEntries(
+      agent.services.map((item) => [item.provider, item.connected ?? false]),
+    ),
+    egress_services: agent.egress_services ?? null,
+  });
+}
+
 function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
+  const fixture =
+    overrides["/api/connections"] ?? (async () => json(catalog([service])));
   vi.mocked(fetch).mockImplementation(async (input, options) => {
     const path = String(input);
+    if (path === "/api/connections") return fixtureRoute(await fixture());
     if (overrides[path]) return overrides[path]();
-    if (path === "/api/connections") return json(catalog([service]));
+    const state = /^\/api\/connections\/agents\/([^/]+)\/state$/.exec(path);
+    if (state)
+      return fixtureRoute(await fixture(), decodeURIComponent(state[1]));
     if (path === "/api/connections/mcp/selection")
       return json({ enabled: false, agents: {} });
     if (path === "/api/connections/mcp/clients")
@@ -341,6 +380,7 @@ function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
         email: null,
         is_administrator: false,
         egress_enabled: true,
+        dashboard_url: "/",
       });
     if (path === "/api/connections/agents/personal/mail/status")
       return json(status);
@@ -351,6 +391,11 @@ function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
     throw new Error(`Unexpected request: ${path}`);
   });
 }
+
+/** How many times the page requested `path`. */
+const requests = (path: string) =>
+  vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === path)
+    .length;
 
 async function expandAgent(name = "Personal assistant") {
   fireEvent.click(
@@ -458,6 +503,7 @@ describe("connections", () => {
     ).toEqual(
       [
         "/api/connections",
+        "/api/connections/agents/personal/state",
         "/api/connections/agents/personal/mail/status",
         "/api/connections/mcp/clients",
         "/api/connections/mcp/selection",
@@ -1549,6 +1595,8 @@ describe("agent table summary, search, and order", () => {
     screen
       .getByRole("button", { name: new RegExp(`^(Expand|Collapse) ${name}$`) })
       .closest("tr")!;
+  const statesLoaded = () =>
+    waitFor(() => expect(screen.queryByText(/Checking accounts/)).toBeNull());
   const withCalculator = () => {
     const base = agentWith("personal", "Personal assistant");
     return {
@@ -1590,10 +1638,11 @@ describe("agent table summary, search, and order", () => {
         json({ ...status, connected: true }),
     });
     render(<Connections />);
-    await screen.findByRole("button", { name: "Expand Personal assistant" });
     // Mail's account and GitHub's key, before any status is read.
-    expect(agentRow("Personal assistant")).toHaveTextContent(
-      "2 tools / 2 of 3 accounts and keys set",
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 2 of 3 accounts and keys set",
+      ),
     );
     await expandAgent();
     await screen.findByRole("button", { name: "Disconnect for Mail" });
@@ -1616,9 +1665,10 @@ describe("agent table summary, search, and order", () => {
         }),
     });
     render(<Connections />);
-    await screen.findByRole("button", { name: "Expand Personal assistant" });
-    expect(agentRow("Personal assistant")).toHaveTextContent(
-      "2 tools / 1 of 1 account set",
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 1 of 1 account set",
+      ),
     );
     expect(agentRow("Personal assistant")).not.toHaveTextContent(/keys/);
   });
@@ -1641,6 +1691,7 @@ describe("agent table summary, search, and order", () => {
     });
     render(<Connections />);
     await screen.findByRole("button", { name: "Expand Personal assistant" });
+    await statesLoaded();
     for (const name of ["Personal assistant", "Research Team"]) {
       expect(within(agentRow(name)).getByText("1 tool")).toBeInTheDocument();
       expect(agentRow(name)).not.toHaveTextContent(/accounts?|keys?|set/);
@@ -1671,9 +1722,10 @@ describe("agent table summary, search, and order", () => {
         }),
     });
     render(<Connections />);
-    await screen.findByRole("button", { name: "Expand Personal assistant" });
-    expect(agentRow("Personal assistant")).toHaveTextContent(
-      "2 tools / 1 of 1 account or key set",
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 1 of 1 account or key set",
+      ),
     );
   });
 
@@ -1711,7 +1763,7 @@ describe("agent table summary, search, and order", () => {
     );
   });
 
-  it("counts a connected account from the catalog before the agent is opened, and lets a loaded status correct it", async () => {
+  it("counts a connected account from the agent's state before the agent is opened, and lets a loaded status correct it", async () => {
     const connected = (agent: ReturnType<typeof withCalculator>) => ({
       ...agent,
       services: agent.services.map((item) => ({ ...item, connected: true })),
@@ -1720,14 +1772,15 @@ describe("agent table summary, search, and order", () => {
     installApi({
       "/api/connections": async () =>
         json({ agents: [connected(withCalculator())] }),
-      // The account was disconnected elsewhere since the catalog was read.
+      // The account was disconnected elsewhere since the agent's state was read.
       "/api/connections/agents/personal/mail/status": async () =>
         json({ ...status, connected: false }),
     });
     render(<Connections />);
-    await screen.findByRole("button", { name: "Expand Personal assistant" });
-    expect(agentRow("Personal assistant")).toHaveTextContent(
-      "2 tools / 1 of 1 account or key set",
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 1 of 1 account or key set",
+      ),
     );
     await expandAgent();
     await waitFor(() =>
@@ -1737,7 +1790,7 @@ describe("agent table summary, search, and order", () => {
     );
   });
 
-  it("follows a refreshed catalog for an agent that was opened and closed, as after a disconnect through another agent", async () => {
+  it("follows a refreshed state for an agent that was opened and closed, as after a disconnect through another agent", async () => {
     // Both agents use the requester's own Mail account.
     let connected = true;
     const agent = (name: string, display_name: string) =>
@@ -1782,12 +1835,225 @@ describe("agent table summary, search, and order", () => {
         "1 tool / 0 of 1 account or key set",
       ),
     );
-    // The closed agent cannot load its status again, so the refreshed catalog decides.
+    // The closed agent cannot load its status again, so its refreshed state decides.
     await waitFor(() =>
       expect(agentRow("Personal assistant")).toHaveTextContent(
         "1 tool / 0 of 1 account or key set",
       ),
     );
+  });
+
+  it("shows the agents at once and their counts and keys once each agent's state arrives", async () => {
+    let answer = (_response: Response) => {};
+    installApi({
+      "/api/connections/agents/personal/state": () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected: true }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    await screen.findByRole("button", { name: "Disconnect for Mail" });
+    const row = agentRow("Personal assistant");
+    // Nothing says an account or key is missing before the state says so.
+    expect(row).toHaveTextContent("1 tool / Checking accounts…");
+    expect(row).not.toHaveTextContent(/ of \d/);
+    expect(
+      screen.queryByRole("heading", { name: "API keys and accounts" }),
+    ).toBeNull();
+
+    answer(
+      json({
+        connected: { mail: true },
+        egress_services: [
+          egress("github", "GitHub", {
+            configured: true,
+            key_configured: true,
+            active_source: "key",
+          }),
+        ],
+      }),
+    );
+
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 2 of 2 accounts and keys set"),
+    );
+    expect(
+      screen.getByRole("heading", { name: "API keys and accounts" }),
+    ).toBeInTheDocument();
+    expect(requests("/api/connections")).toBe(1);
+  });
+
+  const keyed = () => [
+    egress("github", "GitHub", {
+      configured: true,
+      key_configured: true,
+      active_source: "key",
+    }),
+  ];
+
+  it("says it could not check the accounts of an agent whose state cannot load", async () => {
+    installApi({
+      "/api/connections/agents/personal/state": async () =>
+        json({ detail: "unavailable" }, 500),
+    });
+    render(<Connections />);
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "1 tool / Could not check accounts",
+      ),
+    );
+    expect(agentRow("Personal assistant")).not.toHaveTextContent(/ of \d/);
+  });
+
+  it("keeps an agent's last state, keys included, when reloading it fails", async () => {
+    let stateRequests = 0;
+    let connected = true;
+    installApi({
+      "/api/connections/agents/personal/state": async () => {
+        stateRequests += 1;
+        return stateRequests === 1
+          ? json({ connected: { mail: true }, egress_services: keyed() })
+          : json({ detail: "restarting" }, 503);
+      },
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected }),
+      "/api/connections/agents/personal/mail/disconnect": async () => {
+        connected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      },
+    });
+    render(<Connections />);
+    await expandAgent();
+    const row = agentRow("Personal assistant");
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 2 of 2 accounts and keys set"),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Disconnect for Mail" }),
+    );
+    await pressInDialog("Disconnect");
+
+    await waitFor(() => expect(stateRequests).toBe(2));
+    // The card's own status says Mail is gone; the key still comes from the last state.
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 1 of 2 accounts and keys set"),
+    );
+    expect(
+      screen.getByRole("heading", { name: "API keys and accounts" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a card's status that arrives before its agent's state", async () => {
+    let answer = (_response: Response) => {};
+    installApi({
+      "/api/connections/agents/personal/state": () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      // The account was disconnected after the agent's state was read.
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected: false }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    await screen.findByRole("button", { name: "Connect Mail" });
+
+    answer(json({ connected: { mail: true }, egress_services: keyed() }));
+
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "1 tool / 1 of 2 accounts and keys set",
+      ),
+    );
+  });
+
+  it("keeps a card's status over an agent state that was requested before it arrived", async () => {
+    let stateRequests = 0;
+    let answerReload = (_response: Response) => {};
+    let connected = true;
+    installApi({
+      "/api/connections/agents/personal/state": () => {
+        stateRequests += 1;
+        if (stateRequests === 1)
+          return Promise.resolve(
+            json({ connected: { mail: true }, egress_services: [] }),
+          );
+        return new Promise((resolve) => {
+          answerReload = resolve;
+        });
+      },
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected }),
+      "/api/connections/agents/personal/mail/disconnect": async () => {
+        connected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      },
+    });
+    render(<Connections />);
+    await expandAgent();
+    const row = agentRow("Personal assistant");
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 1 of 1 account or key set"),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Disconnect for Mail" }),
+    );
+    await pressInDialog("Disconnect");
+    await screen.findByRole("button", { name: "Connect Mail" });
+    await waitFor(() => expect(stateRequests).toBe(2));
+
+    // The reloaded state was read before the card's status and still says Mail is connected.
+    answerReload(json({ connected: { mail: true }, egress_services: keyed() }));
+
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 1 of 2 accounts and keys set"),
+    );
+  });
+
+  it("loads every agent's state, at most six at a time", async () => {
+    const names = Array.from({ length: 10 }, (_, index) => `agent${index}`);
+    const requested: string[] = [];
+    const answers: (() => void)[] = [];
+    let inFlight = 0;
+    let most = 0;
+    installApi({
+      "/api/connections": async () =>
+        json({ agents: names.map((name) => agentWith(name, name)) }),
+      ...Object.fromEntries(
+        names.map((name) => [
+          `/api/connections/agents/${name}/state`,
+          () => {
+            requested.push(name);
+            inFlight += 1;
+            most = Math.max(most, inFlight);
+            return new Promise<Response>((resolve) =>
+              answers.push(() => {
+                inFlight -= 1;
+                resolve(
+                  json({ connected: { mail: true }, egress_services: null }),
+                );
+              }),
+            );
+          },
+        ]),
+      ),
+    });
+    render(<Connections />);
+    await waitFor(() => expect(requested).toHaveLength(6));
+    for (const _name of names) {
+      await waitFor(() => expect(answers.length).toBeGreaterThan(0));
+      await act(async () => answers.shift()!());
+    }
+
+    expect(requested).toEqual(names);
+    expect(most).toBe(6);
+    for (const name of names)
+      await waitFor(() =>
+        expect(agentRow(name)).toHaveTextContent("1 tool / 1 of 1 account set"),
+      );
   });
 
   const twoAgents = () => ({
@@ -1831,6 +2097,7 @@ describe("agent table summary, search, and order", () => {
     installApi({ "/api/connections": async () => json(twoAgents()) });
     render(<Connections />);
     await screen.findByRole("button", { name: "Expand Research Team" });
+    await statesLoaded();
     expect(shown()).toEqual(["Expand Research Team", "Expand Writer"]);
     search(text);
     expect(shown()).toEqual(["Expand Research Team"]);
@@ -1908,6 +2175,7 @@ describe("connections header", () => {
           email: null,
           is_administrator: false,
           egress_enabled: false,
+          dashboard_url: "/",
         }),
     });
     render(<Connections />);

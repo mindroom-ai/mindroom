@@ -28,6 +28,7 @@ from mindroom.history.replay import (
     configured_replay_plan,
     estimate_prompt_visible_history_tokens,
     estimate_request_messages_tokens,
+    estimate_summary_tokens,
     has_effective_persisted_replay,
     log_replay_plan,
     plan_replay_that_fits,
@@ -350,7 +351,8 @@ async def prepare_scope_history(
             execution_plan=execution_plan,
         ),
     )
-    native_model = configure_native(session=session)
+    visible_runs = scope_visible_runs(session, scope_context.scope)
+    native_model = configure_native(session=session, runs=visible_runs)
     if state.force_compact_before_next_run and native_model is not None:
         native_model.configure_native_compaction(threshold=None)
     compaction_reply_outcome: CompactionReplyOutcome = "none"
@@ -364,7 +366,6 @@ async def prepare_scope_history(
         native_route=native_route,
         replay_model=native_model,
     )
-    visible_runs = scope_visible_runs(session, scope_context.scope)
     # A native checkpoint response is billed for the transcript it replaced, so native routes keep the estimate.
     reported_history_tokens = (
         _reported_history_tokens(
@@ -385,7 +386,9 @@ async def prepare_scope_history(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
         current_history_tokens=current_history_tokens,
-        allow_native_compaction=allow_native_compaction,
+        # Only an active native route compacts between the trigger and hard budgets; without one, text compaction must.
+        allow_native_compaction=native_route is not None,
+        summary_tokens=estimate_summary_tokens(session),
     )
     logger.info(
         "History preparation check",

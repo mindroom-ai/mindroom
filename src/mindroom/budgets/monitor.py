@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MIN_SCAN_INTERVAL_SECONDS = 30.0
+# A scan is CPU-bound Python in a worker thread, so it holds the GIL the event loop needs.
+# Spacing scan starts by ten scan durations keeps a slow scan from starving the loop.
+_SCAN_SPACING_FACTOR = 10.0
 # Finished replies rescan sooner; the tick also catches voice calls, helpers, and a new month.
 _TICK_SECONDS = 300.0
 
@@ -169,6 +172,7 @@ class BudgetMonitor:
     config_provider: Callable[[], Config | None]
     clock: Callable[[], datetime] = _utc_now
     min_scan_interval_seconds: float = _MIN_SCAN_INTERVAL_SECONDS
+    scan_spacing_factor: float = _SCAN_SPACING_FACTOR
     tick_seconds: float = _TICK_SECONDS
     caps: BudgetCaps = field(init=False)
     _snapshot: SpendSnapshot | None = field(default=None, init=False)
@@ -253,6 +257,7 @@ class BudgetMonitor:
 
     async def _run(self) -> None:
         last_scan_started: float | None = None
+        last_scan_seconds = 0.0
         while True:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), timeout=self.tick_seconds)
@@ -261,13 +266,15 @@ class BudgetMonitor:
                 self._wake.clear()
                 continue
             if last_scan_started is not None:
-                delay = last_scan_started + self.min_scan_interval_seconds - time.monotonic()
+                interval = max(self.min_scan_interval_seconds, self.scan_spacing_factor * last_scan_seconds)
+                delay = last_scan_started + interval - time.monotonic()
                 if delay > 0:
                     await asyncio.sleep(delay)
             # Requests made while waiting are covered by this scan; ones made during it earn one trailing scan.
             self._wake.clear()
             last_scan_started = time.monotonic()
             await self._scan()
+            last_scan_seconds = time.monotonic() - last_scan_started
 
     async def _scan(self) -> None:
         config = self.config_provider()

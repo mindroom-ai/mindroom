@@ -4,7 +4,7 @@ platformDomain: ""  # Platform app/API domain when it differs from baseDomain
 storage: 10Gi  # More storage for Matrix data
 storageClassName: hcloud-volumes  # Override to local cluster storage class (for example `standard` in kind)
 storageAccessMode: ReadWriteOnce  # MindRoom storage access mode.
-synapseStorageAccessMode: ReadWriteOnce
+tuwunelStorageAccessMode: ReadWriteOnce
 storagePath: "/mindroom_data"  # Base path inside container for persisted state
 # Namespace of the ingress-nginx controller pods, the only pods outside the instance that may reach its service ports.
 # kube-hetzner's nginx addon installs into `nginx` unless its ingress_target_namespace is set, so confirm the live
@@ -19,7 +19,7 @@ ingressControllerNamespace: ingress-nginx
 # Ephemeral-storage requests stay small: every tenant's requests count against the node's allocatable ephemeral
 # storage, so large ones would leave new tenant pods Pending. They are explicit because a limit without a request
 # makes Kubernetes request the full limit.
-# Memory and CPU requests sit a little above measured idle use (primary ~250 MiB since v2026.9.396, Synapse ~130 MiB,
+# Memory and CPU requests sit a little above measured idle use (primary ~250 MiB since v2026.9.396, Tuwunel ~115 MiB,
 # sandbox runner ~80 MiB, each ~10m CPU), because every tenant's requests count against the node and decide how many
 # tenants fit.
 # The limits absorb bursts such as agent runs and tool installs.
@@ -33,7 +33,7 @@ mindroomResources:
     cpu: "1000m"
     ephemeral-storage: "16Gi"
 
-synapseResources:
+tuwunelResources:
   requests:
     memory: "192Mi"
     cpu: "50m"
@@ -59,14 +59,14 @@ sandboxRunnerWorkspaceSizeLimit: 1Gi
 # Docker images
 mindroom_image: ghcr.io/mindroom-ai/mindroom:latest
 mindroom_image_pull_policy: Always
-synapse_image: matrixdotorg/synapse:latest
-synapse_image_pull_policy: Always
+tuwunel_image: ghcr.io/mindroom-ai/mindroom-tuwunel:latest
+tuwunel_image_pull_policy: Always
 imagePullSecrets: []
 
 matrixOidc:
   enabled: "false"
   issuer: ""
-  clientId: "mindroom-synapse"
+  clientId: "mindroom-matrix"
   clientSecret: ""
 administrators: []
 roomDefaults:
@@ -101,7 +101,7 @@ openrouter_key: ""
 deepseek_key: ""
 sandbox_proxy_token: ""
 credentials_encryption_key: ""
-# Dedicated Synapse registration shared secret when Helm creates the instance Secret.
+# Dedicated Matrix registration shared secret when Helm creates the instance Secret.
 # With instanceSecrets.create=false, populate matrix_registration_shared_secret in the existing instance Secret instead.
 matrixRegistrationSharedSecret: ""
 # Per-instance key the platform uses to sign dashboard login tickets for this instance.
@@ -117,12 +117,8 @@ allowUnauthenticatedPrimary: false
 
 trustedUpstreamAuth:
   enabled: "false"
-  userIdHeader: ""
-  emailHeader: ""
-  matrixUserIdHeader: ""
   emailToMatrixUserIdTemplate: ""
   emailDomain: ""
-  requireJwt: "false"
   jwtHeader: ""
   jwksUrl: ""
   jwtAudience: ""
@@ -130,9 +126,3 @@ trustedUpstreamAuth:
   jwtEmailClaim: "email"
   jwtUserIdClaim: ""
   jwtMatrixUserIdClaim: ""
-
-# Optional Synapse secret seed for macaroon_secret_key and form_secret in the ConfigMap.
-# Also used as the registration-secret fallback when matrixRegistrationSharedSecret is empty.
-# Does not create an admin login; use random secret material rather than a login password.
-# These ConfigMap fields do not support an existing-Secret reference.
-matrix_admin_password: ""

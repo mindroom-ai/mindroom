@@ -67,6 +67,7 @@ Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
 Spend updates within about a minute of a chat reply finishing and within five minutes of other usage, such as voice calls, so a user can go slightly over their cap before the fallback applies.
+With a lot of retained usage, recounting spend takes longer, and updates wait about ten times that long so the recount does not slow replies.
 A reply that already started finishes on its model.
 
 ## Over-Budget Replies
@@ -127,8 +128,8 @@ URL-encode `user_id` in the path, for example `/api/budgets/users/%40alice%3Aexa
 
 ## Budget Service
 
-Strict JWT deployments can let a service, such as a company spend dashboard, read budgets and set caps without a browser or administrator identity.
-Configure [trusted-upstream strict JWT mode](deployment/trusted-upstream-auth.md#strict-jwt-mode), then add a dedicated audience and client ID:
+Deployments with trusted upstream auth can let a service, such as a company spend dashboard, read budgets and set caps without a browser or administrator identity.
+Configure [trusted upstream auth](deployment/trusted-upstream-auth.md#setup), then add a dedicated audience and client ID:
 
 ```bash
 MINDROOM_BUDGET_SERVICE_JWT_AUDIENCE=mindroom-budget-service
@@ -141,5 +142,5 @@ A budget service assertion authorizes only the `/api/budgets/service` routes, an
 
 | Status | Meaning |
 | --- | --- |
-| `503` `Budget service authentication is not configured` | Trusted-upstream auth, a strict-JWT setting, or a budget service setting is missing |
+| `503` `Budget service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a budget service setting is missing |
 | `401` `Invalid budget service JWT` | Missing or invalid assertion |

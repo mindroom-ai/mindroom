@@ -40,7 +40,7 @@ class MatrixOpenIDError(Exception):
         super().__init__(detail)
 
 
-def _openid_audience(paths: RuntimePaths) -> str | None:
+def openid_audience(paths: RuntimePaths) -> str | None:
     """Return the audience MindRoom asks the homeserver to enforce, never taken from a request.
 
     It is the normalized origin of `MINDROOM_PUBLIC_URL`, or MindRoom's own local origin when that is unset, which is
@@ -85,7 +85,7 @@ async def verify_matrix_openid(
         raise MatrixOpenIDError(401, "OpenID server does not match the configured Matrix server.")
     url = runtime_matrix_homeserver(paths).rstrip("/") + "/_matrix/federation/v1/openid/userinfo"
     params = {"access_token": token.access_token}
-    audience = _openid_audience(paths)
+    audience = openid_audience(paths)
     if audience is not None:
         params[_AUDIENCE_PARAM] = audience
     try:
@@ -124,7 +124,7 @@ async def homeserver_binds_openid_audience(paths: RuntimePaths) -> bool:
     binding homeserver still accepts unbound tokens, which clients other than current MindRoom Chat request, so a
     verification then proves nothing about this deployment.
     """
-    if _openid_audience(paths) is None:
+    if openid_audience(paths) is None:
         return False
     url = runtime_matrix_homeserver(paths).rstrip("/") + "/_matrix/client/versions"
     try:

@@ -10,11 +10,12 @@ from __future__ import annotations
 import base64
 import os
 import re
+import unicodedata
 from contextlib import ExitStack, contextmanager
 from html import escape
 from html.parser import HTMLParser
 from pathlib import PureWindowsPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -69,6 +70,13 @@ _CHUNK_BYTES = 1024 * 1024
 _OFFSET = re.compile(r"[0-9]{1,10}")
 _KEY_SEGMENT = re.compile(r"\('([^/]+)'\)(?=/|$)")
 _USER_PREFIX = re.compile(r"^/users/[^/]+")
+# One email address or sign-in name; a guest's sign-in name holds `#EXT#`.
+_MAILBOX = re.compile(r'[^@\s<>,;"/\\?]+@[^@\s<>,;"/\\?]+\.[^@\s<>,;"/\\?]+')
+_MAX_MAILBOX_CHARACTERS = 254
+# The mailbox a next link starts with, however Graph names it: /me, /users/{address or id}, or users({key}).
+_LINK_MAILBOX = re.compile(r"^/(?:me|users/[^/]+|users\([^/]*\))(?=/)", re.IGNORECASE)
+_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+_GRAPH_MESSAGE_CHARACTERS = 300
 _STATUS_ERRORS = {
     403: ("forbidden", "The connected Microsoft account has no permission for this."),
     404: ("not_found", "Microsoft Graph found nothing there, or the connected account cannot see it."),
@@ -109,6 +117,16 @@ def time_zone_name(value: object) -> str:
         msg = 'time_zone must be a Windows or IANA time zone name, such as "Pacific Standard Time" or "Europe/Berlin".'
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value
+
+
+def graph_time(value: object) -> str | None:
+    """Return a Graph dateTimeTimeZone as ISO 8601, ending in Z for UTC and naming any other zone."""
+    fields = cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+    moment, zone = fields.get("dateTime"), fields.get("timeZone")
+    if not isinstance(moment, str):
+        return None
+    moment = moment.split(".", 1)[0]
+    return f"{moment}Z" if zone in {None, "UTC"} else f"{moment} ({zone})"
 
 
 def next_page_token(payload: Mapping[str, Any]) -> str | None:
@@ -154,6 +172,43 @@ def page_offset(page_token: object | None, maximum: int) -> int:
         msg = "page_token must be the next_page_token this function returned."
         raise MicrosoftGraphError(code="invalid_page_token", message=msg)
     return int(page_token)
+
+
+def mailbox_path(value: object, field_name: str) -> str:
+    """Return the Graph path of the requester's mailbox, or of another user's that the call names in `field_name`.
+
+    Another mailbox is named by one printable email address or sign-in name, without padding; a guest's sign-in
+    name holds `#EXT#`, which Graph takes with each `#` percent-encoded.
+    """
+    if value is None:
+        return "/me"
+    if (
+        not isinstance(value, str)
+        or len(value) > _MAX_MAILBOX_CHARACTERS
+        or not value.isprintable()
+        or not _MAILBOX.fullmatch(value)
+    ):
+        msg = f"{field_name} must be an email address or sign-in name, such as kim@contoso.com."
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+    return f"/users/{quote(value, safe='!:@=')}"
+
+
+def mailbox_next_page_token(payload: Mapping[str, Any], mailbox: str) -> str | None:
+    """Return the next page token of a listing in `mailbox`, a `mailbox_path`, naming that mailbox as the call did."""
+    token = next_page_token(payload)
+    return None if token is None else _LINK_MAILBOX.sub(lambda _match: mailbox, token, count=1)
+
+
+def mailbox_page_path(page_token: object, collection: str, mailbox: str, field_name: str) -> str:
+    """Return the Graph path a page token continues, as `page_path` does, only in the call's own mailbox.
+
+    `mailbox` is the call's `mailbox_path`, and `field_name` the parameter that names it.
+    """
+    token = page_path(page_token, collection)
+    if not token.lower().startswith(f"{mailbox.lower()}/"):
+        msg = f"page_token must be the next_page_token this function returned for the same {field_name}."
+        raise MicrosoftGraphError(code="invalid_page_token", message=msg)
+    return token
 
 
 def share_id(url: str) -> str:
@@ -315,14 +370,29 @@ def _chunks(handle: BinaryIO) -> Iterator[bytes]:
         yield chunk
 
 
-def _graph_error_code(response: httpx.Response) -> str | None:
+def _graph_error_details(response: httpx.Response) -> dict[str, object]:
+    """Return Graph's error code and, when Graph gives one, its reason as one short line of plain text.
+
+    The reason is untrusted text: control characters become spaces, links become `<url>`, whitespace collapses,
+    and anything past a few hundred characters is cut.
+    """
     try:
         payload = response.json()
     except ValueError:
-        return None
+        payload = None
     error = payload.get("error") if isinstance(payload, dict) else None
-    code = error.get("code") if isinstance(error, dict) else None
-    return code if isinstance(code, str) else None
+    error = error if isinstance(error, dict) else {}
+    code = error.get("code")
+    details: dict[str, object] = {"graph_code": code if isinstance(code, str) else None}
+    message = error.get("message")
+    if isinstance(message, str):
+        printable = "".join(" " if unicodedata.category(character)[0] == "C" else character for character in message)
+        text = " ".join(_URL.sub("<url>", printable).split())
+        if len(text) > _GRAPH_MESSAGE_CHARACTERS:
+            text = text[: _GRAPH_MESSAGE_CHARACTERS - 1].rstrip() + "…"
+        if text:
+            details["graph_message"] = text
+    return details
 
 
 def _retry_after_seconds(response: httpx.Response) -> int | None:
@@ -353,12 +423,12 @@ class GraphSession:
             raise MicrosoftGraphError(code="throttled", message=msg, retry_after_seconds=_retry_after_seconds(response))
         if response.status_code in _STATUS_ERRORS:
             code, message = _STATUS_ERRORS[response.status_code]
-            raise MicrosoftGraphError(code=code, message=message, graph_code=_graph_error_code(response))
+            raise MicrosoftGraphError(code=code, message=message, **_graph_error_details(response))
         raise MicrosoftGraphError(
             code="graph_error",
             message="Microsoft Graph rejected the request.",
             status_code=response.status_code,
-            graph_code=_graph_error_code(response),
+            **_graph_error_details(response),
         )
 
     def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:  # noqa: ANN401
@@ -542,3 +612,30 @@ def graph_tool_result(tool_name: str, operation: Callable[[], Mapping[str, objec
     except MicrosoftGraphError as exc:
         return graph_error_payload(tool_name, exc)
     return custom_tool_payload(tool_name, "ok", **fields)
+
+
+def mailbox_tool_result(
+    tool_name: str,
+    field_name: str,
+    mailbox: object,
+    operation: Callable[[], Mapping[str, object]],
+) -> str:
+    """Run one operation, as `graph_tool_result` does, for a call that may name another user's mailbox.
+
+    A malformed mailbox is refused before the operation runs; once the call names a valid one, every result,
+    errors included, repeats it as `field_name`.
+    """
+    try:
+        mailbox_path(mailbox, field_name)
+    except MicrosoftGraphError as exc:
+        return graph_error_payload(tool_name, exc)
+    named = {} if mailbox is None else {field_name: mailbox}
+
+    def run() -> Mapping[str, object]:
+        try:
+            return {**operation(), **named}
+        except MicrosoftGraphError as exc:
+            exc.details.update(named)
+            raise
+
+    return graph_tool_result(tool_name, run)

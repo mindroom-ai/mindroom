@@ -71,6 +71,9 @@ _PRIVATE_KEY_PATTERN = re.compile(
     r"-----BEGIN (?P<label>[A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?)-----.*?(?:-----END (?P=label)-----|\Z)",
     re.DOTALL | re.IGNORECASE,
 )
+# An egress broker token: `mrb1.`, a base64url claims payload (the smallest the broker mints is over 200 characters),
+# and a 43-character HMAC-SHA256, so dotted names such as `mrb1.example.com` stay visible.
+_BROKER_TOKEN_PATTERN = r"mrb1\.[A-Za-z0-9_-]{100,}+\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"  # noqa: S105
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
     r"(?:sk|pk)-[A-Za-z0-9._-]+"
@@ -79,6 +82,7 @@ _TOKEN_LIKE_PATTERN = re.compile(
     r"|gh(?:p|o|u|s|r)_[A-Za-z0-9_]+"
     r"|github_pat_[A-Za-z0-9_]+"
     r"|AIza[0-9A-Za-z_-]+"
+    rf"|{_BROKER_TOKEN_PATTERN}"
     r"))(?![A-Za-z0-9])",
 )
 _TOKEN_LIKE_MARKERS = (
@@ -102,6 +106,7 @@ _TOKEN_LIKE_MARKERS = (
     "ghr_",
     "github_pat_",
     "AIza",
+    "mrb1.",
 )
 # Reviewer-facing copies hide only credentials in known token formats with realistic lengths, so hosts,
 # paths, and short names such as `sk-deploy.sh` stay visible; a token may end a sentence but not a file
@@ -116,6 +121,7 @@ _REVIEW_TOKEN_PATTERN = re.compile(
     r"|github_pat_[A-Za-z0-9_]{30,}+"
     r"|AIza[0-9A-Za-z_-]{30,}+"
     r"|eyJ[A-Za-z0-9_-]{8,}+\.eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]*+"
+    rf"|{_BROKER_TOKEN_PATTERN}"
     r")(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])",
 )
 # Only the `sk-` and `pk-` prefixes also start ordinary kebab-case names such as pod, image, or branch
@@ -125,6 +131,14 @@ _RANDOM_RUN_PATTERN = re.compile(r"[A-Za-z0-9]{12,}")
 # Config prose says "ask for the API key before calling", "bearer JWT", or "keep the API key server-side";
 # the word a log pattern takes for a token there is letters, possibly hyphen-joined and ending a sentence.
 _ORDINARY_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*\.?")
+# Docs and tool results say "an API key or a connected account" and "a bearer token with each request". Outside
+# config, only a lowercase or capitalized word after the bare phrase stays: a mixed-case run of letters can be a
+# generated token, and a colon, an Authorization header, or "invalid"/"provided" labels the next word a credential.
+_PROSE_WORD_PATTERN = re.compile(r"[A-Z]?[a-z]+(?:-[a-z]+)*\.?")
+_BARE_CREDENTIAL_PHRASE_PATTERN = re.compile(r"(?:api\s+key|bearer(?:\s+token)?)\s+", re.IGNORECASE)
+# GitHub Actions grants a job's OIDC token with `id-token: write`, so one of these words names a permission, alone
+# or before a YAML comment or the end of a Markdown code span.
+_ID_TOKEN_PERMISSION_PATTERN = re.compile(r"(?:none|read|write)(?=\s*(?:#|`|$))")
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 _GRAPH_SHARE_ID_PATTERN = re.compile(r"/shares/[^/]+")
@@ -458,11 +472,10 @@ def _redact_secret_assignments(value: str) -> str:
             continue
         value_start, value_end, match_end = value_span
         assignment_value = value[value_start:value_end].lower()
-        if classification.normalized == "authorization" and assignment_value in {
-            "basic",
-            "bearer",
-            f"bearer {REDACTED}",
-        }:
+        if (
+            classification.normalized == "authorization"
+            and assignment_value in {"basic", "bearer", f"bearer {REDACTED}"}
+        ) or (classification.normalized == "id_token" and _ID_TOKEN_PERMISSION_PATTERN.match(assignment_value)):
             search_start = match_end
             continue
 
@@ -502,8 +515,7 @@ def _redact_url(value: str) -> str:
         path = capability_path
         changed = True
     if "@" in netloc:
-        userinfo, host = netloc.rsplit("@", 1)
-        netloc = f"{userinfo.split(':', 1)[0]}:***@{host}" if ":" in userinfo else f"***@{host}"
+        netloc = f"***@{netloc.rsplit('@', 1)[1]}"
         changed = True
 
     if query:
@@ -576,6 +588,15 @@ def _redact_prose_token(match: re.Match[str]) -> str:
     return _redact_matched_token(match)
 
 
+def _redact_phrase_token(match: re.Match[str]) -> str:
+    """Keep a prose word after a bare "API key" or "bearer"; a labeled value is hidden whatever it looks like."""
+    if _BARE_CREDENTIAL_PHRASE_PATTERN.fullmatch(match.group("prefix")) and _PROSE_WORD_PATTERN.fullmatch(
+        match.group("token"),
+    ):
+        return match.group(0)
+    return _redact_matched_token(match)
+
+
 def redact_private_keys(value: str) -> str:
     """Replace each PEM private key, which spans several lines, with the redaction placeholder."""
     return _PRIVATE_KEY_PATTERN.sub(REDACTED, value)
@@ -596,10 +617,11 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     redacted = redact_private_keys(bounded_value) if has_private_key else bounded_value
     redacted = URL_PATTERN.sub(_redact_url_match, redacted) if has_url else redacted
     redact_token = _redact_prose_token if prose else _redact_matched_token
+    redact_phrase_token = _redact_prose_token if prose else _redact_phrase_token
     if has_bearer:
-        redacted = _BEARER_TOKEN_PATTERN.sub(redact_token, redacted)
+        redacted = _BEARER_TOKEN_PATTERN.sub(redact_phrase_token, redacted)
     if has_api_key_message:
-        redacted = _API_KEY_MESSAGE_PATTERN.sub(redact_token, redacted)
+        redacted = _API_KEY_MESSAGE_PATTERN.sub(redact_phrase_token, redacted)
     if has_token:
         redacted = _TOKEN_LIKE_PATTERN.sub(redact_token, redacted)
     if has_assignment:

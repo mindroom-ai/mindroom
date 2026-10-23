@@ -318,8 +318,8 @@ export function TeamEditor() {
             ? ` (${config.defaults.max_tool_calls_from_history})`
             : " (no limit)"
         }.`}
-        autoCompactionHelperText="Automatically compact older team-scoped history before the next run when raw replay exceeds the hard context budget."
-        thresholdTokensHelperText="Soft replay budget in tokens. Crossing it records planning metadata; text compaction waits for the hard budget."
+        autoCompactionHelperText="Automatically compact older team-scoped history before the next run when the request crosses the compaction threshold on a route without native compaction, or when raw replay exceeds the hard context budget."
+        thresholdTokensHelperText="Compaction trigger in tokens, counted over the whole request. Supported OpenAI and Claude routes compact natively at it; every other route runs text compaction before the reply."
         compactionModelPlaceholder={
           config?.defaults?.compaction?.model ?? "Default: team run model"
         }
@@ -352,7 +352,7 @@ export function TeamEditor() {
                 const isSelectable =
                   agentPolicy != null && eligibilityReason == null;
                 return (
-                  <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
+                  <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-secondary transition-all duration-200">
                     <Checkbox
                       id={`agent-${agent.id}`}
                       checked={isChecked}
@@ -412,7 +412,7 @@ export function TeamEditor() {
                   return (
                     <div
                       key={room.id}
-                      className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
+                      className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-secondary transition-all duration-200"
                     >
                       <Checkbox
                         id={`room-${room.id}`}

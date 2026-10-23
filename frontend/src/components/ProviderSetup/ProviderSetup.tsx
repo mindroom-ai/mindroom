@@ -214,7 +214,7 @@ function ProviderSetupDialog({
                   "rounded-lg border px-3 py-2.5 text-left transition-colors",
                   provider === option.id
                     ? "border-primary bg-primary/5"
-                    : "border-border hover:bg-muted/50",
+                    : "border-border hover:bg-secondary",
                 )}
               >
                 <span className="flex items-center gap-2 text-sm font-medium">
@@ -315,7 +315,7 @@ export function ProviderSetupBanner({ refreshKey }: { refreshKey: string }) {
   return (
     <>
       {missing.length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-primary/20 bg-primary/10 px-3 py-2.5 text-sm sm:px-6">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-card px-3 py-2.5 text-sm sm:px-6">
           <p className="flex items-center gap-2">
             <KeyRound aria-hidden="true" className="h-4 w-4 shrink-0" />
             <span>

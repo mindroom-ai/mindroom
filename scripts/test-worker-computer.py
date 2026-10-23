@@ -411,10 +411,14 @@ class Fixture:
         print(f"Exact fixture Matrix removed: {container_id}", flush=True)
 
     async def shell(self, args: list[str], *, background: bool = False, user: str | None = None) -> str:
-        """Run commands in the exact worker used by the browser."""
+        """Run commands in the exact worker used by the browser.
+
+        The shell tool has no background mode, so ``background`` detaches the command the way its
+        description prescribes, with ``nohup`` and silenced output so the call returns at once.
+        """
         kwargs: dict[str, Any] = {"args": args, "tail": 1000}
         if background:
-            kwargs["timeout"] = 0
+            kwargs["args"] = ["bash", "-c", 'nohup "$@" > /dev/null 2>&1 &', "bash", *args]
         body = await self.execute("shell", "run_shell_command", kwargs, user=user)
         assert body["ok"], body
         return shell_stdout(body["result"])

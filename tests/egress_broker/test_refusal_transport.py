@@ -287,12 +287,19 @@ async def test_only_a_git_client_gets_the_git_form(
             "Ask the user to connect it at connect_url or add a key at manage_url, then retry.",
         ),
         (
+            SecretMissing(provider="github", reuse_off=True),
+            "No svc key is set for this agent, and Agent Keys may not use a connected github account. "
+            f"Ask the user to add a key or allow that account at {MANAGE_URL}, then retry.",
+            "No svc key is set for this agent, and Agent Keys may not use a connected github account. "
+            "Ask the user to add a key or allow that account at manage_url, then retry.",
+        ),
+        (
             SecretNeedsReconnect(provider="github", connect_url=CONNECT_URL),
             f"The github account for svc must be connected again. Ask the user to reconnect at {MANAGE_URL}.",
             "The github account for svc must be connected again. Ask the user to reconnect at connect_url or manage_url.",
         ),
     ],
-    ids=["key-only", "connectable", "reconnect"],
+    ids=["key-only", "connectable", "reuse-off", "reconnect"],
 )
 async def test_git_error_line_names_the_manage_link_but_never_the_connect_link(
     broker: BrokerFactory,

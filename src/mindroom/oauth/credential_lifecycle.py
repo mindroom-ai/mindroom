@@ -22,6 +22,7 @@ from mindroom.oauth.credential_store import (
     OAuthCredentialTransaction,
     OAuthCredentialUnreadableError,
     oauth_credential_reader,
+    oauth_credential_store_exists,
     oauth_credential_transaction,
 )
 from mindroom.oauth.providers import (
@@ -411,8 +412,18 @@ async def load_oauth_credentials_snapshot(context: OAuthCredentialContext) -> OA
     return await _run_cancellable_oauth_transaction(lambda: _load_oauth_credentials_snapshot_read(context))
 
 
-async def load_oauth_credentials_status(context: OAuthCredentialContext) -> OAuthCredentialsStatus:
-    """Load credentials or classify an unreadable payload as requiring reset."""
+async def load_oauth_credentials_status(
+    context: OAuthCredentialContext,
+    *,
+    create_store: bool = True,
+) -> OAuthCredentialsStatus:
+    """Load credentials or classify an unreadable payload as requiring reset.
+
+    `create_store=False` reads a scope without a store as having no credentials instead of creating an empty store,
+    so a listing of many scopes writes nothing.
+    """
+    if not create_store and not await asyncio.to_thread(oauth_credential_store_exists, context):
+        return OAuthCredentialsStatus(credentials=None, reset_required=False)
     try:
         snapshot = await load_oauth_credentials_snapshot(context)
     except OAuthCredentialUnreadableError:
@@ -871,11 +882,15 @@ def oauth_credentials_usable(
     now: float | None = None,
     scope_validator: Callable[[dict[str, Any]], bool] | None = None,
 ) -> bool:
-    """Return whether stored OAuth credentials can currently authenticate provider calls."""
-    client_config = provider.client_config(runtime_paths)
-    if not credentials or client_config is None:
+    """Return whether stored OAuth credentials can currently authenticate provider calls.
+
+    Without credentials it reads nothing: the client config is a credential file read, which listings of many scopes
+    that never connected would otherwise repeat on the event loop.
+    """
+    if not credentials:
         return False
-    if not oauth_credentials_match_client_id(client_config, credentials):
+    client_config = provider.client_config(runtime_paths)
+    if client_config is None or not oauth_credentials_match_client_id(client_config, credentials):
         return False
     if not (
         scope_validator(credentials)

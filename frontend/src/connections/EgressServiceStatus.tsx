@@ -36,8 +36,9 @@ export function ServiceStatus({
       >
         {statusLabel(service)}
       </StatusLabel>
-      {service.active_source === "oauth" && oauth?.account_label && (
-        <span className="break-all text-xs">{oauth.account_label}</span>
+      {/* Also beside an account only its tools use: the one Agent Keys would use once allowed. */}
+      {service.active_source !== "key" && oauth?.account_label && (
+        <span className="text-xs wrap-anywhere">{oauth.account_label}</span>
       )}
       {service.active_source === "oauth" && sharesAccount(agent, oauth) && (
         <span className="text-xs text-muted-foreground">
@@ -59,7 +60,9 @@ export function ServiceStatus({
           Agent Keys cannot use the shared service account, so{" "}
           {service.active_source === "oauth"
             ? "this uses the account connected earlier."
-            : "this service needs a key."}
+            : oauth.connected
+              ? "this service needs a key or the account connected earlier."
+              : "this service needs a key."}
         </span>
       )}
       {refusalShown && (

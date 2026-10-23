@@ -571,8 +571,8 @@ manage_team(
 These rules apply to both `config_manager` and `self_config`.
 Reading configuration (`manage_config` inspection, `get_info("agent_config")`, `get_own_config()`) and every write require a requester listed in `administrators`; other requesters get an authorization error.
 Redacted output masks every value inside fields the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, except `${NAME}` environment references, which are shown as written.
-It also masks free-form map entries whose key names look like credentials, and credential patterns such as URL passwords and bearer tokens in any text.
-A write whose value contains the `***redacted***` marker or a masked URL password such as `user:***@host` is refused, so copying redacted output back cannot overwrite a hidden real value.
+It also masks free-form map entries whose key names look like credentials, and credential patterns such as URL credentials and bearer tokens in any text.
+A write whose value contains the `***redacted***` marker or masked URL credentials such as `***@host` is refused, so copying redacted output back cannot overwrite a hidden real value.
 Every write is validated against the full runtime config before `config.yaml` is saved, and an invalid change saves nothing.
 Saved changes take effect through the normal config hot reload after the current response.
 When a plain list of tool names replaces an agent's tools, inline overrides for tools that stay in the list are kept.

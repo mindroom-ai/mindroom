@@ -52,6 +52,7 @@ from tests.oauth_test_utils import (
 from .conftest import (
     OAUTH_REFRESH_TOKEN,
     account_store,
+    allow_oauth_reuse,
     audit_records,
     connect_account,
     connect_request,
@@ -67,6 +68,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.egress_broker.secrets import SecretResult
+    from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, OAuthCredentialsSnapshot
     from mindroom.tool_system.worker_routing import WorkerScope
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
@@ -324,7 +326,6 @@ async def test_missing_secret_reports_manage_url(
         **_broker_env(free_port()),
         MINDROOM_PUBLIC_URL="https://chat.example.org/",
         MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
-        MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT="true",
     )
     config = _config(github=_GITHUB)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
@@ -721,7 +722,7 @@ async def test_bind_error_propagates(
                 **_broker_env(8768),
                 "MINDROOM_PUBLIC_URL": "https://chat.example.org/",
                 "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-                "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
+                "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]",
             },
             "https://chat.example.org/connections/egress",
         ),
@@ -733,7 +734,6 @@ async def test_bind_error_propagates(
             {
                 **_broker_env(8768),
                 "MINDROOM_PUBLIC_URL": "https://chat.example.org/",
-                "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
                 "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]",
             },
             "https://chat.example.org/",
@@ -785,7 +785,6 @@ def _oauth_runtime(tmp_runtime_paths: Callable[..., RuntimePaths], backend: str 
         **_broker_env(free_port()),
         MINDROOM_PUBLIC_URL=_PUBLIC_URL,
         MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
-        MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT="true",
         MINDROOM_WORKER_BACKEND=backend,
     )
 
@@ -803,6 +802,7 @@ async def test_stored_key_wins_over_oauth_and_its_removal_falls_back_without_res
     target = _routable_target()
     save_secret(manager, target, "github", "s3cret")
     connect_account(manager, account_store("@alice:example.org"), "alice-oauth")
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
         with_key = await get_through(env)
@@ -817,21 +817,77 @@ async def test_stored_key_wins_over_oauth_and_its_removal_falls_back_without_res
 async def test_placeholder_env_when_only_oauth_is_connected(
     tmp_runtime_paths: Callable[..., RuntimePaths],
     manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A connected OAuth account alone gives the scope its placeholders; the token itself never enters the env."""
+    """A connected OAuth account Agent Keys may use gives the scope its placeholders; the token never enters the env.
+
+    Until the account is allowed for the service it serves only its tools: there is no placeholder, and working that
+    out never reads the connection.
+    """
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
     config = _config(github=_GITHUB_OAUTH)
     connect_account(manager, account_store("@alice:example.org"), "alice-oauth")
+    connect_account(manager, account_store("@bob:example.org"), "bob-oauth")
+    reads: list[str | None] = []
+    real_load = oauth_source.load_oauth_credentials_snapshot_sync
+
+    def recording_load(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
+        identity = None if context.worker_target is None else context.worker_target.execution_identity
+        reads.append(None if identity is None else identity.requester_id)
+        return real_load(context)
+
+    monkeypatch.setattr(oauth_source, "load_oauth_credentials_snapshot_sync", recording_load)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        before_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+        reads_before = list(reads)
+        allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
         alice_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
         bob_env = execution_env_for_worker(
             runtime_paths,
             config=config,
             worker_target=_routable_target("@bob:example.org"),
         )
+    assert "GH_TOKEN" not in before_env
+    assert reads_before == []
     assert alice_env["GH_TOKEN"] == _PLACEHOLDER
     assert "alice-oauth" not in str(alice_env)
     assert "GH_TOKEN" not in bob_env
+    assert reads == ["@alice:example.org"]
+
+
+@pytest.mark.usefixtures("github_oauth_client")
+@pytest.mark.asyncio
+async def test_a_connected_account_is_refused_until_agent_keys_may_use_it(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    get_through: GetThrough,
+) -> None:
+    """A connected account nobody allowed for the service gets a 403 naming it, with no token and no connect link.
+
+    Once the account is allowed, the same proxy token gets it injected without a restart.
+    """
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github=_GITHUB_OAUTH)
+    connect_account(manager, account_store("@alice:example.org"), "alice-oauth")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+        refused = await get_through(env)
+        allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
+        allowed = await get_through(env)
+    assert refused.status_code == 403
+    assert refused.json() == {
+        "error": "credential_not_configured",
+        "service": "github",
+        "provider": "github",
+        "oauth_reuse": "off",
+        "manage_url": f"{_PUBLIC_URL}/connections/egress",
+        "message": "No github key is set for this agent, and Agent Keys may not use a connected github account. "
+        "Ask the user to add a key or allow that account at manage_url, then retry.",
+    }
+    assert "alice-oauth" not in refused.text
+    assert allowed.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
+    assert tls_upstream.hits == ["/echo"]
 
 
 @pytest.mark.usefixtures("github_oauth_client")
@@ -913,10 +969,7 @@ _NO_PERSONAL_PAGE_KEY = (
     "An administrator can enable Connections sign-in or make the agent shared."
 )
 _NO_CHAT_SIGN_IN = {"MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]"}
-_SIGNED_UPSTREAM = {
-    "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-    "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
-}
+_SIGNED_UPSTREAM = {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"}
 
 
 @pytest.mark.parametrize(
@@ -925,8 +978,6 @@ _SIGNED_UPSTREAM = {
         ("user_agent", _SIGNED_UPSTREAM, f"{_PUBLIC_URL}/connections/egress", _NO_GITHUB_KEY),
         ("user", {}, f"{_PUBLIC_URL}/connections/egress", _NO_GITHUB_KEY),
         ("user", _NO_CHAT_SIGN_IN, None, _NO_PERSONAL_PAGE_KEY),
-        # The personal API answers 403 without signed requests, so the page cannot set the key either.
-        ("user", {**_NO_CHAT_SIGN_IN, "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"}, None, _NO_PERSONAL_PAGE_KEY),
         ("shared", {}, f"{_PUBLIC_URL}/", _NO_SHARED_GITHUB_KEY),
         (None, {}, f"{_PUBLIC_URL}/", _NO_SHARED_GITHUB_KEY),
     ],
@@ -934,7 +985,6 @@ _SIGNED_UPSTREAM = {
         "personal-page",
         "personal-page-from-chat",
         "personal-without-page",
-        "personal-trusted-without-jwt",
         "shared-dashboard",
         "unscoped-dashboard",
     ],
@@ -977,6 +1027,8 @@ async def test_requester_scoped_oauth_on_a_shared_agent_injects_the_callers_toke
     config = _config(github={**_GITHUB_OAUTH, "oauth_on_shared_workers": True})
     connect_account(manager, account_store("@alice:example.org"), "alice-oauth")
     connect_account(manager, account_store("@bob:example.org"), "bob-oauth")
+    for requester in ("@alice:example.org", "@bob:example.org"):
+        allow_oauth_reuse(manager, runtime_paths, account_store(requester))
     alice = _routable_target(scope="shared")
     bob = _routable_target("@bob:example.org", scope="shared")
     assert alice.worker_key == bob.worker_key
@@ -1022,6 +1074,7 @@ async def test_requester_scoped_oauth_is_used_on_the_static_runner_with_the_opt_
     runtime_paths = _oauth_runtime(tmp_runtime_paths, backend="static_runner")
     config = _config(github={**_GITHUB_OAUTH, "oauth_on_shared_workers": True})
     connect_account(manager, account_store("@alice:example.org"), "alice-oauth")
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
         response = await get_through(env)
@@ -1042,6 +1095,7 @@ async def test_concurrent_requests_refresh_an_expired_token_once(
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
     config = _config(github=_GITHUB_OAUTH)
     connect_account(manager, account_store("@alice:example.org"), "stale-oauth", expires_at=1.0)
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
     presented = serve_token_endpoint(monkeypatch, [DelayedTokenEndpointOutcome(0.3, rotated_token_response())])
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
@@ -1066,6 +1120,7 @@ async def test_revoked_grant_returns_oauth_connection_required(
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
     config = _config(github=_GITHUB_OAUTH)
     connect_account(manager, account_store("@alice:example.org"), "stale-oauth", expires_at=1.0)
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
     serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
@@ -1099,6 +1154,7 @@ async def test_missing_connection_returns_connect_url(
     """With neither a key nor a connection, the 403 offers both the key page and a link to connect the account."""
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
     config = _config(github=_GITHUB_OAUTH)
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
         response = await get_through(env)
@@ -1138,6 +1194,7 @@ async def test_provider_outage_is_a_retryable_503_off_the_shared_executor(
     target = _routable_target()
     save_secret(manager, target, "keyed", "s3cret")
     connect_account(manager, account_store("@alice:example.org"), "stale-oauth", expires_at=1.0)
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
     grant_started = threading.Event()
     outage = httpx.Response(503, json={"error": "temporarily_unavailable"})
     presented = serve_token_endpoint(
@@ -1188,6 +1245,7 @@ async def test_unconnectable_provider_gives_the_plain_missing_credential_body(
     """Without an OAuth client to connect, the 403 names neither a provider nor a connect link, only the key page."""
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
     config = _config(github=_GITHUB_OAUTH)
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
         response = await get_through(env)
@@ -1208,6 +1266,8 @@ async def test_shared_agent_scoped_provider_refusal_has_no_connect_link(
     manager.save_credentials("google_drive_oauth_client", {"client_id": "drive-client", "client_secret": "secret"})
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
     config = _config(drive={**_GITHUB, "oauth_provider": drive.id})
+    for scope in ("shared", "user_agent"):
+        allow_oauth_reuse(manager, runtime_paths, _routable_target(scope=scope), "drive", provider=drive)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         shared_env = execution_env_for_worker(
             runtime_paths,
@@ -1491,6 +1551,7 @@ async def test_user_service_uses_only_its_scopes_oauth_connection(
     for target in (alice, bob):
         _save_mine(manager, target, config, _GITHUB_OAUTH)
     connect_account(manager, account_store("@alice:example.org"), "alice-oauth")
+    allow_oauth_reuse(manager, runtime_paths, alice, "mine")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         alice_env = execution_env_for_worker(runtime_paths, config=config, worker_target=alice)
         bob_env = execution_env_for_worker(runtime_paths, config=config, worker_target=bob)

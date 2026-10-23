@@ -48,8 +48,7 @@ defaults:
 Compaction is enabled by default through `defaults.compaction`.
 It summarizes older history so later replies keep useful context instead of losing it to replay fitting.
 Supported OpenAI and Claude routes use [native compaction](#native-compaction) inside ordinary requests; every other route uses portable text compaction.
-Text compaction runs before a reply when history exceeds the hard replay budget or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
-A [scheduled task](../scheduling.md) run with a `history_limit` cannot use native compaction, so it also runs text compaction once history exceeds the compaction threshold.
+Text compaction runs before a reply when the request, including the system prompt and tools, exceeds the compaction threshold on a route without native compaction, when history exceeds the hard replay budget, or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
 While it runs, the agent posts `Compacting history...` and edits that notice with the result.
 If compaction fails, the notice reads `Compaction failed; continuing without compaction.` with the reason; before a reply, the reply continues with fitted history.
 
@@ -58,7 +57,7 @@ Set these fields under `defaults.compaction`, an agent's `compaction`, or a team
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | `false` disables automatic compaction for the scope, both before and during a reply |
-| `threshold_tokens` | int, >= 1 | `null` | Native provider trigger in tokens; on text-only routes a soft planning threshold that does not compact by itself while history still fits. Mutually exclusive with `threshold_percent` |
+| `threshold_tokens` | int, >= 1 | `null` | Compaction trigger in tokens, counted over the whole request including the system prompt and tools: the native provider trigger on native routes, and the point where text compaction runs on every other route, unless the system prompt, tools, and saved summary already exceed it. Mutually exclusive with `threshold_percent` |
 | `threshold_percent` | float, > 0 and < 1 | `null` | The same trigger as a fraction of the effective replay window. When neither threshold is set, the trigger is 80% of that window |
 | `replay_window_tokens` | int, >= 1 | `null` | Cap replayed history and compaction planning below the model's real `context_window` without lowering the provider request limit. The smaller of the two applies; when the model window is unknown, this value alone sets the replay window |
 | `reserve_tokens` | int, >= 0 | `16384` | Headroom kept free for the current prompt, tool definitions, and output; set it at least to the model's maximum output tokens, including any thinking budget |
@@ -121,6 +120,7 @@ MindRoom supports automatic [OpenAI Responses compaction](https://developers.ope
 Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the hard request limit.
 An explicit `compaction.model`, a [scheduled task](../scheduling.md) with a `history_limit`, or a request already over the hard budget uses text compaction instead.
 Native checkpoints survive restarts and are tied to their provider, model, and endpoint; after a model switch, the conversation is rebuilt from its full stored history.
+When that history then needs text compaction, it starts from the latest Claude checkpoint's summary instead of summarizing everything that checkpoint covers again, as long as the summary and turns before it are still the ones its request replayed and leave room for its turn; OpenAI checkpoints are encrypted, so they are skipped.
 If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).
 A completed response that carries a provider checkpoint logs a `Native compaction checkpoint` event with the trigger (`threshold_tokens`, `null` for an authored policy) and the checkpoint's conservative size estimate (`checkpoint_tokens`, from byte length for OpenAI's encrypted checkpoints).
 The `Compaction summary chunk` events and the `compaction_*` fields of `Dispatch pipeline timing` cover text compaction only.

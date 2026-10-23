@@ -1604,9 +1604,10 @@ Provider keys from the environment or `.env` are also copied into the shared cre
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_API_KEY` | API key for dashboard/API requests; `mindroom config init` and first-run `mindroom run` add a generated key to `.env` when it has none; unset or empty means open access | _(none)_ |
-| `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, and in the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding) when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; set the API server bind port with `mindroom run --api-port` instead, and set this too when the port changes | `8765` |
+| `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, and in the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding) and the address MindRoom Chat finds when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; it does not set the API server's bind port, which is `mindroom run --api-port`, and when unset it follows that port | the `--api-port` port, `8765` by default |
+| `MINDROOM_DASHBOARD_URL` | Origin, HTTPS or HTTP on a local address, where administrators open the dashboard when another app owns `/` on `MINDROOM_PUBLIC_URL`; prerequisites and effects are in [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host) | _(unset: the dashboard is at `/` on the public origin)_ |
 | `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra host names that unauthenticated dashboard or `/v1` requests may address (see [Authorization](https://docs.mindroom.chat/authorization/#unauthenticated-dashboard-host-names)) | _(none)_ |
-| `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173`, or the hosted public origins when `MINDROOM_PUBLIC_URL` is set |
+| `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin, or `MINDROOM_DASHBOARD_URL` on that host | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173`, or the hosted public origins when `MINDROOM_PUBLIC_URL` is set |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | `true` allows every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
 | `MINDROOM_ENABLE_API_DOCS` | `false` hides the generated API docs at `/docs`, `/redoc`, and `/openapi.json` | `true` (`false` on hosted platform instances) |
 | `OPENAI_COMPAT_API_KEYS` | Comma-separated API keys for `/v1/*` requests (see [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/)) | _(none; `/v1` is locked without this or the flag below)_ |
@@ -2984,8 +2985,7 @@ defaults:
 Compaction is enabled by default through `defaults.compaction`.
 It summarizes older history so later replies keep useful context instead of losing it to replay fitting.
 Supported OpenAI and Claude routes use [native compaction](#native-compaction) inside ordinary requests; every other route uses portable text compaction.
-Text compaction runs before a reply when history exceeds the hard replay budget or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
-A [scheduled task](https://docs.mindroom.chat/scheduling/) run with a `history_limit` cannot use native compaction, so it also runs text compaction once history exceeds the compaction threshold.
+Text compaction runs before a reply when the request, including the system prompt and tools, exceeds the compaction threshold on a route without native compaction, when history exceeds the hard replay budget, or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
 While it runs, the agent posts `Compacting history...` and edits that notice with the result.
 If compaction fails, the notice reads `Compaction failed; continuing without compaction.` with the reason; before a reply, the reply continues with fitted history.
 
@@ -2994,7 +2994,7 @@ Set these fields under `defaults.compaction`, an agent's `compaction`, or a team
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | `false` disables automatic compaction for the scope, both before and during a reply |
-| `threshold_tokens` | int, >= 1 | `null` | Native provider trigger in tokens; on text-only routes a soft planning threshold that does not compact by itself while history still fits. Mutually exclusive with `threshold_percent` |
+| `threshold_tokens` | int, >= 1 | `null` | Compaction trigger in tokens, counted over the whole request including the system prompt and tools: the native provider trigger on native routes, and the point where text compaction runs on every other route, unless the system prompt, tools, and saved summary already exceed it. Mutually exclusive with `threshold_percent` |
 | `threshold_percent` | float, > 0 and < 1 | `null` | The same trigger as a fraction of the effective replay window. When neither threshold is set, the trigger is 80% of that window |
 | `replay_window_tokens` | int, >= 1 | `null` | Cap replayed history and compaction planning below the model's real `context_window` without lowering the provider request limit. The smaller of the two applies; when the model window is unknown, this value alone sets the replay window |
 | `reserve_tokens` | int, >= 0 | `16384` | Headroom kept free for the current prompt, tool definitions, and output; set it at least to the model's maximum output tokens, including any thinking budget |
@@ -3057,6 +3057,7 @@ MindRoom supports automatic [OpenAI Responses compaction](https://developers.ope
 Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the hard request limit.
 An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the hard budget uses text compaction instead.
 Native checkpoints survive restarts and are tied to their provider, model, and endpoint; after a model switch, the conversation is rebuilt from its full stored history.
+When that history then needs text compaction, it starts from the latest Claude checkpoint's summary instead of summarizing everything that checkpoint covers again, as long as the summary and turns before it are still the ones its request replayed and leave room for its turn; OpenAI checkpoints are encrypted, so they are skipped.
 If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).
 A completed response that carries a provider checkpoint logs a `Native compaction checkpoint` event with the trigger (`threshold_tokens`, `null` for an authored policy) and the checkpoint's conservative size estimate (`checkpoint_tokens`, from byte length for OpenAI's encrypted checkpoints).
 The `Compaction summary chunk` events and the `compaction_*` fields of `Dispatch pipeline timing` cover text compaction only.
@@ -3277,10 +3278,11 @@ memory:
 
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
-Before each reply, MindRoom inlines the start of `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
+Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
 An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies, its history is compacted, or MindRoom restarts; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
-Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.
+Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
+Only whole lines are inlined, never part of a line.
 When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
 `memory.file.path` (default unset, relative to the config directory) is a fallback root for team file memory and never moves agent file memory out of the workspace.
 
@@ -3385,7 +3387,7 @@ memory:
 ## Prompt Curation
 
 Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
-Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger, ask the agent in a visible thread to condense them gradually and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
+Enable the [`prompt_curation`](https://docs.mindroom.chat/scheduling/#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger or the preload has to withhold part of `MEMORY.md`, ask the agent in a visible thread to condense them gradually, fold corrections into the entries they correct, and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
 
 ```yaml
 agents:
@@ -3433,6 +3435,7 @@ delete_memory("abc123")
 The tool reaches every agent and team scope visible to the agent, as described in [Memory Scopes](#memory-scopes).
 Search and list results include an ID: Mem0 memory IDs and file-backed `file:<path>:<line>` IDs work with `get_memory`, `update_memory`, and `delete_memory`.
 Semantic file-memory matches use read-only `semantic:<source_file>:<rank>` locators that these functions do not accept.
+After storing, `add_memory` lists up to three similar existing memories with their IDs, so the agent can rewrite an entry the new memory corrects; file memory finds them by keyword even in `semantic` mode, because semantic matches cannot be edited.
 Result metadata includes `search_mode` (`keyword` or `semantic`), showing which search produced each result.
 Failures are returned as readable error messages rather than raised into the conversation.
 
@@ -4605,12 +4608,13 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
 1. The check measures `MEMORY.md` plus the agent's `context_files` with the estimate behind `static_prompt_tokens` (characters / 4); for a private agent these are `MEMORY.md` and `private.context_files` in the requester's private root, because agent-level `context_files` load from the workspace every requester shares.
-2. Above `trigger_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", a cut between `min_reduction` and `max_reduction` (10 to 15%).
-3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
+2. Above `trigger_tokens`, or when the preload has to withhold part of `MEMORY.md` because it passes `memory.file.max_entrypoint_lines` (default `200`) or `memory.file.max_entrypoint_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 19800 tokens in total, but not below 18700", a cut between `min_reduction` and `max_reduction` (10 to 15%).
+3. The prompt asks the agent to commit the files to git first, take lines out of a `MEMORY.md` over either preload cap first (the prompt shows its line and token counts against both caps), fold each later correction into the entry it corrects, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and otherwise never invent facts or change their meaning.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
     - a file can no longer be read safely;
     - a file shrank by more than 25%;
     - the files total less than the floor, or did not shrink;
+    - `MEMORY.md` was over the line cap and still has as many lines;
     - a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
@@ -4622,7 +4626,7 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 |---|---|---|
 | `cron` | `0 4 * * *` | When to check |
 | `room` | first configured room | Where to post the prompt |
-| `trigger_tokens` | `50000` (min 1) | Post the prompt once the files exceed this many estimated tokens |
+| `trigger_tokens` | `20000` (min 1) | Post the prompt once the files exceed this many estimated tokens; a `MEMORY.md` the preload cannot show whole also posts it |
 | `min_reduction` | `0.10` (at most `0.25`) | Smallest cut the prompt asks for; no file may shrink more than 25%, so no pass can be asked for more |
 | `max_reduction` | `0.15` | Largest cut before verify asks for a re-check |
 | `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size, before verify asks for a re-check |
@@ -4716,6 +4720,7 @@ This page lists every command and fully covers `!help`, `!hi`, and `!config`; th
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
 | `!room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#thread_mode) |
+| `!auto_approve [<minutes>\|<hours>h\|off]` | Run your tool calls in this thread without approval for a while, or show or end that window | [Tool Approval](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) |
 | `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) | [Matrix](https://docs.mindroom.chat/matrix/#encrypt) |
 | `!e2ee` | Show encryption diagnostics for this room | [Matrix](https://docs.mindroom.chat/matrix/#e2ee) |
 | `!config <operation>` | View and modify configuration (disabled by default, platform administrators only) | [`!config`](#config) |
@@ -4747,7 +4752,7 @@ Any other command sent by an agent for you is refused with `❌ Agents cannot ru
 !help config
 ```
 
-**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
+**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `auto_approve`, `auto-approve`, `autoapprove`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 Any other topic shows the general command list.
 
@@ -4778,7 +4783,7 @@ Values are parsed as YAML, so `false`, `42`, and `[shell, file]` become a boolea
 Quote a value to keep its exact spacing.
 
 Shown values are redacted like `config_manager` output; see [Access, Redaction, and Saving](https://docs.mindroom.chat/tools/agent-orchestration/#access-redaction-and-saving).
-`!config set` refuses a value containing the `***redacted***` marker or a masked URL password such as `user:***@host`, so copying shown values back cannot overwrite a hidden secret; set the field to its real value instead.
+`!config set` refuses a value containing the `***redacted***` marker or masked URL credentials such as `***@host`, so copying shown values back cannot overwrite a hidden secret; set the field to its real value instead.
 
 ### Configuration Confirmations
 
@@ -6223,17 +6228,17 @@ Counter values can change between reports as coverage improves.
 `GET /api/usage/me/private-agents` returns the signed-in user's usage across their own private agents, with the same rows as `get_my_private_usage()` but without `user_id` or `user_breakdown`.
 The only accepted query parameter is `include_daily` (default `false`); any other parameter returns `400` `Usage target overrides are not accepted`.
 
-The endpoint requires [strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode) with a verified Matrix identity.
+The endpoint requires [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with a [Matrix identity](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-identity).
 A [Connections portal](https://docs.mindroom.chat/connections-portal/) session from MindRoom Chat does not authorize it.
 Without it, requests fail with `403` `Personal APIs require trusted signed authentication` or `Personal APIs require a verified Matrix identity`; an API key alone cannot select a user.
 Any signed-in user can call it, and it grants no administrator or export access.
 
 ## Usage Export Service
 
-Strict JWT deployments can let a collector service call `GET /api/usage/export` without giving it a browser or administrator identity.
+Deployments with trusted upstream auth can let a collector service call `GET /api/usage/export` without giving it a browser or administrator identity.
 The route returns the same report, parameters, and polling behavior as [`GET /api/usage`](#usage-report-api).
 
-Configure [trusted-upstream strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode), including `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER`, then add a dedicated service audience and client ID:
+Configure [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#setup), then add a dedicated service audience and client ID:
 
 ```bash
 MINDROOM_USAGE_SERVICE_JWT_AUDIENCE=mindroom-usage-export
@@ -6246,7 +6251,7 @@ It must also contain `type=app`, `common_name` exactly equal to `MINDROOM_USAGE_
 
 | Status | Meaning |
 | --- | --- |
-| `503` `Usage export service authentication is not configured` | Trusted-upstream auth, a strict-JWT setting, or a service setting is missing |
+| `503` `Usage export service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a service setting is missing |
 | `401` `Invalid usage service JWT` | Missing or invalid assertion |
 
 A service assertion authorizes only `/api/usage/export`, not `/api/usage`, personal usage, configuration, or other administrator routes.
@@ -6373,6 +6378,7 @@ Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
 Spend updates within about a minute of a chat reply finishing and within five minutes of other usage, such as voice calls, so a user can go slightly over their cap before the fallback applies.
+With a lot of retained usage, recounting spend takes longer, and updates wait about ten times that long so the recount does not slow replies.
 A reply that already started finishes on its model.
 
 ## Over-Budget Replies
@@ -6433,8 +6439,8 @@ URL-encode `user_id` in the path, for example `/api/budgets/users/%40alice%3Aexa
 
 ## Budget Service
 
-Strict JWT deployments can let a service, such as a company spend dashboard, read budgets and set caps without a browser or administrator identity.
-Configure [trusted-upstream strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode), then add a dedicated audience and client ID:
+Deployments with trusted upstream auth can let a service, such as a company spend dashboard, read budgets and set caps without a browser or administrator identity.
+Configure [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#setup), then add a dedicated audience and client ID:
 
 ```bash
 MINDROOM_BUDGET_SERVICE_JWT_AUDIENCE=mindroom-budget-service
@@ -6447,7 +6453,7 @@ A budget service assertion authorizes only the `/api/budgets/service` routes, an
 
 | Status | Meaning |
 | --- | --- |
-| `503` `Budget service authentication is not configured` | Trusted-upstream auth, a strict-JWT setting, or a budget service setting is missing |
+| `503` `Budget service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a budget service setting is missing |
 | `401` `Invalid budget service JWT` | Missing or invalid assertion |
 
 # Matrix Integration
@@ -6787,7 +6793,7 @@ It applies only when MindRoom creates the room, and never joins someone who alre
   Leaving and rejoining an onboarding room re-invites them to their existing personal room, except after a ban or for an adopted room.
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
-  Adopted rooms instead allow only the participants listed in their record.
+  Adopted rooms instead allow only the participants listed in their record, and any other MindRoom agent invited there is removed the same way, because an adopted room may share its earlier history.
 - Personal rooms survive restarts and room cleanup, even after `personal_rooms` is removed.
   Disabling the feature stops new onboarding but does not remove existing rooms or access.
 
@@ -6795,13 +6801,15 @@ It applies only when MindRoom creates the room, and never joins someone who alre
 
 An onboarding failure affects only that human, and the onboarding room keeps working for everyone else.
 Failed onboarding is retried automatically, first after 30 seconds and then at doubling intervals up to one hour, and a config reload retries it immediately.
+A personal room that fails its ownership or membership checks keeps retrying only while its reconciliation is still failing; otherwise it is checked again on restart or config reload.
 A join or command that arrives before the personal-room agent connects is handled once it does.
 Revoking the human's access to the agent, or disabling `personal_rooms`, cancels a welcome that has not been sent yet.
 
 | Log message | Meaning |
 | --- | --- |
 | `Personal-room validation failed for an onboarding trigger` | An existing personal room failed ownership or membership checks, for example because another account already holds the alias, or a guest the agent cannot remove was raised to the agent's power level. |
-| `Personal-room imported roster has unattested members` | An adopted room contains members its record does not list; the warning names them, and MindRoom does not change the room. |
+| `Personal-room imported roster has unattested members` | An adopted room contains someone other than a MindRoom agent that its record does not list; the warning names every unlisted member, and MindRoom does not change the room. |
+| `Personal-room validation failed for an owner membership event` | The owner joined or changed their profile in a personal room that fails these checks; the agent keeps answering there. A room whose reconciliation is still failing keeps retrying up to hourly; otherwise the room is checked again on restart or config reload. |
 | `Personal-room onboarding trigger failed` | Any other failure, such as an invite refused by the human's homeserver. |
 | `Personal-room reconciliation failed` | An automatic retry failed; the log shows the attempt number and the delay before the next try. |
 
@@ -6841,8 +6849,8 @@ For a room with shared history and one existing guest, a record looks like this:
 - `additional_user_ids` (default `[]`) lists the only other participants allowed to stay joined, invited, or knocking; it does not invite anyone or grant power.
 - Set `welcome_completed: true` to skip the welcome; otherwise MindRoom sends the configured welcome.
 
-If the room's history setting or members stop matching the record, onboarding for that human fails with one of the log messages above until someone fixes the room.
-MindRoom does not change an adopted room's name, topic, or history setting, and never removes anyone from it.
+If the room's history setting stops matching the record, or anyone other than a MindRoom agent it does not list joins, is invited, or knocks, onboarding for that human fails with one of the log messages above until someone fixes the room.
+MindRoom does not change an adopted room's name, topic, or history setting, and removes only MindRoom agents the record does not list.
 It invites the requester if they are not in the room yet and applies the configured `requester_admin`, avatar, and welcome settings.
 
 # Bridges
@@ -7746,7 +7754,6 @@ When the agent's shell runs in a worker, Bash runs in that same worker, which mu
 Worker shells can reach MindRoom's API, so the API must be locked down:
 
 - Set `MINDROOM_API_KEY`; `mindroom run` adds a generated key to `.env` when Docker or Kubernetes workers are configured and the dashboard has no credential, while an explicitly empty `MINDROOM_API_KEY=` keeps open access and leaves minimal mode unavailable.
-- With trusted-upstream authentication enabled, set `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`.
 - Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`.
 
 Workers call MindRoom at `MINDROOM_AGENT_CLI_PRIMARY_URL`, a plain `http(s)://host:port` origin, when it is set.
@@ -8125,9 +8132,12 @@ Set the trusted origin of the MindRoom runtime API, without a path, in Chat's op
 }
 ```
 
-The shipped value is empty, which hides the Computer action.
+When it is empty, as shipped, Chat on a homeserver that binds tokens uses the runtime origin that the room's MindRoom agents publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`; on other homeservers the Computer action stays hidden.
+The iOS app ignores a published `localhost` origin, which on a phone is the phone itself, so for computers there set `MINDROOM_PUBLIC_URL` to an address the phone can reach.
 Remote origins require HTTPS; plain HTTP works for `localhost` and loopback or private IP addresses.
-Chat shows the Computer action when this origin is set and the room has a joined MindRoom agent; with several agents, the user picks one first.
+Chat shows the Computer action when an origin is known and the room has a joined MindRoom agent with a worker computer.
+With a configured Computers URL, an agent whose MindRoom does not yet publish its server counts as having one; without one, each agent must publish its own server with `computer: true`.
+With several agents, the user picks one first.
 Point `apiUrl` at the runtime that owns the agent's workers; a host that only serves Matrix, Chat, or local provisioning (`/v1/local-mindroom/*`) does not serve computers.
 
 On the runtime, `MINDROOM_COMPUTER_ALLOWED_ORIGINS` is a JSON list of exact Chat origins allowed to open computers.
@@ -12560,12 +12570,12 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | --- | --- | --- | --- |
 | `microsoft_files` | OneDrive and SharePoint files, and Excel ranges in them | `microsoft_files` | `Files.ReadWrite.All` |
 | `microsoft_sharepoint` | SharePoint sites, list items, and site pages the requester can open | `microsoft_sharepoint` | `Sites.ReadWrite.All` |
-| `outlook_mail` | The requester's Outlook mailbox | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send` |
-| `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
+| `outlook_mail` | The requester's Outlook mailbox and automatic replies, and shared mailboxes the requester can open | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send`, `Mail.ReadWrite.Shared`, `Mail.Send.Shared`, `MailboxSettings.ReadWrite` |
+| `outlook_calendar` | The requester's Outlook calendars and events, and calendars others shared with or delegated to them | `outlook_calendar` | `Calendars.ReadWrite`, `Calendars.ReadWrite.Shared` |
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
-| `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.Read`, `ChatMessage.Send` |
+| `microsoft_teams` | Teams channels and chats the requester belongs to, new chats, and people's presence | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.ReadWrite`, `ChatMessage.Send`, `Presence.Read.All`, `User.Read.All` |
 | `microsoft_meetings` | Transcripts of Teams meetings the requester organized or was invited to | `microsoft_meetings` | `OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` |
-| `microsoft_onenote` | The requester's OneNote notebooks, sections, and pages | `microsoft_onenote` | `Notes.ReadWrite.All` |
+| `microsoft_onenote` | OneNote notebooks of the requester, of their Teams teams and SharePoint sites, and of people who share notebooks with them | `microsoft_onenote` | `Notes.ReadWrite.All` |
 | `microsoft_people` | People, managers, and direct reports in the requester's organization directory | `microsoft_people` | `User.Read.All` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
@@ -12581,7 +12591,7 @@ An administrator registers one app in Microsoft Entra for the MindRoom installat
 5. Under **API permissions**, add the **Delegated** Microsoft Graph permissions from the table above for the tools you enable, plus `User.Read` and `offline_access`, and choose **Grant admin consent** if your tenant does not let users consent themselves.
 6. On **Overview**, copy the application (client) ID and the directory (tenant) ID.
 
-`ChannelMessage.Read.All`, which `microsoft_teams` requests, always needs administrator consent, so nobody can connect Teams until an administrator chooses **Grant admin consent** on the app's **API permissions** page.
+`ChannelMessage.Read.All` and `User.Read.All`, which `microsoft_teams` requests, always need administrator consent, so nobody can connect Teams until an administrator chooses **Grant admin consent** on the app's **API permissions** page.
 `OnlineMeetingTranscript.Read.All`, which `microsoft_meetings` requests, likewise always needs administrator consent.
 `User.Read.All`, which `microsoft_people` requests, likewise always needs administrator consent before anyone can connect the people directory.
 
@@ -12635,10 +12645,10 @@ agents:
 | --- | --- | --- | --- | --- |
 | `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges; with `false`, those functions are not offered. |
 | `write` | `microsoft_sharepoint` | `boolean` | `true` | Allows adding list items and changing their column values; with `false`, those functions are not offered. |
-| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, and moving messages; with `false`, those functions are not offered. |
+| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, moving messages, and changing automatic replies; with `false`, those functions are not offered. |
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
 | `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
-| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages; with `false`, those functions are not offered. |
+| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages, and starting chats; with `false`, those functions are not offered. |
 | `write` | `microsoft_onenote` | `boolean` | `true` | Allows creating pages and appending text to pages; with `false`, those functions are not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
@@ -12719,14 +12729,28 @@ Site, list, item, and page listings, and long pages, return a `next_page_token` 
 | `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original; the original's reply-to addresses, when set, take the sender's place. |
 | `outlook_mail_mark_read` | yes | Mark a message read or unread. |
 | `outlook_mail_move` | yes | Move a message to a folder. |
+| `outlook_mail_get_automatic_replies` | no | Read whether the requester's automatic replies (out of office) are off, on, or scheduled, with their period and messages. |
+| `outlook_mail_set_automatic_replies` | yes | Turn the requester's automatic replies off, on, or on for a period, and set the messages for people inside and outside the organization. |
 
 Search takes Outlook search syntax, such as `from:sam@example.com subject:"quarterly plan" hasAttachments:true`.
 Search returns a `next_page_token` while more messages exist; passing it back continues the same listing or search.
 A search with `query` stops after its first 1,000 matches, so a narrower query finds the rest.
 Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID, such as a message's `parent_folder_id`.
-Messages and replies are plain text, and sent mail is saved in the requester's Sent Items.
+Messages and replies are plain text, and sent mail is saved in the sending mailbox's Sent Items.
 A new message takes at most 50 email addresses across To and Cc.
 To review a message before it goes out, ask for a draft; its `web_link` opens it in Outlook, where the requester sends it.
+
+Every function except the automatic replies ones takes an optional `mailbox`: the email address of a shared mailbox, or of a person who gave the requester access to their mailbox, to act in instead of the requester's own.
+Exchange permissions on that mailbox decide what works: reading and changing its messages needs access to them, such as Full Access, and sending from it, as a new message or a reply, needs Full Access plus Send As or Send on Behalf.
+With Send As, recipients see mail from the mailbox itself; with Send on Behalf, they see that the requester sent it on the mailbox's behalf.
+A missing permission fails with `forbidden`, and Microsoft Graph cannot list which mailboxes a requester may open.
+Message IDs and page tokens belong to the mailbox that returned them, so pass the same `mailbox` again.
+A call with `mailbox` repeats it in every result, errors included.
+
+Automatic replies are always the requester's own.
+Their messages are plain text, and a scheduled period takes a local start and end with a time zone, like a new calendar event; Outlook schedules only a period that has not ended yet.
+Turning them on names the internal message and an external audience of `internal_only`, `contactsOnly`, or `all`, plus the external message unless the audience is `internal_only`, so an approval card shows everything senders get.
+Outlook Mail asks a requester to connect again when their connection lacks any of the permissions above.
 
 Attachments are workspace files and follow the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
 Each attached file may be at most 3 MB, and all attachments of one message together about 3 MB; share larger files through OneDrive and send a link instead.
@@ -12761,6 +12785,15 @@ Responding to a meeting also takes the organizer's email from the event as `expe
 A new event can invite at most 100 attendees.
 The description of an online meeting cannot be replaced, because that would remove its join link; edit it in Outlook instead.
 
+Listing calendars and events, reading an event, and creating, changing, and deleting events also take an optional `calendar_owner`: the email address or sign-in name of another person whose calendar the requester can open in Outlook because that person shared it with them or made them a delegate.
+Reading needs at least read access to that calendar and writing needs edit or delegate access; otherwise Microsoft Graph answers `forbidden` or `not_found`.
+Calendar IDs, event IDs, and page tokens from such a call belong to that person's mailbox, so follow-up calls pass the same `calendar_owner`, and a page token from another mailbox fails with `invalid_page_token`.
+A calendar shared with the requester can also appear in their own calendar list, with that person as owner, and its ID works without `calendar_owner`.
+On another person's calendar, that person organizes a new event, and Outlook sends its invitations, updates, and cancellations in that person's name, sent by the requester on their behalf.
+A call with `calendar_owner` shows it on its approval card and repeats it in every result, errors included.
+Responding to invitations covers only the requester's own invitations, and free/busy already looks up other people.
+`Calendars.ReadWrite.Shared` needs no administrator consent; calendar connections made before the tool requested it lack it, so each requester reconnects once.
+
 ## To Do
 
 | Function | Changes data | Purpose |
@@ -12787,9 +12820,11 @@ Updating a task's notes replaces them completely.
 | `microsoft_teams_list_channel_message_replies` | no | List up to 50 replies in the thread of one channel post. |
 | `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names and email addresses, most recent message first. |
 | `microsoft_teams_list_chat_messages` | no | List up to 50 messages of one chat, newest first. |
+| `microsoft_teams_get_presence` | no | Read the availability, activity, and status message of up to 20 people. |
 | `microsoft_teams_send_channel_message` | yes, posts to the channel | Post a new message in a channel. |
 | `microsoft_teams_reply_to_channel_message` | yes, posts to the channel | Reply in the thread of a channel post. |
 | `microsoft_teams_send_chat_message` | yes, posts to the chat | Send a message in an existing chat. |
+| `microsoft_teams_start_chat` | yes, creates a chat and posts to it | Start a chat with up to 20 people and send its first message. |
 
 Messages come back as plain text, up to 4,000 characters each.
 Deleted messages and system events, such as members joining, come back labeled, without text.
@@ -12798,7 +12833,12 @@ Sent messages appear under the requester's name and keep their line breaks, and 
 A sent message holds up to 28,000 bytes once its text is HTML-escaped.
 A chat message takes the email address of every chat member, the requester's own included, as `recipients`, and a channel post or reply takes the team and channel names as `expected_team` and `expected_channel`, so an approval card shows who reads the message.
 When a member's email address is missing or not listed, or a name differs, nothing is sent and the call fails with `recipients_mismatch`, listing every member, or `target_mismatch`, naming the real team and channel.
-The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
+Starting a chat takes the other people's sign-in addresses (userPrincipalName), usually their email addresses, so its approval card shows who reads the first message.
+One person gives a one-on-one chat, and Teams keeps one per pair, so the message lands in the existing one-on-one chat when there is one; two or more people give a new group chat, which can have a topic.
+Before posting, it reads the chat's members and sends nothing, failing with `recipients_mismatch` and the `chat_id`, when a member's email address is missing or differs from the addresses given.
+Presence looks up each person's user id by sign-in address, reports a person Microsoft Graph cannot find or show with `not_found` or `forbidden` without failing the others, and returns status messages as plain text.
+Connections made before `microsoft_teams` requested `Chat.ReadWrite`, `Presence.Read.All`, and `User.Read.All` ask their users to connect again once.
+The tool sees private and shared channels only when the requester is a member.
 Shared channels from a team the requester is not a member of are not reachable.
 
 ## Teams Meetings
@@ -12823,17 +12863,20 @@ Two Teams administrator settings also govern transcripts: with Graph access to t
 
 | Function | Changes data | Purpose |
 | --- | --- | --- |
-| `microsoft_onenote_list_notebooks` | no | List the notebooks the requester owns, by name, and which one is the default. |
+| `microsoft_onenote_list_notebooks` | no | List the notebooks the requester owns, or those of a team, a site, or a person who shares them, by name, and which one is the default. |
 | `microsoft_onenote_list_sections` | no | List the sections directly in one notebook, by name. |
 | `microsoft_onenote_list_pages` | no | List up to 50 pages of one section, most recently modified first, with titles and dates. |
 | `microsoft_onenote_get_page` | no | Read a page's content as plain text, 30,000 characters at a time. |
 | `microsoft_onenote_create_page` | yes | Create a page with a title and plain-text content in a section. |
 | `microsoft_onenote_append_to_page` | yes | Add plain text as a new paragraph at the end of a page's first block of content. |
 
-Only the notebooks the requester owns are listed; notebooks other people share with the requester, and group or SharePoint site notebooks, are not.
-Sections inside section groups are not listed either.
+Without `container`, the functions reach the notebooks the requester owns.
+Every function also takes an optional `container` naming where other notebooks are, told apart by its form: a Teams team's id from `microsoft_teams_list_teams` (a team's id is its Microsoft 365 group's id), a SharePoint site's id from `microsoft_sharepoint_search_sites` or `microsoft_sharepoint_get_site` (`host,guid,guid`), or a person's sign-in email address (user principal name) for the notebooks that person shares with the requester.
+A bare id always names a team, so a person is named by sign-in email address and not by id; a container of any other form is refused before any request.
+Results repeat the `container`, and calls on the sections and pages of those notebooks pass it again; `Notes.ReadWrite.All` already covers every notebook the requester can open, so containers need no new consent.
+Sections inside section groups are not listed.
 Page text leaves out the title, shows images as `[image]`, and separates table cells with `|`.
-Listings and page text return a `next_page_token` while more follows; passing it back with the same notebook, section, or page continues.
+Listings and page text return a `next_page_token` while more follows; passing it back with the same container and the same notebook, section, or page continues.
 Created and appended text keeps its line breaks, and HTML in it shows literally instead of as formatting.
 Creating and appending also take the `web_url` of the notebook they write into, from `microsoft_onenote_list_notebooks`, as `expected_web_url`, so an approval card shows whose notebook the write lands in, and fail with `target_mismatch`, naming the notebook's `web_url`, when it differs.
 
@@ -12875,6 +12918,8 @@ tool_approval:
       action: require_approval
     - match: outlook_mail_reply
       action: require_approval
+    - match: outlook_mail_set_automatic_replies
+      action: require_approval
     - match: outlook_calendar_create_event
       action: require_approval
     - match: outlook_calendar_update_event
@@ -12895,6 +12940,8 @@ tool_approval:
       action: require_approval
     - match: microsoft_teams_send_chat_message
       action: require_approval
+    - match: microsoft_teams_start_chat
+      action: require_approval
     - match: microsoft_onenote_create_page
       action: require_approval
     - match: microsoft_onenote_append_to_page
@@ -12903,7 +12950,9 @@ tool_approval:
 
 Sent mail cannot be recalled, so require approval at least for `outlook_mail_send` and `outlook_mail_reply`, and likewise for the Teams send functions, whose messages everyone in the channel or chat sees at once.
 The approval cards of both mail functions list every recipient, and a reply is sent only to the recipients its card lists.
-`outlook_mail_create_draft`, `outlook_mail_mark_read`, and `outlook_mail_move` change only the requester's own mailbox, where they can be undone.
+A card without `mailbox` sends as the requester; with it, the card names the shared mailbox the mail goes out from.
+`outlook_mail_create_draft`, `outlook_mail_mark_read`, and `outlook_mail_move` change only the mailbox they name, the requester's own by default, where they can be undone; colleagues who share a mailbox see those changes too.
+Automatic replies answer every sender while they are on, outside the organization too when `external_audience` allows it.
 Every calendar write can email invitations, updates, cancellations, or responses to other people.
 
 To give an agent read access only, set `write: false` on the tool.
@@ -12916,7 +12965,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `AADSTS65001` or a consent prompt the requester cannot approve | The tenant requires administrator consent, which Teams, Teams meeting transcripts, and the people directory always do; an administrator grants it on the app's **API permissions** page. |
 | `AADSTS50194` | The app is registered for one organization; set `MICROSOFT_TENANT_ID`. |
 | `invalid_tenant` | `MICROSOFT_TENANT_ID` is not a tenant ID, a verified domain, `organizations`, `common`, or `consumers`. |
-| `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
+| `forbidden` | The connected account lacks access to that item, such as a shared mailbox without the Exchange permission, which reconnecting does not fix. |
 | `not_found` | The item does not exist or the connected account cannot see it, or the Teams meeting expired. |
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
 | `invalid_argument` | An argument is malformed or exceeds a limit above, such as an ID, folder, email address, time, or time zone, or an end that is not after its start; the message names the field. |
@@ -12935,8 +12984,9 @@ To give an agent read access only, set `write: false` on the tool.
 | `too_large` | The file, range, attachment, or message exceeds a limit above; send a OneDrive link instead of a large attachment. |
 | `throttled` | Microsoft Graph is limiting requests; retry after `retry_after_seconds`. |
 | `download_rejected` | SharePoint refused the download link Microsoft Graph returned; retry the download. |
-| `graph_error` | Microsoft Graph refused the request, such as a time zone Outlook does not support or a response to a meeting the requester organizes; `graph_code` names the reason. |
+| `graph_error` | Microsoft Graph refused the request, such as a time zone Outlook does not support or a response to a meeting the requester organizes; `graph_code` and `graph_message` give Microsoft Graph's reason. |
 
+Apart from `throttled`, errors that Microsoft Graph returns carry its error code as `graph_code` and, when Graph gives one, its reason as `graph_message`: one line of plain text without links, cut to 300 characters.
 When Microsoft rejects the connection's access token, the result includes a reconnect link.
 
 ## Security Notes
@@ -12944,7 +12994,7 @@ When Microsoft rejects the connection's access token, the result includes a reco
 - The tools run in the primary MindRoom runtime, so worker containers never receive the app client configuration or user tokens.
 - Tokens are sent only to Microsoft Graph, never to another host, including the SharePoint hosts that serve downloads.
 - Request logs never contain tokens or pre-authenticated download links.
-- Error results never contain tokens or raw response bodies.
+- Error results never contain tokens or raw response bodies, only Graph's error code and its trimmed reason.
 
 ## Related Docs
 
@@ -13744,8 +13794,8 @@ manage_team(
 These rules apply to both `config_manager` and `self_config`.
 Reading configuration (`manage_config` inspection, `get_info("agent_config")`, `get_own_config()`) and every write require a requester listed in `administrators`; other requesters get an authorization error.
 Redacted output masks every value inside fields the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, except `${NAME}` environment references, which are shown as written.
-It also masks free-form map entries whose key names look like credentials, and credential patterns such as URL passwords and bearer tokens in any text.
-A write whose value contains the `***redacted***` marker or a masked URL password such as `user:***@host` is refused, so copying redacted output back cannot overwrite a hidden real value.
+It also masks free-form map entries whose key names look like credentials, and credential patterns such as URL credentials and bearer tokens in any text.
+A write whose value contains the `***redacted***` marker or masked URL credentials such as `***@host` is refused, so copying redacted output back cannot overwrite a hidden real value.
 Every write is validated against the full runtime config before `config.yaml` is saved, and an invalid change saves nothing.
 Saved changes take effect through the normal config hot reload after the current response.
 When a plain list of tool names replaces an agent's tools, inline overrides for tools that stay in the list are kept.
@@ -14564,6 +14614,16 @@ It covers the original call, matching pending calls, and later calls for the sam
 It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves, background-script approvals, or scheduled calls.
 The requester can stop auto-approval from the originating card, and any config change or room membership change ends matching grants; calls already approved still run.
 
+### Auto-Approve Everything
+
+Send `!auto_approve 30` (minutes) or `!auto_approve 2h` in a thread to run every tool call you request there without approval cards, for 1 minute up to 24 hours.
+It covers every agent and team in that thread, script rules, tools that ask for their own confirmation, background jobs, and background scripts, and turning it on approves the cards already waiting for you there.
+Other people in the thread still approve their own calls, an agent cannot turn it on for you, and a tool call scheduled to run later still asks when it is scheduled.
+In a room that uses `thread_mode: room`, the window covers the whole room.
+`!auto_approve` shows when the window ends and `!auto_approve off` ends it early; restarts and config reloads keep it.
+`!auto_approve off` does not stop auto-approval started from an approval card; stop that on the card.
+MindRoom Chat shows the open window in the thread header in rooms where the router may send the `io.mindroom.auto_approve` state event, which the rooms MindRoom creates allow.
+
 ## Approval Card Contents
 
 Cards show a redacted preview of the tool arguments, and clients can expand the complete redacted arguments when the preview is truncated.
@@ -14663,7 +14723,7 @@ Providers, built in or from plugins, supply only provider-specific details such 
 
 ### Connect An Account
 
-Users connect an account from the dashboard **Tools** tab, the [Connections portal](https://docs.mindroom.chat/connections-portal/) (opened from MindRoom Chat or signed in through trusted upstream strict JWT auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
+Users connect an account from the dashboard **Tools** tab, the [Connections portal](https://docs.mindroom.chat/connections-portal/) (opened from MindRoom Chat or signed in through trusted upstream auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
 The API routes are:
 
 | Method | Route | Purpose |
@@ -14729,7 +14789,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
-A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.
+A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
 Otherwise the client works only when MindRoom is opened on `localhost`, and other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access.`
 
 ### Provider And Credential Service Rules
@@ -14830,8 +14890,9 @@ In MindRoom Chat, the user opens **Connections** in Settings, General, which ope
 On a homeserver that binds tokens to one deployment (MindRoom's Tuwunel fork with `mindroom_openid_audience` on, see [Token Binding](#token-binding)), MindRoom needs no settings for this when Chat opens it at `http://localhost:<MINDROOM_PORT>`, such as MindRoom on the user's own machine beside MindRoom's hosted Chat at `https://chat.mindroom.chat`, or a Docker stack opened on the machine it runs on.
 For any other address, such as a public one or a LAN address like `http://192.168.1.10:8765`, set `MINDROOM_PUBLIC_URL` to the origin Chat opens, so the homeserver accepts the tokens and OAuth callbacks come back to MindRoom.
 On a homeserver that does not bind tokens, list the Chat origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which accepts the replay risk described under [Token Binding](#token-binding).
-Chat opens the backend set as its Computers backend: the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`, or each user's Computers URL in Settings, General.
-Hosted MindRoom Chat ships `mindroom.computers.apiUrl` empty, so its users enter their backend's URL under Computers before the card works.
+Chat opens the backend set as its Computers backend: each user's Computers URL in Settings, General, or the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`.
+When neither is set, as in hosted MindRoom Chat, Chat on a homeserver that binds tokens opens the backend that the MindRoom agents in the user's rooms publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, with one button per backend when it finds several.
+On other homeservers, users enter their backend's URL under Computers before the card works.
 Native MindRoom Chat apps do not offer Connections yet.
 
 Sign-in works as follows:
@@ -14861,17 +14922,20 @@ Over plain HTTP, OAuth providers decide which redirect addresses they accept; Go
 
 The portal groups OAuth services by agent, covering every agent the user may use, private or shared, and the shared agents whose credentials the user may manage.
 Services come from each agent's tools, including deferred tools and plugin or MCP OAuth providers; tools that need no browser sign-in are listed too, and room-dependent tools are marked **MindRoom only**.
+The agent list shows at once, and each agent's counts of connected accounts and set keys fill in as they load.
 Each service's status loads independently, so one failing or unconnected service does not block the others.
 Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
 Who may manage each connection follows [Who Can Connect An Account](https://docs.mindroom.chat/oauth-framework/#who-can-connect-an-account), and connections made here are the same ones tools use.
+An agent's shell and python commands use such a connection only after the user allows it on the Agent Keys page (see [Using a connected account](https://docs.mindroom.chat/deployment/egress-broker/#using-a-connected-account)).
+Allowing it covers that provider's account for that agent's scope until the user stops it, so an account connected here later for the tools is then used by Agent Keys at once.
 Disconnecting a shared connection affects every agent using its [credential scope](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored).
 While the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) is on, the portal and its Agent Keys page link to each other.
 The portal never shows tokens, model configuration, generic credential editing, or OAuth client settings; operators still configure OAuth clients.
 When a service uses a shared service account, such as `GOOGLE_SERVICE_ACCOUNT_FILE`, the portal does not show it as a personal connection and disables **Connect** for that service.
 Users choose the agents and tools the optional [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#choose-exposed-agents-and-tools) exposes on the same page.
 Users signed in from Chat have no email, so when MCP accounts are [SCIM-provisioned](https://docs.mindroom.chat/deployment/mcp-gateway/#managed-account-provisioning), that section uses the one active account whose `userName` maps to the signed-in Matrix user through `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` and `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN`, the mapping a trusted upstream sign-in with that email uses.
-Without that mapping, when `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` is set (a signed Matrix claim takes precedence over the template), or when more than one active account maps to the same Matrix user, the section works only for users who sign in through the trusted upstream.
+Without that mapping, when trusted upstream auth is enabled with `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` (a signed Matrix claim takes precedence over the template), or when more than one active account maps to the same Matrix user, the section works only for users who sign in through the trusted upstream.
 
 ## Sessions And Dashboard Access
 
@@ -14890,13 +14954,13 @@ Apart from the dashboard rule below, a session authenticates only these paths:
 For a user listed in `administrators`, the session also opens the dashboard and its APIs, with no API key, when the homeserver binds tokens: MindRoom's Tuwunel fork with `mindroom_openid_audience` on, which MindRoom detects from `/_matrix/client/versions` at sign-in.
 Without binding, a token could have been replayed from another deployment on the same homeserver, and the dashboard is full control of this one.
 So the session reaches the dashboard only when it was started while the homeserver bound tokens, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
-The Connections header links the dashboard for administrators only.
+The Connections header links the dashboard for administrators only, at `MINDROOM_DASHBOARD_URL` when it is set.
 Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
 Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 
 ## Token Binding
 
-MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to `8765`, and `mindroom run --api-port` does not change it.
+MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to the port of `mindroom run --api-port`, `8765` unless changed.
 A homeserver that binds tokens, MindRoom's Tuwunel fork with `mindroom_openid_audience` on, then accepts only tokens Chat requested for that origin, and other homeservers ignore the audience.
 MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header, so on a binding homeserver sign-in fails with 401 when Chat opens another origin than the audience; then set `MINDROOM_PUBLIC_URL` to the origin Chat opens.
 Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
@@ -14908,7 +14972,7 @@ The request-by-request exchange is described in [Connections portal sign-in](htt
 
 ## Trusted Upstream Sign-In
 
-Behind an identity gateway, users can also reach the portal through [strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
+Behind an identity gateway, users can also reach the portal through [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with a [Matrix identity](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-identity) from a signed Matrix claim or the email-to-Matrix template; API-key and `MINDROOM_OWNER_USER_ID` authentication are rejected.
 When more than one user signs in through the gateway, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)).
 To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API, behind the authenticated upstream when you use trusted upstream sign-in.
 Exclude `/connections` from the other application's service-worker navigation fallback.
@@ -14918,8 +14982,8 @@ Portal assets are served under `/connections/assets/`, so root `/assets/` can ke
 
 | Status and message | Fix |
 | --- | --- |
-| `401 Connections sign-in required` | Open Connections from MindRoom Chat, or enable strict JWT mode |
-| `403 Connections require a verified Matrix identity` | Enable strict JWT mode with a Matrix claim or email-to-Matrix template |
+| `401 Connections sign-in required` | Open Connections from MindRoom Chat, or enable trusted upstream auth |
+| `403 Connections require a verified Matrix identity` | Configure a trusted upstream Matrix claim or email-to-Matrix template |
 | `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
 | `403 Connections sign-in from MindRoom Chat needs a homeserver that binds tokens, or MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | Turn on token binding on the homeserver (`mindroom_openid_audience` on MindRoom's Tuwunel fork), and set `MINDROOM_PUBLIC_URL` to the origin Chat opens unless that is `http://localhost:<MINDROOM_PORT>`, or list the Chat origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` to accept the replay risk described under [Token Binding](#token-binding) |
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, or remove an `[]` value; fix any invalid entry because one disables the whole list |
@@ -15181,7 +15245,7 @@ Runners and dedicated workers never receive the primary's config file, its direc
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
-The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
+The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
@@ -15192,6 +15256,7 @@ Worker code can read its own proxy token, but the token only authorizes that wor
 Broker refusals never carry a secret, token, query string, or connect link, but they name a shared agent's credential managers, so worker code can read those Matrix IDs.
 Agents without a worker scope all share the global store, so a token from any of them reaches the same global keys.
 A service can also take its secret from an OAuth account that a user connected (GitHub, Google, Atlassian) when no API key is stored for the scope, and an explicit key always wins over the account.
+The broker uses such an account for a service only after someone allowed Agent Keys to use it, an opt-in kept primary-only beside the connection, so connecting an account for its tools, whose writes may ask for approval, never by itself lets an agent's commands act as it.
 The primary fetches and refreshes those access tokens through the OAuth credential lifecycle and the broker injects them as the matched rule's auth type; workers never receive an OAuth access token or a refresh token, only the proxy token and placeholder values, and the broker's logs and audit records never contain them.
 Account scope follows each provider's own policy: GitHub and Atlassian are requester-scoped, so a worker's requests use the requester named in its verified proxy token, while the Google providers follow the agent's worker scope.
 The broker uses a requester-scoped account only on `user` and `user_agent` workers that run on a dedicated (Docker or Kubernetes) worker backend by default.
@@ -15202,12 +15267,12 @@ The link also requires the browser to be signed in to MindRoom as that requester
 A shared-scope link would skip that sign-in, and any process in a shared worker could read it, so the broker never puts one in a response; users of a shared agent connect its account from the egress pages instead.
 A shared Google service account (`GOOGLE_SERVICE_ACCOUNT_FILE`) is never injected, so the broker cannot be used to spend it.
 On the shared static runner, including the hosted `static_runner` sidecar, a scoped call's broker token, valid for the token TTL, lives in a process shared with other users' calls, consistent with the static runner not being an isolation boundary; use dedicated `user` or `user_agent` workers on `private` agents when requesters must not be able to use each other's brokered credentials (see [Shared workspaces on non-private agents](https://docs.mindroom.chat/deployment/egress-broker/#shared-workspaces-on-non-private-agents)), because a dedicated `shared` or unscoped worker also runs every requester's commands in one sandbox.
-Only administrators and an agent's credential managers can change the keys, services, and account connection of a shared or unscoped agent.
+Only administrators and an agent's credential managers can change the keys, services, account connection, and account opt-in of a shared or unscoped agent.
 The credential managers of one key scope, and of all unscoped agents, can change each other's keys and services (see [Egress Broker Design Decisions](https://docs.mindroom.chat/architecture/egress-broker-design/#secrets-and-identity)).
 Users can define egress services of their own, which apply only to their own scope, route only that scope's keys and accounts, never widen the administrator's policy, and cannot take a config service's name or set `oauth_on_shared_workers`.
 A user service can use a connected account only in a personal scope, and its placeholder variables are limited to credential-like names and plain values, because a shared agent's services set variables in every requester's sandbox.
 `restrict_to_rules` is not a network boundary: under `passthrough` a worker can reach the same server by IP address through a tunnel the broker does not intercept, which carries no credential, so the real boundary stays the token's own permissions on the upstream side.
-The risks the broker cannot prevent (code in the primary process, write access to the config, agents with the `egress_credentials` tool acting with their scope's full keys and accounts, hosts that echo requests, wildcard rules on shared hosting domains, keys that can create other keys, and shared workspaces on `user` and `user_agent` agents that are not `private`) are listed in [What the broker cannot protect against](https://docs.mindroom.chat/deployment/egress-broker/#what-the-broker-cannot-protect-against).
+The risks the broker cannot prevent (code in the primary process, write access to the config, agents with the `egress_credentials` tool acting with their scope's full keys and allowed accounts, hosts that echo requests, wildcard rules on shared hosting domains, keys that can create other keys, and shared workspaces on `user` and `user_agent` agents that are not `private`) are listed in [What the broker cannot protect against](https://docs.mindroom.chat/deployment/egress-broker/#what-the-broker-cannot-protect-against).
 
 The egress broker listener (when `MINDROOM_EGRESS_BROKER_PORT` is set) is a worker-reachable primary runtime surface: workers must reach it to make brokered requests, so it must be accessible from the worker network (Docker `docker0` interface or the Kubernetes broker Service).
 The hosted `static_runner` sidecar shares the primary pod's network instead, so there the broker binds only loopback (`127.0.0.1`) and is reachable from no other pod.
@@ -15369,9 +15434,15 @@ Do not report or "fix" these; they are deliberate.
 - `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
 - An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, and start time, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
+- Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one.
+  MindRoom Chat uses a published origin only from agents on the viewer's homeserver, and only while that homeserver binds tokens, so a hostile agent can collect at most tokens bound to its own origin.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
+- `!auto_approve` lets a person approve every gated tool call they request in one thread, or in the whole room when it has no threads, for up to 24 hours, including tools that ask for their own confirmation but not tool calls scheduled to run later; only that person can send it, never an agent acting for them.
+- The router publishes each room's open `!auto_approve` windows as unencrypted room state keyed by its own user ID: thread, requester ID, and end time, so the homeserver and every room member can read them even in an encrypted room.
+- Scheduled tasks, including their prompts, and thread tags, including the topic tags agents add automatically, are stored as unencrypted room state, so the homeserver and every room member can read them even in an encrypted room.
+- A `!config set` change awaiting confirmation is stored as unencrypted room state with its config path, requester, and new value, so the homeserver and every room member can read them even in an encrypted room; a new value that display redaction would mask, or that room state cannot hold, such as a decimal number, stays only in the running process.
 - The `job` function never asks for approval, even under `tool_approval.default: require_approval`, because it only reads and cancels the caller's own jobs, each of which passed its own approval.
 - `config_manager`'s `manage_config(operation="inspect")` and `manage_agent(operation="validate")` calls never ask for approval, even under a matching rule or `tool_approval.default: require_approval`, because they only read configuration.
 - Inviting an agent to a shared directory makes it readable to every requester of that agent, and the invitation needs only the inviting user's access to that agent, because that user could already relay the files in chat.
@@ -15398,7 +15469,7 @@ Do not report or "fix" these; they are deliberate.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the [upgrade check](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts).
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
-- The Connections portal signs users in either through trusted upstream strict JWT auth or through a Matrix OpenID token that MindRoom Chat hands to the portal window, from the origins `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists or, unset, from MindRoom's hosted Chat and, for a portal on a local address, any Chat on a local address.
+- The Connections portal signs users in either through trusted upstream auth or through a Matrix OpenID token that MindRoom Chat hands to the portal window, from the origins `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists or, unset, from MindRoom's hosted Chat and, for a portal on a local address, any Chat on a local address.
   Under the default list, MindRoom accepts that sign-in only while the homeserver binds tokens, because otherwise any backend a user opens from Chat could replay their token to it, and request headers cannot show that a portal is out of such a backend's reach; an explicit list is the operator's choice.
   The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page.
   Outside hosted platform mode, it also opens the dashboard, but only for a user in `administrators` whose token the homeserver bound to this deployment at sign-in; everyone else, and every session on a homeserver that does not bind tokens, needs the API key for the dashboard.
@@ -15490,6 +15561,16 @@ The password is not a secret.
 Services with an `oauth_provider` reuse the scope's native OAuth connections with their full scopes, so if every `shell` or `python` agent used the broker, an agent whose native tools are read-only or ask for approval would get full access from its commands as soon as an account was connected.
 The tool already tells the agent about the broker, so listing it is the opt-in instead of a separate config field, and one rule decides for the sandbox proxy, the pages, and the request log, so they cannot disagree.
 A call without a configured agent gets no broker environment, because nothing shows that it opted in.
+
+**A connected account is used only after an explicit, per-service opt-in that states the approval bypass.**
+The tool opt-in says an agent may use Agent Keys, not that a user wants a connected account to work without the approvals of its native tools.
+Without a second opt-in, connecting a tool whose writes ask for approval silently gave the agent's commands the same account with its full scopes.
+So the broker reads a connection for a service only while an opt-in names that service and the connection's provider, for its token and for the status behind placeholders and the agent tool alike, and enabling one requires acknowledging that commands skip the tools' approvals.
+The egress pages still show whether an account is connected, through the Connections portal's own status reader, so a user can see what allowing it would use.
+The opt-in lives in the store of the connection it unlocks, and the broker and both APIs resolve that store through one function, so an opt-in cannot unlock another requester's or scope's account; a round-trip test per scope kind guards this.
+Requester-scoped providers get one opt-in per requester and service name, covering all of that requester's agents, because the account itself is the requester's.
+It names the provider, not the account: it covers whatever account of that provider the scope connects, a later connection made for the tools included, until someone stops it, and it does not apply while the service's `oauth_provider` names another provider.
+Rejected: keeping connections already in use working after the upgrade, because that would silently keep the bypass this removes.
 
 **Requester-scoped accounts (GitHub, Atlassian) are used only in a requester's own sandbox.**
 In a shared sandbox, every requester's commands run together, so one user's code could act with another's account.
@@ -15800,6 +15881,10 @@ def greeter_tools() -> type[Toolkit]:
 
     return GreeterTools
 ```
+
+A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
+A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.
+Other parameters receive a model's `"none"`, `"null"`, `"true"`, or `"false"` string, in any case, as `None` or a boolean.
 
 Assign the tool to agents like any built-in tool:
 
@@ -17464,10 +17549,9 @@ Neither the gateway nor clients should automatically retry a failed or timed-out
 
 ## Enable the gateway
 
-First configure strict signed upstream authentication (`MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true` and `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`), so the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) accepts your gateway's users.
-The gateway stays disabled without it, even though users can open the portal from MindRoom Chat.
-When more than one user signs in through the upstream, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)); it names the private agent each user's selection starts with.
-Then enable the gateway:
+Users approve MCP clients and choose their tools on the [Connections portal](https://docs.mindroom.chat/connections-portal/), which they open from MindRoom Chat or reach through [trusted upstream auth](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in).
+When more than one user signs in through a trusted upstream, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)); it names the private agent each user's selection starts with.
+Enable the gateway:
 
 ```bash
 MINDROOM_CONNECTIONS_AGENT=personal
@@ -17475,7 +17559,7 @@ MINDROOM_PUBLIC_URL=https://assistant.example.org
 MINDROOM_MCP_GATEWAY_ENABLED=true
 ```
 
-The gateway is disabled by default and stays disabled unless the strict signed upstream settings, `MINDROOM_PUBLIC_URL`, and `MINDROOM_MCP_GATEWAY_ENABLED` are present.
+The gateway is disabled by default and stays disabled unless `MINDROOM_PUBLIC_URL` and `MINDROOM_MCP_GATEWAY_ENABLED` are present.
 `MINDROOM_PUBLIC_URL` must be an HTTPS origin without a path, query, or fragment; loopback HTTP origins are accepted for local development.
 Internationalized hostnames must be written in their ASCII `xn--` form.
 Restart the API after changing any gateway environment variable.
@@ -17516,7 +17600,7 @@ Tools that share a service connection share its OAuth controls, and tools that n
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
 [Connections sessions from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) carry no email, so with managed account provisioning they reach the MCP controls, and in built-in authorization mode client consent, through the one active account whose `userName` the trusted upstream email template maps to their Matrix user.
-Without such a template, when a signed trusted upstream Matrix claim is configured, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.
+Without such a template, when trusted upstream auth uses a signed Matrix claim, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.
 
 ## Route browser and machine traffic
 
@@ -17533,7 +17617,6 @@ Forward these paths to the MindRoom API:
 
 Browser consent lives at `/connections/mcp/authorize`, inside the authenticated browser prefix, so keep it out of any other frontend's service-worker navigation fallback.
 Machine endpoints must receive MCP and OAuth responses, not an access proxy's HTML login page.
-Strip client-supplied trusted identity headers at the proxy, including on machine paths.
 Preserve the public `Host` header and the `Authorization`, `Origin`, `Accept`, `Content-Type`, `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers.
 Forward the exact `/mcp` path without adding a trailing slash.
 
@@ -17937,6 +18020,7 @@ The homeserver can still see:
 
 - Metadata: room membership, timestamps, event IDs, sender IDs, and traffic patterns.
 - Plaintext of any room that is not encrypted.
+- Room state, which Matrix never encrypts: room names and topics, and MindRoom's scheduled tasks with their prompts, thread tags, and background job lists.
 
 Model and tool providers see whatever prompts and data you send them.
 See the [Matrix E2EE guide](https://matrix.org/docs/matrix-concepts/end-to-end-encryption/) for device discovery and verification.
@@ -18089,7 +18173,7 @@ For the hosted multi-tenant platform (platform and instance charts), see [SaaS P
 | Tuwunel | `cluster/k8s/tuwunel/` | Standalone Tuwunel homeserver (MindRoom fork) to pair with the runtime chart |
 | Client | `cluster/k8s/client/` | Standalone MindRoom web client behind unprivileged nginx, for clusters that already provide a homeserver, ingress, and TLS |
 | MatrixRTC | `cluster/k8s/matrixrtc/` | Optional LiveKit SFU and MatrixRTC authorization service for [voice calls](https://docs.mindroom.chat/voice-calls/), proxied by the client chart |
-| Instance | `cluster/k8s/instance/` | One hosted MindRoom runtime with bundled dashboard/API and Matrix/Synapse, deployed by the SaaS platform |
+| Instance | `cluster/k8s/instance/` | One hosted MindRoom runtime with bundled dashboard/API and a Tuwunel Matrix homeserver, deployed by the SaaS platform |
 | Platform | `cluster/k8s/platform/` | SaaS control plane (API, frontend, provisioner) |
 
 ## Prerequisites
@@ -18589,7 +18673,7 @@ The runtime chart rejects a file-sourced config inside `agents`, `private_instan
 > [!WARNING]
 > The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
 > All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
-> The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`; header-only trusted-upstream authentication is forgeable from the sidecar.
+> The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication.
 > Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY`.
 > Use dedicated Kubernetes workers through the runtime chart when per-agent filesystem and credential isolation are required.
 
@@ -19037,6 +19121,7 @@ The service name is yours to choose; it names the stored `egress_<name>` credent
 
 Placeholder values are `mindroom-brokered`.
 Presets without a connected account take an API key only.
+A preset's connected account is used only after someone allows Agent Keys to use it; see [Using a connected account](#using-a-connected-account).
 
 Several Google presets share `www.googleapis.com`.
 Longest path prefix matching picks the right service, and a request to another path on that host is forwarded without injection, because the host has rules and so does not count as unmatched.
@@ -19071,7 +19156,7 @@ egress_broker:
 | `description` | No | Short description shown in the UI |
 | `rules` | Yes, unless a preset supplies them | Routing rules for the service. Every rule needs `auth`, unless the service sets `restrict_only` |
 | `placeholder_env` | No | Variables set in workers whose scope has a key or account for the service, so CLIs that refuse to run without a token, such as `gh`, work; any placeholder value, conventionally `mindroom-brokered` |
-| `oauth_provider` | No | MindRoom OAuth provider id (such as `github`, `google_drive`, `atlassian`) whose connected account supplies the secret when no API key is stored; see [Secret sources](#secret-sources) |
+| `oauth_provider` | No | MindRoom OAuth provider id (such as `github`, `google_drive`, `atlassian`) whose connected account supplies the secret when no API key is stored, once someone allows Agent Keys to use it; see [Secret sources](#secret-sources) |
 | `oauth_on_shared_workers` | No | Default `false`. Set `true` to use a requester's own GitHub or Atlassian account in shared sandboxes too; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes). Only `config.yaml` may set it, and presets never do |
 | `restrict_to_rules` | No | Default `false`. Set `true` to refuse, with 403 `path_not_allowed`, a request to this service's hosts whose path matches none of its party's rules there, instead of forwarding it without credentials; see [Limiting paths and repositories](#limiting-paths-and-repositories). Presets never set it |
 | `restrict_only` | No | Default `false`. Only for user services; see [Limiting in place](#limiting-in-place) |
@@ -19205,14 +19290,14 @@ A service can take its secret from two sources in a worker's scope:
 
 - **API key**: a key stored for the scope, set by hand.
 - **Connected account**: an OAuth login that the user connected through MindRoom's OAuth providers (the GitHub App user login, the Google providers, Atlassian).
-  A service uses this source when it has an `oauth_provider`, which every preset except `openai` and `anthropic` sets.
+  A service uses this source when it has an `oauth_provider`, which every preset except `openai` and `anthropic` sets, and only after someone allows Agent Keys to use the account; see [Using a connected account](#using-a-connected-account).
 
 For each request the broker picks the secret in this order:
 
 1. The API key stored for the scope, if there is one.
    An explicit key always wins over a connected account, and removing the key falls back to the account.
-2. Otherwise, the connected account's access token, which the primary refreshes when it is near expiry.
-3. Otherwise, a 403 `credential_not_configured`, with a connect link when the user can connect an account (see [Error responses](#error-responses)).
+2. Otherwise, the connected account's access token, if Agent Keys may use the account for the service; the primary refreshes the token when it is near expiry.
+3. Otherwise, a 403 `credential_not_configured`, with `oauth_reuse: "off"` when nobody allowed the account, or a connect link when the user can connect an account Agent Keys may use (see [Error responses](#error-responses)).
 
 The matched rule's auth type then formats the token like any other secret, so a connected GitHub account goes out as `Authorization: Bearer <token>` to `api.github.com` and as basic auth with username `x-access-token` to `github.com`.
 
@@ -19248,7 +19333,7 @@ The Google providers are not affected: their connection on a shared agent is the
 
 An operator who accepts the risk can set `oauth_on_shared_workers: true` on the service.
 The broker then injects the calling requester's own account in shared sandboxes as well, and anyone who can run commands in such a sandbox can act with any other user's connected account until that user's proxy token expires (`MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS`, default 7 days).
-Any user who may use the agent can then connect their own account on it, sees only their own connection, and gets a warning that everyone using the agent can act with it; refusals carry a connect link for the requester's own account.
+Any user who may use the agent can then connect and allow their own account on it, sees only their own connection, and gets a warning that everyone using the agent can act with it; refusals carry a connect link for the requester's own account once they allowed it.
 On the dashboard panel, whose scopes are shared and unscoped agents, such an account is the signed-in administrator's own, so the panel offers it only with this setting.
 Use it only where everyone who can use the agent may act with each other's accounts, such as a single-user deployment.
 
@@ -19290,27 +19375,39 @@ On a standalone deployment the script authenticates with `Authorization: Bearer 
 
 ### Connecting an account
 
-On the personal egress page and the dashboard panel, a service with an account provider offers **Connect**, which opens the provider's login in a popup.
-A connected row shows "Connected" with the account's verified email, or otherwise its login, such as `octocat`, and offers **Disconnect**, and a row whose saved connection cannot be read offers only **Reset connection** until it is reset.
+On the personal egress page and the dashboard panel, a service with an account provider offers **Connect**, which allows Agent Keys to use the provider's account (see [Using a connected account](#using-a-connected-account)) and then opens the provider's login in a popup; the allowance stays on even if the popup is closed without connecting.
+A row whose account Agent Keys uses shows "Using connected account" with the account's verified email, or otherwise its login, such as `octocat`, and offers **Stop using <provider> account** and **Disconnect**, and a row whose saved connection cannot be read offers only **Reset connection** until it is reset.
 In a shared sandbox, GitHub and Atlassian rows offer no **Connect**; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
 
-**Shared accounts.** Where connecting an account makes everyone who uses the agent act as it, which is an agent-scoped account (the Google providers) on a shared or unscoped agent, **Connect** first asks for confirmation and suggests a team account instead of a personal one.
+**Shared accounts.** Where connecting an account makes everyone who uses the agent act as it, which is an agent-scoped account (the Google providers) on a shared or unscoped agent, **Connect** first asks for confirmation that says so.
 Every user of the agent, not only its managers, sees which account is connected, because they all act as it.
-Only administrators and credential managers can connect or disconnect it.
+Only administrators and credential managers can connect, allow, or disconnect it.
 
-**Disconnecting** removes the saved connection for that agent's scope.
-Every service of the agent that uses the provider, and on the Connections portal also the provider's tools, stops working until an account is connected again, and the confirmation lists them.
+**Disconnecting** removes the saved connection for that agent's scope, which the provider's tools use too.
+Every service of the agent that uses the provider and the provider's tools stop working until an account is connected again, and the confirmation lists the services; to keep the connection for the tools, choose **Stop using <provider> account** instead.
 
 **Connect links.** Refusals and the [`egress_credentials` tool](#agent-tool) point at where to connect, and a refusal can carry a `connect_url`, a short-lived single-use login link that works only in a browser signed in to MindRoom as the requester it was made for.
 A connection that everyone using an agent shares never gets a link; connect it at `manage_url` instead.
 
 **Who may connect and set keys.** On `user` and `user_agent` agents each user manages their own keys, accounts, and [services](#user-services) on the personal page.
-On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](https://docs.mindroom.chat/authorization/#platform-and-credential-authority)); GitHub and Atlassian under `oauth_on_shared_workers` are the exception, where each user connects their own account.
+On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](https://docs.mindroom.chat/authorization/#platform-and-credential-authority)); GitHub and Atlassian under `oauth_on_shared_workers` are the exception, where each user connects and allows their own account.
 
-The personal egress page and its API need a verified Matrix identity on the request, from [opening Connections in MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) or from [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`).
-With sign-in from Chat turned off (`MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='[]'`) and no JWT, nobody can sign in to the personal page and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
+The personal egress page and its API need a verified Matrix identity on the request, from [opening Connections in MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) or from [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/).
+With sign-in from Chat turned off (`MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='[]'`) and no trusted upstream auth, nobody can sign in to the personal page and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
 A `user` or `user_agent` agent, private agents included, then has no page where its keys can be set: until an administrator enables one of those sign-ins or gives the agent a shared worker scope, its brokered calls to a service without a key are refused, and the refusal names no page.
 When more than one user can sign in through a trusted upstream gateway, set `MINDROOM_CONNECTIONS_AGENT` as well, or every user the gateway admits gets full dashboard access, including configuration edits, shared keys, and every requester's log; with it set, non-administrators who open the dashboard are sent to the Connections portal (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)).
+
+### Using a connected account
+
+An account connected for the provider's tools, on the Connections portal or here, serves only those tools until someone allows Agent Keys to use it for the service.
+Its row then shows "Connected for tools only" and offers **Use account**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
+The provider's tools ask for approval before they write, but an allowed account lets the agent's shell and python commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
+Whoever may connect the account may allow it (see **Who may connect and set keys** above).
+Allowing a GitHub or Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
+**Stop using <provider> account** turns it off again and keeps the connection for the tools.
+An allowance covers that provider's account for that scope until someone stops it: disconnecting keeps it, so an account of the same provider connected later, also one connected for the tools on the Connections portal, is used at once.
+It does not apply while the service's `oauth_provider` names another provider.
+A script can allow an account with `PUT /api/connections/egress/agents/<agent>/<service>/oauth-reuse`, or `PUT /api/egress-broker/services/<name>/oauth-reuse?agent_name=<agent>` on the dashboard, and the body `{"acknowledge_approval_bypass": true}`, and stop it with `DELETE` on the same URL.
 
 ## User services
 
@@ -19381,7 +19478,7 @@ Another service of the user's own (or, on a shared agent, its credential manager
 ## Connections pages
 
 Users see two pages: the Connections portal at `/connections` (their agents, tools, and account cards) and the personal egress page at `/connections/egress` (titled "Agent Keys").
-Both need trusted upstream auth with JWT or Matrix sign-in from MindRoom Chat.
+Both need trusted upstream auth or Matrix sign-in from MindRoom Chat.
 The portal shows how many of each agent's keys and accounts are set and links to the agent's section on the personal page, where keys are set and services are added, edited, and deleted.
 The personal page lists each agent with how many of its keys and accounts are set; expand an agent to see its services.
 Each service row shows the action that makes it work, such as **Connect** or **Set key**, as a button, and keeps the rest, such as **Replace key**, **Disconnect**, **Edit service**, and **Delete service**, in its **⋯** menu.
@@ -19422,11 +19519,12 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 {
   "tool": "egress_credentials",
   "services": [
-    {"name": "github", "display_name": "GitHub", "source": "config", "configured": true, "active_source": "oauth"},
+    {"name": "github", "display_name": "GitHub", "source": "config", "configured": true, "active_source": "oauth",
+     "oauth_reuse": true},
     {"name": "gmail", "display_name": "Gmail", "source": "config", "configured": false, "active_source": null,
-     "can_connect_account": true, "provider": "google_gmail"},
+     "oauth_reuse": false, "can_connect_account": false, "provider": "google_gmail"},
     {"name": "openai", "display_name": "OpenAI", "source": "user", "configured": false, "active_source": null,
-     "can_connect_account": false, "provider": null}
+     "oauth_reuse": null, "can_connect_account": false, "provider": null}
   ],
   "manage_url": "https://mindroom.example/connections/egress",
   "note": "..."
@@ -19438,12 +19536,14 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
   A [`restrict_only` service](#limiting-in-place) is left out.
 - `configured` is true when the calling agent's scope has either source for the service, and `active_source` says which one the broker uses: `key`, `oauth`, or `null`.
   The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub and Atlassian, their own account, and an agent with no worker scope reads the global store.
+- `oauth_reuse` says whether Agent Keys may use the service's account (see [Using a connected account](#using-a-connected-account)); it is `null` for a service without an account provider or whose GitHub or Atlassian account the broker never uses in a [shared sandbox](#personal-accounts-and-shared-sandboxes).
+  When it is `false`, `provider` names the account to allow, and the note tells the agent that allowing it lets its commands act as the account without the approval prompts the account's tools ask for, and who may allow it.
 - A service with nothing configured also reports `can_connect_account`.
-  When it is `true`, the user can connect an account instead of adding a key, and `provider` names the OAuth provider id.
-  It is `false` when the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection needs a reset first, or the provider is GitHub or Atlassian in a [shared sandbox](#personal-accounts-and-shared-sandboxes); `provider` is then `null`.
+  When it is `true`, the user can connect an account Agent Keys may use instead of adding a key, and `provider` names the OAuth provider id.
+  It is `false` when the account is not allowed, the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection needs a reset first, or the provider is GitHub or Atlassian in a [shared sandbox](#personal-accounts-and-shared-sandboxes); `provider` is then `null` unless the account is not allowed.
   A `true` value says the provider can be connected, not that this user may connect it: for the Google providers on a shared agent, only administrators and credential managers can.
 - `manage_url` is the personal egress page when it is served and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
-- For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that nobody can sign in to the page for the agent's keys here, that an administrator can enable Connections sign-in or make the agent shared, and that an account can still be connected at the `connect_url` in the broker's refusal.
+- For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that nobody can sign in to the page for the agent's keys here, that an administrator can enable Connections sign-in or make the agent shared, that only that page can allow an account for Agent Keys, and that an allowed account can still be connected at the `connect_url` in the broker's refusal.
 - The tool never returns secret values, access tokens, or connect links, and its note tells the agent not to ask users to paste a key into the chat.
 - Without a worker target, the tool returns an empty `services` list and a note saying a worker-scoped agent is required.
 
@@ -19543,6 +19643,7 @@ The broker returns these errors to worker code:
 | Path that fails a restriction (see [Limiting paths and repositories](#limiting-paths-and-repositories)) | 403 JSON `{"error": "path_not_allowed", "service": "<restricting service>", "manage_url": "<link>", "message": "..."}` |
 | Destination fails dial guard (private/metadata/link-local) | 403 JSON `{"error": "destination_blocked", "message": "..."}` |
 | Unmatched host under `deny` policy | 403 JSON `{"error": "host_not_allowed", "services": [...], "message": "..."}` with the operator's service names as a hint |
+| Matched service, no key, and an account provider nobody allowed Agent Keys to use | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "provider": "<id>", "oauth_reuse": "off", "manage_url": "<link>", "message": "..."}` with no `connect_url`; add a key or allow the account at `manage_url` |
 | Matched service, no key and no connected account in scope | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}`, plus `"provider": "<id>"` and `"connect_url": "<link>"` when the user can connect an account that is not shared by everyone using the agent |
 | Connected account revoked, rejected by the provider, or unreadable | 403 JSON `{"error": "oauth_connection_required", "service": "<name>", "provider": "<id>", "connect_url": "<link>", "manage_url": "<link>", "message": "..."}`; `connect_url` is `null` for a shared connection, and an unreadable stored credential adds `"reset_required": true` and has a `null` `connect_url` until it is reset |
 | Provider outage, timeout, or network failure while refreshing the account's token | 503 JSON `{"error": "oauth_refresh_failed", "service": "<name>", "provider": "<id>", "manage_url": "<link>", "message": "..."}`; retry later, do not reconnect |
@@ -19569,8 +19670,8 @@ Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker s
 3. Rebuild or pull the worker image from the same release as the primary, so workers install the broker's CA (see [Worker images](#worker-images)).
 4. Add the services you use to `config.yaml` under `egress_broker.services`, for example `github: {preset: github}`.
 5. Remove the `agent-vault-bridge` plugin from the config.
-6. Set the keys or connect the accounts of `shared` and unscoped agents in the dashboard's **Agent Keys** panel on the Credentials page.
-   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which users open from MindRoom Chat or through trusted upstream auth with JWT; with neither, give those agents a shared worker scope, or their brokered calls that need a key are refused.
+6. Set the keys, or connect and allow the accounts, of `shared` and unscoped agents in the dashboard's **Agent Keys** panel on the Credentials page.
+   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which users open from MindRoom Chat or through trusted upstream auth; with neither, give those agents a shared worker scope, or their brokered calls that need a key are refused.
 7. Verify the broker works by running a worker command that uses a brokered service (such as `gh pr list` or `git clone` of a private repository) and checking that the request succeeds, the request log records it, and the worker environment and workspace contain no trace of the token.
 8. After a grace period, remove the Agent Vault CA from wherever you pinned it for workers, and stop Agent Vault.
 
@@ -19580,8 +19681,8 @@ Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker s
 2. Run one `helm upgrade` that sets `egressBroker.enabled=true` and `workers.kubernetes.agentVault.enabled=false`.
    The chart refuses both being on at once.
    If approved egress is on, the chart rewires Squid's parent from Agent Vault to the broker in the same upgrade.
-3. Have users and credential managers enter their keys or connect their accounts on `/connections/egress` or the dashboard.
-   Users open the personal page from MindRoom Chat or through trusted upstream auth with JWT; with neither, `user` and `user_agent` agents get no keys until one is enabled or they get a shared worker scope.
+3. Have users and credential managers enter their keys, or connect and allow their accounts, on `/connections/egress` or the dashboard.
+   Users open the personal page from MindRoom Chat or through trusted upstream auth; with neither, `user` and `user_agent` agents get no keys until one is enabled or they get a shared worker scope.
 4. Verify against real workers: a brokered call succeeds, the request log records it, and `env` and `/proc/self/environ` hold only the placeholder values and the per-call proxy token, never a secret.
    Replaying the proxy URL after the token TTL returns 407.
 5. Delete the Agent Vault bootstrap Secret and PVC after a grace period.
@@ -19605,8 +19706,8 @@ Each of these is a choice you make, so make it on purpose.
 - **Write access to the configuration.** `config_manager`, and any other way to write the `egress_broker` config, can point a service at another host, and the broker then sends that service's key there.
   It can also add [`private_networks`](#private-networks) that open your local network to every agent that uses Agent Keys, and writing an agent's tools can give it the `egress_credentials` tool.
   Give config write access only to people and agents you would trust with every key.
-- **Agents with Agent Keys.** An agent with the [`egress_credentials` tool](#agent-tool) can send any request that the keys and connected accounts of its scope allow from its commands, with the account's full permissions and without the read-only limits or approvals of native tools such as `gmail` or `google_drive`.
-  Add the tool only to agents you would trust with those keys and accounts.
+- **Agents with Agent Keys.** An agent with the [`egress_credentials` tool](#agent-tool) can send any request that the keys of its scope and the connected accounts allowed for Agent Keys allow from its commands, with the account's full permissions and without the read-only limits or approvals of native tools such as `gmail` or `google_drive`.
+  Add the tool only to agents you would trust with those keys, and allow an account only where its commands may act without those approvals.
 - **Hosts that echo requests.** A host that sends the request back to the caller, such as a debug endpoint that echoes headers (`httpbin.org/headers`) or an error page with the full URL, hands the injected key to the agent.
   `query` auth is the most exposed, because a redirect `Location`, an error page, or a log line that echoes the URL can hand the key back; use it only for APIs that accept nothing else.
   The broker refuses `TRACE` and `TRACK`, which exist to echo requests, but it cannot see what other pages do, so add keys only for hosts you trust not to echo them.
@@ -19896,53 +19997,20 @@ Beyond the chart's required settings:
 
 # Trusted Upstream Browser Auth
 
-Use trusted upstream auth when the MindRoom API and dashboard sit behind a deployment-owned reverse proxy or identity gateway that has already authenticated the human.
+Use trusted upstream auth when the MindRoom API and dashboard sit behind a deployment-owned identity gateway that has already authenticated the human and signs a JWT saying who they are.
 Hosted multi-user deployments need it so the browser that opens an agent-issued OAuth link, such as `/api/oauth/google_drive/authorize?connect_token=...`, signs in as the Matrix requester that triggered it.
 The standalone `MINDROOM_OWNER_USER_ID` setting maps every dashboard request to one Matrix user, so it suits only single-owner deployments.
-The [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), the [usage export service](https://docs.mindroom.chat/usage/#usage-export-service), and the [budget service](https://docs.mindroom.chat/budgets/#budget-service) also build on this mode.
-The [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) can use strict JWT mode, and users signed in to MindRoom Chat can open it without a gateway.
+The [usage export service](https://docs.mindroom.chat/usage/#usage-export-service) and the [budget service](https://docs.mindroom.chat/budgets/#budget-service) also build on this mode.
+The [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) can use it, and users signed in to MindRoom Chat can open it without a gateway.
 
-Trusted upstream auth is disabled by default and works with any gateway, such as an ingress controller, OAuth2 proxy, or identity-aware proxy.
-Enable it only when every network path to MindRoom removes client-supplied copies of the trusted headers and injects verified values itself; never expose such an instance directly to browsers or the public internet.
-Header-only mode trusts those headers alone and suits deployments reachable only through the gateway.
-Prefer [strict JWT mode](#strict-jwt-mode) whenever the gateway can sign an assertion.
+Trusted upstream auth is disabled by default and works with any gateway that publishes a JWKS endpoint and adds a short-lived signed JWT to each authenticated browser request, such as an identity-aware proxy or an OAuth2 proxy.
+MindRoom takes the user only from the verified JWT claims and ignores identity headers, so a request that bypasses the gateway cannot pose as a user.
 While trusted upstream auth is enabled, it replaces Supabase platform auth and `MINDROOM_API_KEY` auth for the dashboard and its API.
 
-## Header Setup
-
-Set the header names that your access layer owns:
+## Setup
 
 ```bash
 MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true
-MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER=X-MindRoom-User-Id
-MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER=X-MindRoom-User-Email
-MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER=X-MindRoom-Matrix-User-Id
-MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE='@{localpart}:example.org'
-MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN=example.com
-```
-
-| Variable | Meaning |
-| --- | --- |
-| `MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED` | Turns the mode on; default `false` |
-| `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER` | Required; a header carrying a stable ID for the authenticated browser user |
-| `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` | Optional; header carrying the user's email, required in header-only mode when an email-to-Matrix template is set |
-| `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` | Optional; header carrying the user's Matrix ID |
-| `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` | Optional; derives the Matrix ID from the email localpart and must contain exactly one `{localpart}` placeholder |
-| `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` | The single email domain allowed for template derivation; required with the template |
-
-Shared dashboard access needs only the user ID header.
-Personal `user` and `user_agent` OAuth connections, the Connections portal, and personal APIs also need a Matrix identity that matches the requester used in conversations.
-Prefer the Matrix user ID header when the access layer can supply a real Matrix ID; header-only mode uses it when present and otherwise derives the ID from the email.
-With the template `@{localpart}:example.org` and domain `example.com`, `alice@example.com` maps to `@alice:example.org`.
-Domain matching is case-insensitive, emails from any other domain or a subdomain are rejected, and the result must be a valid Matrix user ID.
-
-## Strict JWT Mode
-
-Strict mode requires every request to carry a signed JWT from the gateway alongside the identity headers, so a spoofed identity header alone is rejected.
-Use it when the gateway publishes a JWKS endpoint and issues short-lived assertions for authenticated browser requests.
-
-```bash
-MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true
 MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER=X-Trusted-Jwt
 MINDROOM_TRUSTED_UPSTREAM_JWKS_URL=https://gateway.example.com/.well-known/jwks.json
 MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE=mindroom-dashboard
@@ -19954,23 +20022,26 @@ MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM=matrix_user_id
 
 | Variable | Meaning |
 | --- | --- |
-| `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT` | Turns strict mode on; default `false` |
+| `MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED` | Turns the mode on; default `false` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER` | Required; header carrying the JWT |
 | `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL` | Required; the gateway's signing keys |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE` | Required; expected `aud` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER` | Required; expected `iss` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM` | Claim holding the verified email; default `email` |
-| `MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM` | Optional; claim holding a stable user ID distinct from the email |
-| `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` | Optional; claim holding a signed Matrix user ID |
+| `MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM` | Optional; claim holding a stable user ID distinct from the email, which is the user ID otherwise |
+| `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` | Optional; claim holding the user's Matrix ID |
+| `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` | Optional; derives the Matrix ID from the email localpart and must contain exactly one `{localpart}` placeholder |
+| `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` | The single email domain allowed for template derivation; required with the template |
 
 MindRoom verifies the signature, expiry, issuer, audience, and every configured claim, and picks up gateway key rotation without a restart.
-Headers must agree with the verified claims:
 
-- The user ID header must equal the user ID claim when configured, and otherwise the email claim.
-- A configured email header must equal the email claim; without an email header, MindRoom uses the email claim.
-- With a Matrix user ID claim, that claim is the Matrix identity, and a Matrix user ID header must equal it.
-- Without one, the Matrix identity can only come from the email-to-Matrix template applied to the verified email, which works without an email header, and a Matrix user ID header must equal the derived ID.
-- With neither a Matrix claim nor a template, any Matrix user ID header is rejected because no signature backs it.
+## Matrix Identity
+
+Shared dashboard access needs only the signed user.
+Personal `user` and `user_agent` OAuth connections, the Connections portal, and personal APIs also need a Matrix identity that matches the requester used in conversations.
+With a Matrix user ID claim configured, that claim is the Matrix identity.
+Otherwise the email-to-Matrix template, when set, derives it from the signed email: with the template `@{localpart}:example.org` and domain `example.com`, `alice@example.com` maps to `@alice:example.org`.
+Domain matching is case-insensitive, emails from any other domain or a subdomain are rejected, and the result must be a valid Matrix user ID.
 
 ## Helm Charts
 
@@ -19979,12 +20050,6 @@ For the hosted instance chart, set the equivalent values:
 ```yaml
 trustedUpstreamAuth:
   enabled: "true"
-  userIdHeader: X-MindRoom-User-Id
-  emailHeader: X-MindRoom-User-Email
-  matrixUserIdHeader: X-MindRoom-Matrix-User-Id
-  emailToMatrixUserIdTemplate: "@{localpart}:example.org"
-  emailDomain: example.com
-  requireJwt: "true"
   jwtHeader: X-Trusted-Jwt
   jwksUrl: https://gateway.example.com/.well-known/jwks.json
   jwtAudience: mindroom-dashboard
@@ -19992,11 +20057,22 @@ trustedUpstreamAuth:
   jwtEmailClaim: email
   jwtUserIdClaim: sub
   jwtMatrixUserIdClaim: matrix_user_id
+  emailToMatrixUserIdTemplate: "@{localpart}:example.org"
+  emailDomain: example.com
 ```
 
 The chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables.
 When instances come from the platform provisioner, put the same values under `provisioner.trustedUpstreamAuth` in the platform chart, which passes them to the provisioner as `INSTANCE_TRUSTED_UPSTREAM_*` variables.
-Both charts fail to render when `enabled` is true without `userIdHeader`, when `emailToMatrixUserIdTemplate` is set without both `emailHeader` and `emailDomain`, or when `requireJwt` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`.
+Both charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
+
+## Dashboard On Its Own Host
+
+When another app, such as MindRoom Chat, serves `/` on the public host, serve the dashboard on a separate host that sends every path to MindRoom with the browser's `Host` header unchanged, and set `MINDROOM_DASHBOARD_URL` to that host's origin, for example `https://mindroom-admin.example.com`.
+Put that host behind the same access application as the public host, so its requests carry the JWT audience MindRoom already verifies.
+The setting needs trusted upstream auth, because only the gateway's signed identity reaches both hosts, and a `MINDROOM_PUBLIC_URL` on another host or port; MindRoom refuses to start otherwise.
+The Connections header then links administrators there, and Connections pages opened on that host move to `MINDROOM_PUBLIC_URL`, where sign-in, account links, and MCP consent run.
+Accounts connected through the [OAuth framework](https://docs.mindroom.chat/oauth-framework/) from that host return through the public host's OAuth callback.
+With `MINDROOM_CONNECTIONS_AGENT` set, users outside `administrators` who open that host are sent to the Connections portal, as on the public host.
 
 ## Security Boundary
 
@@ -20006,33 +20082,28 @@ With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also re
 A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
 A [Connections session from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#sessions-and-dashboard-access) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
 
-Strict JWT mode adds signature checks but does not replace header stripping, which every network path still needs.
 A personal OAuth link opened by a browser signed in as anyone other than the requester who received it fails with `403`; see [Connect An Account](https://docs.mindroom.chat/oauth-framework/#connect-an-account) for link rules.
 
 ## Browser Mutation Protection
 
-Changing requests (anything other than `GET`, `HEAD`, `OPTIONS`, or `TRACE`) authenticated by trusted upstream identity, a dashboard cookie, or a Connections sign-in session must send an `Origin` matching `MINDROOM_PUBLIC_URL`, or the request origin when it is unset.
+Changing requests (anything other than `GET`, `HEAD`, `OPTIONS`, or `TRACE`) authenticated by trusted upstream identity, a dashboard cookie, or a Connections sign-in session must send an `Origin` matching `MINDROOM_PUBLIC_URL`, or the request origin when it is unset; on the `MINDROOM_DASHBOARD_URL` host they must send that origin instead.
 Requests marked `Sec-Fetch-Site: cross-site` are rejected even when the `Origin` matches.
 A validated bearer token skips these checks, but adding a bearer header to a trusted-upstream request does not.
 `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` controls which origins may read credentialed responses and never authorizes cross-origin changes.
-Host the dashboard on the app's public origin, or use its development proxy, which authenticates with a bearer token.
+Host the dashboard on the app's public origin or on [its own host](#dashboard-on-its-own-host), or use its development proxy, which authenticates with a bearer token.
 
 ## Troubleshooting
 
 | Status and message | Fix |
 | --- | --- |
-| `500 Trusted upstream auth is enabled but MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER is not set` | Set the user ID header variable |
-| `500 Trusted upstream strict JWT auth is enabled but <variable> is not set` | Set the named strict-mode variable |
-| `500 Trusted upstream email-to-Matrix template is set but MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is not set` | In header-only mode, set the email header or use the Matrix user ID header instead |
+| `500 Trusted upstream auth is enabled but <variable> is not set` | Set the named variable |
 | `500 Trusted upstream email mapping requires a valid template and MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` | Use exactly one `{localpart}` in a valid Matrix ID template and set the email domain |
-| `401 Missing trusted upstream identity header: <header>`, `Missing trusted upstream email header: <header>`, or `Missing trusted upstream JWT header: <header>` | The gateway did not send the header; check its routing and header injection |
+| `401 Missing trusted upstream JWT header: <header>` | The gateway did not send its assertion; check its routing and that it signs requests for this application |
 | `401 Invalid trusted upstream JWT` | The JWT is expired, signed by an unknown key, for the wrong issuer or audience, or lacks a configured claim |
-| `401 Trusted upstream identity does not match JWT claim` | Make the user ID and email headers carry the same values as the JWT claims |
-| `401 Trusted upstream Matrix identity does not match JWT claim`, `does not match verified email`, or `is not signed` | Make the Matrix user ID header match the signed or derived ID, configure a Matrix claim or template, or stop sending the header |
 | `401 Invalid trusted upstream email identity` | The email is outside `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` |
-| `401 Invalid trusted upstream Matrix user id` | The Matrix header or claim is not a valid Matrix user ID |
+| `401 Invalid trusted upstream Matrix user id` | The Matrix claim is not a valid Matrix user ID |
 | `403 Administrator access required` | With `MINDROOM_CONNECTIONS_AGENT` set, only `administrators` reach ordinary dashboard routes |
-| `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin |
+| `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin, or from `MINDROOM_DASHBOARD_URL` when set |
 | `403 OAuth link does not belong to the current user` | Open the conversation link while signed in as the requester who received it |
 | Connections portal errors | See [Connections troubleshooting](https://docs.mindroom.chat/connections-portal/#troubleshooting) |
 
@@ -20425,6 +20496,7 @@ Setting `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` to `0` or a negative value
 
 Once agents are ready, and then every `MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS` (default `3600`, `0` disables, any other value below `60` fails startup), MindRoom collects garbage once and excludes the surviving objects from later collections, logging `runtime_heap_refrozen`.
 This keeps routine collections short on large processes at the cost of one full collection per interval.
+After the first refreeze, MindRoom also raises CPython's full-collection threshold and logs `gc_full_collection_threshold_raised`, so routine full collections run less often, by an amount that depends on the workload; unreachable reference cycles then wait longer to be freed.
 Memory held by objects that become garbage while frozen, such as agents a config reload replaced, is reclaimed only at the next refreeze, so resident memory can stay higher for up to one interval.
 
 ### `matrix_sync_stall_diagnostics`

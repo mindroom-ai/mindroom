@@ -45,7 +45,7 @@ def test_a_bare_name_enables_a_built_in_with_its_defaults() -> None:
     assert automation.name == "prompt_curation"
     assert automation.cron == "0 4 * * *"
     assert automation.room is None
-    assert automation.trigger_tokens == 50_000
+    assert automation.trigger_tokens == 20_000
     assert (automation.min_reduction, automation.max_reduction) == (0.10, 0.15)
     assert automation.max_content_loss == 0.05
 

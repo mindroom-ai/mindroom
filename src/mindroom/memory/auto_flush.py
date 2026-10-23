@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, TypedDict
 from uuid import uuid4
 
 from agno.agent import Agent
+from agno.run.base import RunStatus
 
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
@@ -340,6 +341,10 @@ async def _extract_memory_summary(
         requester_id=execution_identity.requester_id if execution_identity is not None else None,
     )
     content = response.content
+    if response.status == RunStatus.error:
+        # Agno returns a provider failure as the run's content; raising backs the pass off instead of saving it.
+        msg = f"Memory extraction failed: {content}"
+        raise RuntimeError(msg)
     raw_output = content if isinstance(content, str) else str(content or "")
     return _sanitize_extractor_output(raw_output, extractor.no_reply_token)
 

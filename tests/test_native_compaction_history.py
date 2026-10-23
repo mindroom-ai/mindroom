@@ -40,7 +40,12 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import set_force_compaction_state
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
-from mindroom.native_compaction import checkpoint_estimated_tokens, record_native_checkpoint
+from mindroom.native_compaction import (
+    checkpoint_estimated_tokens,
+    checkpoint_summary,
+    record_native_checkpoint,
+    replay_basis,
+)
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
@@ -867,6 +872,71 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     db.close()
 
 
+def test_native_requests_record_the_history_they_replay(tmp_path: Path) -> None:
+    """A request replaying from a checkpoint that skips runs records an empty basis; unknown history counts as covering.
+
+    A run that checkpointed before waiting for approval sorts after the turns it waited for, which replay then skips.
+    """
+    config, _ = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(threshold_tokens=120000),
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
+    )
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    resolved = resolve_agent_preparation_inputs(
+        agent=_agent(model=model),
+        agent_name="test_agent",
+        config=config,
+        static_prompt_tokens=100,
+    )
+
+    def configured_basis(runs: list[RunOutput]) -> str:
+        configure_native_history(
+            model,
+            plan=resolved.execution_plan,
+            history_settings=resolved.history_settings,
+            session=None,
+            allowed=True,
+            runs=runs,
+        )
+        assert model.native_compaction is not None
+        return model.native_compaction.basis
+
+    first, waited = _completed_run("first"), _completed_run("waited")
+    configured_basis([])
+    settings = model.native_compaction
+    assert settings is not None
+
+    def resumed(basis: str | None, *, route: str = settings.route, run_id: str = "resumed") -> RunOutput:
+        response = ModelResponse(content="Done")
+        items = [{"type": "compaction", "encrypted_content": "checkpoint"}]
+        record_native_checkpoint(response, items, replace(settings, route=route, basis=basis))
+        answer = Message(role="assistant", content="Done", provider_data=response.provider_data)
+        return _completed_run(run_id, messages=[Message(role="user", content="Go"), answer])
+
+    covering = resumed(replay_basis(None, [first, waited]))
+    assert configured_basis([first, waited, covering]) == replay_basis(None, [first, waited, covering])
+    skipping = resumed(replay_basis(None, [first]))
+    assert configured_basis([first, waited, skipping]) == ""
+    # A checkpoint recorded before bases existed counts as covering, as native replay assumes.
+    unknown = resumed(None)
+    assert configured_basis([first, waited, unknown]) == replay_basis(None, [first, waited, unknown])
+    # Replay starts from the latest checkpoint on its own route, so one on another route does not vouch for it.
+    elsewhere = resumed(replay_basis(None, [first, waited, skipping]), route="other-route", run_id="elsewhere")
+    assert configured_basis([first, waited, skipping, elsewhere]) == ""
+
+    # An approval continuation records what the paused request replayed, so its checkpoints stay reusable.
+    paused_basis = configured_basis([first])
+    waiting = ModelResponse(content="Waiting for approval")
+    record_native_checkpoint(waiting, [], model.native_compaction)
+    answer = Message(role="assistant", content=waiting.content, provider_data=waiting.provider_data)
+    paused = _completed_run("paused", messages=[Message(role="user", content="Go"), answer])
+    rebuilt = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    restore_native_history(rebuilt, persisted_run=paused, session=None)
+    assert rebuilt.native_compaction is not None
+    assert rebuilt.native_compaction.basis == paused_basis
+
+
 @pytest.mark.asyncio
 async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) -> None:
     """A summary left in the session row cannot name the route checkpoints are recorded under."""
@@ -877,9 +947,10 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     )
     model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
+    later = _completed_run("later", messages=[Message(role="user", content="Later")])
     seeded = _session(
         "session",
-        runs=[_completed_run("folded", messages=[Message(role="user", content="Earlier")])],
+        runs=[_completed_run("folded", messages=[Message(role="user", content="Earlier")]), later],
         summary=SessionSummary(summary="Stale summary."),
     )
     db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
@@ -918,6 +989,11 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     assert expected.native_compaction is not None
     assert model.native_compaction is not None
     assert model.native_compaction.route == expected.native_compaction.route
+    # A checkpoint records the history its request replayed, so text compaction can tell where it still stands in.
+    response = ModelResponse(content="Done")
+    record_native_checkpoint(response, [{"type": "compaction", "content": "Checkpoint."}], model.native_compaction)
+    answer = Message(role="assistant", content="Done", provider_data=response.provider_data)
+    assert checkpoint_summary(answer, replay_basis("Archived summary.", [later])) == "Checkpoint."
     db.close()
 
 

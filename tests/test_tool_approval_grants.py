@@ -161,6 +161,8 @@ async def test_only_policy_pause_offers_timed_approval(
         runtime_paths=coordinator.runtime_paths,
         requester_id="@human:test",
         toolkit_owners={("code", "shell"): "test_toolkit"},
+        room_id="!room:test",
+        thread_id="$thread",
     )
     await responder.admit(
         InboundEvent(
@@ -260,6 +262,8 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                 runtime_paths=coordinator.runtime_paths,
                 requester_id="@human:test",
                 toolkit_owners={("code", "shell"): "test_toolkit"},
+                room_id="!room:test",
+                thread_id="$thread",
             )
             assert plan.calls[0].human_approval_required is True
             await responder.admit(

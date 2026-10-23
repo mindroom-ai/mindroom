@@ -10,8 +10,10 @@ from mindroom.credentials.policy import (
     credential_service_policy,
     dashboard_may_edit_oauth_service,
     filter_oauth_credential_fields,
+    is_egress_broker_service,
     looks_like_oauth_credentials,
 )
+from mindroom.egress_broker.oauth_reuse import OAUTH_REUSE_CREDENTIAL_SERVICE
 
 
 @pytest.mark.parametrize(
@@ -116,6 +118,18 @@ def test_egress_services_are_primary_only_and_not_grantable(scope: str) -> None:
         assert policy.uses_primary_runtime_scoped_credentials
         assert not policy.uses_primary_runtime_agent_scoped_credentials
         assert not policy.uses_local_shared_credentials
+
+
+@pytest.mark.parametrize("scope", ["shared", "user", "user_agent", None])
+def test_agent_keys_account_opt_ins_stay_primary_only(scope: str | None) -> None:
+    """Worker code must never read or grant itself an account's opt-in, so its document is an egress document.
+
+    The generic credentials API rejects egress documents and worker leases skip them.
+    """
+    policy = credential_service_policy(OAUTH_REUSE_CREDENTIAL_SERVICE, scope)
+    assert is_egress_broker_service(OAUTH_REUSE_CREDENTIAL_SERVICE)
+    assert policy.primary_built_tool
+    assert not policy.worker_grantable_supported
 
 
 @pytest.mark.parametrize("service", ["egress_x_oauth", "egress_x_oauth_client"])

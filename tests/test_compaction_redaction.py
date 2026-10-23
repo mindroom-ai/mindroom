@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.db.sqlite import SqliteDb
@@ -14,6 +15,7 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 
 from mindroom import constants
+from mindroom.history.compaction import summarize_runs
 from mindroom.history.storage import (
     _read_scope_history_event_ids,
     _remove_redacted_event_from_history,
@@ -21,9 +23,17 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
 )
 from mindroom.history.types import HistoryScope
+from mindroom.native_compaction import replay_basis
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
 from tests.conftest import seed_session
-from tests.history_helpers import compact_runs, folded_run_ids, stored_run_ids, summary_rows_of
+from tests.history_helpers import (
+    _summarizer,
+    checkpointed_answer,
+    compact_runs,
+    folded_run_ids,
+    stored_run_ids,
+    summary_rows_of,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -274,6 +284,31 @@ def test_removing_a_loaded_run_retires_a_legacy_summary(open_legacy: Callable[[A
     stored = _stored(storage)
     assert [run.run_id for run in stored.runs or []] == ["r2"]
     assert stored.summary is None
+
+
+@pytest.mark.asyncio
+async def test_a_retired_legacy_summary_does_not_return_through_a_kept_checkpoint(
+    open_legacy: Callable[[AgentSession], SqliteDb],
+) -> None:
+    """A checkpoint built on the legacy summary stops standing in for history once retiring keeps its run."""
+    legacy = _legacy_session(["r1", "r2", "r3"], "RETIRED LEGACY CONTENT", [])
+    legacy.runs[1].messages.append(
+        checkpointed_answer(
+            {"type": "compaction", "content": "RETIRED LEGACY CONTENT and r1"},
+            replay_basis("RETIRED LEGACY CONTENT", legacy.runs[:1]),
+        ),
+    )
+    storage = open_legacy(legacy)
+
+    assert _redact(storage, _stored(storage), "$r3")
+
+    kept = _stored(storage)
+    assert [run.run_id for run in kept.runs or []] == ["r1", "r2"]
+    assert kept.summary is None
+    summary_mock = AsyncMock(return_value=SessionSummary(summary="result"))
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+        await summarize_runs(_summarizer(), None, kept.runs or [])
+    assert "RETIRED LEGACY CONTENT" not in summary_mock.await_args.kwargs["summary_input"]
 
 
 def test_removing_a_loaded_run_keeps_runs_folded_after_a_legacy_summary(

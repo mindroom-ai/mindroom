@@ -11,6 +11,7 @@ from mindroom.authorization import (
     responder_candidate_entities_with_membership_refresh,
 )
 from mindroom.commands import config_confirmation
+from mindroom.commands.auto_approve_commands import handle_auto_approve_command
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.desktop_commands import (
     DesktopCommandScope,
@@ -85,6 +86,7 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.MODE,
         CommandType.ROOM_MODEL,
         CommandType.THREAD_MODE,
+        CommandType.AUTO_APPROVE,
         CommandType.ENCRYPT,
     },
 )
@@ -627,6 +629,19 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             requester_user_id=requester_user_id,
             sender_user_id=_room_admin_sender(context, event, requester_user_id),
+        )
+
+    elif command.type == CommandType.AUTO_APPROVE:
+        response_text = await handle_auto_approve_command(
+            command.args.get("args_text", ""),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            client=context.client,
+            room=room,
+            thread_id=effective_thread_id,
+            requester_user_id=requester_user_id,
+            logger=context.logger,
+            membership_index=context.agent_reply_memberships,
         )
 
     elif command.type == CommandType.ENCRYPT:

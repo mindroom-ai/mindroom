@@ -258,7 +258,7 @@ def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
 
 
 def test_runtime_dependency_requires_released_durable_nio() -> None:
-    """The wheel requires the release that copies deeply nested event trees without recursion."""
+    """The wheel requires the release that answers durable sync polls from mirrored store state."""
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
     requirement = Requirement(
@@ -283,5 +283,6 @@ def test_runtime_dependency_requires_released_durable_nio() -> None:
     assert Version("1.1.1") not in requirement.specifier
     assert Version("1.1.2") not in requirement.specifier
     assert Version("1.1.3") not in requirement.specifier
-    assert Version("1.1.4") in requirement.specifier
+    assert Version("1.1.4") not in requirement.specifier
+    assert Version("1.1.5") in requirement.specifier
     assert Version("2.0.0") not in requirement.specifier

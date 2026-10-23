@@ -461,7 +461,12 @@ function ServiceSection({
               serviceEditing={serviceEditing}
               hideKeyActions={keysUnused}
               // Only shared agents and the global store are offered here, so every key is shared.
-              agent={{ displayName: agentLabel, shared: true, services }}
+              agent={{
+                displayName: agentLabel,
+                shared: true,
+                scope: agentName === null ? "unscoped" : "shared",
+                services,
+              }}
             />
           </EgressServiceTable>
         </div>

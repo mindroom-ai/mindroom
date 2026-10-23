@@ -2,36 +2,28 @@
 {{- $trustedUpstreamAuth := .Values.trustedUpstreamAuth | default (dict) -}}
 {{- $trustedUpstreamAuthEnabledValue := lower (toString ($trustedUpstreamAuth.enabled | default false)) -}}
 {{- $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") -}}
-{{- $trustedUpstreamRequireJwtValue := lower (toString ($trustedUpstreamAuth.requireJwt | default false)) -}}
-{{- $trustedUpstreamRequireJwt := has $trustedUpstreamRequireJwtValue (list "1" "true" "yes" "on") -}}
 {{- $instanceSecretName := include "mindroom.instanceSecretName" .Values -}}
 {{- $instanceSecretHash := include "mindroom.instanceSecretHash" .Values -}}
 {{- $platformDomain := .Values.platformDomain | default .Values.baseDomain -}}
-{{- $configHash := printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" (.Values.customer | toString) (.Values.baseDomain | toString) (.Values.accountId | default "" | toString) (.Values.storagePath | toString) (.Values.workerBackend | default "static_runner" | toString) (.Values.supabaseUrl | default "" | toString) (.Values.supabaseAnonKey | default "" | toString) ($trustedUpstreamAuth.enabled | default "" | toString) ($trustedUpstreamAuth.userIdHeader | default "" | toString) ($trustedUpstreamAuth.emailHeader | default "" | toString) ($trustedUpstreamAuth.matrixUserIdHeader | default "" | toString) ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | toString) ($trustedUpstreamAuth.requireJwt | default "" | toString) ($trustedUpstreamAuth.jwtHeader | default "" | toString) ($trustedUpstreamAuth.jwksUrl | default "" | toString) ($trustedUpstreamAuth.jwtAudience | default "" | toString) ($trustedUpstreamAuth.jwtIssuer | default "" | toString) ($trustedUpstreamAuth.jwtEmailClaim | default "email" | toString) ($trustedUpstreamAuth.jwtUserIdClaim | default "" | toString) ($trustedUpstreamAuth.jwtMatrixUserIdClaim | default "" | toString) (.Values.administrators | default (list) | toJson) (.Values.roomDefaults | default (dict) | toJson) ($trustedUpstreamAuth.emailDomain | default "" | toString) | sha256sum -}}
+{{- $configHash := printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" (.Values.customer | toString) (.Values.baseDomain | toString) (.Values.accountId | default "" | toString) (.Values.storagePath | toString) (.Values.workerBackend | default "static_runner" | toString) (.Values.supabaseUrl | default "" | toString) (.Values.supabaseAnonKey | default "" | toString) ($trustedUpstreamAuth.enabled | default "" | toString) ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | toString) ($trustedUpstreamAuth.jwtHeader | default "" | toString) ($trustedUpstreamAuth.jwksUrl | default "" | toString) ($trustedUpstreamAuth.jwtAudience | default "" | toString) ($trustedUpstreamAuth.jwtIssuer | default "" | toString) ($trustedUpstreamAuth.jwtEmailClaim | default "email" | toString) ($trustedUpstreamAuth.jwtUserIdClaim | default "" | toString) ($trustedUpstreamAuth.jwtMatrixUserIdClaim | default "" | toString) (.Values.administrators | default (list) | toJson) (.Values.roomDefaults | default (dict) | toJson) ($trustedUpstreamAuth.emailDomain | default "" | toString) | sha256sum -}}
 {{- /* RBAC cannot confine a worker manager to one tenant's Deployments, Services, PVCs, and Secrets in the shared namespace. */ -}}
 {{- if ne $workerBackend "static_runner" -}}
 {{- fail (printf "workerBackend must be static_runner, got %q: tenants share the mindroom-instances namespace, where a dedicated-worker manager could create and change other tenants' Deployments and Services; deploy dedicated workers with the runtime chart in their own namespace instead" $workerBackend) -}}
 {{- end -}}
-{{- if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.userIdHeader | default "")) -}}
-{{- fail "trustedUpstreamAuth.userIdHeader is required when trustedUpstreamAuth.enabled=true" -}}
-{{- end -}}
-{{- if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailHeader | default "")) -}}
-{{- fail "trustedUpstreamAuth.emailHeader is required when trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" -}}
-{{- end -}}
 {{- if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailDomain | default "")) -}}
 {{- fail "trustedUpstreamAuth.emailDomain is required when trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" -}}
 {{- end -}}
-{{- if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtHeader | default "")) -}}
-{{- fail "trustedUpstreamAuth.jwtHeader is required when trustedUpstreamAuth.requireJwt=true" -}}
+{{- if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.jwtHeader | default "")) -}}
+{{- fail "trustedUpstreamAuth.jwtHeader is required when trustedUpstreamAuth.enabled=true" -}}
 {{- end -}}
-{{- if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwksUrl | default "")) -}}
-{{- fail "trustedUpstreamAuth.jwksUrl is required when trustedUpstreamAuth.requireJwt=true" -}}
+{{- if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.jwksUrl | default "")) -}}
+{{- fail "trustedUpstreamAuth.jwksUrl is required when trustedUpstreamAuth.enabled=true" -}}
 {{- end -}}
-{{- if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtAudience | default "")) -}}
-{{- fail "trustedUpstreamAuth.jwtAudience is required when trustedUpstreamAuth.requireJwt=true" -}}
+{{- if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.jwtAudience | default "")) -}}
+{{- fail "trustedUpstreamAuth.jwtAudience is required when trustedUpstreamAuth.enabled=true" -}}
 {{- end -}}
-{{- if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtIssuer | default "")) -}}
-{{- fail "trustedUpstreamAuth.jwtIssuer is required when trustedUpstreamAuth.requireJwt=true" -}}
+{{- if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.jwtIssuer | default "")) -}}
+{{- fail "trustedUpstreamAuth.jwtIssuer is required when trustedUpstreamAuth.enabled=true" -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -65,24 +57,69 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-      - name: wait-for-synapse
+      - name: wait-for-tuwunel
         image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
         imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
         command: ["/bin/sh", "-ec"]
         args:
         - |
           while true; do
-            body="$(curl --silent --show-error --max-time 5 "${SYNAPSE_READY_URL}" || true)"
+            body="$(curl --silent --show-error --max-time 5 "${MATRIX_READY_URL}" || true)"
             if printf '%s' "${body}" | grep -q '"versions"'; then
-              echo "Synapse is ready: ${SYNAPSE_READY_URL}"
+              echo "Tuwunel is ready: ${MATRIX_READY_URL}"
               exit 0
             fi
-            echo "Waiting for Synapse at ${SYNAPSE_READY_URL}"
+            echo "Waiting for Tuwunel at ${MATRIX_READY_URL}"
             sleep 2
           done
         env:
-        - name: SYNAPSE_READY_URL
-          value: "http://synapse-{{ .Values.customer }}:8008/_matrix/client/versions"
+        - name: MATRIX_READY_URL
+          value: "http://tuwunel-{{ .Values.customer }}:8008/_matrix/client/versions"
+      # LEGACY_COMPAT: tenant storage from a Synapse homeserver
+      # Legacy format: tenant storage with no .homeserver-tuwunel marker holds the Matrix state bound to the tenant's
+      # Synapse server, which Tuwunel replaced with an empty database: matrix_state.yaml, encryption_keys/,
+      # sync_continuity/, the event journal with its binding in tracking/, and each agent's personal-room and
+      # invited-room records below tracking/, or still in agents/<agent>/ where releases up to v2026.10.37 kept them
+      # and the first start would move them below tracking/.
+      # Last legacy release: v2026.10.472 ran tenants on Synapse; the next release runs them on Tuwunel.
+      # Handling: the first start on Tuwunel deletes that set once, as `just local-matrix-reset` does, so the runtime
+      # registers its accounts and rooms again instead of refusing to start; the marker keeps later starts from
+      # touching it. Remove once every tenant has started on Tuwunel.
+      # Coverage: tests/test_helm_instance_worker_isolation.py::test_instance_chart_resets_synapse_matrix_state_once,
+      # tests/test_helm_instance_worker_isolation.py::test_instance_chart_reset_keeps_pre_move_room_records_from_coming_back
+      - name: reset-synapse-matrix-state
+        image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
+        imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
+        command: ["/bin/sh", "-ec"]
+        args:
+        - |
+          if [ ! -e "${STORAGE}/.homeserver-tuwunel" ]; then
+            rm -rf "${STORAGE}/matrix_state.yaml" "${STORAGE}/encryption_keys" "${STORAGE}/sync_continuity" \
+              "${STORAGE}"/tracking/event_journal*
+            if [ -d "${STORAGE}/tracking" ]; then
+              find "${STORAGE}/tracking" \( -name personal_rooms -o -name invited_rooms.json -o -name pending_room_invites.json \) \
+                -prune -exec rm -rf {} +
+            fi
+            # Sandbox tool code can write agents/, so this matches only agents/<agent>/<record>, follows no links, and
+            # skips what it cannot read, as the startup migration does, instead of holding the pod in Init.
+            if [ -d "${STORAGE}/agents" ]; then
+              find "${STORAGE}/agents" -mindepth 2 -maxdepth 2 \
+                \( -name personal_rooms -o -name invited_rooms.json -o -name pending_room_invites.json \) -exec rm -rf {} + \
+                || true
+            fi
+            touch "${STORAGE}/.homeserver-tuwunel"
+          fi
+        env:
+        - name: STORAGE
+          value: {{ .Values.storagePath | quote }}
+        volumeMounts:
+        - name: storage
+          mountPath: {{ .Values.storagePath }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
       # Create the sandbox runner's storage subPaths as the runtime user; kubelet would create missing ones as root.
       - name: prepare-sandbox-runner-storage
         image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
@@ -173,7 +210,7 @@ spec:
         - name: MINDROOM_SANDBOX_PROXY_TOOLS
           value: "shell,file,python,coding"
         - name: MATRIX_HOMESERVER
-          value: "http://synapse-{{ .Values.customer }}:8008"
+          value: "http://tuwunel-{{ .Values.customer }}:8008"
         - name: MINDROOM_DESKTOP_MATRIX_HOMESERVER
           value: "https://{{ .Values.customer }}.matrix.{{ .Values.baseDomain }}"
         - name: MATRIX_SERVER_NAME
@@ -189,16 +226,6 @@ spec:
         {{- if $trustedUpstreamAuthEnabled }}
         - name: MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED
           value: "true"
-        - name: MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER
-          value: {{ $trustedUpstreamAuth.userIdHeader | quote }}
-        {{- if $trustedUpstreamAuth.emailHeader }}
-        - name: MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER
-          value: {{ $trustedUpstreamAuth.emailHeader | quote }}
-        {{- end }}
-        {{- if $trustedUpstreamAuth.matrixUserIdHeader }}
-        - name: MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER
-          value: {{ $trustedUpstreamAuth.matrixUserIdHeader | quote }}
-        {{- end }}
         {{- if $trustedUpstreamAuth.emailDomain }}
         - name: MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN
           value: {{ $trustedUpstreamAuth.emailDomain | quote }}
@@ -207,9 +234,6 @@ spec:
         - name: MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE
           value: {{ $trustedUpstreamAuth.emailToMatrixUserIdTemplate | quote }}
         {{- end }}
-        {{- if $trustedUpstreamRequireJwt }}
-        - name: MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT
-          value: "true"
         - name: MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER
           value: {{ $trustedUpstreamAuth.jwtHeader | quote }}
         - name: MINDROOM_TRUSTED_UPSTREAM_JWKS_URL
@@ -227,7 +251,6 @@ spec:
         {{- if $trustedUpstreamAuth.jwtMatrixUserIdClaim }}
         - name: MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM
           value: {{ $trustedUpstreamAuth.jwtMatrixUserIdClaim | quote }}
-        {{- end }}
         {{- end }}
         {{- end }}
         - name: MINDROOM_PLATFORM_LOGIN_URL
@@ -297,7 +320,7 @@ spec:
         secret:
           secretName: {{ $instanceSecretName }}
           defaultMode: 0400
-          # Mount only the files this container reads; the platform-wide Matrix OIDC client secret stays with Synapse.
+          # Mount only the files this container reads; the platform-wide Matrix OIDC client secret stays with Tuwunel.
           # Missing keys stay absent as with a whole-Secret mount; the secretKeyRef env vars still require the Secret.
           optional: true
           items:

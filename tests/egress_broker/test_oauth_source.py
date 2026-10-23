@@ -17,7 +17,8 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker import oauth_source
-from mindroom.egress_broker.oauth_source import oauth_status, resolve_oauth_token
+from mindroom.egress_broker.oauth_reuse import OAUTH_REUSE_CREDENTIAL_SERVICE, set_oauth_reuse
+from mindroom.egress_broker.oauth_source import broker_credential_context, oauth_status, resolve_oauth_token
 from mindroom.egress_broker.secrets import (
     OAuthStatus,
     Secret,
@@ -25,6 +26,7 @@ from mindroom.egress_broker.secrets import (
     SecretNeedsReconnect,
     SecretResult,
     SecretUnavailable,
+    load_egress_document,
 )
 from mindroom.egress_broker.tokens import WorkerClaims
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
@@ -32,7 +34,14 @@ from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import resolve_worker_target
-from tests.egress_broker.conftest import OAUTH_REFRESH_TOKEN, account_store, connect_account, tool_identity
+from tests.egress_broker.conftest import (
+    OAUTH_REFRESH_TOKEN,
+    account_store,
+    allow_oauth_reuse,
+    connect_account,
+    tool_identity,
+    worker_target,
+)
 from tests.oauth_test_utils import (
     DelayedTokenEndpointOutcome,
     TokenEndpointOutcome,
@@ -118,6 +127,15 @@ def _fresh_unknown_provider_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(oauth_source, "_warned_unknown_providers", set())
 
 
+@pytest.fixture
+def enable_reuse(runtime_paths: RuntimePaths, manager: CredentialsManager) -> None:
+    """Let Agent Keys use every connection these tests store: Alice's and Bob's GitHub, and agent `code`'s demo."""
+    for requester in ("@alice:example.org", "@bob:example.org"):
+        allow_oauth_reuse(manager, runtime_paths, account_store(requester))
+        for scope in ("user", "user_agent", "shared", None):
+            allow_oauth_reuse(manager, runtime_paths, _broker_target(requester, scope), "demo", provider=_DEMO)
+
+
 def _tool_target(requester_id: str | None, scope: WorkerScope | None = "user_agent") -> ResolvedWorkerTarget:
     """Return the worker target a tool call on agent `code` carries."""
     return resolve_worker_target(scope, "code", tool_identity(requester_id))
@@ -148,10 +166,11 @@ def _resolve(
     target: ResolvedWorkerTarget,
     *,
     provider_id: str = "github",
-    service: str = "github",
+    service: str | None = None,
 ) -> SecretResult:
+    """Resolve the token of the service named `service`, by default after its provider."""
     return resolve_oauth_token(
-        service=service,
+        service=service or provider_id,
         provider_id=provider_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -167,18 +186,19 @@ def _status(
     target: ResolvedWorkerTarget,
     *,
     provider_id: str = "github",
-    service: str = "github",
+    service: str | None = None,
 ) -> OAuthStatus | None:
     return oauth_status(
         provider_id,
         target,
-        service=service,
+        service=service or provider_id,
         config=config,
         runtime_paths=runtime_paths,
         credentials_manager=manager,
     )
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_connected_account_yields_its_token(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -194,6 +214,7 @@ def test_connected_account_yields_its_token(
 
 
 @pytest.mark.parametrize("scope", ["shared", None], ids=["shared", "unscoped"])
+@pytest.mark.usefixtures("enable_reuse")
 def test_requester_scoped_provider_is_unavailable_on_workers_requesters_share(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -230,6 +251,7 @@ def test_requester_scoped_provider_is_unavailable_on_workers_requesters_share(
 
 
 @pytest.mark.parametrize("scope", ["user", "user_agent"])
+@pytest.mark.usefixtures("enable_reuse")
 def test_requester_scoped_provider_is_unavailable_on_the_static_runner(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -253,6 +275,7 @@ def test_requester_scoped_provider_is_unavailable_on_the_static_runner(
     assert status.shared_worker_opt_in is False
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_unset_worker_backend_is_the_static_runner(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -269,6 +292,7 @@ def test_unset_worker_backend_is_the_static_runner(
 
 @pytest.mark.parametrize("backend", ["docker", "kubernetes"])
 @pytest.mark.parametrize("scope", ["user", "user_agent"])
+@pytest.mark.usefixtures("enable_reuse")
 def test_requester_scoped_provider_is_used_on_a_dedicated_backend(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -291,6 +315,7 @@ def test_requester_scoped_provider_is_used_on_a_dedicated_backend(
 
 @pytest.mark.parametrize("backend", ["static_runner", "docker", "kubernetes"])
 @pytest.mark.parametrize("scope", ["user_agent", "shared", None])
+@pytest.mark.usefixtures("enable_reuse")
 def test_opt_in_uses_the_requesters_account_on_every_backend(
     opted_in_config: Config,
     runtime_paths: RuntimePaths,
@@ -312,6 +337,7 @@ def test_opt_in_uses_the_requesters_account_on_every_backend(
     assert (status.connected, status.unavailable_reason, status.shared_worker_opt_in) == (True, None, not private)
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_status_without_a_worker_target_treats_it_as_unscoped(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -333,6 +359,7 @@ def test_status_without_a_worker_target_treats_it_as_unscoped(
     assert (status.connected, status.can_connect, status.unavailable_reason) == (False, False, "shared_sandbox")
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_opt_in_uses_the_callers_account_on_a_shared_worker(
     opted_in_config: Config,
     runtime_paths: RuntimePaths,
@@ -356,6 +383,7 @@ def test_opt_in_uses_the_callers_account_on_a_shared_worker(
     assert (status.connected, status.unavailable_reason, status.shared_worker_opt_in) == (True, None, True)
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_requester_scoped_status_on_a_private_worker_has_no_shared_worker_flags(
     opted_in_config: Config,
     runtime_paths: RuntimePaths,
@@ -375,15 +403,19 @@ def test_requester_scoped_provider_without_requester_has_no_token(
     runtime_paths: RuntimePaths,
     manager: CredentialsManager,
 ) -> None:
-    """A call without a requester has no GitHub connection to use, even when another requester has one."""
+    """A call without a requester has no GitHub connection to use, even when another requester has one.
+
+    Nor is there a store to allow one in, so the result offers nothing to connect or allow.
+    """
     connect_account(manager, account_store("@alice:example.org"), "alice-access")
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
 
     result = _resolve(opted_in_config, runtime_paths, manager, _broker_target(None, "shared"))
 
-    # Without a requester there is no one to bind a connect token to, so the link is the generic authorize page.
-    assert result == SecretMissing(provider="github", connect_url=f"{PUBLIC_URL}/api/oauth/github/authorize")
+    assert result == SecretMissing()
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_missing_connection_offers_a_connect_link(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -399,6 +431,7 @@ def test_missing_connection_offers_a_connect_link(
     assert "connect_token" not in repr(result)
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_repeated_misses_reuse_one_connect_link(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -423,6 +456,7 @@ def test_repeated_misses_reuse_one_connect_link(
     assert len(state["states"]) == 3
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_provider_without_client_config_offers_no_link(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -464,6 +498,7 @@ def test_unknown_provider_warns_once_naming_the_service(
     ]
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_expired_token_is_refreshed_through_the_lifecycle(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -484,6 +519,7 @@ def test_expired_token_is_refreshed_through_the_lifecycle(
     assert (stored["token"], stored["refresh_token"]) == ("rotated-access-token", "rotated-refresh-token")
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_concurrent_lookups_refresh_once(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -502,6 +538,7 @@ def test_concurrent_lookups_refresh_once(
     assert presented == [OAUTH_REFRESH_TOKEN]
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_revoked_grant_needs_reconnect_without_leaking(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -543,6 +580,7 @@ def _connect_timeout(request: httpx.Request) -> Exception:
     [httpx.Response(503, json={"error": "temporarily_unavailable"}), _connect_failure, _connect_timeout],
     ids=["provider-503", "network-error", "timeout"],
 )
+@pytest.mark.usefixtures("enable_reuse")
 def test_transient_refresh_failure_is_retryable_and_backs_off(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -583,6 +621,7 @@ def test_transient_refresh_failure_is_retryable_and_backs_off(
     assert load_oauth_credentials_snapshot_sync(_store_context(runtime_paths, manager, store)).credentials is not None
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_lookups_queued_behind_a_stalled_refresh_do_not_repeat_it(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -602,6 +641,7 @@ def test_lookups_queued_behind_a_stalled_refresh_do_not_repeat_it(
     assert presented == [OAUTH_REFRESH_TOKEN]
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_unreadable_connection_requires_reset(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -624,7 +664,7 @@ def test_unreadable_connection_requires_reset(
     assert (status.connected, status.reset_required) == (False, True)
 
 
-@pytest.mark.usefixtures("demo_registry")
+@pytest.mark.usefixtures("demo_registry", "enable_reuse")
 def test_agent_scoped_provider_follows_the_worker_scope(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -641,7 +681,7 @@ def test_agent_scoped_provider_follows_the_worker_scope(
     assert isinstance(private, SecretMissing)
 
 
-@pytest.mark.usefixtures("demo_registry")
+@pytest.mark.usefixtures("demo_registry", "enable_reuse")
 def test_agent_scoped_provider_on_a_shared_worker_is_not_gated(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -657,7 +697,7 @@ def test_agent_scoped_provider_on_a_shared_worker_is_not_gated(
     assert (status.unavailable_reason, status.shared_worker_opt_in) == (None, False)
 
 
-@pytest.mark.usefixtures("demo_registry")
+@pytest.mark.usefixtures("demo_registry", "enable_reuse")
 def test_shared_scope_connect_links_are_never_handed_out(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -690,7 +730,7 @@ def test_shared_scope_connect_links_are_never_handed_out(
     assert "connect_token=" in urlsplit(private.connect_url).query
 
 
-@pytest.mark.usefixtures("demo_registry")
+@pytest.mark.usefixtures("demo_registry", "enable_reuse")
 def test_scoped_worker_never_reads_the_unscoped_store(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -707,7 +747,7 @@ def test_scoped_worker_never_reads_the_unscoped_store(
     assert all(isinstance(result, SecretMissing) for result in results)
 
 
-@pytest.mark.usefixtures("demo_registry")
+@pytest.mark.usefixtures("demo_registry", "enable_reuse")
 def test_unscoped_worker_reads_the_store_its_tools_use(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -725,6 +765,7 @@ def test_unscoped_worker_reads_the_store_its_tools_use(
     assert result == Secret("unscoped-access")
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_status_reports_connection_without_refreshing(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -752,6 +793,7 @@ def test_status_reports_connection_without_refreshing(
         account_label="alice@example.org",
         can_connect=True,
         reset_required=False,
+        reuse_enabled=True,
     )
     assert bob == OAuthStatus(
         provider="github",
@@ -760,10 +802,12 @@ def test_status_reports_connection_without_refreshing(
         account_label=None,
         can_connect=True,
         reset_required=False,
+        reuse_enabled=True,
     )
     assert presented == []
 
 
+@pytest.mark.usefixtures("enable_reuse")
 def test_status_with_a_service_account_matches_what_the_broker_injects(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -783,3 +827,155 @@ def test_status_with_a_service_account_matches_what_the_broker_injects(
     assert (bob.service_account, bob.connected, bob.can_connect) == (True, False, False)
     assert _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org")) == Secret("alice-access")
     assert _resolve(config, runtime_paths, manager, _broker_target("@bob:example.org")) == SecretMissing()
+
+
+def test_display_read_of_a_scope_without_a_store_creates_none(
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """The egress pages read a scope that never stored a connection as not connected, and leave no store behind."""
+    store = account_store("@alice:example.org")
+    context = _store_context(runtime_paths, manager, store)
+
+    assert oauth_source.oauth_connection_for_display(context) == (False, None)
+    assert not _oauth_credential_database_path(context).exists()
+
+    connect_account(
+        manager,
+        store,
+        "alice-access",
+        _oauth_claims={"email": "alice@example.org"},
+        _oauth_claims_verified=True,
+    )
+    assert oauth_source.oauth_connection_for_display(context) == (True, "alice@example.org")
+
+
+def _never(*_args: object, **_kwargs: object) -> None:
+    pytest.fail("the broker must not read or refresh a connection Agent Keys may not use")
+
+
+@pytest.mark.usefixtures("demo_registry")
+@pytest.mark.parametrize(
+    ("provider", "target", "requester_owned"),
+    [
+        (github_oauth_provider(), _broker_target("@alice:example.org"), True),
+        (_DEMO, _broker_target("@alice:example.org", "shared"), False),
+    ],
+    ids=["requester-scoped", "agent-scoped"],
+)
+def test_without_an_opt_in_a_connection_is_never_read_refreshed_or_linked(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: OAuthProvider,
+    target: ResolvedWorkerTarget,
+    requester_owned: bool,
+) -> None:
+    """A connected account serves only its tools until someone allows Agent Keys to use it for the service.
+
+    The broker neither reads nor refreshes it, not even for the status that placeholders and the agent tool read, and
+    hands out no connect link; the result names the provider and says whether the account is the requester's own, so
+    the refusal can say who may allow it.
+    """
+    connect_account(
+        manager,
+        _store_context(runtime_paths, manager, target, provider).worker_target,
+        "stale",
+        expires_at=1.0,
+    )
+    presented = serve_token_endpoint(monkeypatch, [])
+    monkeypatch.setattr(oauth_source, "refresh_oauth_credentials_blocking", _never)
+    monkeypatch.setattr(oauth_source, "load_oauth_credentials_snapshot_sync", _never)
+
+    result = _resolve(config, runtime_paths, manager, target, provider_id=provider.id)
+    status = _status(config, runtime_paths, manager, target, provider_id=provider.id)
+
+    assert result == SecretMissing(provider=provider.id, reuse_off=True, requester_owned=requester_owned)
+    assert presented == []
+    assert status is not None
+    assert (status.connected, status.account_label, status.reuse_enabled) == (False, None, False)
+
+
+def test_an_opt_in_for_another_provider_counts_as_off(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """An opt-in names the provider it was given for, so changing a service's `oauth_provider` turns it off."""
+    alice = _broker_target("@alice:example.org")
+    connect_account(manager, account_store("@alice:example.org"), "alice-access")
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"), provider=_DEMO)
+
+    result = _resolve(config, runtime_paths, manager, alice)
+    status = _status(config, runtime_paths, manager, alice)
+
+    assert result == SecretMissing(provider="github", reuse_off=True, requester_owned=True)
+    assert status is not None
+    assert (status.connected, status.reuse_enabled) == (False, False)
+
+
+def test_one_requesters_opt_in_never_unlocks_anothers_account(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """Alice allowing her GitHub account leaves Bob's connected account to his tools only."""
+    connect_account(manager, account_store("@alice:example.org"), "alice-access")
+    connect_account(manager, account_store("@bob:example.org"), "bob-access")
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
+
+    alice = _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org"))
+    bob = _resolve(config, runtime_paths, manager, _broker_target("@bob:example.org"))
+
+    assert alice == Secret("alice-access")
+    assert bob == SecretMissing(provider="github", reuse_off=True, requester_owned=True)
+
+
+def test_a_requester_scoped_opt_in_lives_in_the_requesters_store_and_covers_their_agents(
+    opted_in_config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """Allowing GitHub from one agent writes the requester's own store, where the connection lives.
+
+    So it covers every agent of theirs with a service of that name, a shared one that opts in included.
+    """
+    connect_account(manager, account_store("@alice:example.org"), "alice-access")
+    allow_oauth_reuse(manager, runtime_paths, worker_target(agent_name="code"))
+
+    stored = load_egress_document(manager, account_store("@alice:example.org"), OAUTH_REUSE_CREDENTIAL_SERVICE)
+    other_agent = WorkerClaims.from_worker_target(worker_target(agent_name="docs"))
+    assert other_agent is not None
+    on_other_agent = _resolve(opted_in_config, runtime_paths, manager, other_agent.to_worker_target())
+    on_shared_agent = _resolve(opted_in_config, runtime_paths, manager, _broker_target("@alice:example.org", "shared"))
+
+    assert stored is not None
+    assert stored["services"]["github"]["provider"] == "github"
+    assert stored["services"]["github"]["enabled_by"] == "@alice:example.org"
+    assert on_other_agent == on_shared_agent == Secret("alice-access")
+
+
+def test_status_says_whether_agent_keys_may_use_the_connection_and_revoking_stops_it(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """The status flag follows the opt-in, and removing the opt-in stops the token at once."""
+    alice = _broker_target("@alice:example.org")
+    connect_account(manager, account_store("@alice:example.org"), "alice-access")
+    context = broker_credential_context(github_oauth_provider(), config, runtime_paths, manager, alice)
+
+    before = _status(config, runtime_paths, manager, alice)
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org")
+    allowed = (_status(config, runtime_paths, manager, alice), _resolve(config, runtime_paths, manager, alice))
+    set_oauth_reuse(context, "github", "github", enabled=False, by="@alice:example.org")
+    revoked = _resolve(config, runtime_paths, manager, alice)
+
+    assert before is not None
+    assert (before.connected, before.reuse_enabled) == (False, False)
+    assert allowed[0] is not None
+    assert (allowed[0].connected, allowed[0].reuse_enabled) == (True, True)
+    assert allowed[1] == Secret("alice-access")
+    assert revoked == SecretMissing(provider="github", reuse_off=True, requester_owned=True)
+    assert load_egress_document(manager, account_store("@alice:example.org"), OAUTH_REUSE_CREDENTIAL_SERVICE) is None

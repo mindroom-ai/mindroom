@@ -59,6 +59,7 @@ _MAX_OTHER_THREAD_STACK_CHARACTERS = 1_000
 _STACK_TRUNCATION_MARKER = "\n...\n"
 _GC_REPORT_THRESHOLD_SECONDS = 0.05
 _MAX_GC_RECORDS = 128
+_GIL_SWITCH_INTERVAL_SECONDS = 0.001
 
 
 def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
@@ -473,6 +474,22 @@ class EventLoopStallDetector:
                 self._note_stall_ended(last_beat)
             if now - last_beat > self.threshold_seconds:
                 self._note_stalled(now, heartbeat)
+
+
+def shorten_gil_switch_interval() -> None:
+    """Set CPython's GIL switch interval to 1 ms instead of the default 5 ms.
+
+    The loop releases the GIL around every SQLite statement, socket write and
+    selector poll. While worker threads run Python, the loop usually waits about
+    a switch interval to get it back, so a callback with tens of such calls
+    stalled for hundreds of milliseconds. A shorter interval makes those waits
+    shorter; it does not help while another thread is inside one long C call.
+    The 2026-09-07 startup trial in ``docs/dev/2026-09-07-ledger-write-ownership.md``
+    showed no startup improvement; this setting targets event-loop heartbeat
+    latency under sustained CPU contention from worker threads, where it improves.
+    """
+    sys.setswitchinterval(_GIL_SWITCH_INTERVAL_SECONDS)
+    logger.info("gil_switch_interval_set", interval_seconds=_GIL_SWITCH_INTERVAL_SECONDS)
 
 
 def _nearest_rank_percentile(samples: list[float], percentile: int) -> float:

@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_SIMILAR_MEMORY_LIMIT = 3
+
 
 def _memory_result_lines(results: list[MemoryResult]) -> list[str]:
     lines = [f"Found {len(results)} memory(ies):"]
@@ -121,14 +123,17 @@ class MemoryTools(Toolkit):
 
         Use this when explicitly asked to remember something, or when you
         encounter important information worth retaining for future conversations.
+        To correct something already stored, use update_memory on that entry instead of adding a new one.
 
         Args:
             content: The fact or information to memorize.
 
         Returns:
-            Confirmation message.
+            Confirmation message, followed by similar existing memories when there are any.
 
         """
+        # Look up before storing, so the new entry cannot list itself as similar.
+        similar = await self._similar_memories(content)
         try:
             await add_agent_memory(
                 content,
@@ -142,8 +147,34 @@ class MemoryTools(Toolkit):
         except Exception as e:
             detail = _memory_tool_failure(e, action="add", agent=self._agent_name)
             return f"Failed to store memory: {detail}"
-        else:
+        if not similar:
             return f"Memorized: {content}"
+        lines = [f"Memorized: {content}", "", "Similar existing memories:"]
+        for i, mem in enumerate(similar, 1):
+            lines.append(f"{i}. [id={mem.get('id', '?')}] {mem.get('memory', '')}")
+        lines.append(
+            "If the new memory corrects one of these, rewrite that entry with update_memory, "
+            "keeping its other details, so no stored memory contradicts the correction.",
+        )
+        return "\n".join(lines)
+
+    async def _similar_memories(self, content: str) -> list[MemoryResult]:
+        """Return a few existing memories related to ``content``; a failed lookup returns none."""
+        try:
+            outcome = await search_agent_memories(
+                content,
+                self._agent_name,
+                self._storage_path,
+                self._config,
+                self._runtime_paths,
+                limit=_SIMILAR_MEMORY_LIMIT,
+                execution_identity=self._execution_identity,
+                editable=True,
+            )
+        except Exception as e:
+            _memory_tool_failure(e, action="find similar", agent=self._agent_name)
+            return []
+        return outcome.results
 
     async def search_memories(self, query: str, limit: int = 5) -> str:
         """Search your memories for information relevant to a query.

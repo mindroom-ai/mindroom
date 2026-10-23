@@ -512,10 +512,7 @@ export function ToolConfigPanel({
                   {field.label}
                 </Label>
                 {isEnabled && (
-                  <Badge
-                    variant="outline"
-                    className="text-[10px] uppercase tracking-wide"
-                  >
+                  <Badge variant="outline" className="text-[11px]">
                     Overridden
                   </Badge>
                 )}

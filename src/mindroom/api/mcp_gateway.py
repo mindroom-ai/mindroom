@@ -78,11 +78,7 @@ async def _check_search_access(
 
 
 def _enabled(paths: RuntimePaths) -> bool:
-    return (
-        paths.env_flag("MINDROOM_MCP_GATEWAY_ENABLED", default=False)
-        and paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED", default=False)
-        and paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT", default=False)
-    )
+    return paths.env_flag("MINDROOM_MCP_GATEWAY_ENABLED", default=False)
 
 
 def _browser_origins(paths: RuntimePaths) -> tuple[str, ...]:

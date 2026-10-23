@@ -44,7 +44,7 @@ spec:
             port:
               number: 8765
 
-  # Matrix/Synapse Server
+  # Matrix homeserver
   - host: {{ .Values.customer }}.matrix.{{ .Values.baseDomain }}
     http:
       paths:
@@ -52,6 +52,6 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: synapse-{{ .Values.customer }}
+            name: tuwunel-{{ .Values.customer }}
             port:
               number: 8008

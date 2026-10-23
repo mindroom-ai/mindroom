@@ -14,6 +14,8 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from mindroom import redaction
+from mindroom.egress_broker.env import broker_execution_env
+from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 from mindroom.redaction import (
     REDACTED,
     REDACTION_FAILED,
@@ -126,6 +128,43 @@ def test_redact_sensitive_text_redacts_microsoft_graph_share_ids() -> None:
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "Agent Keys adds the user's API key or connected account on the wire.",
+        "Services have neither an API key nor a connected account.",
+        "An API key wins over a connected account.",
+        "Your API keys are expiring soon: 1 API key for Acme.",
+        "Send a bearer token with each request, as bearer tokens expire.",
+        "permissions:\n  contents: read\n  id-token: write",
+        "permissions:\n  id-token: write  # federate the OIDC token",
+        "Never give that job `id-token: write`, since any ref could run it.",
+    ],
+)
+def test_redact_sensitive_text_keeps_prose_about_credentials(text: str) -> None:
+    """Docs and tool results that talk about API keys keep their words, as Matrix shows them in tool previews."""
+    assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("API key: hunter", f"API key: {REDACTED}"),
+        ("Invalid API key hunter", f"Invalid API key {REDACTED}"),
+        ("Authorization header Bearer hunter", f"Authorization header Bearer {REDACTED}"),
+        ("Authorization: Bearer hunter", f"Authorization: Bearer {REDACTED}"),
+        ("API key AbCdEfGhIjKlMnOp", f"API key {REDACTED}"),
+        ("Bearer abcdefghIJKLmnop", f"Bearer {REDACTED}"),
+        ("id-token: eyJhbGciOiJSUzI1NiJ9.e30.c2ln", f"id-token: {REDACTED}"),
+        ("id-token: writeAbCdEf", f"id-token: {REDACTED}"),
+        ("id_token=read eyJhbGciOiJSUzI1NiJ9.e30.c2ln", f"id_token={REDACTED}"),
+    ],
+)
+def test_redact_sensitive_text_still_hides_credentials_spelled_like_words(text: str, expected: str) -> None:
+    """A labeled value, an Authorization header, or a mixed-case run is a credential even without digits."""
+    assert redact_sensitive_text(text) == expected
+
+
+@pytest.mark.parametrize(
     "dsn",
     [
         "postgresql://journal_user:hunter2@db.example:5432/journal",
@@ -160,7 +199,37 @@ def test_url_redaction_preserves_text_before_a_credential_bearing_scheme(prefix:
     """A URL can follow digits or punctuation without losing its credential protection."""
     value = f"{prefix}{scheme}://user:hunter2@example.test/path"
 
-    assert redact_sensitive_text(value) == f"{prefix}{scheme}://user:***@example.test/path"
+    assert redact_sensitive_text(value) == f"{prefix}{scheme}://***@example.test/path"
+
+
+def test_printed_proxy_settings_hide_the_token_in_the_proxy_user_name() -> None:
+    """Worker proxies carry their token as the proxy URL user name, so printing the proxy settings must not show it."""
+    broker_token = _minted_broker_token()
+    vault_token = _fake_token("", 32)
+    broker_env = broker_execution_env(
+        broker_url="http://broker:8768",
+        token=broker_token,
+        ca_pem="",
+        placeholder_env={},
+        extra_no_proxy_hosts=[],
+    )
+    printed = [
+        *(f"{key}={value}" for key, value in broker_env.items()),
+        f"HTTPS_PROXY=http://{vault_token}:vault@proxy:8080",
+        f"* Proxy auth using Basic with user '{broker_token}'",
+    ]
+
+    redacted = redact_sensitive_text("\n".join(printed))
+
+    assert broker_token not in redacted
+    assert vault_token not in redacted
+    assert "HTTPS_PROXY=http://***@broker:8768" in redacted
+
+
+@pytest.mark.parametrize("name", ["mrb1.example.com", "mrb1.tar.gz", "mrb1.2.3"])
+def test_dotted_names_that_start_like_a_broker_token_stay_visible(name: str) -> None:
+    """Only the broker's real token shape is hidden, not a host, file, or version that starts with `mrb1.`."""
+    assert redact_sensitive_text(f"fetch {name} now") == f"fetch {name} now"
 
 
 @pytest.mark.parametrize("run", ["x" * 64_000, "9x" * 32_000], ids=["letters", "mixed"])
@@ -1064,6 +1133,20 @@ def _fake_token(prefix: str, length: int) -> str:
     return prefix + "".join(("A", "b", "3", "Z")[index % 4] for index in range(length))
 
 
+def _minted_broker_token() -> str:
+    claims = WorkerClaims(
+        worker_key="worker-alice-code",
+        worker_scope="user_agent",
+        routing_agent_name="code",
+        tenant_id=None,
+        account_id=None,
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+    )
+    return TokenSigner(b"k" * 32).mint(claims, now=0)
+
+
 def _fake_jwt() -> str:
     return ".".join([_fake_token("eyJ", 12), _fake_token("eyJ", 16), _fake_token("s", 10)])
 
@@ -1103,6 +1186,7 @@ def test_review_copy_numbers_each_distinct_token() -> None:
         _fake_token("github_pat_", 40),
         _fake_token("AIza", 35),
         _fake_jwt(),
+        _minted_broker_token(),
     ],
 )
 def test_review_copy_hides_known_token_formats(token: str) -> None:

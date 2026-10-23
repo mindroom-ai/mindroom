@@ -280,9 +280,15 @@ export interface Team {
   max_tool_calls_per_turn?: number | null; // Max tool calls one turn may execute
 }
 
-export type TeamConfig = Omit<Team, "id" | "rooms"> & {
-  rooms?: string[];
-};
+// Authored agents and teams may omit these fields; the store fills them in on load.
+type AgentDefaultedField = "tools" | "skills" | "instructions" | "rooms";
+type TeamDefaultedField = "rooms" | "mode";
+
+export type AgentConfig = Omit<Agent, "id" | AgentDefaultedField> &
+  Partial<Pick<Agent, AgentDefaultedField>>;
+
+export type TeamConfig = Omit<Team, "id" | TeamDefaultedField> &
+  Partial<Pick<Team, TeamDefaultedField>>;
 
 export interface Room {
   id: string; // Room identifier
@@ -336,7 +342,7 @@ export interface Config {
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
   models: Record<string, ModelConfig>;
-  agents: Record<string, Omit<Agent, "id">>;
+  agents: Record<string, AgentConfig>;
   defaults?: {
     markdown: boolean;
     learning?: boolean;

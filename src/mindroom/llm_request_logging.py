@@ -116,9 +116,12 @@ def _model_params(model: Model) -> dict[str, _JSONValue]:
 
 def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # One write per record: with a separate newline write, a large record reaches the file in more than one
+    # write(2) (text chunks of about 8 KiB before Python 3.14, the 128 KiB buffer on 3.14), so another model call's
+    # record could land between them on the same line. Each record gets its own O_APPEND handle, and on a local
+    # file system the kernel appends each write(2) whole, so one write per record keeps every record on its own line.
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(redact_sensitive_data(payload)))
-        handle.write("\n")
+        handle.write(json.dumps(redact_sensitive_data(payload)) + "\n")
 
 
 def _json_safe(value: object) -> _JSONValue:
@@ -329,30 +332,39 @@ async def _write_llm_request_log(
     agent_name: str,
     messages: Sequence[Message],
     tools: list[dict[str, _JSONValue]] | None,
+    tools_are_json_safe: bool,
     log_path: Path,
     request_context: dict[str, _JSONValue] | None = None,
     request_log_id: str,
 ) -> None:
-    """Persist one request record for an LLM invocation."""
+    """Persist one request record for an LLM invocation.
+
+    Serializing the whole conversation and tool schemas takes long enough to stall
+    the event loop, so the record is built in the worker thread that writes it.
+    The calling model request waits for the write, so nothing edits its messages meanwhile.
+    """
     now = datetime.now().astimezone()
     resolved_request_context = request_context if request_context is not None else _snapshot_request_log_context()
-    await asyncio.to_thread(
-        _write_jsonl_line,
-        log_path,
-        {
-            "timestamp": now.isoformat(),
-            "request_log_id": request_log_id,
-            "agent_id": agent_name,
-            **resolved_request_context,
-            "model_id": model.id,
-            "system_prompt": _system_prompt(messages, model),
-            "messages": _request_message_payloads(messages),
-            "message_count": len(messages),
-            "tools": _json_safe(tools),
-            "tool_count": len(tools or []),
-            "model_params": model_params_payload(model),
-        },
-    )
+
+    def write() -> None:
+        _write_jsonl_line(
+            log_path,
+            {
+                "timestamp": now.isoformat(),
+                "request_log_id": request_log_id,
+                "agent_id": agent_name,
+                **resolved_request_context,
+                "model_id": model.id,
+                "system_prompt": _system_prompt(messages, model),
+                "messages": cast("list[_JSONValue]", _request_message_payloads(messages)),
+                "message_count": len(messages),
+                "tools": cast("list[_JSONValue] | None", tools) if tools_are_json_safe else _json_safe(tools),
+                "tool_count": len(tools or []),
+                "model_params": model_params_payload(model),
+            },
+        )
+
+    await asyncio.to_thread(write)
 
 
 def _usage_payload(usage: MessageMetrics) -> dict[str, _JSONValue]:
@@ -491,6 +503,8 @@ async def _write_llm_request_log_if_present(
         agent_name=agent_name,
         messages=messages,
         tools=(wire_tools_capture.tools if wire_tools_capture.observed else _request_tools(kwargs.get("tools"))),
+        # Recorded wire tools were already normalized when the provider built the request.
+        tools_are_json_safe=wire_tools_capture.observed,
         log_path=request_log_ref.log_path,
         request_context=request_context,
         request_log_id=request_log_ref.request_log_id,

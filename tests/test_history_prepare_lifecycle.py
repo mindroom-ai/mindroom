@@ -25,7 +25,7 @@ from mindroom.execution_preparation import (
     prepare_agent_execution_context,
     prepare_bound_team_run_context,
 )
-from mindroom.history.replay import _summary_tokens, estimate_prompt_visible_history_tokens
+from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     prepare_bound_scope_history,
@@ -54,6 +54,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
 )
+from mindroom.native_compaction import NativeCompactionModel
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
 from tests.conftest import (
@@ -813,14 +814,107 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     assert len(folded_run_ids(storage)) == 3
 
 
+class _NativeFakeModel(NativeCompactionModel, FakeModel):
+    """A fake model on a route that supports native provider compaction."""
+
+    def native_compaction_supported(self) -> bool:
+        return True
+
+    def native_compaction_endpoint(self) -> str:
+        return "test-endpoint"
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("allow_native_compaction", [True, False])
-async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_compaction_is_disallowed(
+async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_alone_exceeds_the_trigger(
+    tmp_path: Path,
+) -> None:
+    """Compacting cannot bring history under the trigger when the summary alone exceeds it.
+
+    Otherwise every short reply on a text-only route would pay to rewrite the same summary.
+    """
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    summary = SessionSummary(summary="critical work detail " * 500, updated_at=datetime.now(UTC))
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    summary_tokens = estimate_summary_tokens(_session("session-1", runs=[], summary=summary))
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-0",
+                messages=[Message(role="user", content="thanks"), Message(role="assistant", content="you are welcome")],
+            ),
+        ],
+        summary=summary,
+    )
+    seed_session(storage, session)
+    # A summary exactly at the trigger already leaves no room for anything compaction keeps.
+    trigger_budget = summary_tokens
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_enabled=True,
+        text_compaction_available=True,
+        explicit_compaction_model=False,
+        compaction_model_name="summary-model",
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=trigger_budget,
+        reserve_tokens=0,
+        static_prompt_tokens=0,
+        replay_budget_tokens=trigger_budget,
+        hard_replay_budget_tokens=summary_tokens * 4,
+        summary_input_budget_tokens=50_000,
+        compaction_timeout_seconds=600.0,
+    )
+    agent = _agent(db=storage)
+    resolved_inputs = replace(
+        resolve_agent_preparation_inputs(agent=agent, agent_name="test_agent", config=config, static_prompt_tokens=0),
+        history_settings=_ALL_HISTORY_SETTINGS,
+        execution_plan=execution_plan,
+    )
+    summary_mock = AsyncMock(return_value=summary)
+    with (
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
+    ):
+        prepared = await prepare_scope_history(
+            compaction_lifecycle=RecordingCompactionLifecycle(),
+            agent=agent,
+            agent_name="test_agent",
+            resolved_inputs=resolved_inputs,
+            non_prompt_tokens=0,
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+        )
+
+    assert prepared.compaction_decision.mode == "none"
+    assert prepared.compaction_decision.reason == "trigger_unreachable"
+    summary_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("native_model", "allow_native_compaction"),
+    [(True, True), (True, False), (False, True)],
+    ids=["native-route", "native-disallowed", "text-only-route"],
+)
+async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native_route(
     tmp_path: Path,
     *,
+    native_model: bool,
     allow_native_compaction: bool,
 ) -> None:
-    """A scheduled run with a history limit cannot rely on native compaction above the trigger budget."""
+    """Above the trigger budget only an active native route may leave history uncompacted.
+
+    A scheduled run with a history limit disallows native compaction, and a text-only route (OpenRouter, Gemini, a
+    local model) never had it; neither has anything that compacts between the trigger and hard budgets.
+    """
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -852,7 +946,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,
         text_compaction_available=True,
-        explicit_compaction_model=True,
+        explicit_compaction_model=False,
         compaction_model_name="summary-model",
         replay_window_tokens=64_000,
         trigger_threshold_tokens=trigger_budget,
@@ -863,7 +957,8 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
         summary_input_budget_tokens=50_000,
         compaction_timeout_seconds=600.0,
     )
-    agent = _agent(db=storage)
+    model = _NativeFakeModel(id="fake-model", provider="fake") if native_model else None
+    agent = _agent(db=storage, model=model)
     resolved_inputs = replace(
         resolve_agent_preparation_inputs(agent=agent, agent_name="test_agent", config=config, static_prompt_tokens=0),
         history_settings=_ALL_HISTORY_SETTINGS,
@@ -892,7 +987,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
-    if allow_native_compaction:
+    if native_model and allow_native_compaction:
         assert prepared.compaction_decision.mode == "none"
         assert prepared.compaction_decision.reason == "within_hard_budget"
         assert prepared.compaction_reply_outcome == "none"
@@ -1041,7 +1136,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     outcome = completed_outcome(lifecycle)
     assert outcome.compacted_run_count == 23
     assert outcome.runs_after == 0
-    summary_only_tokens = _summary_tokens(persisted)
+    summary_only_tokens = estimate_summary_tokens(persisted)
     assert outcome.after_tokens == summary_only_tokens
     assert outcome.after_tokens < replay_budget
     assert folded_run_ids(storage) == [f"run-{index:02}" for index in range(1, 24)]

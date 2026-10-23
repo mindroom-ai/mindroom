@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 import jwt
@@ -18,18 +18,19 @@ from aioresponses import aioresponses
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from mindroom.api import config_lifecycle, main, oauth
+from mindroom.api import config_lifecycle, connections, main, oauth
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.matrix.state import MatrixState
+from mindroom.oauth import credential_lifecycle
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.api.test_api import (
-    _trusted_upstream_jwks,
-    _trusted_upstream_jwt,
-    _trusted_upstream_jwt_key,
-    _trusted_upstream_strict_jwt_env,
+from tests.api.conftest import (
+    trusted_upstream_env,
+    trusted_upstream_jwks,
+    trusted_upstream_jwt,
+    trusted_upstream_jwt_key,
 )
 from tests.api.test_oauth_api import (
     _fake_provider,
@@ -49,14 +50,14 @@ if TYPE_CHECKING:
 @pytest.fixture
 def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
     """Serve the real API with signed users and one private agent."""
-    key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
+    key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(key))
     monkeypatch.setattr(
         "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
     )
     env = {
-        **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
+        **trusted_upstream_env(),
         "MINDROOM_CONNECTIONS_AGENT": "personal",
         "MINDROOM_PUBLIC_URL": "https://portal.example.org",
         "MATRIX_HOMESERVER": "http://localhost:8008",
@@ -88,8 +89,7 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
     )
     headers = {
         name: {
-            "X-Trusted-User": name,
-            "X-Trusted-Jwt": _trusted_upstream_jwt(
+            "X-Trusted-Jwt": trusted_upstream_jwt(
                 key,
                 user_id=name,
                 email=f"{name}@example.org",
@@ -331,8 +331,21 @@ def test_me_returns_identity_and_admin_flag(portal: dict[str, Any], user: str, i
         "email": f"{user}@example.org",
         "is_administrator": is_administrator,
         "egress_enabled": False,
+        "dashboard_url": "/",
     }
     assert "no-store" in response.headers["cache-control"]
+
+
+def test_me_links_the_dashboard_on_its_own_host(portal: dict[str, Any]) -> None:
+    """With `MINDROOM_DASHBOARD_URL` set, the Connections pages send administrators to that host."""
+    snapshot = config_lifecycle.require_api_state(main.app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={**snapshot.runtime_paths.process_env, "MINDROOM_DASHBOARD_URL": "https://Admin.example.org/"},
+    )
+    response = portal["client"].get("/api/connections/me", headers=portal["headers"]["admin"])
+    assert response.status_code == 200, response.text
+    assert response.json()["dashboard_url"] == "https://admin.example.org/"
 
 
 @pytest.mark.parametrize(
@@ -1027,22 +1040,55 @@ def _connect_account(portal: dict[str, Any], user: str, agent: str) -> None:
     assert callback.status_code in {302, 303, 307}, callback.text
 
 
-def _catalog_services(portal: dict[str, Any], user: str) -> dict[str, dict[str, Any]]:
-    response = portal["client"].get("/api/connections", headers=portal["headers"][user])
+def _agent_state(portal: dict[str, Any], user: str, agent: str) -> dict[str, Any]:
+    response = portal["client"].get(f"/api/connections/agents/{agent}/state", headers=portal["headers"][user])
     assert response.status_code == 200, response.text
-    return {agent["agent_name"]: agent["services"][0] for agent in response.json()["agents"]}
+    assert "no-store" in response.headers["cache-control"]
+    return response.json()
 
 
-def test_catalog_says_whether_each_service_is_connected_for_the_viewer(portal: dict[str, Any]) -> None:
-    """The catalog carries the connected flag the expanded row would show, without refreshing any token."""
-    refresh = AsyncMock(side_effect=AssertionError("The catalog must not refresh tokens"))
+def _connected(portal: dict[str, Any], user: str, agent: str, provider: str = "google_drive") -> bool:
+    return _agent_state(portal, user, agent)["connected"][provider]
+
+
+def _sqlite_stores(portal: dict[str, Any]) -> list[Path]:
+    return sorted(portal["paths"].storage_root.rglob("*.sqlite3"))
+
+
+def test_catalog_reads_no_connection_state(portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """The catalog lists agents, services and tools without opening any credential store or Agent Keys state."""
+    _enable_egress_broker(portal)
+    _connect_account(portal, "alice", "personal")
+    store_read = Mock(side_effect=AssertionError("The catalog must not open a credential store"))
+    monkeypatch.setattr(credential_lifecycle, "oauth_credential_reader", store_read)
+    monkeypatch.setattr(credential_lifecycle, "oauth_credential_transaction", store_read)
+    egress_read = AsyncMock(side_effect=AssertionError("The catalog must not read Agent Keys rows"))
+    monkeypatch.setattr(connections, "egress_services_for_agent", egress_read)
+
+    response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+
+    assert response.status_code == 200, response.text
+    agent = response.json()["agents"][0]
+    assert [service["provider"] for service in agent["services"]] == ["google_drive"]
+    assert "connected" not in agent["services"][0]
+    assert "egress_services" not in agent
+    store_read.assert_not_called()
+    egress_read.assert_not_called()
+
+
+def test_state_says_whether_each_service_is_connected_for_the_viewer(portal: dict[str, Any]) -> None:
+    """An agent's state carries the connected flag the expanded row would show, without refreshing any token."""
+    refresh = AsyncMock(side_effect=AssertionError("The state must not refresh tokens"))
     with patch.object(oauth, "refresh_oauth_credentials", refresh):
-        assert _catalog_services(portal, "alice")["personal"]["connected"] is False
+        assert _agent_state(portal, "alice", "personal") == {
+            "connected": {"google_drive": False},
+            "egress_services": None,
+        }
     _connect_account(portal, "alice", "personal")
     with patch.object(oauth, "refresh_oauth_credentials", refresh):
-        assert _catalog_services(portal, "alice")["personal"]["connected"] is True
+        assert _connected(portal, "alice", "personal") is True
         # A private agent's account belongs to the user who connected it.
-        assert _catalog_services(portal, "bob")["personal"]["connected"] is False
+        assert _connected(portal, "bob", "personal") is False
     refresh.assert_not_called()
     status = portal["client"].get(
         "/api/connections/agents/personal/google_drive/status",
@@ -1051,7 +1097,7 @@ def test_catalog_says_whether_each_service_is_connected_for_the_viewer(portal: d
     assert status.json()["connected"] is True
 
 
-def test_catalog_never_bootstraps_an_oauth_client_to_read_connected_state(
+def test_state_never_bootstraps_an_oauth_client_to_read_connected_state(
     portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1069,40 +1115,101 @@ def test_catalog_never_bootstraps_an_oauth_client_to_read_connected_state(
     get_runtime_credentials_manager(portal["paths"]).delete_credentials("test_drive_oauth_client")
 
     for user in ("alice", "bob"):
-        assert _catalog_services(portal, user)["personal"]["connected"] is False
+        assert _connected(portal, user, "personal") is False
 
     assert bootstrapped == []
 
 
-def test_catalog_shows_a_shared_account_as_connected_to_managers_and_to_users(shared_portal: dict[str, Any]) -> None:
+def test_state_shows_a_shared_account_as_connected_to_managers_and_to_users(shared_portal: dict[str, Any]) -> None:
     """Everyone who uses a shared agent sees its connection, whether or not they may change it."""
     shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
     _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
     _use_runtime_auth_settings(main.app)
     for user in ("alice", "bob"):
-        assert _catalog_services(shared_portal, user)["research"]["connected"] is False
+        assert _connected(shared_portal, user, "research") is False
     _connect_account(shared_portal, "alice", "research")
-    alice, bob = _catalog_services(shared_portal, "alice"), _catalog_services(shared_portal, "bob")
-    assert (alice["research"]["can_manage"], alice["research"]["connected"]) == (True, True)
-    assert (bob["research"]["can_manage"], bob["research"]["connected"]) == (False, True)
+    # Bob cannot change the account (the catalog says so), but he sees it connected.
+    assert _connected(shared_portal, "alice", "research") is True
+    assert _connected(shared_portal, "bob", "research") is True
     # Another shared agent has its own connection.
-    assert alice["personal"]["connected"] is False
+    assert _connected(shared_portal, "alice", "personal") is False
 
 
-def test_catalog_survives_a_service_whose_state_cannot_be_read(
+def test_state_survives_a_service_whose_state_cannot_be_read(
     portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One unreadable connection shows as not connected and neither fails the catalog nor leaks the error."""
-    monkeypatch.setattr(
-        oauth,
-        "authenticated_connection_status",
-        AsyncMock(side_effect=HTTPException(503, "internal-client-secret")),
-    )
-    response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+    """One unreadable connection shows as not connected and fails neither the agent's other services nor its state."""
+    portal["payload"]["mcp_servers"] = {
+        "wiki": {
+            "transport": "streamable-http",
+            "url": "https://mcp.example.test/mcp",
+            "auth": {
+                "type": "oauth",
+                "discovery": "manual",
+                "authorization_url": "https://auth.example.test/authorize",
+                "token_url": "https://auth.example.test/token",
+            },
+        },
+    }
+    portal["payload"]["agents"]["personal"]["tools"].append("mcp_wiki")
+    _publish_config(main.app, portal["paths"], portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    _connect_account(portal, "alice", "personal")
+    real = oauth.authenticated_connection_status
+
+    async def fails_for_wiki(provider_id: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if provider_id != "google_drive":
+            raise HTTPException(503, "internal-client-secret")
+        return await real(provider_id, *args, **kwargs)
+
+    monkeypatch.setattr(oauth, "authenticated_connection_status", fails_for_wiki)
+    response = portal["client"].get("/api/connections/agents/personal/state", headers=portal["headers"]["alice"])
     assert response.status_code == 200, response.text
-    assert response.json()["agents"][0]["services"][0]["connected"] is False
+    connected = response.json()["connected"]
+    assert connected.pop("google_drive") is True
+    assert list(connected.values()) == [False]
     assert "internal-client-secret" not in response.text
+
+
+@pytest.mark.parametrize(("user", "agent"), [("bob", "research"), ("bob", "missing"), ("alice", "other_private")])
+def test_state_of_an_unlisted_agent_is_denied(shared_portal: dict[str, Any], user: str, agent: str) -> None:
+    """The state route lists only agents the catalog lists to the same user."""
+    response = shared_portal["client"].get(
+        f"/api/connections/agents/{agent}/state",
+        headers=shared_portal["headers"][user],
+    )
+    assert response.status_code == 404
+
+
+def test_reading_state_creates_no_credential_store(shared_portal: dict[str, Any]) -> None:
+    """Listing a connection that was never made leaves no store behind, and a made one still reads as connected."""
+    for user in ("alice", "bob", "admin"):
+        for agent in ("personal", "research", "support", "other_private"):
+            response = shared_portal["client"].get(
+                f"/api/connections/agents/{agent}/state",
+                headers=shared_portal["headers"][user],
+            )
+            assert response.status_code in {200, 404}, response.text
+    assert _sqlite_stores(shared_portal) == []
+
+    _connect_account(shared_portal, "alice", "research")
+    stores = _sqlite_stores(shared_portal)
+    assert len(stores) == 1
+    assert _connected(shared_portal, "alice", "research") is True
+    assert _connected(shared_portal, "alice", "personal") is False
+    assert _sqlite_stores(shared_portal) == stores
+
+
+def test_status_still_creates_the_store_it_reads(portal: dict[str, Any]) -> None:
+    """A card's own status read keeps preparing the scope's store, as connect and refresh expect."""
+    response = portal["client"].get(
+        "/api/connections/agents/personal/google_drive/status",
+        headers=portal["headers"]["alice"],
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["connected"] is False
+    assert len(_sqlite_stores(portal)) == 1
 
 
 def _catalog_managers(portal: dict[str, Any], user: str) -> dict[str, list[str]]:

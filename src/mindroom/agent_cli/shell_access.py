@@ -126,13 +126,6 @@ def _worker_problems(runtime_paths: RuntimePaths) -> list[str]:
             "Set `MINDROOM_API_KEY` to a long random secret, because minimal-mode worker shells can reach "
             "the MindRoom API; the dashboard then asks for this key.",
         )
-    if runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED") and not runtime_paths.env_flag(
-        "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT",
-    ):
-        problems.append(
-            "Set `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`, because worker shells could forge "
-            "trusted-upstream headers.",
-        )
     if runtime_paths.env_flag("OPENAI_COMPAT_ALLOW_UNAUTHENTICATED"):
         problems.append(
             "Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`, because worker shells could run agents through "

@@ -1215,6 +1215,7 @@ visibility = [
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.approval.tool_approval",
+    "mindroom.commands.auto_approve_commands",
     "mindroom.tool_jobs.approvals",
 ]
 
@@ -1323,11 +1324,24 @@ depends_on = [
     "mindroom.message_target",
     "mindroom.reply_lifecycle",
     "mindroom.approval.tool_approval",
+    "mindroom.approval.auto_approve_windows",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.events",
 ]
 visibility = ["mindroom.response_runner", "mindroom.tool_jobs.approvals", "mindroom.delegation.job_approvals"]
+
+[[modules]]
+path = "mindroom.approval.auto_approve_windows"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.durable_write",
+]
+visibility = [
+    "mindroom.approval.response",
+    "mindroom.commands.auto_approve_commands",
+    "mindroom.orchestration.script_runtime",
+]
 
 [[modules]]
 path = "mindroom.approval.inbound"
@@ -1339,6 +1353,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
+    "mindroom.commands.auto_approve_commands",
     "mindroom.reaction_dispatch",
 ]
 
@@ -1359,6 +1374,7 @@ visibility = [
     "mindroom.approval.response",
     "mindroom.approval.transport",
     "mindroom.bot",
+    "mindroom.commands.auto_approve_commands",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.orchestration.script_runtime",
@@ -1635,6 +1651,7 @@ path = "mindroom.api.egress_broker"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials_target",
+    "mindroom.api.dashboard_credential_scope",
     "mindroom.api.egress_status",
     "mindroom.api.oauth",
     "mindroom.egress_broker",
@@ -1847,6 +1864,7 @@ depends_on = [
     "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",
     "mindroom.oauth.service",
+    "mindroom.origins",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -2319,10 +2337,8 @@ depends_on = [
     "mindroom.custom_tools.chat_ui",
     "mindroom.logging_config",
     "mindroom.orchestration.computer_runtime",
-    "mindroom.runtime_env_policy",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.runtime_context",
-    "mindroom.worker_computer.sessions",
 ]
 visibility = ["mindroom.agents"]
 
@@ -2566,6 +2582,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.logging_config",
+    "mindroom.native_compaction",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
@@ -2617,6 +2634,7 @@ visibility = [
     "mindroom.providers.openai_response_replay",
     "mindroom.providers.vertex_claude_compat",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.compaction",
 ]
 
 [[modules]]
@@ -2931,6 +2949,7 @@ depends_on = [
     "mindroom.script_runs.store",
     "mindroom.script_runs.worker_client",
     "mindroom.approval.tool_approval",
+    "mindroom.approval.auto_approve_windows",
     "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.orchestrator"]
@@ -4521,6 +4540,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.orchestration.server_state",
     "mindroom.tool_jobs.client_cancel",
     "mindroom.model_catalog_receiver",
     "mindroom.tool_jobs.follow_ups",
@@ -4780,6 +4800,7 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
+    "mindroom.origins",
     "mindroom.api.auth",
     "mindroom.cli.api",
     "mindroom.cli.config_bundle",
@@ -4913,6 +4934,17 @@ depends_on = [
 visibility = ["mindroom.commands.handler"]
 
 [[modules]]
+path = "mindroom.commands.auto_approve_commands"
+depends_on = [
+    "mindroom.approval.inbound",
+    "mindroom.approval.manager",
+    "mindroom.approval.tool_approval",
+    "mindroom.approval.auto_approve_windows",
+    "mindroom.matrix.event_types",
+]
+visibility = ["mindroom.commands.handler"]
+
+[[modules]]
 path = "mindroom.commands.encryption_commands"
 depends_on = [
     "mindroom.matrix.client_room_admin",
@@ -4945,6 +4977,7 @@ depends_on = [
     "mindroom.commands.parsing",
     "mindroom.commands.room_model_commands",
     "mindroom.commands.thread_mode_commands",
+    "mindroom.commands.auto_approve_commands",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.handled_turns",
@@ -5276,6 +5309,7 @@ visibility = [
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
     "mindroom.tool_jobs.control",
+    "mindroom.tool_system.agno_compat_tool_arguments",
     "mindroom.tool_system.agno_compat_tool_hooks",
     "mindroom.tool_system.call_record",
     "mindroom.hooks",
@@ -6211,6 +6245,7 @@ expose = [
     "build_memory_prompt_parts",
     "conversation_entrypoint_preamble",
     "delete_agent_memory",
+    "entrypoint_withholds_lines",
     "get_agent_memory",
     "list_all_agent_memories",
     "read_scope_memory_files",
@@ -6873,6 +6908,7 @@ expose = [
     "load_oauth_reset_connection_generation",
     "oauth_account_label",
     "oauth_credential_generation",
+    "oauth_credential_store_exists",
     "oauth_credentials_have_required_scopes",
     "oauth_credentials_have_scopes",
     "oauth_credentials_match_client_id",
@@ -7789,6 +7825,16 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.server_state"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix.event_types",
+    "mindroom.matrix_openid",
+    "mindroom.orchestration.computer_runtime",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.orchestration.computer_runtime"
 depends_on = [
     "mindroom.authorization",
@@ -7901,6 +7947,15 @@ visibility = ["mindroom.tool_system.tool_hooks"]
 
 [[interfaces]]
 from = ["mindroom.tool_system.agno_compat_tool_hooks"]
+expose = ["install_patch"]
+
+[[modules]]
+path = "mindroom.tool_system.agno_compat_tool_arguments"
+depends_on = []
+visibility = ["mindroom.tool_system.tool_hooks"]
+
+[[interfaces]]
+from = ["mindroom.tool_system.agno_compat_tool_arguments"]
 expose = ["install_patch"]
 
 [[modules]]
