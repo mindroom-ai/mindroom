@@ -13,7 +13,7 @@ import asyncio
 import json
 from copy import deepcopy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
@@ -22,7 +22,7 @@ from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.tool_function import AdaptedToolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Sequence
+    from collections.abc import Callable, Coroutine, Sequence
 
     from mindroom.llm.runs import RunRecord, TeamRunRecord, ToolExecution
     from mindroom.teams.spec import TeamMember
@@ -35,13 +35,8 @@ NO_MEMBER_RESPONSE = "No response from the member agent."
 _COLLABORATE_MEMBER_RESULT = "Agent {name}: {result}"
 _COLLABORATE_BLANK_RESULT = "No Response"
 
-
-class MemberRunner(Protocol):
-    """Run one member on the leader's task and return its terminal record, whatever its status."""
-
-    def __call__(self, member: TeamMember, task: str) -> Coroutine[Any, Any, RunRecord]:
-        """Run ``member`` on ``task``."""
-        ...
+# Runs one member on the leader's task and returns its terminal record, whatever its status.
+type MemberRunner = Callable[[TeamMember, str], Coroutine[Any, Any, RunRecord]]
 
 
 def delegate_functions(
