@@ -393,7 +393,6 @@ def _build_agent_turn_callbacks(
     ) -> None:
         persist_interrupted_replay(
             scope_context=scope_context,
-            session_id=snapshot.session_id or session_id,
             run_id=snapshot.run_id,
             user_message=prompt,
             user_message_is_structured=current_prompt_is_structured,
@@ -401,7 +400,6 @@ def _build_agent_turn_callbacks(
             completed_tools=snapshot.completed_tools,
             interrupted_tools=snapshot.interrupted_tools,
             run_metadata=snapshot.run_metadata,
-            is_team=False,
             original_status=snapshot.original_status,
         )
 

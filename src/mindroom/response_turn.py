@@ -669,7 +669,6 @@ class EmptyRunDiscard:
 class StandaloneReplaySnapshot:
     """Interrupted-turn state persisted when no turn recorder is attached."""
 
-    session_id: str | None
     run_id: str
     partial_text: str
     completed_tools: list[ToolTraceEntry]
@@ -782,7 +781,6 @@ def _interrupted_run_metadata(
 
 
 def _persist_excluded_attempt_replay(
-    ctx: ResponseTurnContext,
     persist: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None],
     run: TurnRunState,
     resolution: ExcludedAttempt,
@@ -791,7 +789,6 @@ def _persist_excluded_attempt_replay(
     persist(
         run.scope_context,
         StandaloneReplaySnapshot(
-            session_id=resolution.session_id or ctx.session_id,
             run_id=resolution.run_id or str(uuid4()),
             partial_text=resolution.partial_text,
             completed_tools=run.turn_state.completed_tools_for(resolution.completed_tools),
@@ -839,7 +836,6 @@ def _record_turn_excluded_fallback(
     persist(
         run.scope_context,
         StandaloneReplaySnapshot(
-            session_id=ctx.session_id,
             run_id=(snapshot.attempt_run_id or ctx.run_id) or str(uuid4()),
             partial_text=snapshot.assistant_text,
             completed_tools=run.turn_state.completed_tools_for(snapshot.completed_tools),
@@ -1138,7 +1134,6 @@ def _settle_blocking_attempt(
         )
         if sinks.turn_recorder is None and adapter.persist_standalone_replay is not None:
             _persist_excluded_attempt_replay(
-                ctx,
                 adapter.persist_standalone_replay,
                 run,
                 resolution,
@@ -1397,7 +1392,6 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         _publish_run_metadata(sinks, resolution.metadata_content)
                         if sinks.turn_recorder is None and adapter.persist_standalone_replay is not None:
                             _persist_excluded_attempt_replay(
-                                ctx,
                                 adapter.persist_standalone_replay,
                                 run,
                                 resolution,

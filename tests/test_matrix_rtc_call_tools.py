@@ -849,7 +849,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
-        lambda **_kwargs: nullcontext(SimpleNamespace()),
+        lambda **kwargs: nullcontext(SimpleNamespace(session_id=kwargs["session_id"])),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
@@ -944,8 +944,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert persisted_interruptions == (
         [
             {
-                "scope_context": SimpleNamespace(),
-                "session_id": "!room:example.org:call:one",
+                "scope_context": SimpleNamespace(session_id="!room:example.org:call:one"),
                 "run_id": "call-run-1",
                 "user_message": "What is the weather?",
                 "user_message_is_structured": False,
@@ -953,7 +952,6 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
                 "completed_tools": tuple(completed_tools),
                 "interrupted_tools": (),
                 "run_metadata": {"model": "same-chat-model"},
-                "is_team": False,
                 "original_status": RunStatus.cancelled,
             },
         ]
@@ -1217,7 +1215,7 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
-        lambda **_kwargs: nullcontext(SimpleNamespace()),
+        lambda **kwargs: nullcontext(SimpleNamespace(session_id=kwargs["session_id"])),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
@@ -1251,7 +1249,7 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
 
     assert len(persisted_interruptions) == 1
     persisted = persisted_interruptions[0]
-    assert persisted["session_id"] == "call-session"
+    assert persisted["scope_context"] == SimpleNamespace(session_id="call-session")
     assert persisted["user_message"] == "Never speak this"
     assert persisted["partial_text"] == ""
     assert persisted["original_status"] is RunStatus.cancelled

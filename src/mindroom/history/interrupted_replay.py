@@ -223,11 +223,12 @@ def _build_interrupted_replay_run(
     *,
     snapshot: InterruptedReplaySnapshot,
     run_id: str,
-    scope_id: str,
-    session_id: str,
-    is_team: bool,
+    session: ConversationSession,
 ) -> AnyRunRecord:
-    """Build one canonical replayable run for an interrupted top-level turn."""
+    """Build one canonical replayable run of ``session`` for an interrupted top-level turn.
+
+    The session names the run's session, its owner, and whether it is a team's.
+    """
     content = _render_interrupted_replay_content(snapshot)
     messages = []
     if snapshot.user_message:
@@ -245,11 +246,11 @@ def _build_interrupted_replay_run(
         messages.append(Message(role="user", content=user_content))
     messages.append(Message(role="assistant", content=content))
     metadata = _interrupted_replay_metadata(snapshot)
-    if is_team:
+    if session.kind == "team":
         return TeamRunRecord(
             run_id=run_id,
-            team_id=scope_id,
-            session_id=session_id,
+            team_id=session.owner_id,
+            session_id=session.session_id,
             content=content,
             messages=messages,
             metadata=metadata,
@@ -257,8 +258,8 @@ def _build_interrupted_replay_run(
         )
     return RunRecord(
         run_id=run_id,
-        agent_id=scope_id,
-        session_id=session_id,
+        agent_id=session.owner_id,
+        session_id=session.session_id,
         content=content,
         messages=messages,
         metadata=metadata,
@@ -329,20 +330,13 @@ def persist_interrupted_replay_snapshot(
         completed_tools=_unfolded(snapshot.completed_tools, folded),
         interrupted_tools=_unfolded(snapshot.interrupted_tools, folded),
     )
-    persisted_run = _build_interrupted_replay_run(
-        snapshot=snapshot,
-        run_id=run_id,
-        scope_id=session.owner_id,
-        session_id=session.session_id,
-        is_team=session.kind == "team",
-    )
+    persisted_run = _build_interrupted_replay_run(snapshot=snapshot, run_id=run_id, session=session)
     storage.save_runs(session, [persisted_run], state=state)
 
 
 def persist_interrupted_replay(
     *,
     scope_context: ScopeSessionContext | None,
-    session_id: str,
     run_id: str,
     user_message: str | None,
     user_message_is_structured: bool,
@@ -350,20 +344,27 @@ def persist_interrupted_replay(
     completed_tools: Sequence[ToolTraceEntry],
     interrupted_tools: Sequence[ToolTraceEntry],
     run_metadata: Mapping[str, object] | None,
-    is_team: bool,
     original_status: RunStatus = RunStatus.cancelled,
 ) -> None:
     """Persist one interrupted top-level turn from trusted runtime state.
 
-    The scope's stored session is the one saved into; ``session_id`` and ``is_team`` name the first one of a scope
-    that has none yet.
+    The scope context names the session saved into: its stored session, else the first one of its scope under the
+    session id the context was opened for. A context that names neither has nothing to save into.
     """
     if scope_context is None:
         return
+    session = scope_context.session
+    if session is None:
+        if scope_context.session_id is None:
+            return
+        session = new_scope_session(
+            session_id=scope_context.session_id,
+            scope_id=scope_context.scope.scope_id,
+            is_team=scope_context.scope.kind == "team",
+        )
     persist_interrupted_replay_snapshot(
         storage=scope_context.storage,
-        session=scope_context.session
-        or new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=is_team),
+        session=session,
         run_id=run_id,
         snapshot=build_interrupted_replay_snapshot(
             user_message=user_message,
