@@ -339,11 +339,8 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         lambda opened, state: persist_interrupted_replay_snapshot(
             storage=opened,
             session=session,
-            session_id=continuation.session_id,
-            scope_id=continuation.entity_name,
             run_id=continuation.run_id,
             snapshot=snapshot,
-            is_team=False,
             state=state,
         ),
     )
