@@ -261,7 +261,7 @@ def test_summary_tokens_without_a_summary_are_zero() -> None:
     for text in ("", "   "):
         assert (
             estimate_summary_tokens(
-                _session("session-1", summary=ScopeSummary(text=text, updated_at=datetime.now(UTC)))
+                _session("session-1", summary=ScopeSummary(text=text, updated_at=datetime.now(UTC))),
             )
             == 0
         )
