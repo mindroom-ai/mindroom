@@ -18,7 +18,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.logging_config import get_logger
-from mindroom.providers.errors import classify_provider_error
+from mindroom.providers.errors import classify_provider_error, is_credential_error
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -97,15 +97,6 @@ def _structured_provider_error(error_str: str) -> tuple[str, str] | None:
     return error_type.casefold(), message.casefold()
 
 
-def _names_transient_failure(error_str: str) -> bool:
-    """Return whether an untyped error's text holds a provider payload the provider classifier calls transient."""
-    structured_error = _structured_provider_error(error_str)
-    if structured_error is None:
-        return False
-    error_type, message = structured_error
-    return isinstance(classify_provider_error(message, provider="unknown", error_type=error_type), ProviderUnavailable)
-
-
 def _missing_provider_key_message(runtime_paths: RuntimePaths | None) -> str:
     dashboard_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip() if runtime_paths else ""
     dashboard = f"the MindRoom dashboard ({dashboard_url.rstrip('/')})" if dashboard_url else "the MindRoom dashboard"
@@ -124,7 +115,8 @@ def get_user_friendly_error_message(
     """Return a user-friendly error message.
 
     A provider error's type alone decides its message, since the provider's status and wording were read when it
-    was classified; only an error of another kind is matched by the keywords in its text.
+    was classified. An error of another kind that holds a provider's error payload reads as that payload's typed
+    error would; only one without a payload is matched by the keywords in its text.
 
     Args:
         error: The exception that occurred
@@ -159,11 +151,16 @@ def get_user_friendly_error_message(
     return f"{agent_prefix}{_untyped_error_message(error, safe_error, runtime_paths)}"
 
 
+def _authentication_failed(provider: str | None, safe_error: str) -> str:
+    provider_hint = f" ({provider})" if provider else ""
+    return f"❌ Authentication failed{provider_hint}: {safe_error}"
+
+
 def _provider_error_message(error: ProviderError, safe_error: str, runtime_paths: RuntimePaths | None) -> str:
     if isinstance(error, AuthenticationFailed):
         if error.code == MISSING_API_KEY:
             return _missing_provider_key_message(runtime_paths)
-        return f"❌ Authentication failed ({error.provider}): {safe_error}"
+        return _authentication_failed(error.provider, safe_error)
     if isinstance(error, ContextWindowExceeded):
         return (
             "⚠️ The conversation no longer fits the model's context window. "
@@ -180,15 +177,16 @@ def _untyped_error_message(error: Exception, safe_error: str, runtime_paths: Run
     error_str = str(error).lower()
     if _MISSING_PROVIDER_KEY_PATTERN.search(error_str):
         return _missing_provider_key_message(runtime_paths)
+    provider = _extract_provider_from_error(error)
+    if (payload := _structured_provider_error(error_str)) is not None:
+        error_type, message = payload
+        typed = classify_provider_error(message, provider=provider or "", error_type=error_type)
+        return _provider_error_message(typed, safe_error, runtime_paths)
     # Only distinguish the most important error types
-    if any(x in error_str for x in ["401", "auth", "unauthorized", "api key", "api_key", "apikey"]):
-        provider = _extract_provider_from_error(error)
-        provider_hint = f" ({provider})" if provider else ""
-        return f"❌ Authentication failed{provider_hint}: {safe_error}"
+    if "401" in error_str or is_credential_error(error_str):
+        return _authentication_failed(provider, safe_error)
     if any(x in error_str for x in ["rate", "429", "quota"]):
         return _RATE_LIMITED
-    if _names_transient_failure(error_str):
-        return _PROVIDER_UNAVAILABLE
     if "timeout" in error_str:
         return "⏰ Request timed out. Please try again."
     # Generic error with the actual error message for transparency

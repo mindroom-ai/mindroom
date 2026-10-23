@@ -84,6 +84,7 @@ def test_statuses_and_wording_classify_the_same_for_every_family(
             "authentication_error",
             AuthenticationFailed,
         ),
+        ("invalid x-api-key", None, "authentication_error", AuthenticationFailed),
         ("Bad block", None, "invalid_request_error", ProviderError),
         ("An error occurred.", "invalid_prompt", None, ProviderError),
         # Only whole words of the auth family name the credentials.

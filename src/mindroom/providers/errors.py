@@ -30,6 +30,7 @@ __all__ = [
     "CliLoginError",
     "classify_provider_error",
     "is_context_window_error",
+    "is_credential_error",
     "provider_failure",
 ]
 
@@ -42,6 +43,8 @@ _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 _HTTP_CLIENT_ERROR_RANGE = range(400, 500)
 # The names providers give a throttled request: Anthropic's error type and the Responses code.
 _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
+# The name Anthropic gives rejected credentials, with or without its 401 status.
+_AUTHENTICATION_ERROR_TYPE = "authentication_error"
 # Anthropic reports an overloaded model with this error type, with or without a 529 status.
 _OVERLOADED_ERROR_TYPE = "overloaded_error"
 # The names providers give a transient failure: Anthropic's error types, where ``timeout_error`` is a gateway
@@ -99,6 +102,11 @@ class CliLoginError(ValueError):
         self.status_code = status_code
 
 
+def is_credential_error(message: str) -> bool:
+    """Return whether an error's wording names the credentials: an API key, or a whole word of the auth family."""
+    return _CREDENTIAL_WORDING.search(message.casefold()) is not None
+
+
 def is_context_window_error(message: str, *, code: str | None = None) -> bool:
     """Return whether an error's code or wording says the request does not fit the context window."""
     if code == "context_length_exceeded":
@@ -123,7 +131,7 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
 
     1. A 429 status or a rate-limit name is ``RateLimited``.
     2. A transient status is ``ProviderUnavailable``.
-    3. A 401 status is ``AuthenticationFailed``.
+    3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
     4. Wording or a code that names the context window, on a client error or an event without a status, is
        ``ContextWindowExceeded``: a retry cannot make the request fit. A 5xx that mentions it stays transient.
     5. A transient name, or Anthropic's overloaded wording, is ``ProviderUnavailable``.
@@ -144,13 +152,13 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
         return typed(RateLimited)
     if status in _TRANSIENT_STATUSES:
         return typed(ProviderUnavailable)
-    if status == _UNAUTHORIZED_STATUS:
+    if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:
         return typed(AuthenticationFailed)
     if client_side and is_context_window_error(message, code=code):
         return typed(ContextWindowExceeded)
     if names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered:
         return typed(ProviderUnavailable)
-    if client_side and _CREDENTIAL_WORDING.search(lowered):
+    if client_side and is_credential_error(message):
         return typed(AuthenticationFailed)
     if status in _INVALID_REQUEST_STATUSES:
         return typed(InvalidRequest)
