@@ -154,7 +154,8 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
     # A delegation answered on an earlier entry no longer waits, though its stored call still names the pause.
     answered = answered_delegation_calls(response)
     for tool in response.tools or ():
-        if tool.is_paused and tool.tool_call_id not in answered:
+        # An agent's own calls name no member.
+        if tool.is_paused and (None, tool.tool_call_id) not in answered:
             presentation.start_tool(tool)
         elif tool.tool_call_id is None or tool.tool_call_id not in completed_call_ids:
             # Repeated terminal completions must not match older public slots by name.

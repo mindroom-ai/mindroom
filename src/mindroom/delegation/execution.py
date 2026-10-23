@@ -178,10 +178,14 @@ def _delegation_call(requirement: RunRequirement) -> bool:
     return tool.tool_name in DELEGATION_TOOL_NAMES and bool(tool.external_execution_required)
 
 
-def answered_delegation_calls(response: AnyRunRecord) -> dict[str, str]:
-    """Return, by call id, the answer each delegation call of a paused run already holds."""
+def answered_delegation_calls(response: AnyRunRecord) -> dict[tuple[str | None, str], str]:
+    """Return the answer each delegation call of a paused run already holds, by its member and call id.
+
+    The member is the one whose run waits for the call, None for the run's own; a team's members number their calls
+    independently, so a call id alone does not name a call, as the driver's own keys say.
+    """
     return {
-        call_id: answer
+        (requirement.member_agent_id, call_id): answer
         for requirement in response.requirements or ()
         if _delegation_call(requirement)
         and (call_id := requirement.tool_execution.tool_call_id) is not None

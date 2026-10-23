@@ -587,7 +587,8 @@ def _attach_blocking_pause_presentation(
             continue
         seen_ids.add(call_id)
         presentation.start_tool(tool)
-        if call_id not in pending_by_id and (not tool.is_paused or call_id in answered):
+        # An agent's own calls name no member.
+        if call_id not in pending_by_id and (not tool.is_paused or (None, call_id) in answered):
             presentation.complete_tool(tool)
 
     return replace(

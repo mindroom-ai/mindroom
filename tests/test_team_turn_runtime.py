@@ -1237,6 +1237,45 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
 
 
 @pytest.mark.asyncio
+async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_team_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Members number their calls independently, so two can delegate under one call id; each child runs once."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            calls(
+                tool_call("delegate_task_to_member", "call-w", member_id="writer", task="Dig A"),
+                tool_call("delegate_task_to_member", "call-c", member_id="checker", task="Dig B"),
+                metrics=usage(40, 4),
+            ),
+            answer("Consensus.", usage(50, 5)),
+        ],
+        writer=[_delegate_to_helper("A"), answer("Writer: done.")],
+        checker=[_delegate_to_helper("B"), answer("Checker: done.")],
+        helper=[answer("Helper one."), answer("Helper two.")],
+    )
+    team.config.agents["checker"].delegate_to = ["helper"]
+
+    await team.stream()
+
+    assert len(team.models["helper-model"].requests) == 2
+    record, members = team.stored_runs()
+    assert (record.status, record.content) == (RunStatus.completed, "Consensus.")
+    assert sorted((member.agent_id or "", member.status) for member in members) == [
+        ("checker", RunStatus.completed),
+        ("writer", RunStatus.completed),
+    ]
+    state = DelegationState.from_metadata(record.metadata)
+    assert sorted((child.caller_agent_name, child.status) for child in state.children) == [
+        ("checker", "completed"),
+        ("writer", "completed"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_blocking_team_continues_after_a_member_s_delegation_with_streamed_leader_requests(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

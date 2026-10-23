@@ -140,8 +140,9 @@ def _route_decisions(
     """Route each decision to the waiting member or leader call it names, checking an approved call's toolkit owner.
 
     An approved call is matched by the member the approval was shown for, and must still come from the toolkit the
-    approval recorded, so a removed or replaced tool cannot run under an old approval. A denial or a delegation's
-    result names its call by id alone; a call id two members share is refused rather than guessed at.
+    approval recorded, so a removed or replaced tool cannot run under an old approval. A denial names its call by id
+    alone, and a call id two members share is refused rather than guessed at; a delegation's result names its member
+    and call, which the resume checks against the calls the team waits for.
     """
     waiting: dict[str | None, list[RunRequirement]] = {}
     for requirement in persisted.requirements or ():
@@ -173,7 +174,7 @@ def _route_decisions(
     return _RoutedDecisions(
         approved=approved,
         denied={key_of(call_id): note for call_id, note in decisions.denied.items()},
-        external_results={key_of(call_id): result for call_id, result in decisions.external_results.items()},
+        external_results=dict(decisions.external_results),
     )
 
 

@@ -53,12 +53,13 @@ type ContinueRun[R: AnyRunRecord] = Callable[[R, ResumeDecisions, ResumeEvents |
 class ResumeDecisions:
     """What one resume answers: the approved calls, the denied calls with their notes, and the external results.
 
-    ``external_results`` holds, by call id, what an externally executed call (a delegation) returned.
+    ``external_results`` holds what an externally executed call (a delegation) returned, by the member whose run
+    waits for it, None for the run's own call, and the call id.
     """
 
     approved: tuple[ApprovalCall, ...] = ()
     denied: Mapping[str, str] = field(default_factory=dict)
-    external_results: Mapping[str, str] = field(default_factory=dict)
+    external_results: Mapping[tuple[str | None, str], str] = field(default_factory=dict)
 
 
 def approval_decisions(
@@ -103,7 +104,10 @@ def resume_from_session(
         build_resume_request(paused=paused.messages, summary=summary, history=history),
         approved=decisions.approved,
         denied=decisions.denied,
-        external_results=decisions.external_results,
+        # An agent's run waits only for calls of its own; a result naming a member answers none of them.
+        external_results={
+            call_id: result for (member, call_id), result in decisions.external_results.items() if member is None
+        },
         ctx=RunContext(
             run_id=paused.run_id,
             session_id=session.session_id,
