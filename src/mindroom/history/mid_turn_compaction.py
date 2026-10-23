@@ -48,6 +48,7 @@ from mindroom.native_compaction import checkpoint_items, native_replay_messages
 from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.store import runs_without
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests
 
@@ -322,7 +323,10 @@ async def _compact_scope(
         )
         if binding.turn_recorder is not None:
             binding.turn_recorder.record_folded_tool_calls(folded_calls)
+        # The turn's session then holds what a fresh load does, so a request rebuilt from it within the turn, as a
+        # delegation continuation is, replays only what the summary does not cover.
         session.summary = ScopeSummary(text=summary, updated_at=datetime.now(UTC))
+        session.runs = runs_without(session.runs, [run.run_id for run in basis.covered])
         _finish(messages, layout, summary_message, record)
 
     outcome = await compact_scope_mid_turn(

@@ -9359,6 +9359,7 @@ depends_on = [
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
+    "mindroom.session_storage.store",
     "mindroom.usage.storage",
 ]
 visibility = [

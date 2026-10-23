@@ -21,7 +21,7 @@ from mindroom import agents
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
-from mindroom.approval.resume import ResumeDecisions, ResumeRunner
+from mindroom.approval.resume import ResumeDecisions, ResumeRunner, forward_resume, resume_from_session
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
@@ -387,6 +387,61 @@ async def test_approval_resume_after_mid_turn_compaction(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("resume_probe")
+async def test_a_continuation_on_the_turns_own_session_replays_no_run_the_fold_summarized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    summary_calls: SummaryCalls,
+) -> None:
+    """The fold leaves the turn's session as a fresh load holds it, so a same-turn continuation replays no folded run.
+
+    An agent's delegation continuation resumes on the session its turn loaded, as this resume does.
+    """
+    model = _PausingLoop(tool_rounds=6)
+    agent = _resumable(tmp_path, monkeypatch, model, replays_history=True)
+    paused = await _pause(agent)
+    assert summary_calls.inputs
+    fresh = agent.store.load_session("session-1", "agent")
+    assert fresh is not None
+    assert [run.run_id for run in agent.session.runs] == [run.run_id for run in fresh.runs] == [paused.run_id]
+    before = len(model.requests)
+
+    events = resume_from_session(
+        agent.build.spec,
+        paused,
+        _approved(paused),
+        session=agent.session,
+        scope=TEST_AGENT_SCOPE,
+        settings=agent.build.history_settings,
+        plan=configured_replay_plan(history_settings=agent.build.history_settings, estimated_tokens=0),
+        user_id=None,
+        hooks=agent_loop_hooks(
+            agent.build,
+            HookTurn(
+                config=agent.config,
+                runtime_paths=agent.runtime_paths,
+                model_name="default",
+                store=agent.store,
+                session=agent.session,
+                scope=TEST_AGENT_SCOPE,
+                scoped=True,
+                native_compaction=None,
+                prompt_id=None,
+            ),
+            agent_name="test_agent",
+        ),
+        persist=persist_to(agent.store, agent.session),
+        request_template=agent.build.request_template,
+    )
+    record = await forward_resume(events, None, record_type=RunRecord)
+
+    assert record.status is RunStatus.completed
+    resumed = model.requests[before]
+    assert len(_summaries(resumed.messages)) == 1
+    assert {"q1", "a1", "q2", "a2"}.isdisjoint(resumed.contents)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("resume_probe")
 async def test_compaction_after_an_approval_resume_reaches_the_stored_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -498,6 +553,40 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
     # The turn's member runs stay stored under the team run the fold summarized.
     assert len(members) == 5
     assert {member.parent_run_id for member in members} == {record.run_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("squad_probe")
+async def test_a_team_continued_within_its_turn_after_a_fold_replays_no_run_the_fold_summarized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    summary_calls: SummaryCalls,
+) -> None:
+    """The leader continues after a member's child finished on the session its turn loaded, which the fold updated."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[*_delegations(4), _delegation("call-team", "writer", "Research it"), answer("All parts done")],
+        writer=[
+            *_big_answers(4),
+            calls(tool_call("run_subagent", "call-sub", agent_name="helper", task="Dig")),
+            answer("Writer: the helper found it."),
+        ],
+        helper=[answer("Helper found it.")],
+        context_window=4000,
+    )
+    _seed_team_history(team)
+
+    chunks = await team.stream()
+
+    assert chunks[-1].content.endswith("All parts done")
+    assert summary_calls.inputs
+    # The sixth leader request is the continuation after the writer's child finished.
+    requests = team.models["default"].requests
+    assert len(requests) == 6
+    continued = requests[-1]
+    assert len(_summaries(continued.messages)) == 1
+    assert not any("team question" in content or "team answer" in content for content in _contents(continued))
 
 
 @pytest.mark.asyncio
