@@ -299,16 +299,18 @@ FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE = (
     "and memory.file.max_entrypoint_tokens={max_entrypoint_tokens}). "
     "Read `{memory_path}` directly for the omitted lines.]"
 )
-PROMPT_CURATION_PROMPT_TEMPLATE = """🧹 Prompt maintenance: the files loaded into every one of your prompts total {measured_tokens} tokens, over the {trigger_tokens}-token limit.
+PROMPT_CURATION_PROMPT_TEMPLATE = """🧹 Prompt maintenance: the files loaded into every one of your prompts total {measured_tokens} tokens (limit {trigger_tokens}), and MEMORY.md has {memory_lines} lines (limit {max_entrypoint_lines}; lines past it never reach your prompt).
 Files: {file_sizes}.
 
 1. Commit these files to git in your workspace first (run `git init` if it is not a repository yet), so this change can be undone.
 2. Bring them to at most {upper_tokens} tokens in total, but not below {floor_tokens}; no single file may shrink by more than {max_file_shrink_percent}%.
-3. When the same fact appears in more than one file, keep it once, in the file that owns it: identity and voice in SOUL.md and IDENTITY.md, workflow rules in AGENTS.md, facts about the person in USER.md, and everything else in MEMORY.md.
-4. Move detail, history, and finished items verbatim into topic files under memory/, such as memory/projects.md, and leave a one-line pointer where it helps; those files are searched on demand.
-5. Never invent facts or change their meaning, names, dates, or numbers.
+   If MEMORY.md is over {max_entrypoint_lines} lines, take lines out of it first, as far as these bounds allow.
+3. When a later entry corrects or supersedes an earlier one, rewrite the earlier entry to the corrected fact and delete the separate correction, so only the corrected fact remains.
+4. When the same fact appears in more than one file, keep it once, in the file that owns it: identity and voice in SOUL.md and IDENTITY.md, workflow rules in AGENTS.md, facts about the person in USER.md, and everything else in MEMORY.md.
+5. Move detail, history, and finished items verbatim into topic files under memory/, such as memory/projects.md, and leave a one-line pointer where it helps; those files are searched on demand.
+6. Never invent facts or change their meaning, names, dates, or numbers, except to apply a correction as in step 3.
 
-Delete only true duplicates; move everything else.
+Delete only true duplicates and folded corrections; move everything else.
 When you finish, MindRoom measures the files again and asks you to re-check if a file shrank too much, the total fell below {floor_tokens} tokens or did not shrink, or detail was deleted instead of moved.
 Reply with one line saying what you changed."""
 PROMPT_CURATION_RECHECK_TEMPLATE = """⚠️ Prompt maintenance needs a re-check: {findings}.
@@ -738,6 +740,8 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
             {
                 "measured_tokens",
                 "trigger_tokens",
+                "memory_lines",
+                "max_entrypoint_lines",
                 "file_sizes",
                 "upper_tokens",
                 "floor_tokens",

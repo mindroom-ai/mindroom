@@ -67,9 +67,12 @@ class PromptCurationAutomation(_ScheduledAutomation):
     name: Literal["prompt_curation"] = Field(default="prompt_curation", description="Built-in automation name")
     cron: str = Field(default="0 4 * * *", description="When to check, in the configured timezone")
     trigger_tokens: int = Field(
-        default=50_000,
+        default=20_000,
         ge=1,
-        description="Post the prompt once MEMORY.md and the context files total more than this many estimated tokens",
+        description=(
+            "Post the prompt once MEMORY.md and the context files total more than this many estimated tokens; "
+            "MEMORY.md longer than memory.file.max_entrypoint_lines also posts it"
+        ),
     )
     min_reduction: float = Field(
         default=0.10,

@@ -4047,8 +4047,8 @@
           "type": "string"
         },
         "trigger_tokens": {
-          "default": 50000,
-          "description": "Post the prompt once MEMORY.md and the context files total more than this many estimated tokens",
+          "default": 20000,
+          "description": "Post the prompt once MEMORY.md and the context files total more than this many estimated tokens; MEMORY.md longer than memory.file.max_entrypoint_lines also posts it",
           "minimum": 1,
           "title": "Trigger Tokens",
           "type": "integer"

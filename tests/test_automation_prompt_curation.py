@@ -90,18 +90,45 @@ def test_the_band_is_the_configured_reductions_of_the_measured_size(tmp_path: Pa
     assert (plan.upper_tokens, plan.floor_tokens) == (1034, 969)
 
 
+def test_memory_past_the_preload_line_cap_asks_for_a_cut_under_the_token_trigger(tmp_path: Path) -> None:
+    """Lines past memory.file.max_entrypoint_lines never reach the prompt, so they trigger a pass on their own."""
+    config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
+    config.memory.file.max_entrypoint_lines = 17
+    assert _plan_curation(config, root, "mind", automation) is None
+    config.memory.file.max_entrypoint_lines = 16
+
+    plan = _plan_curation(config, root, "mind", automation)
+
+    assert plan is not None
+    assert (plan.measured_tokens, plan.memory_lines) == (1292, 17)
+    assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
+    prompt = _curation_prompt(config, plan)
+    assert "total 1292 tokens (limit 10000), and MEMORY.md has 17 lines (limit 16;" in prompt
+    assert "If MEMORY.md is over 16 lines" in prompt
+
+
 def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:
     """The visible prompt names every file, the band, the per-file cap, committing first, and the re-check."""
     plan, config, _root = _plan(tmp_path)
 
     prompt = _curation_prompt(config, plan)
 
-    assert "total 1292 tokens, over the 1000-token limit" in prompt
+    assert "total 1292 tokens (limit 1000), and MEMORY.md has 17 lines (limit 200;" in prompt
     assert "MEMORY.md (1286 tokens), SOUL.md (4 tokens), USER.md (2 tokens)" in prompt
     assert "at most 1163 tokens in total, but not below 1098" in prompt
     assert "shrink by more than 25%" in prompt
     assert "git init" in prompt
     assert "asks you to re-check" in prompt
+
+
+def test_the_prompt_asks_to_fold_corrections_into_the_entries_they_correct(tmp_path: Path) -> None:
+    """A later correction rewrites the earlier entry instead of both surviving, or moving on to memory/."""
+    plan, config, _root = _plan(tmp_path)
+
+    prompt = _curation_prompt(config, plan)
+
+    assert "rewrite the earlier entry to the corrected fact and delete the separate correction" in prompt
+    assert "except to apply a correction" in prompt
 
 
 def test_an_untouched_workspace_is_reported_unchanged(tmp_path: Path) -> None:
@@ -290,6 +317,23 @@ def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
     assert plan is not None
     (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "memory" / "context.md").write_text(context.replace(SECTIONS[3], POINTER), encoding="utf-8")
+
+    result = _verify_curation(plan)
+
+    assert (result.changed, result.findings) == (True, ())
+
+
+def test_folding_a_correction_into_the_entry_it_corrects_is_accepted(tmp_path: Path) -> None:
+    """Rewriting the earlier entry and dropping the correction note deletes the note, well within the loss allowance."""
+    config, automation, root = _setup(tmp_path)
+    earlier = "- The project database is Postgres 14.\n"
+    correction = "- Correction: the project database is Postgres 16, not 14.\n"
+    (root / "MEMORY.md").write_text(MEMORY + earlier + correction, encoding="utf-8")
+    plan = _plan_curation(config, root, "mind", automation)
+    assert plan is not None
+    (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
+    folded = MEMORY.replace(SECTIONS[3], POINTER) + earlier.replace("14", "16")
+    (root / "MEMORY.md").write_text(folded, encoding="utf-8")
 
     result = _verify_curation(plan)
 
