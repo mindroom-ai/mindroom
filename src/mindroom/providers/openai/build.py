@@ -23,7 +23,7 @@ from mindroom.model_defaults import (
     ZAI_BASE_URL_DEFAULT,
 )
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
-from mindroom.providers.errors import provider_failure
+from mindroom.providers.errors import CliLoginError, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.model_loading import uses_alternative_auth
@@ -255,11 +255,12 @@ def _sdk_client_kwargs(
     )
 
 
-def _cli_login_error(error: Exception, *, provider: str) -> ProviderError:
+def _cli_login_error(error: CliLoginError, *, provider: str) -> ProviderError:
     """Return the error of a CLI login whose token could not be borrowed.
 
-    A token refresh that failed on the network is the provider's transient failure; any other login failure, such
-    as a missing login or a refresh token the CLI's server rejected, is final and tells the user to log in again.
+    A token refresh that failed on the network or with a transient status is the provider's transient failure, as
+    ``provider_failure`` decides; any other login failure, such as a missing login or a refresh token the CLI's
+    server rejected, is final and tells the user to log in again.
     """
     return provider_failure(error, provider=provider) or AuthenticationFailed(
         str(error),

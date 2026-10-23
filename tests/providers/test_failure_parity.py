@@ -1314,6 +1314,12 @@ def _expire_cli_login(route: str, root: Path) -> None:
         ("codex", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
         ("kimi", True, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
         ("kimi", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, 1),
+        # A login server that is down or throttling answers with its status, which the shared classifier reads as for
+        # any provider response, as the Agno-backed runtime reported and retried it.
+        ("codex", True, httpx.Response(503, text="upstream down"), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("codex", False, httpx.Response(502, text="bad gateway"), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("kimi", True, httpx.Response(429, text="slow down"), RateLimited, RATE_LIMITED, _PIPELINE),
+        ("kimi", False, httpx.Response(500, text="server error"), ProviderUnavailable, UNAVAILABLE, 1),
         # A refresh token the login server rejects is final and asks the user to log in again.
         (
             "codex",
@@ -1323,6 +1329,7 @@ def _expire_cli_login(route: str, root: Path) -> None:
             AUTHENTICATION,
             1,
         ),
+        ("codex", True, httpx.Response(403, text="forbidden"), AuthenticationFailed, AUTHENTICATION, 1),
         ("kimi", True, httpx.Response(401, text="invalid_grant"), AuthenticationFailed, AUTHENTICATION, 1),
     ],
     ids=[
@@ -1330,11 +1337,16 @@ def _expire_cli_login(route: str, root: Path) -> None:
         "codex-blocking-refused",
         "kimi-streamed-refused",
         "kimi-blocking-refused",
+        "codex-streamed-unavailable",
+        "codex-blocking-bad-gateway",
+        "kimi-streamed-throttled",
+        "kimi-blocking-server-error",
         "codex-rejected",
+        "codex-forbidden",
         "kimi-rejected",
     ],
 )
-async def test_a_cli_login_refresh_failure_is_retried_only_when_the_network_failed(
+async def test_a_cli_login_refresh_failure_is_retried_only_when_it_is_transient(
     route: str,
     stream: bool,
     refresh_reply: httpx.Response | Exception,
@@ -1344,7 +1356,7 @@ async def test_a_cli_login_refresh_failure_is_retried_only_when_the_network_fail
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An expired CLI login refreshes inside the request; only a network failure there is worth retrying."""
+    """An expired CLI login refreshes inside the request; a network failure or a transient status there is retried."""
     attempts: list[str] = []
 
     def refresh(url: str, **_kwargs: object) -> httpx.Response:

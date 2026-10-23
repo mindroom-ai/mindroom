@@ -17,6 +17,7 @@ import httpx
 
 from mindroom.file_locks import advisory_file_lock
 from mindroom.model_defaults import CODEX_GPT_ALIAS, CODEX_GPT_ENDPOINT
+from mindroom.providers.errors import CliLoginError
 
 __all__ = [
     "CODEX_BASE_URL",
@@ -37,7 +38,7 @@ _CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 _CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
 
 
-class CodexAuthError(ValueError):
+class CodexAuthError(CliLoginError):
     """Raised when the local Codex CLI OAuth state cannot provide a usable token."""
 
 
@@ -155,9 +156,9 @@ def _refresh_codex_tokens(refresh_token: str) -> dict[str, Any]:
         error_code = _refresh_error_code(error_body)
         if error_code in {"refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated"}:
             msg = f"Codex refresh token is no longer valid ({error_code}). Run `codex login` again."
-            raise CodexAuthError(msg) from None
-        msg = f"Codex token refresh failed (HTTP {response.status_code}): {error_body}"
-        raise CodexAuthError(msg) from None
+        else:
+            msg = f"Codex token refresh failed (HTTP {response.status_code}): {error_body}"
+        raise CodexAuthError(msg, status_code=response.status_code) from None
 
     try:
         refreshed = response.json()

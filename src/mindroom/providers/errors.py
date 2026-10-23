@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 __all__ = [
+    "CliLoginError",
     "classify_provider_error",
     "is_context_window_error",
     "provider_failure",
@@ -82,6 +83,17 @@ _CONTEXT_WINDOW_MARKERS = (
 )
 # A timeout as the HTTP client raises it, or as aiohttp and the socket layer raise it.
 _TRANSPORT_TIMEOUTS = (httpx.TimeoutException, TimeoutError)
+
+
+class CliLoginError(ValueError):
+    """A CLI's saved OAuth login, such as Codex's or Kimi Code's, could not lend a usable token.
+
+    ``status_code`` is the HTTP status of a token refresh the login server answered with an error.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def is_context_window_error(message: str, *, code: str | None = None) -> bool:
@@ -143,14 +155,15 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
 
 
 def provider_failure(error: BaseException, *, provider: str) -> ProviderError | None:
-    """Return the normalized error a transport or Google sign-in failure is, or None for the adapter's own mapping.
+    """Return the normalized error a transport or sign-in failure is, or None for the adapter's own mapping.
 
     The error and every cause it shows count, so a network failure that an SDK, the Google auth library, or a CLI
     login refresh wrapped in an error of its own is still the retryable failure it is: a refused or reset
     connection, a timeout, an HTTP client or aiohttp transport error, or a Google token endpoint that could not be
-    reached or answered with a retryable error. Google credentials the token endpoint rejected, such as a deleted
-    service-account key, are an authentication failure; credentials that cannot be found or loaded stay a
-    configuration error.
+    reached or answered with a retryable error. A CLI login server that answered its token refresh with a status
+    ``classify_provider_error`` calls retryable, such as a 503 or a 429, is that failure. Google credentials the
+    token endpoint rejected, such as a deleted service-account key, are an authentication failure; credentials that
+    cannot be found or loaded stay a configuration error, and any other CLI login failure is the adapter's to map.
     """
     import aiohttp  # noqa: PLC0415 - google-genai's transport, loaded only once a request fails
     from google.auth import exceptions as google_auth  # noqa: PLC0415 - loaded only once a request fails
@@ -166,6 +179,10 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
         return ProviderUnavailable(str(error) or type(error).__name__, provider=provider, code=code)
     if any(isinstance(cause, google_auth.RefreshError) for cause in chain):
         return AuthenticationFailed(f"Google credentials were rejected: {error}", provider=provider, status_code=401)
+    for cause in chain:
+        if isinstance(cause, CliLoginError) and cause.status_code is not None:
+            failure = classify_provider_error(str(cause), provider=provider, status_code=cause.status_code)
+            return failure if failure.retryable else None
     return None
 
 

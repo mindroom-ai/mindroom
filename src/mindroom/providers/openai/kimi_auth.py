@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mindroom.file_locks import advisory_file_lock
+from mindroom.providers.errors import CliLoginError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -29,7 +30,7 @@ _KIMI_MODEL_PREFIX = "kimi-code/"
 _KIMI_CREDENTIALS_RELATIVE_PATH = Path("credentials") / "kimi-code.json"
 
 
-class KimiAuthError(ValueError):
+class KimiAuthError(CliLoginError):
     """Raised when the local Kimi Code CLI OAuth state cannot provide a usable token."""
 
 
@@ -128,7 +129,7 @@ def _refresh_kimi_tokens(refresh_token: str) -> dict[str, Any]:
             f"Kimi token refresh failed (HTTP {response.status_code}): {response.text}. "
             "Run `kimi` and `/login` to re-authenticate if the refresh token expired."
         )
-        raise KimiAuthError(msg) from None
+        raise KimiAuthError(msg, status_code=response.status_code) from None
 
     try:
         refreshed = response.json()
