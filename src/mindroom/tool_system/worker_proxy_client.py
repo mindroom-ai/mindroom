@@ -154,10 +154,7 @@ def _record_proxy_exception_for_worker(
     """Classify one proxy exception as either worker-health or request-level failure."""
     if worker_handle is None:
         return
-    if _is_request_level_proxy_http_error(exc):
-        worker_manager.touch_worker(worker_handle.worker_key)
-        return
-    if _is_request_level_proxy_transport_error(exc):
+    if _is_request_level_proxy_http_error(exc) or _is_request_level_proxy_transport_error(exc):
         worker_manager.touch_worker(worker_handle.worker_key)
         return
     worker_manager.record_failure(worker_handle.worker_key, str(exc), startup_count=worker_handle.startup_count)
