@@ -1,4 +1,4 @@
-"""The provider wrapper every pipeline stage uses, and the attempt bookkeeping retrying stages share.
+"""The provider wrapper every pipeline stage uses, and the attempt runner retrying stages share.
 
 A stage is an async generator function ``stage(inner, request)``; ``WrappedProvider`` presents it as a
 ``ModelProvider`` so stages compose by nesting and callers never see the difference.
@@ -13,15 +13,19 @@ consumer settling a stream that never completed sums them and adds any partial r
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY
-from mindroom.llm.provider import ReasoningDelta, StreamProgress, TextDelta, ToolCallReady, TurnCompleted
+from mindroom.llm.provider import ReasoningDelta, ReportedUsage, StreamProgress, TextDelta, ToolCallReady, TurnCompleted
+from mindroom.llm.usage import add_usage
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.usage.storage import has_token_usage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from mindroom.llm.provider import (
         Capabilities,
@@ -35,9 +39,9 @@ if TYPE_CHECKING:
     from mindroom.llm.usage import MessageMetrics
 
 __all__ = [
+    "Retry",
     "WrappedProvider",
-    "commits_attempt",
-    "with_carried_usage",
+    "attempts",
 ]
 
 type _Stage = Callable[[ModelProvider, ModelRequest], AsyncIterator[StreamEvent]]
@@ -80,10 +84,57 @@ class WrappedProvider:
         return self.stage(self.inner, request)
 
 
-def commits_attempt(event: StreamEvent) -> bool:
+@dataclass(frozen=True, slots=True)
+class Retry:
+    """How a retrying stage reissues a failed attempt: the request to send, after ``delay_seconds``."""
+
+    request: ModelRequest
+    delay_seconds: float = 0.0
+
+
+async def attempts(
+    inner: ModelProvider,
+    request: ModelRequest,
+    retry: Callable[[ProviderError], Retry | None],
+    *,
+    next_event: Callable[[AsyncIterator[StreamEvent]], Awaitable[StreamEvent]] = anext,
+) -> AsyncIterator[StreamEvent]:
+    """Stream ``request``, reissuing it as ``retry`` decides after a failure that came before the attempt committed.
+
+    ``retry`` sees only the failures of attempts that committed nothing, and returns how to reissue the request, or
+    None to let the failure propagate; ``next_event`` reads each event, so a stage can bound the wait for it. A failed
+    attempt's partial usage is settled before the retry, and the finished turn carries the failed attempts' usage.
+    """
+    carried: MessageMetrics | None = None
+    while True:
+        committed = False
+        usage = ReportedUsage()
+        try:
+            events = inner.stream(request)
+            async with closing_async_stream(events):
+                while True:
+                    try:
+                        event = await next_event(events)
+                    except StopAsyncIteration:
+                        return
+                    usage.observe(event)
+                    committed = committed or _commits_attempt(event)
+                    yield _with_carried_usage(event, carried)
+        except ProviderError as error:
+            if committed or (reissue := retry(error)) is None:
+                raise
+        if (report := usage.settle()) is not None:
+            yield report
+        if reissue.delay_seconds:
+            await asyncio.sleep(reissue.delay_seconds)
+        carried = add_usage(carried, usage.settled)
+        request = reissue.request
+
+
+def _commits_attempt(event: StreamEvent) -> bool:
     """Return whether a retry after this event could repeat work: output the caller received, or a hosted tool's run.
 
-    Every retrying stage decides by this alone, for a failure the adapter raised and for the idle limit's stall.
+    It decides for a failure the adapter raised and for a stage's own stall alike.
     """
     if isinstance(event, TextDelta | ReasoningDelta):
         return bool(event.text)
@@ -92,7 +143,7 @@ def commits_attempt(event: StreamEvent) -> bool:
     return isinstance(event, ToolCallReady)
 
 
-def with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> StreamEvent:
+def _with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> StreamEvent:
     """Add usage reported by failed attempts to a finished turn, marking the sum."""
     if carried is None or not isinstance(event, TurnCompleted):
         return event

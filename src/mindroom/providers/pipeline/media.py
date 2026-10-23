@@ -16,9 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, SAFEGUARD_REFUSAL, ContextWindowExceeded, ProviderError
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
-from mindroom.llm.provider import ReportedUsage
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import commits_attempt, with_carried_usage
+from mindroom.providers.pipeline.wrapped import Retry, attempts
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -167,35 +166,26 @@ async def media_fallback_stream(
     present = _media_kinds(request.messages)
     known = (frozenset(_LEARNED_UNSUPPORTED.get(route, ())) | inner.capabilities.omitted_media) & present
     remaining = present - known
-    first = replace(request, messages=_without_media(request.messages, known, fallback_prompt))
-    committed = False
-    usage = ReportedUsage()
-    try:
-        events = inner.stream(first)
-        async with closing_async_stream(events):
-            async for event in events:
-                usage.observe(event)
-                committed = committed or commits_attempt(event)
-                yield event
-    except ProviderError as error:
-        if committed or not remaining or not _media_may_have_caused(error):
-            raise
+    failure: ProviderError | None = None
+
+    def without_remaining_media(error: ProviderError) -> Retry | None:
+        nonlocal failure
+        if failure is not None or not remaining or not _media_may_have_caused(error):
+            return None
         failure = error
-    else:
-        return
-    logger.warning(
-        "Retrying model request without inline media",
-        provider=identity.provider,
-        model_id=identity.id,
-        status_code=failure.status_code,
-        error=redact_sensitive_text(str(failure), max_length=500),
-    )
-    if (report := usage.settle()) is not None:
-        yield report
-    retry = replace(request, messages=_without_media(request.messages, known | remaining, fallback_prompt))
-    events = inner.stream(retry)
+        logger.warning(
+            "Retrying model request without inline media",
+            provider=identity.provider,
+            model_id=identity.id,
+            status_code=error.status_code,
+            error=redact_sensitive_text(str(error), max_length=500),
+        )
+        return Retry(replace(request, messages=_without_media(request.messages, known | remaining, fallback_prompt)))
+
+    first = replace(request, messages=_without_media(request.messages, known, fallback_prompt))
+    events = attempts(inner, first, without_remaining_media)
     async with closing_async_stream(events):
         async for event in events:
-            yield with_carried_usage(event, usage.settled)
-    if _names_capability_gap(failure, remaining):
+            yield event
+    if failure is not None and _names_capability_gap(failure, remaining):
         _LEARNED_UNSUPPORTED.setdefault(route, set()).update(remaining)

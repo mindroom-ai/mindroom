@@ -16,21 +16,18 @@ from __future__ import annotations
 import asyncio
 import random
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
-from mindroom.llm.provider import ReportedUsage
-from mindroom.llm.usage import add_usage
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import commits_attempt, with_carried_usage
+from mindroom.providers.pipeline.wrapped import Retry, attempts
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
-    from mindroom.llm.usage import MessageMetrics
 
 __all__ = ["STREAM_STALLED", "retrying_stream"]
 
@@ -52,6 +49,7 @@ def _retry_delay_seconds(attempt: int) -> float:
 
 async def _next_event(
     stream: AsyncIterator[StreamEvent],
+    *,
     idle_timeout_seconds: float | None,
     provider: str,
 ) -> StreamEvent:
@@ -114,36 +112,12 @@ def retrying_stream(
     """
     if not request.stream and not inner.capabilities.streams_only:
         return inner.stream(request)
-    return _retried(inner, request, idle_timeout_seconds)
-
-
-async def _retried(
-    inner: ModelProvider,
-    request: ModelRequest,
-    idle_timeout_seconds: float | None,
-) -> AsyncIterator[StreamEvent]:
-    identity = inner.identity
     budget = _RetryBudget()
-    carried: MessageMetrics | None = None
-    while True:
-        committed = False
-        usage = ReportedUsage()
-        try:
-            events = inner.stream(request)
-            async with closing_async_stream(events):
-                while True:
-                    try:
-                        event = await _next_event(events, idle_timeout_seconds, identity.provider_name)
-                    except StopAsyncIteration:
-                        return
-                    usage.observe(event)
-                    committed = committed or commits_attempt(event)
-                    yield with_carried_usage(event, carried)
-        except ProviderError as error:
-            if committed or (delay := _retry_delay(error, budget, identity.id)) is None:
-                raise
-            if (report := usage.settle()) is not None:
-                yield report
-            if delay:
-                await asyncio.sleep(delay)
-        carried = add_usage(carried, usage.settled)
+    model_id = inner.identity.id
+
+    def reissue(error: ProviderError) -> Retry | None:
+        delay = _retry_delay(error, budget, model_id)
+        return None if delay is None else Retry(request, delay)
+
+    next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=inner.identity.provider_name)
+    return attempts(inner, request, reissue, next_event=next_event)

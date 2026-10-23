@@ -163,6 +163,19 @@ async def test_transient_failure_before_output_is_retried_and_its_usage_carried(
 
 
 @pytest.mark.asyncio
+async def test_a_transient_failure_is_reissued_after_its_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.2)
+    inner = _ScriptedProvider([[_transient()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    await _drain(provider, ModelRequest(messages=[_user()]))
+
+    assert (len(inner.requests), loop.time() - started >= 0.2) == (2, True)
+
+
+@pytest.mark.asyncio
 async def test_failure_after_visible_output_is_not_retried() -> None:
     inner = _ScriptedProvider([[TextDelta("partial"), _transient()], [_turn()]])
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
@@ -356,6 +369,18 @@ async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_ro
     await _drain(provider, request)
     assert len(inner.requests) == 3
     assert inner.requests[2].messages[0].images is None
+
+
+@pytest.mark.asyncio
+async def test_a_media_free_retry_that_is_rejected_too_ends_the_request() -> None:
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
+    inner = _ScriptedProvider([[rejection], [rejection], [_turn()]])
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+
+    with pytest.raises(InvalidRequest):
+        await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert len(inner.requests) == 2
 
 
 @pytest.mark.asyncio

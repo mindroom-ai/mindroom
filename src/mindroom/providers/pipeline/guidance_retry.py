@@ -11,16 +11,15 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError
+from mindroom.llm.errors import MALFORMED_TOOL_CALL
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ReportedUsage
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import commits_attempt, with_carried_usage
-from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.providers.pipeline.wrapped import Retry, attempts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from mindroom.llm.errors import ProviderError
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
 
 __all__ = ["MALFORMED_FUNCTION_CALL_GUIDANCE", "guidance_retry_stream"]
@@ -37,32 +36,22 @@ Guidelines:
 """
 
 
-async def guidance_retry_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+def guidance_retry_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, resending it once with the malformed-call guidance after a malformed tool call."""
-    committed = False
-    usage = ReportedUsage()
-    try:
-        events = inner.stream(request)
-        async with closing_async_stream(events):
-            async for event in events:
-                usage.observe(event)
-                committed = committed or commits_attempt(event)
-                yield event
-    except ProviderError as error:
-        if committed or error.code != MALFORMED_TOOL_CALL:
-            raise
-    else:
-        return
-    identity = inner.identity
-    logger.warning(
-        "Retrying model request with malformed tool-call guidance",
-        provider=identity.provider,
-        model_id=identity.id,
-    )
-    if (report := usage.settle()) is not None:
-        yield report
-    guidance = Message(role="user", content=MALFORMED_FUNCTION_CALL_GUIDANCE)
-    events = inner.stream(replace(request, messages=(*request.messages, guidance)))
-    async with closing_async_stream(events):
-        async for event in events:
-            yield with_carried_usage(event, usage.settled)
+    retried = False
+
+    def with_guidance(error: ProviderError) -> Retry | None:
+        nonlocal retried
+        if retried or error.code != MALFORMED_TOOL_CALL:
+            return None
+        retried = True
+        identity = inner.identity
+        logger.warning(
+            "Retrying model request with malformed tool-call guidance",
+            provider=identity.provider,
+            model_id=identity.id,
+        )
+        guidance = Message(role="user", content=MALFORMED_FUNCTION_CALL_GUIDANCE)
+        return Retry(replace(request, messages=(*request.messages, guidance)))
+
+    return attempts(inner, request, with_guidance)
