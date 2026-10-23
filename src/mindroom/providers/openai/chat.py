@@ -103,7 +103,8 @@ class ChatAdapter:
                 for call in parts.tool_calls:
                     yield ToolCallReady(call)
             else:
-                parts = parse_chat_completion(await client.chat.completions.create(**kwargs), self.wire)
+                completion = await client.chat.completions.create(**kwargs)
+                parts = parse_chat_completion(completion, self.wire, provider=self.identity.provider_name)
                 first_token = time.monotonic()
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error

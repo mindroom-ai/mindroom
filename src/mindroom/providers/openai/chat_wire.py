@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.assistant_turn import split_thinking
+from mindroom.providers.openai.errors import error_body_error
 from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
@@ -700,8 +701,14 @@ def _completion_tool_calls(message: Any, wire: ChatWire) -> list[dict[str, Any]]
     )
 
 
-def parse_chat_completion(completion: ChatCompletion, wire: ChatWire) -> ChatTurnParts:
-    """Read one non-streamed completion into a finished turn."""
+def parse_chat_completion(completion: ChatCompletion, wire: ChatWire, *, provider: str) -> ChatTurnParts:
+    """Read one non-streamed completion into a finished turn.
+
+    A gateway such as OpenRouter answers a failed upstream with HTTP 200 and an ``error`` body instead of choices,
+    which raises as the error it names, as a stream's error chunk does.
+    """
+    if (error := _extra(completion).get("error")) is not None:
+        raise error_body_error(error, provider=provider, default_message="The provider returned an error")
     choice = completion.choices[0]
     message = choice.message
     parts = ChatTurnParts(

@@ -819,6 +819,16 @@ _CHAT_CASES = [
         1,
     ),
     _Case("reset_before_output", _chat_stream(drop=True), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+    # Gateways such as OpenRouter answer a failed upstream with HTTP 200 and an error body; the Agno-backed runtime
+    # raised it as a 502.
+    _Case(
+        "http_200_error_body",
+        _json(200, {"error": {"message": "Provider returned error", "code": 502}, "user_id": "u"}),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        None,
+        1,
+    ),
     _Case(
         "reset_during_tool_arguments",
         _chat_stream(_TOOL_ARGUMENTS, drop=True),
@@ -852,7 +862,11 @@ _CHAT_CASES = [
         1,
     ),
 ]
-_CHAT_SHARED = [case for case in _CHAT_CASES if case.failure in {"http_503", "http_400", "event_server_error"}]
+_CHAT_SHARED = [
+    case
+    for case in _CHAT_CASES
+    if case.failure in {"http_503", "http_400", "event_server_error", "http_200_error_body"}
+]
 
 _RESPONSES_CASES = [
     *_OPENAI_HTTP_CASES,

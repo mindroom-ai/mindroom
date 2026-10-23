@@ -15,6 +15,7 @@ from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderE
 from mindroom.providers.errors import classify_provider_error, provider_failure
 
 __all__ = [
+    "error_body_error",
     "missing_api_key_error",
     "provider_error",
     "sdk_failures",
@@ -53,9 +54,15 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
             message = error.response.text or str(error)
         return classify_provider_error(message, provider=provider, status_code=error.status_code, code=code)
     if isinstance(error, openai.APIError):
-        message, code, error_type = _error_fields(error.body)
-        return classify_provider_error(message or error.message, provider=provider, code=code, error_type=error_type)
+        # The SDK raises an error chunk inside a stream as an ``APIError`` that carries the chunk's ``error`` body.
+        return error_body_error(error.body, provider=provider, default_message=error.message)
     return ProviderError(str(error) or type(error).__name__, provider=provider)
+
+
+def error_body_error(body: object, *, provider: str, default_message: str) -> ProviderError:
+    """Return the owned error for an ``error`` object a server sent in place of its reply, after an HTTP 200."""
+    message, code, error_type = _error_fields(body)
+    return classify_provider_error(message or default_message, provider=provider, code=code, error_type=error_type)
 
 
 def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:
