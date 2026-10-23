@@ -390,17 +390,22 @@ def _reported_history_tokens(
     # are whole seconds, which cannot order a summary written in the same second, so a tie counts as later too.
     if summary is not None and (summary.updated_at is None or summary.updated_at.timestamp() >= answer.created_at):
         return None
-    configured = config.models.get(resolved_inputs.active_model_name)
-    reported = response_context_tokens(
-        answer,
-        provider=model.identity.provider_name,
-        configured_provider=configured.provider if configured is not None else None,
-        model_id=model.identity.id,
-    )
+    reported = reported_context_tokens(answer, model=model, config=config, model_name=resolved_inputs.active_model_name)
     if reported is None:
         return None
     newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=replay_estimator)
     return reported + newer_tokens - non_prompt_tokens
+
+
+def reported_context_tokens(message: Message, *, model: ModelProvider, config: Config, model_name: str) -> int | None:
+    """Return the request-context size ``model`` reported with ``message``, configured as ``model_name``, if any."""
+    configured = config.models.get(model_name)
+    return response_context_tokens(
+        message,
+        provider=model.identity.provider_name,
+        configured_provider=configured.provider if configured is not None else None,
+        model_id=model.identity.id,
+    )
 
 
 # Runs one compaction under the lifecycle wrapper, given the callbacks that report its progress and its success.
