@@ -140,8 +140,8 @@ agents:
 
 `daytona` runs code and shell commands in a remote Daytona sandbox.
 It provides `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
-With `persistent: true`, the same sandbox is reused across calls in one agent session; set `sandbox_id` to use a known sandbox across sessions.
-The working directory persists in the session, so later relative paths resolve from it.
+With `persistent: true`, the same sandbox is reused across calls within one reply, and each new reply creates a new sandbox unless `sandbox_id` is set.
+The working directory persists only within one reply, so later relative paths in that reply resolve from it and the next reply starts in `/home/daytona`.
 Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
 When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
 
@@ -152,7 +152,7 @@ Set it only for a self-hosted Daytona API whose certificate you cannot otherwise
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Daytona API key. |
 | `api_url` | `url` | `null` | Daytona API URL. |
-| `sandbox_id` | `text` | `null` | Existing sandbox to use instead of a session sandbox. |
+| `sandbox_id` | `text` | `null` | Existing sandbox to use for every reply instead of creating one. |
 | `sandbox_language` | `text` | `python` | `python`, `javascript`, or `typescript`. |
 | `sandbox_target` | `text` | `null` | Daytona target. |
 | `sandbox_os` | `text` | `null` | Accepted but not applied to created sandboxes. |
@@ -164,7 +164,7 @@ Set it only for a self-hosted Daytona API whose certificate you cannot otherwise
 | `timeout` | `number` | `300` | Timeout in seconds for sandbox operations. |
 | `auto_create_sandbox` | `boolean` | `true` | Create a replacement sandbox when finding, creating, or starting one fails. |
 | `verify_ssl` | `boolean` | `true` | Verify Daytona TLS certificates; see the warning above. |
-| `persistent` | `boolean` | `true` | Reuse one sandbox across calls in the current agent session. |
+| `persistent` | `boolean` | `true` | Reuse one sandbox across calls within one reply. |
 | `sandbox_public` | `boolean` | `null` | Make created sandboxes public. |
 | `instructions` | `text` | `null` | Custom toolkit instructions replacing the bundled write, run, and show-results guidance. |
 | `add_instructions` | `boolean` | `false` | Add the toolkit instructions to the agent prompt. |
