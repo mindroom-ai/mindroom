@@ -7257,7 +7257,13 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.mcp_scim"
-depends_on = ["mindroom.bounded_bytes", "mindroom.mcp_gateway.accounts", "mindroom.json_utils", "mindroom.logging_config"]
+depends_on = [
+    "mindroom.bounded_bytes",
+    "mindroom.mcp_gateway.accounts",
+    "mindroom.json_utils",
+    "mindroom.llm",
+    "mindroom.logging_config",
+]
 
 [[modules]]
 path = "mindroom.mcp_gateway.accounts"
