@@ -277,22 +277,18 @@ async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
     if file.content:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
         return _inline(data, file.mime_type or mimetypes.guess_type(file.filename or "")[0] or "application/pdf")
-    if file.url is not None:
-        return await _remote_file_part(file, file.url, route)
+    if (url := file.url) is not None:
+        # Gemini fetches a Cloud Storage file, or an HTTPS file of known type, itself; other files are downloaded.
+        if url.startswith("gs://"):
+            return _file_uri(url, file.mime_type or mimetypes.guess_type(url)[0] or "application/pdf")
+        if url.startswith("https://") and file.mime_type:
+            return _file_uri(url, file.mime_type)
+        data, declared = await _downloaded(url, "file", route)
+        return _inline(data, file.mime_type or declared or mimetypes.guess_type(url)[0] or "application/pdf")
     if file.filepath is None:
         return None
     mime_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
     return await _local_part(file.filepath, "file", route, lambda _: mime_type)
-
-
-async def _remote_file_part(file: File, url: str, route: MediaRoute) -> dict[str, Any]:
-    """Reference a Cloud Storage file, or an HTTPS file of known type, which Gemini fetches itself; download others."""
-    if url.startswith("gs://"):
-        return _file_uri(url, file.mime_type or mimetypes.guess_type(url)[0] or "application/pdf")
-    if url.startswith("https://") and file.mime_type:
-        return _file_uri(url, file.mime_type)
-    data, declared = await _downloaded(url, "file", route)
-    return _inline(data, file.mime_type or declared or mimetypes.guess_type(url)[0] or "application/pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -362,9 +358,7 @@ def without_tool_selection(config: Mapping[str, Any], *, vertexai: bool) -> Gene
 
 def tool_config(tool_choice: ToolChoice | None) -> dict[str, Any] | None:
     """Return the function-calling config for ``tool_choice``; ``"none"`` turns function calling off."""
-    if tool_choice is None:
-        return None
-    return {"function_calling_config": {"mode": "NONE"}}
+    return None if tool_choice is None else {"function_calling_config": {"mode": "NONE"}}
 
 
 def response_schema(response_format: object) -> type[BaseModel] | dict[str, Any] | None:
