@@ -30,13 +30,13 @@ class TeamMode(StrEnum):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TeamMember:
-    """One member as the leader sees and runs it in one turn or approval resume, which each build their team.
+    """One member as the leader sees and runs it, in the team one turn or approval resume builds.
 
     ``spec.id`` is the member id the leader delegates to and the stored ``agent_id``; ``spec.name`` the roster name
     and stored ``agent_name``. ``role`` is the roster text the leader reads. ``new_hooks`` builds the hooks of one
-    run of this member, and ``hooks`` holds one set per run; ``request_template`` applies to every run and resume,
-    except that the team run's stream mode overrides its ``stream`` field, so a member streams exactly when its team
-    run does.
+    run of this member, and ``hooks(run_id)`` returns the set a run keeps for its whole life; ``request_template``
+    applies to every run and resume, except that the team run's stream mode overrides its ``stream`` field, so a
+    member streams exactly when its team run does.
     """
 
     spec: AgentSpec
@@ -46,11 +46,11 @@ class TeamMember:
     _hooks_by_run: dict[str, LoopHooks] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def hooks(self, run_id: str) -> LoopHooks:
-        """Return the hooks of the member's run ``run_id``: the set its first run here built, else a new one.
+        """Return the hooks of the member's run ``run_id``, built when this team first runs or resumes that run.
 
         A hook such as the output-limit count or mid-turn compaction keeps state for the run it serves, so a run
-        continued after its delegations keeps that state, and every new run starts afresh, as an approval resume,
-        which builds the team again, does.
+        continued after its delegations keeps that state and a new run starts with its own. An approval resume
+        builds its team again, so the run it resumes starts with new hooks, as an agent's approval resume does.
         """
         hooks = self._hooks_by_run.get(run_id)
         if hooks is None:

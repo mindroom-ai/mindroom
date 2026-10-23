@@ -451,7 +451,7 @@ class _MemberRuns:
         return await self._finish(member, ctx.run_id, stream, ended)
 
     async def resume(self, member: TeamMember, paused: RunRecord, plan: ResumePlan) -> RunRecord:
-        """Resume ``member``'s paused run from its stored messages, which hold no history copies, under its hooks."""
+        """Resume ``member``'s paused run, under that run's hooks, from its stored messages, which hold no history."""
         ended: list[RunRecord] = []
         stream = resume_planned(
             member.spec,
