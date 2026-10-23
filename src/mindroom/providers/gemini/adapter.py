@@ -133,10 +133,13 @@ class GeminiProvider:
                             first_output_at = output_started(first_output_at, event)
                             yield event
             else:
-                events = read_chunk(reply, await client.aio.models.generate_content(**call), whole_response=True)
+                whole = read_chunk(reply, await client.aio.models.generate_content(**call), whole_response=True)
                 first_output_at = time.monotonic()
-                for event in events:
-                    yield event
+                # A reply that arrives whole yields no deltas; its usage still comes first, so a malformed call
+                # settles it.
+                for event in whole:
+                    if isinstance(event, UsageReported):
+                        yield event
         except ProviderError:
             # Media and chunk failures arrive normalized.
             raise

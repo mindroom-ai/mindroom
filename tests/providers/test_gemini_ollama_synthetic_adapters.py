@@ -609,19 +609,14 @@ async def test_gemini_usage_counts_thinking_as_output_and_keeps_cached_input(tmp
 
 @pytest.mark.asyncio
 async def test_gemini_non_streaming_requests_use_generate_content(tmp_path: Path) -> None:
-    """``stream=False`` sends the route's non-streaming call and still yields the usage and the finished turn."""
+    """``stream=False`` sends the route's non-streaming call and yields only the usage and the finished turn."""
     reply = httpx.Response(200, json=_gemini_chunk({"text": "Whole."}))
 
     request, events = await run_adapter(GEMINI, _request(stream=False), tmp_path, reply)
 
     assert request["url"].endswith(":generateContent")
     completed = _completed(events)
-    assert [type(event).__name__ for event in events] == [
-        "TextDelta",
-        "UsageReported",
-        "UsageReported",
-        "TurnCompleted",
-    ]
+    assert [type(event).__name__ for event in events] == ["UsageReported", "UsageReported", "TurnCompleted"]
     assert completed.message.content == "Whole."
     assert completed.message.metrics.input_tokens == 10
 
@@ -1662,6 +1657,20 @@ async def test_synthetic_waits_for_each_chunk_at_the_configured_rate(
     _completed([event async for event in provider.stream(_request())])
 
     assert sleeps == [2.0, 2.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_a_whole_synthetic_reply_yields_only_its_finished_turn(tmp_path: Path) -> None:
+    """``stream=False`` gets the planned text and shell call on the finished turn, without deltas, as on every route."""
+    config = _synthetic_config(chars_per_second=0, tool_call_probability=1.0)
+    provider = build_synthetic_provider(config, runtime_paths_for(tmp_path))
+    shell = ToolSpec(name="run_shell_command", description="Run a shell command.", parameters={"type": "object"})
+
+    [completed] = [event async for event in provider.stream(_request(tools=[shell], stream=False))]
+
+    assert isinstance(completed, TurnCompleted)
+    assert completed.message.content
+    assert [call["function"]["name"] for call in completed.message.tool_calls or []] == ["run_shell_command"]
 
 
 @pytest.mark.parametrize(
