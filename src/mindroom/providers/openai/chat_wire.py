@@ -22,7 +22,6 @@ from pydantic import BaseModel
 from mindroom.llm.messages import split_thinking
 from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics
-from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.openai.errors import error_body_error
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
@@ -186,16 +185,15 @@ def _cerebras_message(message: Message) -> dict[str, Any]:
 
 
 def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSettings) -> list[dict[str, Any]]:
-    replayable = repair_legacy_tool_calls(messages)
     if wire.dialect == "groq":
-        return [_groq_message(message) for message in replayable]
+        return [_groq_message(message) for message in messages]
     if wire.dialect == "cerebras":
-        return [_cerebras_message(message) for message in replayable]
+        return [_cerebras_message(message) for message in messages]
     role_map = settings.role_map or {
         "system": "developer" if wire.developer_system_role else "system",
         "model": "assistant",
     }
-    canonical = reformat_tool_call_ids(replayable, "chat")
+    canonical = reformat_tool_call_ids(messages, "chat")
     return [_openai_message(message, wire, role_map) for message in canonical]
 
 

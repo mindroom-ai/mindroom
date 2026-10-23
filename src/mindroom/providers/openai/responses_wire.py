@@ -25,7 +25,6 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
 from mindroom.providers.errors import classify_provider_error
-from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
@@ -209,7 +208,7 @@ def responses_input(
     """
     prepared, explicit = _prepare_continuation(messages, explicit_replay=portable_replay)
     route = native_compaction.route if native_compaction is not None else None
-    prepared = native_replay_messages(repair_legacy_tool_calls(prepared), route)
+    prepared = native_replay_messages(prepared, route)
     replay_store = False if explicit else store
     formatted = _agno_input(prepared, store=replay_store)
     # Ordered output is restored only for the spans the request still sends.

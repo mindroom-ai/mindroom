@@ -158,42 +158,6 @@ async def _adapter_turn(built: _Built, request: ModelRequest) -> Any:  # noqa: A
     return await complete(built.adapter, request)
 
 
-# --- Legacy history -------------------------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_legacy_tool_replay_supplies_missing_arguments(tmp_path: Path) -> None:
-    call = {"id": "call_1", "type": "function", "function": {"name": "list_rooms"}}
-    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
-    history = [
-        _user(),
-        Message(role="assistant", tool_calls=[call]),
-        Message(role="tool", tool_call_id="call_1", content="[]"),
-    ]
-
-    await _turn(built, ModelRequest(messages=history))
-
-    assert built.body()["messages"][1]["tool_calls"][0]["function"] == {"name": "list_rooms", "arguments": "{}"}
-    assert "arguments" not in call["function"]
-
-
-@pytest.mark.asyncio
-async def test_legacy_tool_replay_removes_placeholders_and_orphans(tmp_path: Path) -> None:
-    history = [
-        _user(),
-        Message(role="assistant", tool_calls=[{"id": "call_0"}, _CALL]),
-        Message(role="tool", tool_call_id="call_0", content="orphan"),
-        Message(role="tool", tool_call_id="call_1", content="sunny"),
-    ]
-    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
-
-    await _turn(built, ModelRequest(messages=history))
-
-    sent = built.body()["messages"]
-    assert [message.get("tool_call_id") for message in sent if message["role"] == "tool"] == ["call_1"]
-    assert sent[1]["tool_calls"] == [_CALL]
-
-
 # --- Chat parsing ---------------------------------------------------------------------------------------------
 
 

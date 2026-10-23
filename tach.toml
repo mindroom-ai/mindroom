@@ -2596,12 +2596,19 @@ depends_on = [
 path = "mindroom.history.request_messages"
 depends_on = [
     "mindroom.constants",
+    "mindroom.history.legacy_stored_tool_calls",
     "mindroom.history.legacy_summary_system_prompt",
     "mindroom.history.message_content",
     "mindroom.history.summary_message",
     "mindroom.llm",
     "mindroom.history.run_visibility",
 ]
+
+# The stored tool-call shapes earlier releases wrote, read where stored runs become requests.
+[[modules]]
+path = "mindroom.history.legacy_stored_tool_calls"
+depends_on = []
+visibility = ["mindroom.history.request_messages"]
 
 [[modules]]
 path = "mindroom.history.summary_message"
@@ -2706,7 +2713,6 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.providers.claude_wire_blocks",
-    "mindroom.providers.legacy_stored_tool_calls",
     "mindroom.providers.stored_tool_calls",
 ]
 visibility = ["mindroom.providers.anthropic.messages"]
@@ -5977,7 +5983,6 @@ depends_on = [
     "mindroom.providers.cache_ladder",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
-    "mindroom.providers.legacy_stored_tool_calls",
     "mindroom.providers.model_http_client",
     "mindroom.providers.model_loading",
     "mindroom.providers.names",
@@ -7917,14 +7922,10 @@ depends_on = ["mindroom.llm"]
 path = "mindroom.providers.remote_media"
 depends_on = ["mindroom.bounded_bytes", "mindroom.llm"]
 
-# How every wire reads stored tool calls, and the shapes earlier releases stored.
+# How a wire reads the arguments of a stored tool call.
 [[modules]]
 path = "mindroom.providers.stored_tool_calls"
 depends_on = ["mindroom.llm"]
-
-[[modules]]
-path = "mindroom.providers.legacy_stored_tool_calls"
-depends_on = []
 
 [[modules]]
 path = "mindroom.providers.gemini"
@@ -7933,7 +7934,6 @@ depends_on = [
     "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
-    "mindroom.providers.legacy_stored_tool_calls",
     "mindroom.providers.model_loading",
     "mindroom.providers.remote_media",
     "mindroom.providers.stored_tool_calls",
@@ -7947,7 +7947,6 @@ depends_on = [
     "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
-    "mindroom.providers.legacy_stored_tool_calls",
     "mindroom.providers.remote_media",
     "mindroom.providers.stored_tool_calls",
     "mindroom.providers.tool_policy",
