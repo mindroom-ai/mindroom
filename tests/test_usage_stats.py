@@ -79,7 +79,7 @@ def _source(
         path=Path("/not-read.db"),
         path_label=f"{scope}/{agent_name or 'team'}.db",
         scope=scope,  # type: ignore[arg-type]
-        names=TableNames("code"),
+        names=TableNames(agent_name or "team"),
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset({"code", "other"}),
         requester_isolated=requester_isolated,
