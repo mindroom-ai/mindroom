@@ -554,7 +554,7 @@ class ToolJobRuntime:
                 await self._publish(entry, _updated(entry.job, status=status))
 
     async def _run(self, entry: _Entry, operation: _Operation) -> None:
-        # The receipt's model hook reaches tool dispatch, which imports this module.
+        # approval.receipt imports the model loop, whose tool dispatch imports this module.
         from mindroom.approval.receipt import without_approval_receipt  # noqa: PLC0415
 
         outcome = None
