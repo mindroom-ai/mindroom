@@ -84,8 +84,7 @@ async def test_a_catalog_for_another_requester_names_the_recovery_command(tmp_pa
     with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="!mode helper standard"):
         await prepare_minimal_catalog(
             build,
-            run=RunContext(run_id="run", session_id="session", user_id="@mallory:example.test"),
-            session=session,
+            run=RunContext(run_id="run", session_id="session", user_id="@mallory:example.test", session=session),
             store=None,
             delegation_depth=0,
         )
@@ -95,8 +94,7 @@ async def test_a_catalog_for_another_requester_names_the_recovery_command(tmp_pa
     ):
         await prepare_minimal_catalog(
             replace(build, spec=replace(build.spec, toolkits=())),
-            run=RunContext(run_id="run", session_id="session", user_id=runtime.requester_id),
-            session=session,
+            run=RunContext(run_id="run", session_id="session", user_id=runtime.requester_id, session=session),
             store=None,
             delegation_depth=1,
         )

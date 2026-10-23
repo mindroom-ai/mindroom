@@ -75,10 +75,8 @@ async def _catalog(
     session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
     catalog = agent_tool_calls.PreparedAgentToolCatalog(
         agent_name="helper",
-        # The run's tools share the session's state, as every turn hands it to them.
-        run=RunContext(run_id="run", session_id="session", user_id="@alice:test", session_state=session.session_state),
+        run=RunContext(run_id="run", session_id="session", user_id="@alice:test", session=session),
         runtime_context=runtime,
-        session=session,
         middleware=middleware,
         tool_call_limit=tool_call_limit,
     )

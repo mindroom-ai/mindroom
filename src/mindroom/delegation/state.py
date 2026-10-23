@@ -5,9 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
-from mindroom.llm.runs import RunStatus
-from mindroom.redaction import redact_sensitive_text
-
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
 
@@ -15,7 +12,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.llm.runs import AnyRunRecord, RunRequirement
+    from mindroom.llm.runs import RunRequirement
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
 
@@ -271,21 +268,6 @@ def child_card_id(delegation_id: str, call_id: str) -> str:
 def child_call_id(delegation_id: str, card_id: str) -> str:
     """Return the child's own call id from the id ``child_card_id`` gave that call on the child's parent."""
     return card_id.removeprefix(f"{delegation_id}:")
-
-
-def handover_content(record: AnyRunRecord) -> str | dict[str, Any] | None:
-    """Return what a finished run shows whoever reads it after it ends: why it failed, else its content.
-
-    The run that started it, a team's document of its members, and a delegation's settlement all read this. A run
-    that failed in this process carries its reason, credentials redacted, on ``error``; its ``content`` is what its
-    model said before the failure, or the unredacted error when it said nothing. A failed record loaded from storage
-    has no ``error``, so its stored content is shown with credentials redacted.
-    """
-    if record.status is not RunStatus.error:
-        return record.content
-    if record.error is not None:
-        return record.error
-    return redact_sensitive_text(record.content) if isinstance(record.content, str) else record.content
 
 
 class ChildResponseRunner(Protocol):

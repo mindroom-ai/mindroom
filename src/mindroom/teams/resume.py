@@ -234,7 +234,7 @@ class TeamResume:
                 session_id=session.session_id,
                 user_id=self.user_id,
                 metadata=deepcopy(paused.metadata),
-                session_state=session.session_state,
+                session=session,
                 history_scope=self.storage.scope,
             ),
             hooks=self.hooks,

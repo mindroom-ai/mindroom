@@ -1,10 +1,11 @@
 """The final model request of a response that counts toward skill learning, kept for the review to fork.
 
-Like Hermes' review fork, the review replays that request with its tools, as the run's functions declare them, and
-its request settings unchanged and appends the review prompt, so the provider serves the conversation from its prompt
-cache. Only the ordinary response path
-records requests, and it builds its provider for that one response, so the review owns the provider once the response
-has ended.
+Like Hermes' review fork, the review replays that request with its request settings unchanged and appends the review
+prompt. Its tools are the definitions the run's functions declare, so the provider serves the conversation from its
+prompt cache when the request offered those same definitions; the fork of a request that offered a wait budget for
+calls that could become jobs differs in its tools and misses the cache. Only the ordinary response path records
+requests, and it builds its provider for that one response, so the review owns the provider once the response has
+ended.
 """
 
 from __future__ import annotations

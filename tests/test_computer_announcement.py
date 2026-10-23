@@ -343,7 +343,7 @@ def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
     tools: list[str],
     announces: bool,
 ) -> None:
-    """create_agent gives a chat_ui agent's worker browser functions the announcement as their own policy, and no other agent's."""
+    """create_agent gives a chat_ui agent's worker browser functions the announcement as their own policy, alone."""
     config, runtime_paths = _agent(tmp_path, tools)
     config = bind_runtime_paths(config, runtime_paths)
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))

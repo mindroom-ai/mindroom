@@ -5972,7 +5972,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.llm"
-depends_on = []
+depends_on = ["mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.providers.openai"
@@ -7724,7 +7724,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.delegation.state"
-depends_on = ["mindroom.llm", "mindroom.redaction"]
+depends_on = []
 
 [[modules]]
 path = "mindroom.delegation.hooks"

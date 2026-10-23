@@ -356,7 +356,7 @@ class _LeaderRun:
                 session_id=session_id,
                 user_id=user_id,
                 metadata=metadata,
-                session_state=self.storage.session.session_state if self.storage is not None else {},
+                session=self.storage.session if self.storage is not None else None,
                 history_scope=self.storage.scope if self.storage is not None else None,
             ),
             hooks=self.hooks,

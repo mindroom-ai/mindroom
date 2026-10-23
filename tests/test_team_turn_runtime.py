@@ -1286,6 +1286,39 @@ async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_t
 
 
 @pytest.mark.asyncio
+async def test_two_members_approvals_under_one_call_id_are_refused_and_neither_call_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval names its call by call id, so two members' calls under one id are refused rather than guessed at."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            calls(
+                tool_call("delegate_task_to_member", "call-w", member_id="writer", task="Touch A"),
+                tool_call("delegate_task_to_member", "call-c", member_id="checker", task="Touch B"),
+                metrics=usage(40, 4),
+            ),
+        ],
+        writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1))],
+        checker=[calls(tool_call("touch", "call-touch", label="b"), metrics=usage(10, 1))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+
+    chunks = await team.stream(show_tool_calls=False)
+
+    assert chunks[-1].endswith("Paused approval requirements contain duplicate tool-call IDs")
+    assert ProbeToolkit.calls == []
+    record, members = team.stored_runs()
+    assert record.status is RunStatus.paused
+    assert sorted((member.agent_id or "", member.status) for member in members) == [
+        ("checker", RunStatus.paused),
+        ("writer", RunStatus.paused),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_blocking_team_continues_after_a_member_s_delegation_with_streamed_leader_requests(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

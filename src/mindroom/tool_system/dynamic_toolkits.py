@@ -37,7 +37,7 @@ class ToolDeferral:
 
 @dataclass(frozen=True)
 class DeferredToolkit:
-    """The functions a run offers of one authored deferred tool, off the provider request until tool search finds them."""
+    """The functions a run offers of one authored deferred tool, which stay off the provider request until searched."""
 
     deferral: ToolDeferral
     functions: tuple[ToolFunction, ...]

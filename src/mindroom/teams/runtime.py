@@ -29,7 +29,6 @@ from mindroom.agent_loop.run import (
 )
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agent_loop.tools import prepare_run_tools
-from mindroom.delegation.state import handover_content
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import ContentDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
@@ -183,7 +182,7 @@ def continue_team(
                 if resumed.status is RunStatus.paused:
                     propagate_member_pause(record, plan.member, resumed)
                 else:
-                    content = handover_content(resumed) or MEMBER_TASK_COMPLETED
+                    content = resumed.handover_content or MEMBER_TASK_COMPLETED
                     results.append(MEMBER_RESULT_LINE.format(name=plan.member.spec.name, content=content))
             if plans and not any(not r.is_resolved() for r in record.requirements or ()):
                 _answer_delegations(record, messages, [plan.member for plan in plans], results)
@@ -238,7 +237,7 @@ def _keep_ended_member_run(ended: list[RunRecord], record: RunRecord) -> None:
 
 
 def team_usage_runs(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[tuple[AnyRunRecord, RunMetrics]]:
-    """Return the runs whose own metrics make up the turn's usage, each with its metrics: the leader's, then every member's.
+    """Return the runs whose own metrics make up the turn's usage, with those metrics: the leader's, then each member's.
 
     The team record's own metrics cover only the leader's requests; each member's usage is on its record, so
     nothing is counted twice. A run that reported no usage is left out.
@@ -469,15 +468,8 @@ class _MemberRuns:
         return replace(member.request_template, stream=self.stream)
 
     def _member_context(self, run_id: str) -> RunContext:
-        return RunContext(
-            run_id=run_id,
-            session_id=self.ctx.session_id,
-            user_id=self.ctx.user_id,
-            parent_run_id=self.record.run_id,
-            metadata=self.ctx.metadata,
-            session_state=self.ctx.session_state,
-            history_scope=self.ctx.history_scope,
-        )
+        """Return a member run's context: the team run's, so its tools share the team's state, under its own run id."""
+        return replace(self.ctx, run_id=run_id, parent_run_id=self.record.run_id)
 
     def _capture(self, ended: list[RunRecord]) -> Persist[RunRecord]:
         async def persist(record: RunRecord) -> None:

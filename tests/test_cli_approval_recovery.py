@@ -784,9 +784,13 @@ async def _checkpointed_batch(
     )
     catalog = PreparedAgentToolCatalog(
         agent_name="helper",
-        run=RunContext(run_id="saved-run", session_id=runtime.session_id, user_id=runtime.requester_id),
+        run=RunContext(
+            run_id="saved-run",
+            session_id=runtime.session_id,
+            user_id=runtime.requester_id,
+            session=session,
+        ),
         runtime_context=runtime,
-        session=session,
         store=store,
     )
     checkpoint = BatchCheckpoint(catalog)

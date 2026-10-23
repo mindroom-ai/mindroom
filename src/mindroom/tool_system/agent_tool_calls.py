@@ -95,9 +95,9 @@ class AgentToolCallEvent:
 class PreparedAgentToolCatalog:
     """One turn's catalog of the agent's tools, each under the toolkit it was authored in.
 
-    ``run`` is the turn's run identity and the session state its calls share; ``session`` and ``store`` are where
-    that run is stored, and ``record`` is the run itself once known: the live run after its first tool batch is
-    planned, or the stored run a recovery continues. ``middleware`` is the build's tool-call policy, which every
+    ``run`` is the turn's run identity, whose session holds the state its calls share; that session and ``store``
+    are where the run is stored, and ``record`` is the run itself once known: the live run after its first tool batch
+    is planned, or the stored run a recovery continues. ``middleware`` is the build's tool-call policy, which every
     call runs through, and ``tool_call_limit`` bounds the calls of one turn. The toolkits it connects, the ones a
     run reaches only through it and every deferred toolkit it materializes, stay connected until it closes.
     """
@@ -105,7 +105,6 @@ class PreparedAgentToolCatalog:
     agent_name: str
     run: RunContext
     runtime_context: ToolRuntimeContext
-    session: ConversationSession
     store: ConversationStore | None = None
     middleware: Sequence[ToolMiddleware] = ()
     tool_call_limit: int | None = None
@@ -117,6 +116,14 @@ class PreparedAgentToolCatalog:
     _call_count: int = field(default=0, init=False)
     _closed: bool = field(default=False, init=False)
     _closes: list[ToolkitClose] = field(default_factory=list, init=False)
+
+    @property
+    def session(self) -> ConversationSession:
+        """Return the session the turn's run is stored to, which the catalog's checkpoints and delegations write."""
+        if self.run.session is None:
+            msg = "A tool catalog needs a run that belongs to a session"
+            raise RuntimeError(msg)
+        return self.run.session
 
     @contextmanager
     def execution_context(self) -> Iterator[None]:
@@ -239,15 +246,7 @@ class PreparedAgentToolCatalog:
 
     def call_context(self, call_id: str) -> ToolCallContext:
         """Return the execution context of one call: the turn's run and the call's own id."""
-        return ToolCallContext(
-            run_id=self.run.run_id,
-            session_id=self.run.session_id,
-            user_id=self.run.user_id,
-            call_id=call_id,
-            session_state=self.run.session_state,
-            metadata=self.run.metadata or {},
-            history_scope=self.run.history_scope,
-        )
+        return ToolCallContext.of_run(self.run, call_id)
 
     async def bind(
         self,

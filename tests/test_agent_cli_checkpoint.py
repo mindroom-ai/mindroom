@@ -8,7 +8,6 @@ import sys
 import threading
 from contextlib import closing
 from copy import deepcopy
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -153,7 +152,7 @@ async def test_approval_checkpoint_refreshes_mutable_session_state(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_a_checkpoint_and_the_state_its_calls_ran_with_are_stored_together_or_neither(tmp_path: Path) -> None:
-    """A checkpoint the database refuses leaves the session state as it was, so a restart never finds state without it."""
+    """A checkpoint the database refuses leaves the session state as it was, so a restart finds no state without it."""
     catalog = await _stored_catalog(tmp_path)
     checkpoint = BatchCheckpoint(catalog)
     await _capture(checkpoint, _record(), [_assistant("bash-1")])
@@ -184,8 +183,6 @@ async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_ch
     session = catalog.session
     session.session_state["cwd"] = "/repo"
     store.save_session_state(session, session_state_snapshot(session.session_state))
-    # As in a turn, the run's tools change the session's own state in place.
-    catalog.run = replace(catalog.run, session_state=session.session_state)
     persist = persist_to(store, session)
     checkpoint = BatchCheckpoint(catalog)
     record = _record()

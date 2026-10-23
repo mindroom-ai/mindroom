@@ -97,15 +97,7 @@ class PlannedCall:
 
     def context(self, run: RunContext) -> ToolCallContext:
         """Return the call's execution context for ``run``."""
-        return ToolCallContext(
-            run_id=run.run_id,
-            session_id=run.session_id,
-            user_id=run.user_id,
-            call_id=self.call_id,
-            session_state=run.session_state,
-            metadata=run.metadata or {},
-            history_scope=run.history_scope,
-        )
+        return ToolCallContext.of_run(run, self.call_id)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

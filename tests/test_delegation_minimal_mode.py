@@ -389,6 +389,8 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     assert "Leader done" in result, result
     assert len(child_listings) == 1
     assert [offered_tools(request) for request in child.requests] == [["bash"], ["bash"]]
+    # The parent's delegation ran inside its Bash call, so its run never paused and kept its Bash-only surface.
+    assert [offered_tools(request) for request in lead.requests] == [["bash"], ["bash"]]
     assert "Child answer" in str(lead.requests[-1].messages)
 
 

@@ -125,7 +125,8 @@ def resume_agent(
     must be covered once: a confirmation by one approved call whose name and argument digest match or by a denial,
     an external execution by its result; anything else raises ``ValueError`` here, before any call runs, and
     ``paused`` is left unchanged. Approved calls run from their stored arguments and announce themselves as tool
-    events; denied calls answer with their note; external results answer as they are. The returned stream ends as ``run_agent``'s does.
+    events; denied calls answer with their note; external results answer as they are. The returned stream ends as
+    ``run_agent``'s does.
     """
     plan = plan_resume(spec, paused, approved=approved, denied=denied, external_results=external_results)
     return resume_planned(

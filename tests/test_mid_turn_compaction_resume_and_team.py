@@ -216,7 +216,7 @@ async def _pause(agent: _Resumable) -> RunRecord:
     events = run_agent(
         replace(build.spec, system_message=prompt_for_turn(build)),
         build_request(system=(), summary=summary, history=history, turn=turn),
-        ctx=RunContext(run_id=str(uuid4()), session_id="session-1", session_state=agent.session.session_state),
+        ctx=RunContext(run_id=str(uuid4()), session_id="session-1", session=agent.session),
         hooks=agent_loop_hooks(
             build,
             HookTurn(

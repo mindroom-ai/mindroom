@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import RunMetrics, ToolCallMetrics
+from mindroom.redaction import redact_sensitive_text
 
 
 def _new_id() -> str:
@@ -247,6 +248,20 @@ class _RunRecordCommon:
     # Why an ``ERROR`` run failed, credentials redacted, set by the loop that ended it. It is never stored, so a
     # loaded record has none; ``content`` keeps Agno's stored rule (the error's text only when the model said nothing).
     error: str | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def handover_content(self) -> str | dict[str, Any] | None:
+        """Return what the run shows whoever reads it after it ends: why it failed, else its content.
+
+        The run that started it, a team's document of its members, and a delegation's settlement all read this. A
+        failed run that ended in this process shows its ``error``; a failed record loaded from storage has none, so
+        its stored content, the unredacted error when its model said nothing, is shown with credentials redacted.
+        """
+        if self.status is not RunStatus.error:
+            return self.content
+        if self.error is not None:
+            return self.error
+        return redact_sensitive_text(self.content) if isinstance(self.content, str) else self.content
 
     def _scalars_dict(self, identity: Mapping[str, str | None]) -> dict[str, Any]:
         """Return the scalar keys in Agno's order: the run, its agent or team, then the rest."""

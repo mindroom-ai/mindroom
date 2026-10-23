@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
-from mindroom.delegation.state import handover_content, member_slot_id
+from mindroom.delegation.state import member_slot_id
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import MODEL_PROVENANCE_KEY
 from mindroom.matrix.message_builder import opens_with_markdown_block
@@ -124,7 +124,7 @@ def finished_run_text(record: AnyRunRecord) -> str:
     the thread as assistant messages; only the messages a model answered carry its provenance, so a run without
     content never shows an earlier turn's answer.
     """
-    content = handover_content(record)
+    content = record.handover_content
     if content:
         return str(content)
     return "\n\n".join(
@@ -137,9 +137,10 @@ def finished_run_text(record: AnyRunRecord) -> str:
 def format_team_response(record: TeamRunRecord, members: Sequence[RunRecord]) -> str:
     """Return a finished team run's text as Agno's blocking team reply rendered it, without the header.
 
-    ``members`` are the member runs that ended, in the order they ended; each with text contributes it as written,
-    so a member delegated twice contributes twice and a member that failed before any text shows its error. The
-    leader's content is the consensus. A run in which nobody wrote anything renders as empty text.
+    ``members`` are the member runs that ended, in the order they ended; each contributes its ``finished_run_text``,
+    so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
+    credentials redacted, even when it wrote text first. The leader's content is the consensus. A run in which nobody
+    wrote anything renders as empty text.
     """
     contributions = [
         _format_member_contribution(member.agent_name or "Team Member", text)

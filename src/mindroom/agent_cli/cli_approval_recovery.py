@@ -125,7 +125,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         run_id=continuation.run_id,
         session_id=continuation.session_id,
         user_id=continuation.requester_id,
-        session_state=session.session_state,
+        session=session,
         metadata=deepcopy(persisted.metadata),
     )
     turn = ResponseTurnContext(
@@ -159,7 +159,6 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         catalog = await prepare_minimal_catalog(
             build,
             run=run,
-            session=session,
             store=store,
             delegation_depth=payload.delegation_depth,
             record=persisted,
