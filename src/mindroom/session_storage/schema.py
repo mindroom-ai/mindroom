@@ -85,7 +85,8 @@ class TableNames:
     @property
     def runs(self) -> str:
         """The runs table."""
-        # Agno 3 names the runs table beside its default sessions table ``agno_sessions`` (storage name ``agno``) ``agno_runs`` (agno/db/base.py, BaseDb.__init__).
+        # Agno 3 (agno/db/base.py, BaseDb.__init__) names the runs table ``<sessions>_runs``, except that its default
+        # sessions table ``agno_sessions``, which is the storage name ``agno``, keeps the runs table ``agno_runs``.
         return "agno_runs" if self.storage_name == "agno" else f"{self.sessions}_runs"
 
     @property
