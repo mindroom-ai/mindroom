@@ -1469,7 +1469,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
             if toolkit is not None:
                 # Checked while this toolkit builds, so a hooked function costs only its own toolkit; the adapter,
-                # which would reject it too, runs once every toolkit is built.
+                # which would reject it too, runs once every toolkit is built. The check runs before the steps that
+                # hide unresumable approval functions, session MCP collisions, and shadowed deferred functions, so
+                # a hooked function one of those would hide still drops its toolkit.
                 for function in toolkit.get_async_functions().values():
                     reject_agno_hooks(function)
             if toolkit is not None and persona_tools is not None:

@@ -481,9 +481,9 @@ class FoldBasis:
 def read_fold_basis(storage: ConversationStore, session: ConversationSession, scope: HistoryScope) -> FoldBasis | None:
     """Read the latest summary row and the visible stored runs after it.
 
-    The running loop's own session still holds every run it loaded when the turn started, so an earlier
-    fold of the same turn would be summarized again; the stored log knows what that fold covered. A stored
-    copy of the running run is paused or cancelled, so it never counts as visible.
+    The stored log, not the running loop's own session, is authoritative for what earlier folds covered, so
+    the basis is read from it. A stored copy of the running run is paused or cancelled, so it never counts
+    as visible.
     Returns ``None`` when the stored history changed between the reads.
     """
     latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
