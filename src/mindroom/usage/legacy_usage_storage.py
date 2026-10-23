@@ -10,7 +10,8 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json
-from mindroom.session_storage.schema import TableNames
+from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, migrate_database
 from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
@@ -43,39 +44,33 @@ def legacy_request_model(models: Mapping[tuple[str, str], object]) -> tuple[str,
 # Replacement: v2026.9.191 introduced independent usage snapshots; no historical billing completeness is inferred.
 # Handling: Detect by schema; seed once transactionally, prefer current rows, retain unknown dates and content-free gaps.
 # Coverage: tests/test_legacy_usage_storage.py.
-def migrate_usage_database(path: Path, session_table: str, *, timeout: float = 30) -> None:
+def migrate_usage_database(path: Path, session_table: str, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> None:
     """Seed an existing database once; publication and all imported records commit together."""
     if not path.is_file():
         return
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=rw", uri=True, timeout=timeout)
-    try:
-        if not _needs_migration(connection, session_table):
-            return
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("BEGIN IMMEDIATE")
-        # Another startup may have finished while this connection waited for its write lock.
-        if _needs_migration(connection, session_table):
-            connection.execute(usage_table_sql(session_table))
-            _seed_usage(connection, session_table)
-        connection.commit()
-    finally:
-        # close rolls back both DDL and rows on interruption, leaving migration retryable.
-        connection.close()
+    migrate_database(
+        path,
+        needed=lambda connection: _needs_migration(connection, session_table),
+        apply=lambda connection: _create_usage(connection, session_table),
+        timeout=timeout,
+    )
 
 
 def _needs_migration(connection: sqlite3.Connection, session_table: str) -> bool:
-    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    tables = table_names(connection)
     return session_table in tables and f"{session_table}_usage" not in tables
+
+
+def _create_usage(connection: sqlite3.Connection, session_table: str) -> None:
+    connection.execute(usage_table_sql(session_table))
+    _seed_usage(connection, session_table)
 
 
 def _seed_usage(connection: sqlite3.Connection, session_table: str) -> None:
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(session_table)})")}
     legacy_column = "runs" if "runs" in columns else "NULL"
     runs_table = TableNames(session_table).runs
-    has_runs = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (runs_table,),
-    ).fetchone()
+    has_runs = runs_table in table_names(connection)
     for session_id, blob in connection.execute(
         f"SELECT session_id, {legacy_column} FROM {quote_identifier(session_table)}",  # noqa: S608
     ):

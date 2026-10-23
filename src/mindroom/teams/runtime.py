@@ -237,22 +237,28 @@ def _keep_ended_member_run(ended: list[RunRecord], record: RunRecord) -> None:
         ended.append(record)
 
 
-def team_usage(record: TeamRunRecord, members: Sequence[RunRecord]) -> RunMetrics | None:
-    """Return the turn's usage: the leader's requests plus every member run's, within the leader's duration.
+def team_usage_runs(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[tuple[AnyRunRecord, RunMetrics]]:
+    """Return the runs whose own metrics make up the turn's usage, each with its metrics: the leader's, then every member's.
 
     The team record's own metrics cover only the leader's requests; each member's usage is on its record, so
-    nothing is counted twice. Members run inside the leader's window, so summing durations would double-count
-    wall clock; token and cost sums are disjoint.
+    nothing is counted twice. A run that reported no usage is left out.
     """
-    member_metrics = [member.metrics for member in members if member.metrics is not None]
-    if not member_metrics:
-        return record.metrics
-    total = sum(member_metrics[1:], member_metrics[0])
-    if record.metrics is None:
-        return total
-    combined = record.metrics + total
-    combined.duration = record.metrics.duration
-    return combined
+    return [(run, run.metrics) for run in (record, *members) if run.metrics is not None]
+
+
+def team_usage(record: TeamRunRecord, members: Sequence[RunRecord]) -> RunMetrics | None:
+    """Return the turn's usage, the sum over ``team_usage_runs``, within the leader's duration.
+
+    Members run inside the leader's window, so summing durations would double-count wall clock; token and cost sums
+    are disjoint.
+    """
+    metrics = [run_metrics for _, run_metrics in team_usage_runs(record, members)]
+    if not metrics:
+        return None
+    total = sum(metrics[1:], metrics[0])
+    if len(metrics) > 1 and record.metrics is not None:
+        total.duration = record.metrics.duration
+    return total
 
 
 @dataclass(frozen=True, slots=True)
@@ -545,4 +551,5 @@ __all__ = [
     "run_team",
     "team_paused_content",
     "team_usage",
+    "team_usage_runs",
 ]

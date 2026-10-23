@@ -85,7 +85,7 @@ from mindroom.response_runner import (
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
-from mindroom.session_storage.types import ConversationSession, SessionKind
+from mindroom.session_storage.types import ConversationSession, SessionKind, SessionStateWrite
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.access_schema_support import with_current_room_member_access
@@ -436,10 +436,16 @@ class _RecordingStore(ConversationStore):
             assert self.held.wait(timeout=1)
         return ConversationStore.load_session(self, session_id, kind)
 
-    def save_runs(self, session: ConversationSession, runs: Iterable[AnyRunRecord]) -> None:
+    def save_runs(
+        self,
+        session: ConversationSession,
+        runs: Iterable[AnyRunRecord],
+        *,
+        state: SessionStateWrite | None = None,
+    ) -> None:
         written = list(runs)
         self.saves.append([run.run_id for run in written])
-        ConversationStore.save_runs(self, session, written)
+        ConversationStore.save_runs(self, session, written, state=state)
 
 
 def _recording_store(tmp_path: Path, name: str, *, held: threading.Event | None = None) -> _RecordingStore:

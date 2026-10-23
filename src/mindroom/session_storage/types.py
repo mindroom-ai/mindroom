@@ -30,6 +30,18 @@ def session_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionStateWrite:
+    """The ``session_state`` a run save writes beside its run: ``state``, a ``session_state_snapshot`` of ``session``.
+
+    ``session`` is the loaded copy of the row that the snapshot was taken from, and it records what the row holds
+    afterwards. The save writes ``state`` only when the row does not already hold it.
+    """
+
+    session: ConversationSession
+    state: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class SessionFields:
     """The two session-row fields MindRoom writes by field: scope metadata and the tools' shared ``session_state``."""
 
@@ -50,6 +62,8 @@ class ConversationSession:
     ``summary`` as a load returns them. ``summary`` is the owner scope's latest summary row, derived on load and on
     those changes and never written back. ``metadata`` is the row's, as loaded and as the store's latest metadata
     change for this session left it. Only the store assigns these fields.
+    ``user_id`` is the row's requester as loaded; a row created without one takes the first requester a saved run
+    names, which the store does not mirror here.
     ``session_state`` is the dict the run's tools share and change in place. ``stored_session_state`` is the state the
     store holds for the session as far as this session knows: as loaded, then as the store's latest write of that
     field for this session left it. A run's terminal save writes ``session_state`` back only when the two differ.
@@ -74,5 +88,6 @@ __all__ = [
     "SaveOutcome",
     "SessionFields",
     "SessionKind",
+    "SessionStateWrite",
     "session_state_snapshot",
 ]

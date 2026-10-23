@@ -196,19 +196,16 @@ path = "mindroom.agent_cli.checkpoint"
 depends_on = [
     "mindroom.agent_loop",
     "mindroom.llm",
-    "mindroom.session_storage.lanes",
-    "mindroom.session_storage.types",
+    "mindroom.session_storage.store",
 ]
 visibility = [
     "mindroom.agent_cli.turn",
-    "mindroom.agent_cli.cli_approval_recovery",
 ]
 
 [[interfaces]]
 from = ["mindroom.agent_cli.checkpoint"]
 expose = [
     "BatchCheckpoint",
-    "save_cli_session",
 ]
 
 [[modules]]
@@ -1076,7 +1073,7 @@ depends_on = ["mindroom.llm", "mindroom.session_storage.legacy_tool_results"]
 
 [[modules]]
 path = "mindroom.session_storage.legacy_agno2_runs"
-depends_on = ["mindroom.usage.storage"]
+depends_on = ["mindroom.session_storage.schema", "mindroom.usage.storage"]
 visibility = [
     "mindroom.session_storage.store",
     "mindroom.history.legacy_compaction_state",
@@ -2753,6 +2750,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.history.summary_rows_schema",
     "mindroom.usage.storage",
+    "mindroom.session_storage.schema",
     "mindroom.session_storage.store",
 ]
 visibility = [
@@ -6300,6 +6298,7 @@ expose = [
     "presentation.strip_team_display",
     "resume.continue_paused_team_run",
     "runtime.MemberEvent",
+    "runtime.team_usage_runs",
     "spec.TeamMode",
     "storage.TeamRunRecords",
 ]
@@ -8634,10 +8633,10 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
-    "mindroom.agent_cli.checkpoint",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_loop",
     "mindroom.llm",
+    "mindroom.session_storage.store",
 ]
 visibility = [
     "mindroom.approval.execution",
@@ -8899,6 +8898,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.session_storage.legacy_agno2_runs",
     "mindroom.session_storage.schema",
+    "mindroom.session_storage.store",
     "mindroom.logging_config",
     "mindroom.usage.storage",
 ]

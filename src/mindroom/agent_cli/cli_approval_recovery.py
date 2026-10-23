@@ -7,7 +7,6 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from mindroom.agent_cli.checkpoint import save_cli_session
 from mindroom.agent_cli.delegation import advance_cli_delegation
 from mindroom.agent_cli.events import project_cli_execution, stream_cli_events
 from mindroom.agent_cli.lifetime import response_cli_lifetime
@@ -33,6 +32,7 @@ from mindroom.response_turn import (
     ResponseTurnContext,
     apply_exact_approval_decisions,
 )
+from mindroom.session_storage.store import write_with_session_state
 from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_agent_tool_call
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -333,17 +333,19 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         run_metadata=persisted.metadata,
         response_event_id=continuation.response_event_id,
     )
-    await save_cli_session(
+    # The replay run and the state the recovered call left commit together.
+    await write_with_session_state(
         store,
         session,
-        lambda opened, saved: persist_interrupted_replay_snapshot(
+        lambda opened, state: persist_interrupted_replay_snapshot(
             storage=opened,
-            session=saved,
+            session=session,
             session_id=continuation.session_id,
             scope_id=continuation.entity_name,
             run_id=continuation.run_id,
             snapshot=snapshot,
             is_team=False,
+            state=state,
         ),
     )
     decision = continuation_decision_from_tools(

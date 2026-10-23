@@ -18,8 +18,14 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.session_storage import store as store_module
-from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import ConversationStore, open_conversation_store, persist_to, runs_without
+from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.store import (
+    ConversationStore,
+    migrate_database,
+    open_conversation_store,
+    persist_to,
+    runs_without,
+)
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 
 if TYPE_CHECKING:
@@ -838,6 +844,71 @@ def test_load_finds_member_rows_without_scanning_the_session_per_run(
     assert "SEARCH children USING AUTOMATIC COVERING INDEX (parent_run_id=?)" in step
 
 
+# --- migrations -------------------------------------------------------------------------------------------------
+
+
+def _database_with_values(tmp_path: Path) -> Path:
+    path = tmp_path / "migrating.db"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("CREATE TABLE legacy (value INTEGER)")
+        connection.executemany("INSERT INTO legacy VALUES (?)", [(1,), (2,)])
+    return path
+
+
+def _not_yet_copied(connection: sqlite3.Connection) -> bool:
+    return "copied" not in table_names(connection)
+
+
+def test_a_failed_migration_changes_nothing_and_releases_the_write_lock_at_once(tmp_path: Path) -> None:
+    """A failure while a cursor is still reading rolls back by itself, not when the dropped cursor lets the close finish."""
+    path = _database_with_values(tmp_path)
+
+    def copy_then_fail(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE copied (value INTEGER)")
+        reading = connection.execute("SELECT value FROM legacy")
+        (value,) = reading.fetchone()
+        connection.execute("INSERT INTO copied VALUES (?)", (value,))
+        msg = "interrupted copy"
+        raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="interrupted copy") as interrupted:
+        migrate_database(path, needed=_not_yet_copied, apply=copy_then_fail)
+
+    # The failure's traceback keeps the reading cursor alive, as it does for a caller that logs or re-raises it.
+    assert interrupted.traceback
+    with closing(sqlite3.connect(path, timeout=0, isolation_level=None)) as other:
+        other.execute("BEGIN IMMEDIATE")
+        assert _not_yet_copied(other)
+        other.rollback()
+
+
+def test_a_migration_another_opener_finished_while_this_one_waited_does_not_run_again(tmp_path: Path) -> None:
+    """The migration is asked for again once the write lock is held, so racing openers migrate the database once."""
+    path = _database_with_values(tmp_path)
+    answers = iter([True, False])
+
+    migrate_database(path, needed=lambda _connection: next(answers), apply=lambda _connection: pytest.fail("ran twice"))
+
+    assert next(answers, None) is None
+
+
+def test_a_migration_that_is_not_due_opens_no_write_transaction(tmp_path: Path) -> None:
+    """A migrated database costs one read, so it never waits for another writer's lock."""
+    path = _database_with_values(tmp_path)
+    holder = sqlite3.connect(path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        migrate_database(
+            path,
+            needed=lambda _connection: False,
+            apply=lambda _connection: pytest.fail("not due"),
+            timeout=0,
+        )
+    finally:
+        holder.rollback()
+        holder.close()
+
+
 # --- session rows -----------------------------------------------------------------------------------------------
 
 
@@ -872,6 +943,83 @@ def test_ensure_session_row_creates_a_missing_row_from_the_session(store: Conver
         {"key": "value"},
         1_700_000_000,
     )
+
+
+def _unnamed_session() -> ConversationSession:
+    """A session as a conversation's first turn builds it, before any run has named the requester."""
+    return ConversationSession(session_id="s1", kind="agent", owner_id="code", created_at=1_700_000_000)
+
+
+def _requested_run(run_id: str, requester_id: str | None) -> RunRecord:
+    run = _run(run_id)
+    run.user_id = requester_id
+    return run
+
+
+def _row_requester(store: ConversationStore) -> str | None:
+    [(user_id,)] = _query(store, "SELECT user_id FROM code_sessions")
+    return user_id
+
+
+@pytest.mark.parametrize("save", ["save_run", "save_runs"])
+def test_a_saved_run_gives_a_session_row_created_without_a_requester_the_runs(
+    store: ConversationStore,
+    save: str,
+) -> None:
+    """A conversation's row stores its first run's requester, as Agno's session did, whoever created the row."""
+    session = _unnamed_session()
+    run = _requested_run("r1", "@alice:example.test")
+
+    if save == "save_run":
+        store.save_run(session, run, record_usage=True)
+    else:
+        store.save_runs(session, [run])
+
+    assert _row_requester(store) == "@alice:example.test"
+    assert _loaded(store).user_id == "@alice:example.test"
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_save_of_a_turn_stores_its_requester_on_the_row_a_fold_created(
+    store: ConversationStore,
+) -> None:
+    """The row a first turn's fold or usage write created has no requester; the turn's own save names it."""
+    session = _unnamed_session()
+    store.ensure_session_row(session)
+    assert _row_requester(store) is None
+
+    await persist_to(store, session)(_requested_run("r1", "@alice:example.test"))
+
+    assert _row_requester(store) == "@alice:example.test"
+
+
+def test_a_session_row_keeps_the_first_requester_a_run_named(store: ConversationStore) -> None:
+    """A later run of another requester, or of none, leaves the row's requester alone."""
+    session = _unnamed_session()
+
+    store.save_run(session, _requested_run("r0", None), record_usage=True)
+    assert _row_requester(store) is None
+    store.save_run(session, _requested_run("r1", "@alice:example.test"), record_usage=True)
+    store.save_run(session, _requested_run("r2", "@bob:example.test"), record_usage=True)
+    store.save_run(session, _requested_run("r3", None), record_usage=True)
+
+    assert _row_requester(store) == "@alice:example.test"
+
+
+def test_a_frozen_or_removed_run_does_not_name_the_requester(store: ConversationStore) -> None:
+    """Only a run the store wrote names the row's requester."""
+    _seed(store, [_run("r0"), _run("r1")], _unnamed_session())
+    _summary_after(store, "r1")
+    _remove(store, "gone")
+    _execute(store, "UPDATE code_sessions SET user_id = NULL")
+
+    outcomes = [
+        store.save_run(_unnamed_session(), _requested_run("r0", "@alice:example.test"), record_usage=True),
+        store.save_run(_unnamed_session(), _requested_run("gone", "@alice:example.test"), record_usage=True),
+    ]
+
+    assert outcomes == ["frozen", "removed"]
+    assert _row_requester(store) is None
 
 
 @pytest.mark.asyncio
@@ -927,8 +1075,8 @@ async def test_persist_to_writes_back_a_session_state_restored_after_an_earlier_
 
 
 @pytest.mark.asyncio
-async def test_persist_to_retries_a_changed_session_state_whose_write_failed(store: ConversationStore) -> None:
-    """A state write that fails is written by the next save of the same state, so a lost write is never taken as done."""
+async def test_persist_to_stores_a_record_and_its_state_together_or_neither(store: ConversationStore) -> None:
+    """A state write that fails takes its record with it, so a paused run never stores without the state it ran with."""
     _seed(store, [_run("r1")])
     session = _loaded(store)
     session.session_state = {"cwd": "/repo"}
@@ -943,14 +1091,17 @@ async def test_persist_to_retries_a_changed_session_state_whose_write_failed(sto
     session.session_state["cwd"] = "/repo/sub"
 
     with pytest.raises(sqlite3.IntegrityError, match="state refused"):
-        await persist(_run("r2"))
+        await persist(_run("r2", RunStatus.paused))
     assert _loaded(store).session_state == {"cwd": "/repo"}
+    assert _loaded_ids(store) == ["r1"]
+    assert not _has_usage(store, "r2")
+    assert session.stored_session_state == {"cwd": "/repo"}
 
     _execute(store, "DROP TRIGGER refuse_state")
-    await persist(_run("r3"))
+    await persist(_run("r2", RunStatus.paused))
 
     assert _loaded(store).session_state == {"cwd": "/repo/sub"}
-    assert _loaded_ids(store) == ["r1", "r2", "r3"]
+    assert _loaded_ids(store) == ["r1", "r2"]
 
 
 @pytest.mark.asyncio

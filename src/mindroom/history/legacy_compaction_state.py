@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import time
-from contextlib import closing
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
@@ -18,12 +17,8 @@ from mindroom.session_storage.legacy_agno2_runs import (
     ordered_run_ids,
     renumber_runs,
 )
-from mindroom.session_storage.schema import run_log_sql
-from mindroom.session_storage.store import (
-    connect_conversation_database,
-    delete_run_subtrees_in_transaction,
-    table_names,
-)
+from mindroom.session_storage.schema import run_log_sql, table_names
+from mindroom.session_storage.store import delete_run_subtrees_in_transaction, migrate_database
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
@@ -56,25 +51,25 @@ _SEEN_STATE_KEYS = frozenset({"seen_event_ids"})
 
 def migrate_to_summary_rows(path: Path, names: TableNames) -> None:
     """Create the summary-row tables once, first giving every stored run a position and adopting older state."""
-    with closing(connect_conversation_database(path)) as connection:
-        if not _needs_summary_rows(connection, names):
-            return
-        connection.execute("BEGIN IMMEDIATE")
-        # Another startup may have finished while this connection waited for its write lock.
-        if _needs_summary_rows(connection, names):
-            for statement in run_log_sql(names):
-                connection.execute(statement)
-            if has_blob_runs(connection, names):
-                move_blob_runs_to_rows(connection, names)
-            number_unindexed_runs(connection, names)
-            for statement in summary_rows_schema_sql(names.sessions):
-                connection.execute(statement)
-            if f"{names.sessions}_compactions" in table_names(connection):
-                _convert_archive(connection, names)
-            else:
-                _adopt_legacy_sessions(connection, names)
-        # Closing without this commit rolls the whole migration back, so an interrupted one runs again next time.
-        connection.commit()
+    migrate_database(
+        path,
+        needed=lambda connection: _needs_summary_rows(connection, names),
+        apply=lambda connection: _create_summary_rows(connection, names),
+    )
+
+
+def _create_summary_rows(connection: sqlite3.Connection, names: TableNames) -> None:
+    for statement in run_log_sql(names):
+        connection.execute(statement)
+    if has_blob_runs(connection, names):
+        move_blob_runs_to_rows(connection, names)
+    number_unindexed_runs(connection, names)
+    for statement in summary_rows_schema_sql(names.sessions):
+        connection.execute(statement)
+    if f"{names.sessions}_compactions" in table_names(connection):
+        _convert_archive(connection, names)
+    else:
+        _adopt_legacy_sessions(connection, names)
 
 
 def _needs_summary_rows(connection: sqlite3.Connection, names: TableNames) -> bool:

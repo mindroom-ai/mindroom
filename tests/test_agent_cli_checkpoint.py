@@ -3,8 +3,10 @@
 # ruff: noqa: D103
 from __future__ import annotations
 
+import sqlite3
 import sys
 import threading
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -12,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.agent_cli.bash import MinimalBashTools
-from mindroom.agent_cli.checkpoint import BatchCheckpoint, save_cli_session
+from mindroom.agent_cli.checkpoint import BatchCheckpoint
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState
 from mindroom.agent_loop.tools import PlannedCall, PreparedTools
 from mindroom.history.run_visibility import is_model_history_visible_run
@@ -20,7 +22,7 @@ from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.store import ConversationStore, persist_to
+from mindroom.session_storage.store import ConversationStore, persist_to, write_with_session_state
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolValue
@@ -150,6 +152,30 @@ async def test_approval_checkpoint_refreshes_mutable_session_state(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_a_checkpoint_and_the_state_its_calls_ran_with_are_stored_together_or_neither(tmp_path: Path) -> None:
+    """A checkpoint the database refuses leaves the session state as it was, so a restart never finds state without it."""
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    await _capture(checkpoint, _record(), [_assistant("bash-1")])
+    await checkpoint.persist("bash-1")
+    store = catalog.store
+    assert store is not None
+    with closing(sqlite3.connect(store.path)) as connection, connection:
+        connection.execute(
+            "CREATE TRIGGER refuse_run BEFORE UPDATE ON sessions_runs BEGIN SELECT RAISE(ABORT, 'run refused'); END",
+        )
+    catalog.run.session_state["before_approval"] = "kept"
+
+    with pytest.raises(sqlite3.IntegrityError, match="run refused"):
+        await checkpoint.persist_approval("bash-1")
+
+    fields = store.read_session_fields("session")
+    assert fields is not None
+    assert fields.session_state == {}
+    assert catalog.session.stored_session_state == {}
+
+
+@pytest.mark.asyncio
 async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_changed(tmp_path: Path) -> None:
     """A state one Bash call changes and the next restores is stored restored, though a checkpoint stored the change."""
     catalog = await _stored_catalog(tmp_path)
@@ -266,10 +292,10 @@ async def test_a_checkpoint_saves_a_session_state_another_thread_keeps_changing(
     changer.start()
     try:
         for _ in range(3):
-            await save_cli_session(
+            await write_with_session_state(
                 store,
                 session,
-                lambda opened, saved: opened.save_run(saved, record, record_usage=False),
+                lambda opened, state: opened.save_run(session, record, record_usage=False, state=state),
             )
             fields = store.read_session_fields("session")
             assert fields is not None

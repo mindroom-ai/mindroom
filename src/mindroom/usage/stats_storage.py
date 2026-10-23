@@ -22,6 +22,7 @@ from mindroom.private_storage.private_instance_identity import (
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json
+from mindroom.session_storage.schema import table_names
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
@@ -492,7 +493,7 @@ def iter_usage_storage_rows(
                 return
             table = quote_identifier(source.expected_session_table)
             usage_table = f"{source.expected_session_table}_usage"
-            has_usage = _table_exists(connection, usage_table)
+            has_usage = usage_table in table_names(connection)
             # Session counters cover all history, so a run-only read skips their payload.
             session_data = "session_data" if mode == "both" else "NULL AS session_data"
             query = (
@@ -520,26 +521,17 @@ def iter_usage_storage_rows(
 
 def _validate_schema(connection: sqlite3.Connection, source: UsageStorageSource) -> UsageStorageDiagnostic | None:
     table = source.expected_session_table
-    if _IDENTIFIER.fullmatch(table) is None or not _table_exists(connection, table):
+    tables = table_names(connection)
+    if _IDENTIFIER.fullmatch(table) is None or table not in tables:
         return _source_diagnostic(source, "unsupported_schema", "session table unavailable")
     if not _REQUIRED_COLUMNS.issubset(_table_columns(connection, table)):
         return _source_diagnostic(source, "unsupported_schema", "session schema unsupported")
     usage_table = f"{table}_usage"
-    if _table_exists(connection, usage_table) and not _USAGE_REQUIRED_COLUMNS.issubset(
+    if usage_table in tables and not _USAGE_REQUIRED_COLUMNS.issubset(
         _table_columns(connection, usage_table),
     ):
         return _source_diagnostic(source, "unsupported_schema", "usage schema unsupported")
     return None
-
-
-def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
-    return (
-        connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (table,),
-        ).fetchone()
-        is not None
-    )
 
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
