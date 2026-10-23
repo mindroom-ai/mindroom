@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import math
 import random
 import ssl
 import time
+import weakref
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -19,6 +21,7 @@ from mindroom.cancellation import (
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
     CancelSource,
+    TaskCancelSource,
     cancel_failure_reason,
     cancel_source_from_failure_reason,
     classify_cancel_source,
@@ -67,7 +70,11 @@ _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS = 2.0
 STARTUP_RETRY_INITIAL_DELAY_SECONDS = 2.0
 STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
+_UNRESPONSIVE_MATRIX_SYNC_TASKS: weakref.WeakKeyDictionary[asyncio.Task[Any], asyncio.Task[Any]] = (
+    weakref.WeakKeyDictionary()
+)
 _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
+_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS = 10.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
 _MATRIX_INGESTION_GRACE_ENV = "MINDROOM_MATRIX_INGESTION_GRACE_SECONDS"
 _STALLED_RESTART_MAX_JITTER_SECONDS = 10.0
@@ -258,6 +265,93 @@ class _MatrixSyncStalledError(RuntimeError):
     """Raised when the watchdog detects a stalled Matrix sync loop."""
 
 
+class _MatrixSyncCancellationTimeoutError(RuntimeError):
+    """Raised when a Matrix sync task refuses to finish after cancellation."""
+
+
+def _format_task_stack(task: asyncio.Task[Any]) -> str:
+    """Return a compact formatted stack for one asyncio task."""
+    buffer = io.StringIO()
+    task.print_stack(file=buffer, limit=8)
+    return buffer.getvalue().rstrip()
+
+
+async def _cancel_sync_task_with_timeout(
+    bot: AgentBot | TeamBot,
+    sync_task: asyncio.Task[Any],
+    *,
+    cancel_source: TaskCancelSource | None,
+    timeout_log_message: str,
+) -> None:
+    """Cancel a sync task and log diagnostics if it refuses to finish."""
+    request_task_cancel(sync_task, cancel_source=cancel_source)
+    done, _ = await asyncio.wait({sync_task}, timeout=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS)
+    if sync_task in done:
+        with suppress(asyncio.CancelledError):
+            await sync_task
+        return
+
+    logger.error(
+        timeout_log_message,
+        agent_name=bot.agent_name,
+        cancel_timeout_seconds=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS,
+        sync_task_name=sync_task.get_name(),
+        sync_task_done=sync_task.done(),
+        sync_task_cancelling=sync_task.cancelling(),
+        sync_task_cancelled=sync_task.cancelled(),
+        sync_task_stack=_format_task_stack(sync_task),
+    )
+    msg = f"Matrix sync task for {bot.agent_name} did not stop after cancellation"
+    raise _MatrixSyncCancellationTimeoutError(msg)
+
+
+async def _hold_supervisor_until_sync_task_finishes(
+    bot: AgentBot | TeamBot,
+    sync_task: asyncio.Task[Any],
+    *,
+    cancel_source: TaskCancelSource | None,
+) -> None:
+    """Keep the supervisor alive while an unresponsive sync task still exists."""
+    supervisor_task = asyncio.current_task()
+    if supervisor_task is not None:
+        _UNRESPONSIVE_MATRIX_SYNC_TASKS[supervisor_task] = sync_task
+    logger.error(
+        "Matrix sync supervisor is waiting for unresponsive sync task",
+        agent_name=bot.agent_name,
+        sync_task_name=sync_task.get_name(),
+        sync_task_stack=_format_task_stack(sync_task),
+    )
+    try:
+        try:
+            await asyncio.shield(sync_task)
+        except asyncio.CancelledError:
+            if supervisor_task is not None and supervisor_task.cancelling():
+                request_task_cancel(sync_task, cancel_source=cancel_source)
+                raise
+    finally:
+        if sync_task.done() and supervisor_task is not None:
+            _UNRESPONSIVE_MATRIX_SYNC_TASKS.pop(supervisor_task, None)
+
+
+def _track_unresponsive_matrix_sync_task(
+    entity_name: str,
+    sync_tasks: dict[str, asyncio.Task],
+    supervisor_task: asyncio.Task[Any],
+) -> bool:
+    """Replace a cancelled supervisor with its still-running Matrix sync task."""
+    unresponsive_sync_task = _UNRESPONSIVE_MATRIX_SYNC_TASKS.pop(supervisor_task, None)
+    if unresponsive_sync_task is None or unresponsive_sync_task.done():
+        return False
+    sync_tasks[entity_name] = unresponsive_sync_task
+    logger.error(
+        "Matrix sync task remains tracked after supervisor cancellation",
+        entity_name=entity_name,
+        sync_task_name=unresponsive_sync_task.get_name(),
+        sync_task_stack=_format_task_stack(unresponsive_sync_task),
+    )
+    return True
+
+
 def _matrix_sync_receive_loop_active(bot: AgentBot | TeamBot) -> bool:
     """Return whether the supervisor still owns an active receive loop."""
     return bot.running and not bot._matrix_ingestion_quiesce_requested
@@ -359,9 +453,12 @@ class _SyncIteration:
                 )
 
             watchdog_cancelled_sync.set()
-            request_task_cancel(sync_task, cancel_source="sync_restart")
-            with suppress(asyncio.CancelledError):
-                await sync_task
+            await _cancel_sync_task_with_timeout(
+                bot,
+                sync_task,
+                cancel_source="sync_restart",
+                timeout_log_message="Matrix sync watchdog cancellation timed out",
+            )
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
             raise _MatrixSyncStalledError(msg)
 
@@ -416,22 +513,35 @@ class _SyncIteration:
         await self.watchdog_task
 
     async def cancel(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
-        """Cancel child tasks without masking the original failure."""
+        """Cancel child tasks without masking the original failure.
+
+        A sync task that outlives its cancellation timeout stays in ``sync_task``
+        and the timeout propagates so the supervisor can keep holding it.
+        """
         for attr in ("watchdog_task", "sync_task"):
             task = getattr(self, attr)
             if task is None:
                 continue
-            setattr(self, attr, None)
-            if attr == "sync_task":
-                request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
-            else:
-                task.cancel()
             try:
-                await task
+                if attr == "sync_task":
+                    await _cancel_sync_task_with_timeout(
+                        self.bot,
+                        task,
+                        cancel_source=shutdown_intent.cancel_source,
+                        timeout_log_message="Matrix sync iteration cleanup cancellation timed out",
+                    )
+                else:
+                    task.cancel()
+                    await task
             except (asyncio.CancelledError, _MatrixSyncStalledError):
                 pass
+            except _MatrixSyncCancellationTimeoutError:
+                if attr == "sync_task":
+                    raise
+                # The watchdog already surfaced its own cancellation timeout through wait().
             except Exception:
                 logger.warning("sync_iteration_cleanup_failed", agent=self.bot.agent_name, exc_info=True)
+            setattr(self, attr, None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,6 +564,7 @@ async def _run_sync_iteration(bot: AgentBot | TeamBot, *, attempt: int) -> _Sync
     """
     iteration: _SyncIteration | None = None
     outcome = _SyncIterationOutcome()
+    prepared_for_sync_shutdown = False
     try:
         logger.info("starting_sync_loop", agent=bot.agent_name)
         iteration = _SyncIteration.start(bot)
@@ -467,17 +578,63 @@ async def _run_sync_iteration(bot: AgentBot | TeamBot, *, attempt: int) -> _Sync
             # A replacement runtime is taking over, so its predecessor's responses
             # must carry sync-restart provenance into the drain below.
             outcome = _SyncIterationOutcome(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    except _MatrixSyncCancellationTimeoutError:
+        logger.exception("sync_loop_cancellation_timed_out", agent=bot.agent_name)
+        if iteration is not None and iteration.sync_task is not None:
+            if not bot.running:
+                await bot.prepare_for_sync_shutdown(shutdown_intent=outcome.shutdown_intent)
+                prepared_for_sync_shutdown = True
+            # Keep the orchestrator-owned supervisor alive so a replacement
+            # sync loop cannot start while the old one is still running.
+            await _hold_supervisor_until_sync_task_finishes(bot, iteration.sync_task, cancel_source="sync_restart")
     except _MatrixSyncStalledError:
         outcome = _SyncIterationOutcome(restart_reason_category="watchdog_stall", stalled_restart=True)
     except Exception:
         logger.exception("sync_loop_failed", agent=bot.agent_name, retry_count=attempt)
         outcome = _SyncIterationOutcome(restart_reason_category="sync_failure")
     finally:
-        if iteration is not None:
-            await iteration.cancel(shutdown_intent=outcome.shutdown_intent)
-            if not bot.running:
-                await bot.prepare_for_sync_shutdown(shutdown_intent=outcome.shutdown_intent)
+        if iteration is not None and await _settle_sync_iteration(
+            bot,
+            iteration,
+            shutdown_intent=outcome.shutdown_intent,
+            prepared_for_sync_shutdown=prepared_for_sync_shutdown,
+        ):
+            # The supervisor stays attached to the unresponsive sync task, so no
+            # replacement receive loop may start.
+            outcome = _SyncIterationOutcome(shutdown_intent=outcome.shutdown_intent)
     return outcome
+
+
+async def _settle_sync_iteration(
+    bot: AgentBot | TeamBot,
+    iteration: _SyncIteration,
+    *,
+    shutdown_intent: RuntimeShutdownIntent,
+    prepared_for_sync_shutdown: bool,
+) -> bool:
+    """Cancel one iteration's tasks and return whether its sync task outlived cancellation."""
+    try:
+        await iteration.cancel(shutdown_intent=shutdown_intent)
+    except _MatrixSyncCancellationTimeoutError:
+        unresponsive_sync_task = iteration.sync_task
+    else:
+        unresponsive_sync_task = None
+    if not prepared_for_sync_shutdown and not bot.running:
+        await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
+    if unresponsive_sync_task is None:
+        return False
+    logger.error("sync_loop_cleanup_cancellation_timed_out", agent=bot.agent_name)
+    supervisor_task = asyncio.current_task()
+    if supervisor_task is not None and supervisor_task.cancelling():
+        # cancel_sync_task tracks the unresponsive sync task in place of this supervisor.
+        _UNRESPONSIVE_MATRIX_SYNC_TASKS[supervisor_task] = unresponsive_sync_task
+    else:
+        await _hold_supervisor_until_sync_task_finishes(
+            bot,
+            unresponsive_sync_task,
+            cancel_source=shutdown_intent.cancel_source,
+        )
+    return True
 
 
 def _log_detached_task_result(task: asyncio.Task, *, message: str) -> None:
@@ -665,9 +822,37 @@ async def cancel_sync_task(
     *,
     shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
 ) -> None:
-    """Cancel and remove a sync task for an entity."""
-    task = sync_tasks.pop(entity_name, None)
-    await cancel_task(task, shutdown_intent=shutdown_intent)
+    """Cancel and remove a sync task for an entity.
+
+    A supervisor that outlives its cancellation timeout stays tracked, or is
+    replaced by the unresponsive sync task it was holding, so no replacement
+    sync loop can start while the old one still runs.
+    """
+    task = sync_tasks.get(entity_name)
+    if task is None:
+        return
+    request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
+    done, _ = await asyncio.wait({task}, timeout=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS)
+    if task not in done:
+        if _track_unresponsive_matrix_sync_task(entity_name, sync_tasks, task):
+            return
+        logger.error(
+            "Matrix sync supervisor cancellation timed out",
+            entity_name=entity_name,
+            cancel_timeout_seconds=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS,
+            sync_task_name=task.get_name(),
+            sync_task_stack=_format_task_stack(task),
+        )
+        return
+    try:
+        with suppress(asyncio.CancelledError):
+            await task
+    finally:
+        if (
+            not _track_unresponsive_matrix_sync_task(entity_name, sync_tasks, task)
+            and sync_tasks.get(entity_name) is task
+        ):
+            sync_tasks.pop(entity_name, None)
 
 
 def _split_restart_response_timeouts(
