@@ -849,6 +849,31 @@ def _lines_within_token_cap(lines: list[str], max_tokens: int) -> list[str]:
     return lines
 
 
+def _entrypoint_lines_within_caps(lines: list[str], max_lines: int, max_tokens: int) -> list[str]:
+    """Keep whole lines within both caps, withholding the oldest structured entries first.
+
+    `add_memory` appends entries, so a capped preload keeps the curated head before the first entry and fills the
+    rest with the newest lines; a file without entries, or whose head alone reaches a cap, keeps its leading lines.
+    """
+    leading = _lines_within_token_cap(lines[:max_lines], max_tokens)
+    first_entry = next(
+        (index for index, line in enumerate(lines) if FILE_MEMORY_ENTRY_PATTERN.match(line.strip())),
+        len(lines),
+    )
+    if len(leading) == len(lines) or len(leading) <= first_entry:
+        return leading
+    head = lines[:first_entry]
+    kept_chars = len("\n".join(head))
+    newest: list[str] = []
+    for line in reversed(lines[first_entry:]):
+        line_chars = len(line) + (1 if head or newest else 0)
+        if len(head) + len(newest) >= max_lines or estimate_char_tokens(kept_chars + line_chars) > max_tokens:
+            break
+        kept_chars += line_chars
+        newest.append(line)
+    return [*head, *reversed(newest)]
+
+
 @timed("system_prompt_assembly.memory_file_entrypoint_read")
 def _load_scope_entrypoint_context(
     scope_user_id: str,
@@ -873,9 +898,7 @@ def _load_scope_entrypoint_context(
             path=str(entrypoint_path),
             max_bytes=_MAX_MEMORY_FILE_BYTES,
         )
-    if max_lines < total_lines:
-        lines = lines[:max_lines]
-    lines = _lines_within_token_cap(lines, max_tokens)
+    lines = _entrypoint_lines_within_caps(lines, max_lines, max_tokens)
     return MemoryEntrypointContext(
         text="\n".join(lines).strip(),
         source_path=entrypoint_path,

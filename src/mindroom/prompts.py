@@ -294,7 +294,7 @@ FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE = (
     "may be missing; open the file to look for them."
 )
 FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE = (
-    "[Memory entrypoint truncated - showing the first {included_lines} of {total_lines} lines "
+    "[Memory entrypoint truncated - showing {included_lines} of {total_lines} lines "
     "(capped by memory.file.max_entrypoint_lines={max_entrypoint_lines} "
     "and memory.file.max_entrypoint_tokens={max_entrypoint_tokens}). "
     "Read `{memory_path}` directly for the omitted lines.]"
