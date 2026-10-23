@@ -10,6 +10,7 @@ import pytest
 
 from mindroom import agents
 from mindroom.ai import ai_response
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.execution import (
     _collect_agent_continuation,
     _continuation_turn_context,
@@ -705,6 +706,69 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
     assert "🔧 `subtract` [2] ⏳" in resumed[1]
     assert contents[-1] == result.response_text
     assert result.response_text.endswith("Both results are ready.")
+
+
+@pytest.mark.asyncio
+async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The continuation registers the agent session it resumed, so a notice delivered during it is finalized there."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": []},
+                "memory": {"backend": "none"},
+                "agents": {"general": {"display_name": "General", "tools": ["calculator"]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {"rules": [{"match": "add", "action": "require_approval"}]},
+            },
+        ),
+        paths,
+    )
+    identity = _identity("notice-session")
+    model = _CheckedModel([_call("add", "approved", a=2, b=3), answer("Five.")])
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    paused = await _paused_turn(config, paths, identity, "Add them.")
+    continuation = approval_continuation(
+        approval_id="approval-notice",
+        run_id=paused.run_id,
+        session_id=identity.session_id,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        state="claimed",
+        calls=(
+            ApprovalCall(
+                "approved",
+                "add",
+                "general",
+                2**62,
+                toolkit_name="calculator",
+                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            ),
+        ),
+        request_body="Add them.",
+    )
+    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+
+    with queued_message_signal_context(None) as notices:
+        result = await execution.continue_run(
+            continuation,
+            paused_answer=PausedAnswer(),
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions={"approved": True},
+            denial_reasons={"approved": None},
+            tool_trace_collector=[],
+            typing_log_context={},
+            progress=None,
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert list(notices.storage_targets) == [("general", identity.session_id, "agent")]
 
 
 @pytest.mark.asyncio
