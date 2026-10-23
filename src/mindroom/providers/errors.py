@@ -35,9 +35,10 @@ _TRANSIENT_STATUSES = frozenset({408, 409, 500, 502, 503, 504, 529})
 _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 # Anthropic reports an overloaded model with this error type, with or without a 529 status.
 _OVERLOADED_ERROR_TYPE = "overloaded_error"
-# Error types of a stream's error event that report throttling, and those that report a transient provider failure:
-# Anthropic's, whose ``timeout_error`` is a gateway timeout, and those OpenAI-compatible servers send.
+# The error type of a stream's error event that reports throttling.
 _RATE_LIMIT_ERROR_TYPES = frozenset({"rate_limit_error"})
+# The error types of a stream's error event that report a transient provider failure: Anthropic's, where
+# ``timeout_error`` is a gateway timeout, and the ones OpenAI-compatible servers send.
 _TRANSIENT_ERROR_TYPES = frozenset(
     {"overloaded", _OVERLOADED_ERROR_TYPE, "server_error", "internal_server_error", "api_error", "timeout_error"},
 )
@@ -114,15 +115,18 @@ def stream_event_error(
     Such an event carries no HTTP status of its own: OpenAI-compatible servers put a status in ``code``, which
     counts as one, and Anthropic names the failure in ``error_type``. Throttling and transient failures, timeouts
     included, are retryable; any other event, such as an invalid request, is final, as the same request would fail
-    again.
+    again. Wording that names the context window outranks a transient error type, because a retry cannot make the
+    request fit.
     """
     status = int(code) if code is not None and code.isdecimal() else None
     if status == _RATE_LIMIT_STATUS or error_type in _RATE_LIMIT_ERROR_TYPES:
         return RateLimited(message, provider=provider, code=code)
-    if status in _TRANSIENT_STATUSES or error_type in _TRANSIENT_ERROR_TYPES:
+    if status in _TRANSIENT_STATUSES:
         return ProviderUnavailable(message, provider=provider, code=code)
     if is_context_window_error(message, code=code):
         return ContextWindowExceeded(message, provider=provider, code=code)
+    if error_type in _TRANSIENT_ERROR_TYPES:
+        return ProviderUnavailable(message, provider=provider, code=code)
     return ProviderError(message, provider=provider, code=code)
 
 

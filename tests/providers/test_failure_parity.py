@@ -697,6 +697,14 @@ _CHAT_CASES = [
         RATE_LIMITED,
         _PIPELINE,
     ),
+    # Wording that names the context window outranks the transient type, since a retry cannot make the request fit.
+    _Case(
+        "event_api_error_context_window",
+        _chat_error(message="This model's maximum context length is 128000 tokens.", type="api_error"),
+        ContextWindowExceeded,
+        CONTEXT_WINDOW,
+        1,
+    ),
     _Case(
         "event_context_window",
         _chat_error(message="context length exceeded", code="context_length_exceeded"),
