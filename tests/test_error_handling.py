@@ -261,6 +261,9 @@ def test_an_untyped_provider_payload_reads_as_its_typed_twin(error_type: str, me
         ("invalid_auth: the access token was revoked", True),
         ("Unauthorised to invoke the model", True),
         ("The summary input held 40100 tokens", False),
+        # A credential name is one lowercase word, so only its whole-word wording reads, as in the classifier.
+        ("Request failed: GoogleAuthError", False),
+        ("Request failed: AuthenticationError", True),
     ],
 )
 def test_untyped_text_names_the_credentials_as_the_provider_classifier_does(text: str, *, authentication: bool) -> None:
@@ -277,10 +280,13 @@ def test_untyped_text_names_the_credentials_as_the_provider_classifier_does(text
         ("rate_limit_exceeded: slow down", True),
         ("HTTP 429 Too Many Requests", True),
         ("Quota exceeded for this project", True),
-        # An error's name holds its keyword in one lowercase word.
+        # A name that starts with its keyword is one lowercase word that holds it.
         ("RetryError[<Future state=finished raised RateLimitError>]", True),
         ("The request ratelimited", True),
         ("QuotaExceededError", True),
+        # A name that holds the keyword after a prefix is one lowercase word with no keyword of its own.
+        ("RetryError[<Future state=finished raised OpenAIRateLimitError>]", False),
+        ("QuotaError", False),
         # Words that only hold "rate", and a number that only holds "429".
         ("Failed to generate a response for this model", False),
         ("Could not separate the tool arguments", False),
