@@ -1815,8 +1815,8 @@ export function AgentEditor() {
             ? ` (${config.defaults.max_tool_calls_from_history})`
             : " (no limit)"
         }.`}
-        autoCompactionHelperText="Automatically compact older session history before a run when raw replay exceeds the hard context budget."
-        thresholdTokensHelperText="Soft replay budget in tokens. Crossing it records planning metadata; text compaction waits for the hard budget."
+        autoCompactionHelperText="Automatically compact older session history before a run when the request crosses the compaction threshold on a route without native compaction, or when raw replay exceeds the hard context budget."
+        thresholdTokensHelperText="Compaction trigger in tokens, counted over the whole request. Supported OpenAI and Claude routes compact natively at it; every other route runs text compaction before the reply."
         compactionModelPlaceholder={
           config?.defaults?.compaction?.model ?? "Default: agent model"
         }
