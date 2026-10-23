@@ -109,8 +109,12 @@ if TYPE_CHECKING:
     from mindroom.approval.resume import ContinueRun, ResumeEvents
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.records import DelegationTerminalStatus
-    from mindroom.delegation.state import ChildResponseRunner, DelegationHookState, SubagentPersona
+    from mindroom.delegation.state import (
+        ChildResponseRunner,
+        DelegationHookState,
+        DelegationTerminalStatus,
+        SubagentPersona,
+    )
     from mindroom.event_journal import ApprovalCall
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent

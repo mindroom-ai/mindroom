@@ -15,8 +15,8 @@ from mindroom.delegation.records import (
     DelegationRecordHandle,
     DelegationRecordLocator,
     DelegationRecordOwner,
-    DelegationTerminalStatus,
 )
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
 from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import DelegationChild
+    from mindroom.delegation.state import DelegationChild, DelegationTerminalStatus
     from mindroom.llm.events import RunEvent
     from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -270,7 +270,7 @@ async def finish_child_record(
 ) -> str:
     """Idempotently project lifecycle-owned terminal state and usage."""
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
-    if child.status not in {"completed", "failed", "cancelled", "denied"}:
+    if child.status not in TERMINAL_CHILD_STATUSES:
         msg = f"Cannot finish active delegation record: {child.delegation_id}"
         raise ValueError(msg)
     status = cast("DelegationTerminalStatus", child.status)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -21,6 +21,10 @@ DELEGATION_STATE_KEY = "mindroom_delegation"
 RUN_SUBAGENT = "run_subagent"
 CONTINUE_SUBAGENT = "continue_subagent"
 DELEGATION_FUNCTIONS = (RUN_SUBAGENT, CONTINUE_SUBAGENT)
+
+# A child, or its record, in one of these statuses is settled for good; a running or paused one can still advance.
+type DelegationTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]
+TERMINAL_CHILD_STATUSES: frozenset[str] = frozenset(get_args(DelegationTerminalStatus.__value__))
 
 type PersonaSourceKind = Literal["inline", "profile", "workflow"]
 _SOURCE_KINDS: tuple[PersonaSourceKind, ...] = ("inline", "profile", "workflow")
@@ -118,7 +122,7 @@ class DelegationChild:
     parent_requirement_id: str = ""
     storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     record_locator: dict[str, object] = field(default_factory=dict)
-    status: Literal["running", "paused", "completed", "failed", "cancelled", "denied"] = "running"
+    status: Literal["running", "paused"] | DelegationTerminalStatus = "running"
     result: str | None = None
     # LEGACY_COMPAT: Delegated children persisted without an agent mode.
     # Legacy format: Parent delegation state and subagent session records omitted agent_mode; every child ran in standard mode.

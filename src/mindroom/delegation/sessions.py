@@ -11,7 +11,7 @@ from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _UNAVAILABLE = "Subagent ID is not available in this conversation."
-_TERMINAL = frozenset({"completed", "failed", "cancelled", "denied"})
 
 
 class SubagentSessionError(ValueError):
@@ -155,7 +154,7 @@ async def reserve_subagent_turn(
                 previous = _read(path, owner)
                 if previous.delegation_id == child.delegation_id:
                     return previous
-                if previous.status not in _TERMINAL:
+                if previous.status not in TERMINAL_CHILD_STATUSES:
                     msg = "Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up."
                     raise SubagentSessionError(msg)
                 if child.previous_delegation_id != previous.delegation_id:
