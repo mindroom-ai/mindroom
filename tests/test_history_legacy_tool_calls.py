@@ -1,4 +1,4 @@
-"""Stored tool calls in the shapes earlier releases wrote read in the current shape, wherever stored runs are read."""
+"""Stored tool calls in earlier releases' shapes read in the current shape in replays, compactions, and resumes."""
 # ruff: noqa: D103
 
 from __future__ import annotations
