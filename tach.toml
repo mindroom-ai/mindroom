@@ -842,6 +842,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.model_usage",
     "mindroom.llm",
+    "mindroom.providers.names",
 ]
 
 [[modules]]
@@ -1162,6 +1163,9 @@ visibility = [
     "mindroom.api.provider_setup",
     "mindroom.cli.config",
     "mindroom.cli.doctor",
+    "mindroom.providers.anthropic.messages",
+    "mindroom.providers.gemini",
+    "mindroom.providers.openai",
     "mindroom.providers.registry",
 ]
 
@@ -2722,6 +2726,7 @@ depends_on = [
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
     "mindroom.providers.model_http_client",
+    "mindroom.providers.model_loading",
     "mindroom.providers.names",
     "mindroom.runtime_env_policy",
     "mindroom.tool_system.dependencies",
@@ -5926,6 +5931,7 @@ depends_on = [
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.model_http_client",
+    "mindroom.providers.model_loading",
     "mindroom.providers.names",
     "mindroom.providers.prompt_cache_key",
     "mindroom.providers.tool_policy",
@@ -6332,7 +6338,7 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential"]
+expose = ["dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential", "uses_alternative_auth"]
 from = ["mindroom.providers.model_loading"]
 
 [[interfaces]]
@@ -7867,6 +7873,7 @@ depends_on = [
     "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.model_loading",
     "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]

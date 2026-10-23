@@ -13,10 +13,9 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import anthropic
-import httpx
 from anthropic import NOT_GIVEN, AsyncAnthropic, AsyncAnthropicVertex
 from anthropic.lib.streaming import (
     ParsedBetaContentBlockStopEvent,
@@ -24,12 +23,11 @@ from anthropic.lib.streaming import (
     ParsedContentBlockStopEvent,
     ParsedMessageStopEvent,
 )
-from anthropic.types import RawContentBlockDeltaEvent, RawMessageStartEvent, ToolUseBlock
+from anthropic.types import RawContentBlockDeltaEvent, ToolUseBlock
 from anthropic.types import TextDelta as AnthropicTextDelta
 from anthropic.types import ThinkingDelta as AnthropicThinkingDelta
 from anthropic.types.beta import (
     BetaRawContentBlockDeltaEvent,
-    BetaRawMessageStartEvent,
     BetaTextDelta,
     BetaThinkingDelta,
     BetaToolUseBlock,
@@ -38,7 +36,7 @@ from pydantic import BaseModel
 
 from mindroom.constants import runtime_env_path
 from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
-from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError
+from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -51,6 +49,7 @@ from mindroom.llm.provider import (
     ToolCallReady,
     TurnCompleted,
     UsageReported,
+    hosted_tool_started,
 )
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
@@ -80,20 +79,15 @@ from mindroom.providers.anthropic.wire import (
     stop_reason_of,
     supports_prefill,
     supports_structured_outputs,
-    thinking_text,
     tool_call_from_block,
 )
-from mindroom.providers.assistant_turn import stamp_finished_turn, whole_turn_deltas
-from mindroom.providers.claude_wire_blocks import (
-    SERVER_TOOL_USE_BLOCK_TYPE,
-    TOOL_SEARCH_RESULT_BLOCK_TYPE,
-    TOOL_SEARCH_TOOL_NAME,
-    as_dict,
-)
-from mindroom.providers.errors import classify_provider_error, google_auth_error, stream_event_error, transport_error
+from mindroom.providers.assistant_turn import stamp_finished_turn
+from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
+from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.model_loading import uses_alternative_auth
 from mindroom.providers.names import canonical_provider
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
@@ -101,6 +95,7 @@ from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dep
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
+    import httpx
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types.beta import BetaMessage
@@ -237,9 +232,9 @@ class ClaudeProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one request and yield its events; the SDK's message stream accumulates the final message.
 
-        ``message_start`` reports the input and cache usage as a partial ``UsageReported`` so a stream that
-        stops early still settles what Anthropic bills. A request with ``stream=False`` is sent without
-        streaming and yields its output, usage, and finished turn once the response arrives.
+        ``message_start`` and ``message_delta`` report the usage so far, as a partial ``UsageReported``, so a stream
+        that stops early still settles what Anthropic bills. A request with ``stream=False`` is sent without
+        streaming and yields its usage and finished turn once the response arrives.
         """
         started = time.monotonic()
         messages = await inline_url_media(request.messages, self.http_client)
@@ -248,7 +243,6 @@ class ClaudeProvider:
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None
-        server_tool_started = False
         try:
             if not request.stream:
                 response = await (
@@ -262,20 +256,15 @@ class ClaudeProvider:
                     first_output_at,
                     streamed=False,
                 )
-                for output in whole_turn_deltas(
-                    reasoning=thinking_text(response),
-                    content=message.get_content_string(),
-                    tool_calls=message.tool_calls or (),
-                ):
-                    yield output
                 yield UsageReported(message.metrics)
                 yield TurnCompleted(message=message, stop_reason=stop_reason)
                 return
             manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
             async with manager as events:
                 async for event in events:
-                    if isinstance(event, (RawMessageStartEvent, BetaRawMessageStartEvent)):
-                        yield UsageReported(parse_claude_usage(event.message.usage), final=False)
+                    if event.type in _USAGE_EVENT_TYPES:
+                        # The SDK has already added the event's usage to its accumulated message.
+                        yield UsageReported(parse_claude_usage(events.current_message_snapshot.usage), final=False)
                     elif isinstance(event, (ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
                         message, stop_reason = self._finish(
                             event.message,
@@ -293,10 +282,9 @@ class ClaudeProvider:
                     elif event.type in _PROVIDER_EVENT_TYPES:
                         # Block starts, tool-call argument pieces, and server-tool blocks carry no output but
                         # show the provider is still working; the SDK's own convenience events repeat them.
-                        server_tool_started = server_tool_started or _starts_server_tool(event)
-                        yield StreamProgress()
+                        yield _progress(event)
         except Exception as error:
-            self._raise_provider_error(error, server_tool_started=server_tool_started)
+            raise _provider_error(error, provider=self.identity.provider_name) from error
 
     def _finish(
         self,
@@ -343,9 +331,8 @@ class ClaudeProvider:
         """Return the model's authored request parameters with the request's overrides applied."""
         settings, overrides = self.settings, request.overrides
         params: dict[str, Any] = {}
-        max_tokens = settings.max_tokens if overrides.max_output_tokens is None else overrides.max_output_tokens
-        if max_tokens:
-            params["max_tokens"] = max_tokens
+        if settings.max_tokens:
+            params["max_tokens"] = settings.max_tokens
         if settings.thinking and not overrides.disable_thinking:
             params["thinking"] = dict(settings.thinking)
         if settings.output_config:
@@ -509,57 +496,43 @@ class ClaudeProvider:
             client.project_id = project_id
         return client
 
-    def _raise_provider_error(self, error: Exception, *, server_tool_started: bool) -> NoReturn:
-        """Translate an SDK, transport, or Google token failure into the shared provider errors; others propagate.
 
-        An ``error`` event inside the stream reaches here with the stream's committed 200 status, so its error type
-        classifies it. Once a server tool such as web search or code execution started, a retry would run it again,
-        so the failure is final and carries the code that keeps the media fallback from resending the request.
-        """
-        provider = self.identity.provider_name
-        if isinstance(error, anthropic.APIConnectionError | httpx.TransportError):
-            mapped: ProviderError = transport_error(error, provider=provider)
-        elif isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:
-            mapped = stream_event_error(error.message, provider=provider, error_type=_event_error_type(error.body))
-        elif isinstance(error, anthropic.APIStatusError):
-            mapped = classify_provider_error(error.message, provider=provider, status_code=error.status_code)
-        elif isinstance(error, anthropic.APIError):
-            mapped = ProviderError(str(error), provider=provider)
-        elif (google_auth := google_auth_error(error, provider=provider)) is not None:
-            # The Vertex client mints its Google access token inside the request.
-            mapped = google_auth
-        else:
-            raise error
-        if server_tool_started and mapped.retryable:
-            msg = f"Claude stream failed after a server tool started: {mapped}"
-            raise ProviderError(
-                msg,
-                provider=provider,
-                status_code=mapped.status_code,
-                code=INCOMPLETE_STREAM,
-            ) from error
-        raise mapped from error
-
-
+# The raw API events that report the request's usage so far.
+_USAGE_EVENT_TYPES = frozenset({"message_start", "message_delta"})
 # Raw API events the SDK forwards; its convenience events (text, thinking, input_json, ...) repeat them.
-_PROVIDER_EVENT_TYPES = frozenset({"content_block_start", "content_block_delta", "content_block_stop", "message_delta"})
+_PROVIDER_EVENT_TYPES = frozenset({"content_block_start", "content_block_delta", "content_block_stop"})
 # The HTTP status the SDK reports for an ``error`` event that arrives after the stream started.
 _COMMITTED_STREAM_STATUS = 200
-# Blocks a retry may produce again: the model's own, a tool search, which only looks up deferred tool definitions, and
-# a compaction, which only summarizes the request's history. Any other block is a server tool at work.
-_REPEATABLE_BLOCK_TYPES = frozenset(
-    {"text", "thinking", "redacted_thinking", "tool_use", TOOL_SEARCH_RESULT_BLOCK_TYPE, "compaction"},
-)
+# The blocks the model writes itself; every other block is a server tool's call or result.
+_MODEL_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
 
 
-def _starts_server_tool(event: Any) -> bool:  # noqa: ANN401 - SDK stream event
-    """Return whether a ``content_block_start`` opens a block of a server-side tool whose rerun would repeat its work."""
-    if event.type != "content_block_start":
-        return False
-    block = event.content_block
-    if block.type == SERVER_TOOL_USE_BLOCK_TYPE:
-        return block.name != TOOL_SEARCH_TOOL_NAME
-    return block.type not in _REPEATABLE_BLOCK_TYPES
+def _progress(event: Any) -> StreamProgress:  # noqa: ANN401 - SDK stream event
+    """Return the progress event of a raw stream event, which commits the attempt when a server tool's block opens.
+
+    A server tool is named by its ``server_tool_use`` block, and any other server block, such as a tool search
+    result or a compaction, by its type.
+    """
+    if event.type != "content_block_start" or (block := event.content_block).type in _MODEL_BLOCK_TYPES:
+        return StreamProgress()
+    return hosted_tool_started(block.name if block.type == SERVER_TOOL_USE_BLOCK_TYPE else block.type)
+
+
+def _provider_error(error: Exception, *, provider: str) -> ProviderError:
+    """Return the shared error for an SDK, transport, or Google token failure; any other exception propagates.
+
+    The Vertex client mints its Google access token inside the request. An ``error`` event inside the stream arrives
+    with the stream's committed 200 status, so its error type classifies it.
+    """
+    if (failure := provider_failure(error, provider=provider)) is not None:
+        return failure
+    if isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:
+        return classify_provider_error(error.message, provider=provider, error_type=_event_error_type(error.body))
+    if isinstance(error, anthropic.APIStatusError):
+        return classify_provider_error(error.message, provider=provider, status_code=error.status_code)
+    if isinstance(error, anthropic.APIError):
+        return ProviderError(str(error), provider=provider)
+    raise error
 
 
 def _event_error_type(body: object) -> str | None:
@@ -742,7 +715,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     authored = dict(model_config.extra_kwargs or {})
     if route == "anthropic":
         api_key = model_config.configured_api_key()
-        if api_key is None and not authored.get("auth_token"):
+        if api_key is None and not uses_alternative_auth(model_config):
             api_key = get_api_key_for_provider("anthropic", runtime_paths=runtime_paths)
         if api_key:
             authored["api_key"] = api_key

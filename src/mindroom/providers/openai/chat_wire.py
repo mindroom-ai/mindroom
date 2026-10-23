@@ -17,9 +17,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta
+from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.assistant_turn import split_thinking
+from mindroom.providers.openai.errors import error_body_error
 from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
@@ -602,7 +603,7 @@ class ChatStream:
     _calls: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     def add(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
-        """Fold one chunk and return the deltas it carried."""
+        """Fold one chunk and return the events it carried: its deltas, and a partial report of usage it carried."""
         events: list[StreamEvent] = []
         if chunk.choices:
             choice = chunk.choices[0]
@@ -614,7 +615,7 @@ class ChatStream:
                     self._add_call_delta(call, position)
                 if self.wire.dialect == "openai":
                     events.extend(self._add_reasoning(_extra(delta)))
-        self._add_usage(chunk)
+        events.extend(self._add_usage(chunk))
         return events
 
     def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
@@ -661,7 +662,7 @@ class ChatStream:
         if call.type:
             entry["type"] = call.type
 
-    def _add_usage(self, chunk: ChatCompletionChunk) -> None:
+    def _add_usage(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
         if self.wire.dialect == "groq":
             # Groq streams its usage in its own chunk extension.
             groq = _extra(chunk).get("x_groq")
@@ -669,8 +670,10 @@ class ChatStream:
             metrics = _groq_usage(usage) if isinstance(usage, Mapping) else None
         else:
             metrics = _usage_metrics(chunk.usage, self.wire) if chunk.usage is not None else None
-        if metrics is not None:
-            self.parts.usage = metrics if self.parts.usage is None else self.parts.usage + metrics
+        if metrics is None:
+            return []
+        self.parts.usage = metrics if self.parts.usage is None else self.parts.usage + metrics
+        return [UsageReported(self.parts.usage, final=False)]
 
     def finish(self) -> ChatTurnParts:
         """Return the finished turn; the stream must be fully consumed first."""
@@ -698,8 +701,14 @@ def _completion_tool_calls(message: Any, wire: ChatWire) -> list[dict[str, Any]]
     )
 
 
-def parse_chat_completion(completion: ChatCompletion, wire: ChatWire) -> ChatTurnParts:
-    """Read one non-streamed completion into a finished turn."""
+def parse_chat_completion(completion: ChatCompletion, wire: ChatWire, *, provider: str) -> ChatTurnParts:
+    """Read one non-streamed completion into a finished turn.
+
+    A gateway such as OpenRouter answers a failed upstream with HTTP 200 and an ``error`` body instead of choices,
+    which raises as the error it names, as a stream's error chunk does.
+    """
+    if (error := _extra(completion).get("error")) is not None:
+        raise error_body_error(error, provider=provider, default_message="The provider returned an error")
     choice = completion.choices[0]
     message = choice.message
     parts = ChatTurnParts(

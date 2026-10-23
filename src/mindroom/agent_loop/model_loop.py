@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.tools import dispatch_tool_calls, media_follow_up, plan_tool_batch
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.events import ContentDelta, RequestCompleted, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
@@ -358,8 +358,7 @@ async def _stream_turn(
                 elif isinstance(event, TurnCompleted):
                     turn = event
         if turn is None:
-            msg = "The provider stream ended without completing the turn"
-            raise ProviderError(msg, provider=identity.provider_name, code="incomplete_stream")
+            raise incomplete_stream_error(provider=identity.provider_name)
         yield turn
         # The consumer asked for more, so it holds the turn and accepts it before its next suspension point.
         handed_off = True

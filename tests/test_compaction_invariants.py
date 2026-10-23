@@ -58,7 +58,7 @@ from mindroom.llm.errors import ContextWindowExceeded, ModelSafeguardRefusal, Pr
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.providers.errors import classify_provider_error, transport_error
+from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
@@ -84,6 +84,13 @@ _HISTORY_SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), ma
 
 def _provider_request() -> httpx.Request:
     return httpx.Request("POST", "https://api.example.test/v1/responses")
+
+
+def _transport_failure(cause: httpx.TransportError) -> ProviderError:
+    """Return the retryable error an adapter raises for a network failure before its response completed."""
+    failure = provider_failure(cause, provider="fake")
+    assert failure is not None
+    return failure
 
 
 def _retry_budget_value(
@@ -732,7 +739,7 @@ def test_retry_policy_retries_a_transport_failure_at_the_same_budget(cause: http
         budget=16_000,
         input_tokens=4_000,
         minimum_progress_input_tokens=0,
-        error=transport_error(cause, provider="fake"),
+        error=_transport_failure(cause),
     )
 
     assert decision == SummaryRetryDecision(budget=16_000, kind="same-budget-transient")
@@ -1688,7 +1695,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
             id="status-503",
         ),
         pytest.param(
-            transport_error(httpx.ConnectError("connection reset", request=_provider_request()), provider="fake"),
+            _transport_failure(httpx.ConnectError("connection reset", request=_provider_request())),
             id="transport-failure",
         ),
     ],

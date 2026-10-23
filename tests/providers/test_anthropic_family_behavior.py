@@ -19,7 +19,14 @@ from pydantic import BaseModel
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import (
+    AuthenticationFailed,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
 from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -110,7 +117,7 @@ def test_identity_and_capabilities_per_route(
 
 @pytest.mark.asyncio
 async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_message(tmp_path: Path) -> None:
-    """The partial usage comes first, output events follow the blocks, and the turn ends with the parsed message."""
+    """Partial usage comes first and again with the message delta, and the turn ends with the parsed message."""
     wire = Wire(
         sse_reply(
             [
@@ -140,7 +147,9 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
     assert events[3] == ToolCallReady(
         {"id": "toolu_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}},
     )
-    final_usage, completed = events[4], events[5]
+    delta_usage, final_usage, completed = events[4], events[5], events[6]
+    assert isinstance(delta_usage, UsageReported)
+    assert (delta_usage.final, delta_usage.usage.input_tokens, delta_usage.usage.output_tokens) == (False, 40, 9)
     assert isinstance(final_usage, UsageReported)
     assert final_usage.final is True
     assert isinstance(completed, TurnCompleted)
@@ -168,18 +177,14 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["anthropic", "vertexai_claude", "bedrock_claude"])
-async def test_a_whole_reply_yields_the_output_its_stream_would_before_the_turn(tmp_path: Path, route: str) -> None:
-    """A non-streaming reply's thinking, text, and tool calls arrive as the stream's would, then its usage and turn.
-
-    A blocking caller that reads the deltas, such as a team leader's consensus, gets the same reply on both paths.
-    """
+async def test_a_whole_reply_finishes_with_the_message_its_stream_would(tmp_path: Path, route: str) -> None:
+    """A non-streaming reply yields only its usage and finished turn, whose message matches the streamed one."""
     blocks = [
         {"type": "thinking", "thinking": "Check first.", "signature": "sig"},
         {"type": "text", "text": "Looking it up."},
         {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
     ]
     tools = [ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object", "properties": {}})]
-    outputs = (ReasoningDelta, TextDelta, ToolCallReady)
     streamed = await claude_events(
         route_provider(route, tmp_path, Wire(sse_reply(blocks, stop_reason="tool_use"))),
         ModelRequest(messages=_user(), tools=tools),
@@ -189,10 +194,14 @@ async def test_a_whole_reply_yields_the_output_its_stream_would_before_the_turn(
         ModelRequest(messages=_user(), tools=tools, stream=False),
     )
 
-    assert [event for event in whole if isinstance(event, outputs)] == [
-        event for event in streamed if isinstance(event, outputs)
-    ]
-    assert [type(event) for event in whole] == [ReasoningDelta, TextDelta, ToolCallReady, UsageReported, TurnCompleted]
+    assert [type(event) for event in whole] == [UsageReported, TurnCompleted]
+    streamed_turn, whole_turn = streamed[-1], whole[-1]
+    assert isinstance(streamed_turn, TurnCompleted)
+    assert isinstance(whole_turn, TurnCompleted)
+    assert [
+        (turn.message.content, turn.message.reasoning_content, turn.message.tool_calls)
+        for turn in (streamed_turn, whole_turn)
+    ] == [("Looking it up.", "Check first.", streamed_turn.message.tool_calls)] * 2
 
 
 @pytest.mark.asyncio
@@ -220,10 +229,8 @@ async def test_stored_reasoning_is_what_agno_stored_for_the_stream_mode(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_a_whole_reply_yields_the_reasoning_of_every_thinking_block_though_it_stores_the_last(
-    tmp_path: Path,
-) -> None:
-    """The stored copy keeps Agno's last block; the reasoning deltas add up to all blocks, as the stream's do."""
+async def test_a_whole_reply_stores_its_last_thinking_block_where_a_stream_stores_them_all(tmp_path: Path) -> None:
+    """Agno's whole-response parser kept the last thinking block, while its stream summed every block's deltas."""
     blocks = [
         {"type": "thinking", "thinking": "First. ", "signature": "sig-1"},
         {"type": "thinking", "thinking": "Second.", "signature": "sig-2"},
@@ -232,10 +239,10 @@ async def test_a_whole_reply_yields_the_reasoning_of_every_thinking_block_though
     reasoning = {}
     for stream, reply in ((True, sse_reply(blocks)), (False, json_reply(blocks))):
         provider = route_provider("anthropic", tmp_path, Wire(reply), extra_kwargs={"thinking": {"type": "adaptive"}})
-        events = await claude_events(provider, ModelRequest(messages=_user(), stream=stream))
-        reasoning[stream] = "".join(event.text for event in events if isinstance(event, ReasoningDelta))
+        turn = await claude_turn(provider, ModelRequest(messages=_user(), stream=stream))
+        reasoning[stream] = turn.message.reasoning_content
 
-    assert reasoning == {True: "First. Second.", False: "First. Second."}
+    assert reasoning == {True: "First. Second.", False: "Second."}
 
 
 @pytest.mark.asyncio
@@ -315,7 +322,7 @@ async def test_block_types_the_sdk_does_not_know_are_kept_for_replay(tmp_path: P
         ModelRequest(messages=_user(), stream=stream),
     )
     outputs = [event for event in events if isinstance(event, (TextDelta, ReasoningDelta, ToolCallReady))]
-    assert outputs == [TextDelta("Hi.")]
+    assert outputs == ([TextDelta("Hi.")] if stream else [])
     completed = events[-1]
     assert isinstance(completed, TurnCompleted)
     assert completed.message.content == "Hi."
@@ -451,10 +458,11 @@ async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(
         extra_kwargs={
             "thinking": {"type": "enabled", "budget_tokens": 1024},
             "temperature": 0.7,
+            "max_tokens": 512,
             "request_params": {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 2048}, "top_k": 4}},
         },
     )
-    overrides = RequestOverrides(temperature=0.1, max_output_tokens=512, prompt_cache=False, disable_thinking=True)
+    overrides = RequestOverrides(temperature=0.1, prompt_cache=False, disable_thinking=True)
     messages = [*_user("Summarize."), Message(role="assistant", content="Earlier answer.")]
     await claude_turn(provider, ModelRequest(messages=messages, overrides=overrides))
     body = wire.body()
@@ -1137,7 +1145,7 @@ class _RefreshFailingCredentials(Credentials):
         ),
         (
             google.auth.exceptions.RefreshError("invalid_grant: Invalid JWT Signature."),
-            ProviderError,
+            AuthenticationFailed,
             401,
             "❌ Authentication failed",
         ),

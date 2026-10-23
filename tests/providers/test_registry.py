@@ -419,6 +419,31 @@ async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_pat
 
 
 @pytest.mark.asyncio
+async def test_an_azure_model_with_an_ad_token_never_sends_the_shared_key(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    """An Azure model that authenticates with an Entra ID token needs no key, so the shared one stays local."""
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("azure", {"api_key": "sk-shared"})
+    extra_kwargs = {"azure_ad_token": "entra-token", "azure_endpoint": "https://test.openai.azure.com"}
+    model_config = ModelConfig(
+        provider="azure",
+        id="gpt-6-astra",
+        extra_kwargs={**extra_kwargs, "azure_deployment": "d"},
+    )
+    wire.replies.append(httpx.Response(400, json={"error": {"message": "bad", "type": "invalid_request_error"}}))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests[0].headers["authorization"] == "Bearer entra-token"
+    assert "api-key" not in wire.requests[0].headers
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["codex", "kimi", "vertexai_claude", "bedrock_claude"])
 async def test_routes_without_api_keys_never_send_a_configured_one(
     provider: str,
@@ -683,10 +708,15 @@ async def test_the_usage_of_a_malformed_tool_call_counts_toward_the_retried_turn
 
     events = [event async for event in provider.stream(request)]
 
-    reports = [event.usage for event in events if isinstance(event, UsageReported)]
+    reports = [
+        (event.usage.input_tokens, event.usage.output_tokens, event.final)
+        for event in events
+        if isinstance(event, UsageReported)
+    ]
     turn = events[-1]
     assert isinstance(turn, TurnCompleted)
-    assert [(usage.input_tokens, usage.output_tokens) for usage in reports] == [(30, 5), (40, 9)]
+    # Each attempt reports its usage as it arrives; the guidance retry settles the malformed attempt's report first.
+    assert reports == [(30, 5, False), (30, 5, True), (40, 9, False), (40, 9, True)]
     assert (turn.message.metrics.input_tokens, turn.message.metrics.output_tokens) == (70, 14)
     assert (turn.message.provider_data or {})[AGGREGATE_USAGE_KEY] is True
     assert len(wire.requests) == 2

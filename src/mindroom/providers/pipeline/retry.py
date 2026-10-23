@@ -1,8 +1,9 @@
 """Bounded retries for transient provider failures in streamed requests, and the stream idle limit.
 
 SDK HTTP retries cannot recover errors delivered inside an established SSE stream, so a failed request
-is reissued here while it has produced nothing the caller could have shown. Earlier tool calls and their
-results stay in the conversation; only the failed request repeats.
+is reissued here until the attempt committed: produced output the caller could have shown, or started a hosted
+tool that acts or costs, which a retry would run again. A stall is decided the same way. Earlier tool calls and
+their results stay in the conversation; only the failed request repeats.
 
 The idle limit ends attempts whose provider sends no event for too long. Adapters report provider data
 without output as ``StreamProgress``, so long tool-call arguments or hosted-tool work keep an attempt alive.
@@ -15,21 +16,18 @@ from __future__ import annotations
 import asyncio
 import random
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
-from mindroom.llm.provider import ReportedUsage
-from mindroom.llm.usage import add_usage
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import Retry, attempts
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
-    from mindroom.llm.usage import MessageMetrics
 
 __all__ = ["STREAM_STALLED", "retrying_stream"]
 
@@ -51,6 +49,7 @@ def _retry_delay_seconds(attempt: int) -> float:
 
 async def _next_event(
     stream: AsyncIterator[StreamEvent],
+    *,
     idle_timeout_seconds: float | None,
     provider: str,
 ) -> StreamEvent:
@@ -106,43 +105,19 @@ def retrying_stream(
     *,
     idle_timeout_seconds: float | None,
 ) -> AsyncIterator[StreamEvent]:
-    """Stream ``request``, reissuing it after a retryable failure that came before any visible output.
+    """Stream ``request``, reissuing it after a retryable failure that came before the attempt committed.
 
     Non-streaming requests pass through unchanged, since their callers own deadlines and retry policy, except on a
     route that only streams: it streams every request, so each one gets the stream's retries and idle limit.
     """
     if not request.stream and not inner.capabilities.streams_only:
         return inner.stream(request)
-    return _retried(inner, request, idle_timeout_seconds)
-
-
-async def _retried(
-    inner: ModelProvider,
-    request: ModelRequest,
-    idle_timeout_seconds: float | None,
-) -> AsyncIterator[StreamEvent]:
-    identity = inner.identity
     budget = _RetryBudget()
-    carried: MessageMetrics | None = None
-    while True:
-        visible = False
-        usage = ReportedUsage()
-        try:
-            events = inner.stream(request)
-            async with closing_async_stream(events):
-                while True:
-                    try:
-                        event = await _next_event(events, idle_timeout_seconds, identity.provider_name)
-                    except StopAsyncIteration:
-                        return
-                    usage.observe(event)
-                    visible = visible or is_visible_output(event)
-                    yield with_carried_usage(event, carried)
-        except ProviderError as error:
-            if visible or (delay := _retry_delay(error, budget, identity.id)) is None:
-                raise
-            if (report := usage.settle()) is not None:
-                yield report
-            if delay:
-                await asyncio.sleep(delay)
-        carried = add_usage(carried, usage.settled)
+    model_id = inner.identity.id
+
+    def reissue(error: ProviderError) -> Retry | None:
+        delay = _retry_delay(error, budget, model_id)
+        return None if delay is None else Retry(request, delay)
+
+    next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=inner.identity.provider_name)
+    return attempts(inner, request, reissue, next_event=next_event)

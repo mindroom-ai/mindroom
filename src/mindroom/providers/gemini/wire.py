@@ -21,7 +21,8 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady
+from mindroom.llm.media import IMAGE_HEADER_BYTES, image_mime_type
+from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.providers.remote_media import download_media
@@ -45,8 +46,6 @@ logger = get_logger(__name__)
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
 # Gemini rejects requests above 20 MB, so larger local media goes through the Files API, which Vertex AI lacks.
 _INLINE_MEDIA_LIMIT_BYTES = 20 * 1024 * 1024
-# The leading bytes that identify an image format.
-_HEADER_BYTES = 12
 _FORMAT_TO_MIME = {
     "png": "image/png",
     "jpeg": "image/jpeg",
@@ -66,6 +65,8 @@ _FORMAT_TO_MIME = {
     "webm": "video/webm",
     "pdf": "application/pdf",
 }
+# The finish reason of a candidate whose tool call the model malformed.
+_MALFORMED_FUNCTION_CALL = "MALFORMED_FUNCTION_CALL"
 _FILTERED_FINISH_REASONS = frozenset(
     {
         "SAFETY",
@@ -199,7 +200,7 @@ def _read_local_media(path: Path, kind: str, provider: str, inline_limit: int) -
             raise FileNotFoundError(path)
         with path.open("rb") as stream:
             size = os.fstat(stream.fileno()).st_size
-            return size, stream.read() if size <= inline_limit else stream.read(_HEADER_BYTES)
+            return size, stream.read() if size <= inline_limit else stream.read(IMAGE_HEADER_BYTES)
     except OSError as error:
         logger.warning("gemini_media_file_unreadable", kind=kind, path=str(path), error=str(error))
         msg = f"The {kind} attachment could not be read"
@@ -249,42 +250,13 @@ def _media_mime_type(media: Audio | Video, default: str) -> str:
     return default
 
 
-def _image_format(data: bytes) -> str | None:  # noqa: PLR0911 - one return per magic-byte signature
-    """Return the image format from the magic bytes in the file header."""
-    if len(data) < _HEADER_BYTES:
-        return None
-    if data[0:8] == b"\x89PNG\r\n\x1a\n":
-        return "png"
-    if data[0:4] == b"GIF8" and data[5:6] == b"a":
-        return "gif"
-    if data[0:3] == b"\xff\xd8\xff":
-        return "jpeg"
-    if data[4:8] == b"ftyp":
-        return "heic"
-    if data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "webp"
-    return None
-
-
-def _image_mime_type(image: Image, data: bytes) -> str:
-    if image.mime_type:
-        return image.mime_type
-    if image.format:
-        return f"image/{image.format.lower()}"
-    if image.filepath and (guessed := mimetypes.guess_type(image.filepath)[0]):
-        return guessed
-    if detected := _image_format(data):
-        return f"image/{detected}"
-    return "image/jpeg"
-
-
 async def _image_part(image: Image, route: MediaRoute) -> dict[str, Any] | None:
     if image.url is not None:
         data, _ = await _downloaded(image.url, "image", route)
-        return _inline(data, _image_mime_type(image, data))
+        return _inline(data, image_mime_type(image, data))
     if image.filepath is not None:
-        return await _local_part(image.filepath, "image", route, partial(_image_mime_type, image))
-    return _inline(image.content, _image_mime_type(image, image.content)) if image.content else None
+        return await _local_part(image.filepath, "image", route, partial(image_mime_type, image))
+    return _inline(image.content, image_mime_type(image, image.content)) if image.content else None
 
 
 async def _audio_part(audio: Audio, route: MediaRoute) -> dict[str, Any] | None:
@@ -577,11 +549,7 @@ def _dictionary_schema(additional: Mapping[str, Any], *, description: str | None
 
 @dataclass(slots=True)
 class GeminiReply:
-    """What one streamed Gemini reply produced so far.
-
-    ``hosted_tool_ran`` turns true once a chunk shows a native tool (grounding, code execution) at work, after
-    which a failed attempt must not be retried, since the retry would run the tool again.
-    """
+    """What one streamed Gemini reply produced so far."""
 
     content: str = ""
     reasoning: str = ""
@@ -589,44 +557,53 @@ class GeminiReply:
     thought_signature: str | None = None
     usage: MessageMetrics | None = None
     finish_reason: str | None = None
-    hosted_tool_ran: bool = False
 
 
 def read_chunk(
     reply: GeminiReply,
     chunk: GenerateContentResponse,
     *,
-    provider: str,
     whole_response: bool = False,
 ) -> list[StreamEvent]:
     """Add one streamed chunk (or one ``whole_response`` from a non-streamed call) to ``reply`` and return its events.
 
-    Gemini repeats cumulative usage on every streamed chunk, so only usage on a finished candidate counts.
-    A whole response without candidates, such as a blocked prompt, still counts its prompt usage, as Agno's
-    non-streaming parser did; Agno's streaming parser dropped it, so a streamed one does not. A malformed tool
-    call raises after its usage is recorded, so the attempt the guidance retry replaces still counts.
+    Gemini repeats cumulative usage on every streamed chunk, so only usage on a finished candidate counts, and it is
+    returned as a partial report of the reply's usage so far. A whole response without candidates, such as a blocked
+    prompt, still counts its prompt usage, as Agno's non-streaming parser did; Agno's streaming parser dropped it, so
+    a streamed one does not. A candidate that ended in a malformed tool call reports its usage and nothing else;
+    ``malformed_tool_call_error`` then ends the reply. A chunk that shows Google Search grounding or code execution
+    at work reports that hosted tool's start.
     """
     if not chunk.candidates:
-        if whole_response and chunk.usage_metadata is not None:
-            reply.usage = _usage_metrics(chunk.usage_metadata)
-        return []
+        if not whole_response or chunk.usage_metadata is None:
+            return []
+        reply.usage = _usage_metrics(chunk.usage_metadata)
+        return [UsageReported(reply.usage, final=False)]
     candidate = chunk.candidates[0]
+    events: list[StreamEvent] = []
     finish_reason = None if candidate.finish_reason is None else candidate.finish_reason.value
-    if finish_reason is not None and chunk.usage_metadata is not None:
-        usage = _usage_metrics(chunk.usage_metadata)
-        reply.usage = usage if reply.usage is None else reply.usage + usage
-    if finish_reason == "MALFORMED_FUNCTION_CALL":
-        msg = f"Generation ended with finish reason: {finish_reason}"
-        raise ProviderError(msg, provider=provider, code=MALFORMED_TOOL_CALL)
-    parts = candidate.content.parts if candidate.content is not None else None
-    if candidate.grounding_metadata is not None or any(
-        part.executable_code is not None or part.code_execution_result is not None for part in parts or ()
-    ):
-        reply.hosted_tool_ran = True
-    events = [event for part in parts or () for event in _read_part(reply, part)]
+    if finish_reason != _MALFORMED_FUNCTION_CALL:
+        parts = candidate.content.parts if candidate.content is not None else None
+        if candidate.grounding_metadata is not None:
+            events.append(hosted_tool_started("google_search"))
+        if any(part.executable_code is not None or part.code_execution_result is not None for part in parts or ()):
+            events.append(hosted_tool_started("code_execution"))
+        events.extend(event for part in parts or () for event in _read_part(reply, part))
     if finish_reason is not None:
         reply.finish_reason = finish_reason
+        if chunk.usage_metadata is not None:
+            usage = _usage_metrics(chunk.usage_metadata)
+            reply.usage = usage if reply.usage is None else reply.usage + usage
+            events.append(UsageReported(reply.usage, final=False))
     return events
+
+
+def malformed_tool_call_error(reply: GeminiReply, *, provider: str) -> ProviderError | None:
+    """Return the error of a reply that ended in a tool call the model malformed, or None for any other reply."""
+    if reply.finish_reason != _MALFORMED_FUNCTION_CALL:
+        return None
+    msg = f"Generation ended with finish reason: {_MALFORMED_FUNCTION_CALL}"
+    return ProviderError(msg, provider=provider, code=MALFORMED_TOOL_CALL)
 
 
 def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
@@ -692,6 +669,7 @@ __all__ = [
     "convert_schema",
     "format_contents",
     "function_declarations",
+    "malformed_tool_call_error",
     "read_chunk",
     "response_schema",
     "stop_reason",

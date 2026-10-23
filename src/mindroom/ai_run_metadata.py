@@ -8,6 +8,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import RunMetrics
 from mindroom.model_usage import context_input_tokens_from_counts
+from mindroom.providers.names import canonical_provider
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -129,7 +130,7 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
 
 
 def _context_provider_key(provider: str | None) -> str:
-    key = (provider or "").strip().lower().replace("-", "_")
+    key = canonical_provider(provider or "")
     return {"vertexai_claude": "vertexai", "bedrock_claude": "awsbedrock"}.get(key, key)
 
 

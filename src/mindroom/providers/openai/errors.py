@@ -11,17 +11,15 @@ from typing import Any, cast
 
 import httpx
 
-from mindroom.llm.errors import ProviderError
-from mindroom.providers.errors import classify_provider_error, stream_event_error, transport_error
+from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
+from mindroom.providers.errors import classify_provider_error, provider_failure
 
 __all__ = [
+    "error_body_error",
     "missing_api_key_error",
     "provider_error",
-    "responses_event_error",
     "sdk_failures",
 ]
-
-_RESPONSES_EVENT_STATUSES = {"server_error": 500, "rate_limit_exceeded": 429, "vector_store_timeout": 504}
 
 
 def sdk_failures() -> tuple[type[Exception], ...]:
@@ -48,31 +46,26 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the owned error for one SDK or transport failure; ``provider`` is the metrics provider name."""
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
 
+    if (failure := provider_failure(error, provider=provider)) is not None:
+        return failure
     if isinstance(error, openai.APIStatusError):
         message, code, _ = _error_fields(error.body)
         if message is None:
             message = error.response.text or str(error)
         return classify_provider_error(message, provider=provider, status_code=error.status_code, code=code)
-    if isinstance(error, openai.APIConnectionError | httpx.TransportError):
-        return transport_error(error, provider=provider)
     if isinstance(error, openai.APIError):
-        message, code, error_type = _error_fields(error.body)
-        return stream_event_error(message or error.message, provider=provider, code=code, error_type=error_type)
+        # The SDK raises an error chunk inside a stream as an ``APIError`` that carries the chunk's ``error`` body.
+        return error_body_error(error.body, provider=provider, default_message=error.message)
     return ProviderError(str(error) or type(error).__name__, provider=provider)
 
 
-def responses_event_error(code: str | None, message: str | None, *, provider: str) -> ProviderError:
-    """Return the owned error for a Responses ``error`` or ``response.failed`` event."""
-    status_code = _RESPONSES_EVENT_STATUSES.get(code, 400) if code is not None else 400
-    return classify_provider_error(
-        message or "OpenAI Responses stream failed",
-        provider=provider,
-        status_code=status_code,
-        code=code,
-    )
+def error_body_error(body: object, *, provider: str, default_message: str) -> ProviderError:
+    """Return the owned error for an ``error`` object a server sent in place of its reply, after an HTTP 200."""
+    message, code, error_type = _error_fields(body)
+    return classify_provider_error(message or default_message, provider=provider, code=code, error_type=error_type)
 
 
-def missing_api_key_error(env_var: str, *, provider: str) -> ProviderError:
-    """Return the error for a route that has no API key, worded as the user-facing message mapping expects."""
+def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:
+    """Return the error for a route that has no API key, which the reply turns into how to connect one."""
     message = f"{env_var} not set. Please set the {env_var} environment variable."
-    return ProviderError(message, provider=provider, status_code=401, code="missing_api_key")
+    return AuthenticationFailed(message, provider=provider, status_code=401, code=MISSING_API_KEY)

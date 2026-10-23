@@ -11,6 +11,7 @@ unavailability, and a request that no longer fits the context window says so.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
     INCOMPLETE_STREAM,
     MALFORMED_TOOL_CALL,
+    AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
     ProviderError,
@@ -29,26 +31,27 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, complete
+from mindroom.llm.provider import ModelRequest, ReportedUsage, complete
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.retry import STREAM_STALLED
 from tests.providers.anthropic_family_support import ROUTE_CONFIGS, claude_message, provider_for
 from tests.providers.family_support import scrub_provider_env
 from tests.providers.gemini_ollama_support import build_adapter
 from tests.providers.golden_support import PacedBytes, ndjson_response, pipeline_provider, sse_response
-from tests.providers.openai_family_support import openai_family_adapter
+from tests.providers.openai_family_support import openai_family_adapter, unsigned_jwt
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.llm.provider import ModelProvider
 
 type Reply = Callable[[], httpx.Response | Exception]
 
-# The idle limit every row runs with; a stalled reply pauses past it before its first event.
-_IDLE_LIMIT_SECONDS = 0.3
-_STALL_SECONDS = 0.6
+# The idle limit every row runs with; a stalled reply pauses past it before its first event. The limit also covers
+# a request's preparation, such as borrowing a CLI login in a thread, so it outlasts that on a loaded machine.
+_IDLE_LIMIT_SECONDS = 0.5
+_STALL_SECONDS = 1.0
 _PARTIAL = "partial"
 
 RATE_LIMITED = "⏱️ Rate limited."
@@ -216,12 +219,26 @@ _RESPONSE_FAILED = {
     "sequence_number": 2,
     "response": {**_RESPONSE, "status": "failed", "output": [], "error": {"code": "server_error", "message": "Failed"}},
 }
-_WEB_SEARCH_STARTED = {
-    "type": "response.output_item.added",
-    "sequence_number": 1,
-    "output_index": 0,
-    "item": {"id": "ws_1", "type": "web_search_call", "status": "in_progress"},
+
+
+def _item_added(item: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "response.output_item.added", "sequence_number": 1, "output_index": 0, "item": item}
+
+
+_WEB_SEARCH_STARTED = _item_added({"id": "ws_1", "type": "web_search_call", "status": "in_progress"})
+# The hosted tools a Responses route may run, by the output item that shows each starting.
+_RESPONSES_HOSTED_TOOLS = {
+    "web_search": _WEB_SEARCH_STARTED,
+    "file_search": _item_added({"id": "fs_1", "type": "file_search_call", "status": "in_progress", "queries": []}),
+    "code_interpreter": _item_added(
+        {"id": "ci_1", "type": "code_interpreter_call", "status": "in_progress", "code": "", "container_id": "c"},
+    ),
+    "image_generation": _item_added({"id": "ig_1", "type": "image_generation_call", "status": "in_progress"}),
 }
+_TOOL_SEARCH_STARTED = _item_added(
+    {"id": "ts_1", "type": "tool_search_call", "status": "in_progress", "execution": "server", "arguments": {}},
+)
+_COMPACTION_STARTED = _item_added({"id": "cmp_1", "type": "compaction", "encrypted_content": "e"})
 _RESPONSE_COMPLETED = {
     "type": "response.completed",
     "sequence_number": 3,
@@ -280,6 +297,35 @@ def _ollama_chunk(content: str = "", *, done: bool = False) -> dict[str, Any]:
 
 def _ollama_stream(*chunks: dict[str, Any], pause: float = 0.0, drop: bool = False) -> Reply:
     return lambda: ndjson_response(chunks, pause_seconds=pause, drop=drop)
+
+
+class _OpenAfter(httpx.AsyncByteStream):
+    """A response body sent at once, after which the connection stays open without sending more."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+        self.sent = asyncio.Event()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Send the body, mark it sent once the reader asks for more, then wait forever."""
+        yield self._body
+        self.sent.set()
+        await asyncio.get_running_loop().create_future()
+
+
+def _then_silent(reply: Reply) -> Reply:
+    """Send ``reply``'s whole body at once and then keep the connection open without sending more."""
+
+    def silent() -> httpx.Response:
+        sent = reply()
+        assert isinstance(sent, httpx.Response)
+        return httpx.Response(
+            200,
+            headers={"content-type": sent.headers["content-type"]},
+            stream=_OpenAfter(sent.content),
+        )
+
+    return silent
 
 
 def _connect_error() -> Exception:
@@ -349,6 +395,7 @@ _SDK_AND_PIPELINE = 15
 _PIPELINE = 5
 _STALLED = 2
 
+_CLAUDE_WEB_SEARCH = {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}
 _CLAUDE_CASES = [
     _Case(
         "http_429",
@@ -407,6 +454,20 @@ _CLAUDE_CASES = [
         1,
         1,
     ),
+    # Older Claude models word an input that leaves no room for the output this way.
+    _Case(
+        "http_400_context_limit",
+        _claude_status(
+            400,
+            "invalid_request_error",
+            "input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000, decrease input length or "
+            "`max_tokens` and try again",
+        ),
+        ContextWindowExceeded,
+        CONTEXT_WINDOW,
+        1,
+        1,
+    ),
     _Case(
         "http_413",
         _claude_status(413, "request_too_large", "Request exceeds the size"),
@@ -418,7 +479,7 @@ _CLAUDE_CASES = [
     _Case(
         "http_401",
         _claude_status(401, "authentication_error", "invalid x-api-key"),
-        ProviderError,
+        AuthenticationFailed,
         AUTHENTICATION,
         1,
         1,
@@ -426,7 +487,7 @@ _CLAUDE_CASES = [
     _Case(
         "http_403",
         _claude_status(403, "permission_error", "Your API key does not have permission to use the specified resource."),
-        ProviderError,
+        AuthenticationFailed,
         AUTHENTICATION,
         1,
         1,
@@ -526,14 +587,43 @@ _CLAUDE_CASES = [
     # A retry would run the web search again, so the failure is final; the Agno-backed runtime retried it.
     _Case(
         "event_after_web_search",
-        _claude_stream(
-            *_claude_block(0, {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}),
-            _claude_error("api_error"),
-        ),
-        ProviderError,
+        _claude_stream(*_claude_block(0, _CLAUDE_WEB_SEARCH), _claude_error("api_error")),
+        ProviderUnavailable,
         UNAVAILABLE,
         1,
-        code=INCOMPLETE_STREAM,
+    ),
+    # A stall after a server tool that acts or costs started is final too; the Agno-backed runtime retried it once.
+    _Case(
+        "stall_after_web_search",
+        _then_silent(_claude_stream(*_claude_block(0, _CLAUDE_WEB_SEARCH))),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        1,
+        code=STREAM_STALLED,
+    ),
+    _Case(
+        "stall_after_code_execution",
+        _then_silent(_claude_stream(*_claude_block(0, {**_CLAUDE_WEB_SEARCH, "name": "code_execution"}))),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        1,
+        code=STREAM_STALLED,
+    ),
+    _Case(
+        "stall_after_tool_search",
+        _then_silent(_claude_stream(*_claude_block(0, {**_CLAUDE_WEB_SEARCH, "name": "tool_search_tool_regex"}))),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        _STALLED,
+        code=STREAM_STALLED,
+    ),
+    _Case(
+        "stall_after_compaction",
+        _then_silent(_claude_stream(*_claude_block(0, {"type": "compaction", "content": "Summary."}))),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        _STALLED,
+        code=STREAM_STALLED,
     ),
 ]
 
@@ -623,7 +713,7 @@ _OPENAI_HTTP_CASES = [
     _Case(
         "http_401",
         _openai_status(401, "Incorrect API key provided.", "invalid_request_error", "invalid_api_key"),
-        ProviderError,
+        AuthenticationFailed,
         AUTHENTICATION,
         1,
         1,
@@ -729,6 +819,16 @@ _CHAT_CASES = [
         1,
     ),
     _Case("reset_before_output", _chat_stream(drop=True), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+    # Gateways such as OpenRouter answer a failed upstream with HTTP 200 and an error body; the Agno-backed runtime
+    # raised it as a 502.
+    _Case(
+        "http_200_error_body",
+        _json(200, {"error": {"message": "Provider returned error", "code": 502}, "user_id": "u"}),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        None,
+        1,
+    ),
     _Case(
         "reset_during_tool_arguments",
         _chat_stream(_TOOL_ARGUMENTS, drop=True),
@@ -762,7 +862,11 @@ _CHAT_CASES = [
         1,
     ),
 ]
-_CHAT_SHARED = [case for case in _CHAT_CASES if case.failure in {"http_503", "http_400", "event_server_error"}]
+_CHAT_SHARED = [
+    case
+    for case in _CHAT_CASES
+    if case.failure in {"http_503", "http_400", "event_server_error", "http_200_error_body"}
+]
 
 _RESPONSES_CASES = [
     *_OPENAI_HTTP_CASES,
@@ -787,7 +891,7 @@ _RESPONSES_CASES = [
         CONTEXT_WINDOW,
         1,
     ),
-    _Case("event_invalid_prompt", _responses_stream(_response_error("invalid_prompt")), InvalidRequest, ERROR, 1),
+    _Case("event_invalid_prompt", _responses_stream(_response_error("invalid_prompt")), ProviderError, ERROR, 1),
     _Case("response_failed", _responses_stream(_RESPONSE_FAILED), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
     _Case(
         "end_before_completed",
@@ -809,34 +913,51 @@ _RESPONSES_CASES = [
     _Case(
         "event_after_visible_output",
         _responses_stream(_response_text(_PARTIAL), _response_error("server_error")),
-        ProviderError,
+        ProviderUnavailable,
         UNAVAILABLE,
         1,
-        code=INCOMPLETE_STREAM,
+        code="server_error",
     ),
     _Case(
         "reset_after_visible_output",
         _responses_stream(_response_text(_PARTIAL), drop=True),
-        ProviderError,
-        ERROR,
+        ProviderUnavailable,
+        UNAVAILABLE,
         1,
-        code=INCOMPLETE_STREAM,
+        code="connection_error",
     ),
     _Case(
         "end_after_visible_output",
         _responses_stream(_response_text(_PARTIAL)),
-        ProviderError,
+        ProviderUnavailable,
         UNAVAILABLE,
         1,
         code=INCOMPLETE_STREAM,
     ),
-    _Case(
-        "event_after_hosted_tool",
-        _responses_stream(_WEB_SEARCH_STARTED, _response_error("server_error")),
-        ProviderError,
-        UNAVAILABLE,
-        1,
-        code=INCOMPLETE_STREAM,
+    # A retry would run the hosted tool again, so a failure after it started is final, a stall included.
+    *(
+        _Case(
+            f"{failure}_after_{tool}",
+            reply,
+            ProviderUnavailable,
+            UNAVAILABLE,
+            1,
+            code=code,
+        )
+        for tool, started in _RESPONSES_HOSTED_TOOLS.items()
+        for failure, reply, code in (
+            ("event", _responses_stream(started, _response_error("server_error")), "server_error"),
+            ("stall", _then_silent(_responses_stream(started)), STREAM_STALLED),
+        )
+    ),
+    # Rerunning a tool search or a compaction repeats no work, so their items keep the retry budget.
+    *(
+        _Case(f"{failure}_after_{name}", reply, ProviderUnavailable, UNAVAILABLE, requests, code=code)
+        for name, started in (("tool_search", _TOOL_SEARCH_STARTED), ("compaction", _COMPACTION_STARTED))
+        for failure, reply, requests, code in (
+            ("event", _responses_stream(started, _response_error("server_error")), _PIPELINE, "server_error"),
+            ("stall", _then_silent(_responses_stream(started)), _STALLED, STREAM_STALLED),
+        )
     ),
 ]
 
@@ -904,7 +1025,7 @@ _GEMINI_CASES = [
     _Case(
         "http_400_api_key",
         _gemini_status(400, "API key not valid. Please pass a valid API key.", "INVALID_ARGUMENT"),
-        InvalidRequest,
+        AuthenticationFailed,
         AUTHENTICATION,
         1,
         1,
@@ -918,6 +1039,20 @@ _GEMINI_CASES = [
         1,
     ),
     _Case("http_404", _gemini_status(404, "models/gemini-x is not found.", "NOT_FOUND"), InvalidRequest, ERROR, 1, 1),
+    # Google's own wording: "generateContent" holds "rate", which no longer reads as a rate limit.
+    _Case(
+        "http_404_unsupported_method",
+        _gemini_status(
+            404,
+            "models/gemini-x is not found for API version v1beta, or is not supported for generateContent. "
+            "Call ListModels to see the list of available models and their supported methods.",
+            "NOT_FOUND",
+        ),
+        InvalidRequest,
+        ERROR,
+        1,
+        1,
+    ),
     _Case(
         "http_422",
         _gemini_status(422, "Unprocessable entity.", "INVALID_ARGUMENT"),
@@ -957,13 +1092,18 @@ _GEMINI_CASES = [
         UNAVAILABLE,
         1,
     ),
-    _Case(
-        "reset_after_grounding",
-        _gemini_stream(_gemini_chunk(grounding=True), drop=True),
-        ProviderError,
-        ERROR,
-        1,
-        code=INCOMPLETE_STREAM,
+    # A retry would run Google Search grounding or code execution again, so a failure after either is final, a
+    # stall included; the Agno-backed runtime retried a stall.
+    *(
+        _Case(f"{failure}_after_{tool}", reply, ProviderUnavailable, UNAVAILABLE, 1, code=code)
+        for tool, chunk in (
+            ("grounding", _gemini_chunk(grounding=True)),
+            ("code_execution", _gemini_chunk({"executableCode": {"language": "PYTHON", "code": "print(1)"}})),
+        )
+        for failure, reply, code in (
+            ("reset", _gemini_stream(chunk, drop=True), "connection_error"),
+            ("stall", _then_silent(_gemini_stream(chunk)), STREAM_STALLED),
+        )
     ),
     # One guidance retry follows a malformed tool call in both modes.
     _Case(
@@ -1109,6 +1249,81 @@ async def test_a_failed_request_is_retried_and_reported_as_the_parity_table_says
         assert raised.value.code == row.code
 
 
+# --- CLI login refresh --------------------------------------------------------------------------------------------
+
+
+def _expire_cli_login(route: str, root: Path) -> None:
+    """Replace the route's saved CLI login with one whose access token expired, so each request refreshes it."""
+    if route == "codex":
+        tokens = {"access_token": unsigned_jwt({"exp": 1000}), "refresh_token": "r", "account_id": "parity-account"}
+        auth = {"auth_mode": "chatgpt", "tokens": tokens}
+        (root / "codex" / "auth.json").write_text(json.dumps(auth), encoding="utf-8")
+    else:
+        credentials = {"access_token": "expired", "refresh_token": "r", "expires_at": 1000}
+        (root / "kimi" / "credentials" / "kimi-code.json").write_text(json.dumps(credentials), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "stream", "refresh_reply", "error", "message", "refreshes"),
+    [
+        # A refresh that fails on the network is the provider's transient failure, retried as the Agno-backed
+        # runtime retried it; Kimi's blocking requests get no stream retries, and Codex always streams.
+        ("codex", True, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("codex", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("kimi", True, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("kimi", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, 1),
+        # A refresh token the login server rejects is final and asks the user to log in again.
+        (
+            "codex",
+            True,
+            httpx.Response(400, json={"error": "refresh_token_expired"}),
+            AuthenticationFailed,
+            AUTHENTICATION,
+            1,
+        ),
+        ("kimi", True, httpx.Response(401, text="invalid_grant"), AuthenticationFailed, AUTHENTICATION, 1),
+    ],
+    ids=[
+        "codex-streamed-refused",
+        "codex-blocking-refused",
+        "kimi-streamed-refused",
+        "kimi-blocking-refused",
+        "codex-rejected",
+        "kimi-rejected",
+    ],
+)
+async def test_a_cli_login_refresh_failure_is_retried_only_when_the_network_failed(
+    route: str,
+    stream: bool,
+    refresh_reply: httpx.Response | Exception,
+    error: type[ProviderError],
+    message: str,
+    refreshes: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired CLI login refreshes inside the request; only a network failure there is worth retrying."""
+    attempts: list[str] = []
+
+    def refresh(url: str, **_kwargs: object) -> httpx.Response:
+        attempts.append(url)
+        if isinstance(refresh_reply, Exception):
+            raise refresh_reply
+        return refresh_reply
+
+    monkeypatch.setattr(httpx, "post", refresh)
+    adapter = _adapter(route, tmp_path, lambda _request: pytest.fail("no model request may be sent"))
+    _expire_cli_login(route, tmp_path)
+    provider = pipeline_provider(adapter, idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=stream))
+
+    assert (type(raised.value), len(attempts)) == (error, refreshes)
+    assert get_user_friendly_error_message(raised.value).startswith(message)
+
+
 _CHAT_COMPLETION = {
     "id": "chatcmpl-1",
     "object": "chat.completion",
@@ -1144,3 +1359,89 @@ async def test_a_blocking_reply_slower_than_the_idle_limit_is_waited_for(route: 
     turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=False))
 
     assert (turn.content, len(sent)) == ("ok", 1)
+
+
+# --- Usage of a cut-off stream ------------------------------------------------------------------------------------
+
+
+_CLAUDE_USAGE_DELTA = {
+    "type": "message_delta",
+    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+    "usage": {"output_tokens": 9},
+}
+_CHAT_USAGE = {
+    "id": "chatcmpl-1",
+    "object": "chat.completion.chunk",
+    "created": 1,
+    "model": "m",
+    "choices": [],
+    "usage": {"prompt_tokens": 40, "completion_tokens": 9, "total_tokens": 49},
+}
+# Each route's reply up to and including the event that reports the request's usage, without the stream's end.
+_USAGE_THEN_SILENCE: dict[str, Reply] = {
+    "anthropic": _claude_stream(
+        *_claude_text(0, "ok"),
+        {"type": "content_block_stop", "index": 0},
+        _CLAUDE_USAGE_DELTA,
+    ),
+    "openai_chat": _chat_stream(_chat_chunk({"content": "ok"}), _CHAT_USAGE),
+    "openai_responses": _responses_stream(_response_text("ok"), _RESPONSE_COMPLETED),
+    "gemini": _gemini_stream(_gemini_chunk({"text": "ok"}, finish="STOP")),
+    "ollama": _ollama_stream(_ollama_chunk("ok"), _ollama_chunk(done=True)),
+}
+
+
+def _silent_after_usage(route: str) -> tuple[_OpenAfter, Callable[[httpx.Request], httpx.Response]]:
+    reply = _then_silent(_USAGE_THEN_SILENCE[route])()
+    assert isinstance(reply, httpx.Response)
+    assert isinstance(reply.stream, _OpenAfter)
+    body = reply.stream
+    return body, lambda _request: reply
+
+
+def _billed(usage: ReportedUsage) -> tuple[int, int] | None:
+    received = usage.received
+    return None if received is None else (received.input_tokens, received.output_tokens)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", _USAGE_THEN_SILENCE)
+async def test_usage_the_provider_reported_is_kept_when_the_reply_is_cancelled_after_it(
+    route: str,
+    tmp_path: Path,
+) -> None:
+    """A reply cancelled after the provider reported its usage, before the stream ended, still settles that usage."""
+    body, respond = _silent_after_usage(route)
+    provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=None)
+    usage = ReportedUsage()
+
+    async def consume() -> None:
+        async for event in provider.stream(ModelRequest(messages=[Message(role="user", content="Hi")])):
+            usage.observe(event)
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(body.sent.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _billed(usage) == (40, 9)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", _USAGE_THEN_SILENCE)
+async def test_usage_the_provider_reported_is_kept_when_the_stream_stalls_after_it(route: str, tmp_path: Path) -> None:
+    """A stream that stalls after the provider reported its usage fails at the idle limit and still settles that usage."""
+    _, respond = _silent_after_usage(route)
+    provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+    usage = ReportedUsage()
+
+    async def consume() -> None:
+        async for event in provider.stream(ModelRequest(messages=[Message(role="user", content="Hi")])):
+            usage.observe(event)
+
+    with pytest.raises(ProviderUnavailable) as raised:
+        await consume()
+
+    assert raised.value.code == STREAM_STALLED
+    assert _billed(usage) == (40, 9)

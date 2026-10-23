@@ -10,8 +10,7 @@ from mindroom.llm.usage import MessageMetrics
 # Gemini's MALFORMED_FUNCTION_CALL; the request pipeline answers it with one guidance retry, and the media fallback
 # never strips media for it.
 MALFORMED_TOOL_CALL = "malformed_tool_call"
-# The ``ProviderError.code`` of a stream that failed after the attempt exposed output or a hosted tool ran: a retry
-# could duplicate output or rerun the tool, so the error is final and the media fallback never resends the request.
+# The ``ProviderError.code`` of a stream that ended before its turn completed.
 INCOMPLETE_STREAM = "incomplete_stream"
 # The ``ProviderError.code`` of a transport failure that timed out, such as an HTTP connect or read timeout, so callers
 # that report timeouts need not read the error's text; other transport failures carry ``connection_error``.
@@ -19,6 +18,8 @@ TRANSPORT_TIMEOUT = "timeout"
 # The ``ProviderError.code`` of a response the model's safeguards refused: neither a retry nor a resend without the
 # request's media can change the answer.
 SAFEGUARD_REFUSAL = "refusal"
+# The ``ProviderError.code`` of a request whose route has no credential at all, so the reply can say how to add one.
+MISSING_API_KEY = "missing_api_key"
 # The text of a safeguard refusal; error runs store it, and the runtime recognizes stored refusals by it.
 MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Claude returned stop_reason=refusal"
 
@@ -46,6 +47,10 @@ class ProviderError(Exception):
         self.code = code
 
 
+class AuthenticationFailed(ProviderError):  # noqa: N818
+    """The provider rejected the request's credentials, or the route has none; a retry cannot succeed."""
+
+
 class ContextWindowExceeded(ProviderError):  # noqa: N818
     """The request does not fit the model's context window; compaction, not retrying, resolves it."""
 
@@ -66,6 +71,12 @@ class ProviderUnavailable(ProviderError):  # noqa: N818
     retryable = True
 
 
+def incomplete_stream_error(*, provider: str) -> ProviderError:
+    """Return the error of a provider stream that ended without completing its turn; ``provider`` names the route."""
+    msg = "The provider stream ended without completing the turn"
+    return ProviderError(msg, provider=provider, code=INCOMPLETE_STREAM)
+
+
 class ModelOutputLimitError(RuntimeError):
     """A run's model responses kept stopping at the output limit before their tool calls were complete."""
 
@@ -84,9 +95,11 @@ class ModelSafeguardRefusal(ProviderError):  # noqa: N818
 __all__ = [
     "INCOMPLETE_STREAM",
     "MALFORMED_TOOL_CALL",
+    "MISSING_API_KEY",
     "MODEL_SAFEGUARD_REFUSAL_MESSAGE",
     "SAFEGUARD_REFUSAL",
     "TRANSPORT_TIMEOUT",
+    "AuthenticationFailed",
     "ContextWindowExceeded",
     "InvalidRequest",
     "ModelOutputLimitError",
@@ -94,4 +107,5 @@ __all__ = [
     "ProviderError",
     "ProviderUnavailable",
     "RateLimited",
+    "incomplete_stream_error",
 ]

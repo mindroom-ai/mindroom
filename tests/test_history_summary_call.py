@@ -42,7 +42,7 @@ from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import RequestOverrides
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.providers.errors import classify_provider_error, transport_error
+from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import Await
@@ -719,10 +719,13 @@ def test_owned_timeout_classification_does_not_depend_on_message_text() -> None:
 
 def test_a_compaction_failure_is_a_timeout_by_its_type_or_a_providers_own_words() -> None:
     """A transport timeout counts by its code, a provider's own timeout by its text, and no other error by wording."""
-    assert _compaction_failure_status(transport_error(httpx.PoolTimeout(""), provider="fake")) == "timeout"
+    timed_out = provider_failure(httpx.PoolTimeout(""), provider="fake")
+    assert timed_out is not None
+    assert _compaction_failure_status(timed_out) == "timeout"
     provider_side = classify_provider_error("upstream request timed out", provider="fake", status_code=504)
     assert _compaction_failure_status(provider_side) == "timeout"
-    refused = transport_error(httpx.ConnectError("connection refused"), provider="fake")
+    refused = provider_failure(httpx.ConnectError("connection refused"), provider="fake")
+    assert refused is not None
     assert _compaction_failure_status(refused) == "failed"
     assert _compaction_failure_status(RuntimeError("lock wait timed out")) == "failed"
 

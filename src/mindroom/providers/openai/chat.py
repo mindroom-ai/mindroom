@@ -17,7 +17,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.providers.assistant_turn import finished_assistant_message, whole_turn_deltas
+from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.chat_wire import (
@@ -92,23 +92,20 @@ class ChatAdapter:
                 sdk_stream = await client.chat.completions.create(**kwargs)
                 try:
                     async for chunk in sdk_stream:
-                        events = accumulator.add(chunk)
-                        if not events:
-                            # A chunk without deltas, such as a tool-call argument piece, is still activity.
-                            yield StreamProgress()
-                            continue
-                        first_token = first_token or time.monotonic()
-                        for event in events:
+                        # A chunk without deltas or usage, such as a tool-call argument piece, is still activity.
+                        for event in accumulator.add(chunk) or [StreamProgress()]:
+                            first_token = output_started(first_token, event)
                             yield event
                 finally:
                     await sdk_stream.close()
                 parts = accumulator.finish()
+                # A stream assembles its tool calls from their pieces, so each is complete only now.
+                for call in parts.tool_calls:
+                    yield ToolCallReady(call)
             else:
-                parts = parse_chat_completion(await client.chat.completions.create(**kwargs), self.wire)
+                completion = await client.chat.completions.create(**kwargs)
+                parts = parse_chat_completion(completion, self.wire, provider=self.identity.provider_name)
                 first_token = time.monotonic()
-                # Tool calls are yielded after the branch for both paths, so the whole reply contributes none here.
-                for event in whole_turn_deltas(reasoning=parts.reasoning, content=parts.content, tool_calls=()):
-                    yield event
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
         message = finished_assistant_message(
@@ -121,8 +118,6 @@ class ChatAdapter:
             started=started,
             first_output_at=first_token,
         )
-        for call in parts.tool_calls:
-            yield ToolCallReady(call)
         if parts.usage is not None:
             yield UsageReported(message.metrics)
         yield TurnCompleted(message=message, stop_reason=chat_stop_reason(parts.finish_reason))

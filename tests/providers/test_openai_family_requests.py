@@ -769,7 +769,7 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
                 },
             },
         )
-        usage = parse_chat_completion(completion, adapter.wire).usage
+        usage = parse_chat_completion(completion, adapter.wire, provider=adapter.identity.provider_name).usage
     else:
         response = _response([]).model_copy(
             update={
@@ -828,7 +828,7 @@ def test_groq_and_cerebras_usage_keeps_cached_input_and_reasoning(tmp_path: Path
         },
     )
 
-    usage = parse_chat_completion(completion, adapter.wire).usage
+    usage = parse_chat_completion(completion, adapter.wire, provider=adapter.identity.provider_name).usage
 
     assert usage is not None
     assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (5000, 300, 5300)

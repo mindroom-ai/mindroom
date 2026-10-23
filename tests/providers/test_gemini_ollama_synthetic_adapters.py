@@ -570,7 +570,12 @@ async def test_gemini_non_streaming_requests_use_generate_content(tmp_path: Path
 
     assert request["url"].endswith(":generateContent")
     completed = _completed(events)
-    assert [type(event).__name__ for event in events] == ["TextDelta", "UsageReported", "TurnCompleted"]
+    assert [type(event).__name__ for event in events] == [
+        "TextDelta",
+        "UsageReported",
+        "UsageReported",
+        "TurnCompleted",
+    ]
     assert completed.message.content == "Whole."
     assert completed.message.metrics.input_tokens == 10
 
@@ -588,6 +593,7 @@ async def test_gemini_chunks_without_output_are_reported_as_progress(tmp_path: P
     assert [type(event).__name__ for event in events] == [
         "StreamProgress",
         "TextDelta",
+        "UsageReported",
         "UsageReported",
         "TurnCompleted",
     ]
@@ -618,8 +624,8 @@ async def test_gemini_non_streamed_blocked_prompt_reports_its_prompt_usage(tmp_p
     _, events = await run_adapter(GEMINI, _request(stream=False), tmp_path, reply)
 
     completed = _completed(events)
-    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
-    usage = [event.usage for event in events if isinstance(event, UsageReported)]
+    assert [type(event).__name__ for event in events] == ["UsageReported", "UsageReported", "TurnCompleted"]
+    usage = [event.usage for event in events if isinstance(event, UsageReported) and event.final]
     assert [(metrics.input_tokens, metrics.output_tokens, metrics.total_tokens) for metrics in usage] == [(9, 0, 9)]
     assert completed.message.metrics.input_tokens == 9
     assert (completed.message.content, completed.message.tool_calls, completed.stop_reason) == (None, None, None)
@@ -640,7 +646,7 @@ async def test_gemini_empty_text_parts_add_no_deltas_but_keep_their_signature(tm
     assert [type(event).__name__ for event in events] == [
         "StreamProgress",
         "TextDelta",
-        "StreamProgress",
+        "UsageReported",
         "UsageReported",
         "TurnCompleted",
     ]
@@ -1479,12 +1485,14 @@ async def test_ollama_parses_text_tool_calls_usage_and_length_stops(tmp_path: Pa
         ([_ollama_done(content="Hi")], "end"),
         ([_ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}])], "tool_use"),
         ([_ollama_done("load")], "incomplete"),
+        # Servers from before done_reason existed, and some Ollama-compatible ones, end a normal reply without one.
+        ([{key: value for key, value in _ollama_done(content="Hi").items() if key != "done_reason"}], "end"),
         (
             [{"model": "qwen3.8:27b", "done": False, "message": {"role": "assistant", "content": "Hi"}}],
             None,
         ),
     ],
-    ids=["stop", "stop-with-tool-calls", "load", "no-done-chunk"],
+    ids=["stop", "stop-with-tool-calls", "load", "no-done-reason", "no-done-chunk"],
 )
 async def test_ollama_stop_reasons(chunks: list[dict[str, Any]], stop: str | None, tmp_path: Path) -> None:
     """Done reasons map to stop reasons; a stream that ends without its ``done`` chunk has neither one nor usage."""
@@ -1528,19 +1536,13 @@ async def test_ollama_non_streaming_replies_split_think_tags(tmp_path: Path) -> 
     assert request["body"]["stream"] is False
     completed = _completed(events)
     assert (completed.message.content, completed.message.reasoning_content) == ("Hi there", "Plan first.")
-    assert [type(event).__name__ for event in events] == [
-        "ReasoningDelta",
-        "TextDelta",
-        "UsageReported",
-        "TurnCompleted",
-    ]
-    assert events[1] == TextDelta("Hi there")
+    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
     assert completed.message.metrics.input_tokens == 7
 
 
 @pytest.mark.asyncio
 async def test_ollama_non_streaming_tool_call_replies_have_no_text(tmp_path: Path) -> None:
-    """A whole reply that only calls a tool yields the call and no empty text or reasoning delta."""
+    """A whole reply that only calls a tool finishes with the call and no empty text or reasoning."""
     reply = httpx.Response(
         200,
         json=_ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}]),
@@ -1548,9 +1550,9 @@ async def test_ollama_non_streaming_tool_call_replies_have_no_text(tmp_path: Pat
 
     _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER], stream=False), tmp_path, reply)
 
-    assert [type(event).__name__ for event in events] == ["ToolCallReady", "UsageReported", "TurnCompleted"]
+    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
     completed = _completed(events)
-    assert completed.message.content is None
+    assert (completed.message.content, completed.message.reasoning_content) == (None, None)
     [call] = completed.message.tool_calls or []
     assert call["function"] == {"name": "get_weather", "arguments": '{"city": "Oslo"}'}
     assert completed.stop_reason == "tool_use"
@@ -1571,7 +1573,6 @@ async def test_ollama_keeps_think_tags_agno_did_not_split(content: str, tmp_path
     completed = _completed(events)
     assert completed.message.content == content
     assert completed.message.reasoning_content is None
-    assert [type(event).__name__ for event in events] == ["TextDelta", "UsageReported", "TurnCompleted"]
 
 
 @pytest.mark.asyncio

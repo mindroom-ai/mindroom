@@ -396,10 +396,10 @@ def _validate_vertexai_claude_connection(
     # The anthropic SDK loads only when a Vertex Claude model is checked.
     from mindroom.providers.anthropic.messages import build_provider  # noqa: PLC0415
 
-    probe_config = model_config.model_copy(update={"extra_kwargs": {"timeout": 10, **extra_kwargs}})
+    probe_config = model_config.model_copy(update={"extra_kwargs": {"timeout": 10, **extra_kwargs, "max_tokens": 1}})
     request = ModelRequest(
         messages=[Message(role="user", content="Reply with OK.")],
-        overrides=RequestOverrides(max_output_tokens=1, prompt_cache=False, disable_thinking=True),
+        overrides=RequestOverrides(prompt_cache=False, disable_thinking=True),
         stream=False,
     )
     try:

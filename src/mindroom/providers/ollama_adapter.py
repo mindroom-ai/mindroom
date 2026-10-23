@@ -17,11 +17,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from uuid import uuid4
 
-import httpx
 from pydantic import BaseModel
 
 from mindroom.credentials.sync import get_ollama_host
-from mindroom.llm.errors import InvalidRequest
+from mindroom.llm.errors import InvalidRequest, ProviderError
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -34,8 +33,8 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import finished_assistant_message, split_thinking, whole_turn_deltas
-from mindroom.providers.errors import classify_provider_error, transport_error
+from mindroom.providers.assistant_turn import finished_assistant_message, output_started, split_thinking
+from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.remote_media import download_media
 from mindroom.providers.tool_policy import provider_tools_disabled
@@ -106,8 +105,6 @@ class OllamaProvider:
         """
         messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
         chat_kwargs = self._chat_kwargs(request)
-        from ollama import ResponseError  # noqa: PLC0415 - provider SDK loads on first request
-
         reply = _OllamaReply()
         started = time.monotonic()
         first_output_at: float | None = None
@@ -121,11 +118,8 @@ class OllamaProvider:
                 )
                 async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
                     async for chunk in responses:
-                        events = _read_chunk(reply, chunk)
-                        if not events:
-                            yield StreamProgress()
-                        for event in events:
-                            first_output_at = first_output_at or time.monotonic()
+                        for event in _read_chunk(reply, chunk) or [StreamProgress()]:
+                            first_output_at = output_started(first_output_at, event)
                             yield event
             else:
                 response = await self._sdk_client().chat(
@@ -134,17 +128,9 @@ class OllamaProvider:
                     **chat_kwargs,
                 )
                 first_output_at = time.monotonic()
-                for event in _whole_reply_events(reply, cast("ChatResponse", response)):
-                    yield event
-        except ResponseError as error:
-            # The SDK reports an error the server streams after a 200 response with status -1.
-            raise classify_provider_error(
-                str(error),
-                provider=self.identity.provider_name,
-                status_code=error.status_code if error.status_code > 0 else None,
-            ) from error
-        except (httpx.TransportError, OSError) as error:
-            raise transport_error(error, provider=self.identity.provider_name) from error
+                _read_whole_reply(reply, cast("ChatResponse", response))
+        except Exception as error:
+            raise _provider_error(error, provider=self.identity.provider_name) from error
         message = finished_assistant_message(
             self.identity,
             content=reply.content or None,
@@ -200,6 +186,19 @@ class OllamaProvider:
         if settings.api_key:
             params["headers"] = {"authorization": f"Bearer {settings.api_key}"}
         return {**params, **(settings.client_params or {})}
+
+
+def _provider_error(error: Exception, *, provider: str) -> ProviderError:
+    """Return the normalized error for one failed request; any other exception propagates as it is."""
+    from ollama import ResponseError  # noqa: PLC0415 - provider SDK loads on first request
+
+    if (failure := provider_failure(error, provider=provider)) is not None:
+        return failure
+    if isinstance(error, ResponseError):
+        # The SDK reports an error the server streams after a 200 response with status -1.
+        status_code = error.status_code if error.status_code > 0 else None
+        return classify_provider_error(str(error), provider=provider, status_code=status_code)
+    raise error
 
 
 def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
@@ -275,18 +274,18 @@ def _read_image(path: Path, provider: str) -> bytes:
         raise InvalidRequest(msg, provider=provider) from error
 
 
-def _whole_reply_events(reply: _OllamaReply, response: ChatResponse) -> list[StreamEvent]:
-    """Read a reply that arrived whole: its ``<think>`` reasoning becomes a reasoning delta ahead of the text.
+def _read_whole_reply(reply: _OllamaReply, response: ChatResponse) -> None:
+    """Read a reply that arrived whole, splitting out its ``<think>`` reasoning.
 
     Agno's Ollama split only a reply that contains an opening ``<think>`` tag.
     """
     _read_chunk(reply, response)
     if "<think>" in reply.content:
         reply.reasoning, reply.content = split_thinking(reply.content)
-    return whole_turn_deltas(reasoning=reply.reasoning, content=reply.content, tool_calls=reply.tool_calls)
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
+    """Add one chunk to ``reply`` and return its events: its text, its tool calls, and the done chunk's usage."""
     events: list[StreamEvent] = []
     message = chunk.message
     if message.content:
@@ -304,6 +303,7 @@ def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
         reply.done = True
         reply.done_reason = chunk.done_reason
         reply.usage = _usage(chunk)
+        events.append(UsageReported(reply.usage, final=False))
     return events
 
 
@@ -333,7 +333,8 @@ def _stop_reason(reply: _OllamaReply) -> StopReason | None:
         return None
     if reply.done_reason == "length":
         return "output_limit"
-    if reply.done_reason != "stop":
+    # A server from before ``done_reason`` existed, or an Ollama-compatible one, ends a normal reply without it.
+    if reply.done_reason not in {None, "stop"}:
         return "incomplete"
     return "tool_use" if reply.tool_calls else "end"
 

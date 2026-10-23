@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError
+from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.usage import add_usage
 
 if TYPE_CHECKING:
@@ -80,13 +80,9 @@ class ToolSpec:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestOverrides:
-    """Per-request knobs that override the adapter's configured defaults; None leaves a default untouched.
-
-    Only the Claude routes honor ``max_output_tokens``; its one caller is the ``mindroom doctor`` Vertex Claude probe.
-    """
+    """Per-request knobs that override the adapter's configured defaults; None leaves a default untouched."""
 
     temperature: float | None = None
-    max_output_tokens: int | None = None
     sdk_max_retries: int | None = None
     prompt_cache: bool | None = None
     disable_thinking: bool = False
@@ -109,8 +105,9 @@ class NativeCompactionReplay:
 class ModelRequest:
     """One provider request.
 
-    ``stream=False`` asks for one non-streaming provider call where the route offers one; the events still
-    arrive through ``stream()``, after the response completes.
+    ``stream=False`` asks for one non-streaming provider call where the route offers one; its events still
+    arrive through ``stream()``, after the response completes, and callers read its output from the finished turn,
+    since a route may yield no deltas for it.
     ``deferred_tool_names`` name tools kept out of the rendered prompt: routes with native tool search defer
     them server-side, and the portable tool-search wrapper hides them behind ``call_tool`` everywhere else.
     ``portable_replay`` replays history explicitly instead of continuing provider-stored state, and
@@ -161,8 +158,27 @@ class UsageReported:
 class StreamProgress:
     """Provider stream data that carried no other event, such as tool-call arguments or hosted-tool progress.
 
-    It only shows that the provider is still sending: idle limits count it as activity, and output consumers skip it.
+    It shows that the provider is still sending: idle limits count it as activity, and output consumers skip it.
+    ``commits`` marks the start of a hosted tool whose rerun would repeat work or cost (``hosted_tool_started``):
+    once an attempt yields it, a retry could run the tool twice, so any later failure of the attempt is final.
     """
+
+    commits: bool = False
+
+
+# Hosted tools whose rerun repeats no work: a tool search only looks up deferred tool definitions, and a compaction
+# only summarizes the request's own history. Every route names them with these prefixes, such as Claude's
+# ``tool_search_tool_regex`` and ``compaction`` blocks and Responses' ``tool_search_call`` and ``compaction`` items.
+_READ_ONLY_HOSTED_TOOL_PREFIXES = ("tool_search", "compaction")
+
+
+def hosted_tool_started(name: str) -> StreamProgress:
+    """Return the progress event of a hosted tool that started, named as its route names the tool or its output.
+
+    One rule decides for every route: a tool that only reads keeps the attempt retryable, and any other, such as web
+    search, code execution, file search, image generation, or Gemini's search grounding, commits it.
+    """
+    return StreamProgress(commits=not name.startswith(_READ_ONLY_HOSTED_TOOL_PREFIXES))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -313,8 +329,7 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
         if isinstance(event, TurnCompleted):
             completed = event
     if completed is None:
-        msg = "The provider stream ended without completing the turn"
-        raise ProviderError(msg, provider=provider.identity.provider_name, code=INCOMPLETE_STREAM)
+        raise incomplete_stream_error(provider=provider.identity.provider_name)
     return ModelTurn(message=completed.message, stop_reason=completed.stop_reason)
 
 
@@ -341,4 +356,5 @@ __all__ = [
     "TurnCompleted",
     "UsageReported",
     "complete",
+    "hosted_tool_started",
 ]

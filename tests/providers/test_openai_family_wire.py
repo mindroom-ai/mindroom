@@ -18,7 +18,14 @@ from mindroom.agent_loop.structured import select_response_format
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import (
+    AuthenticationFailed,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
 from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -498,7 +505,7 @@ async def test_attachments_deleted_since_their_turn_are_left_out(
         (400, {"error": {"message": "Unknown parameter: 'x'", "code": "unknown_parameter"}}, InvalidRequest, False),
         (429, {"error": {"message": "slow down"}}, RateLimited, True),
         (503, {"error": {"message": "overloaded"}}, ProviderUnavailable, True),
-        (401, {"error": {"message": "bad key"}}, ProviderError, False),
+        (401, {"error": {"message": "bad key"}}, AuthenticationFailed, False),
     ],
 )
 async def test_http_errors_map_to_typed_provider_errors(
@@ -678,10 +685,10 @@ async def test_a_missing_cli_login_fails_the_request_before_sending(
     logged_out.mkdir()
     built = _Built(tmp_path, {**model_config, "extra_kwargs": {home_key: str(logged_out)}}, reply)
 
-    with pytest.raises(ProviderError, match=message) as info:
+    with pytest.raises(AuthenticationFailed, match=message) as info:
         await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.status_code, info.value.code, info.value.retryable) == (401, "authentication", False)
+    assert info.value.status_code == 401
     assert built.requests == []
 
 
@@ -706,14 +713,15 @@ async def test_a_codex_login_without_an_account_sends_no_account_header(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_responses_error_event_maps_code_to_status(tmp_path: Path) -> None:
+async def test_responses_error_event_is_classified_by_its_code(tmp_path: Path) -> None:
+    """The event's code names the failure; the event has no HTTP status of its own."""
     error = {"type": "error", "sequence_number": 1, "code": "server_error", "message": "boom", "param": None}
     built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(_text_events("")[0], error))
 
     with pytest.raises(ProviderUnavailable) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.status_code, info.value.code, str(info.value)) == (500, "server_error", "boom")
+    assert (info.value.status_code, info.value.code, str(info.value)) == (None, "server_error", "boom")
 
 
 @pytest.mark.asyncio
@@ -766,23 +774,25 @@ async def test_a_non_streamed_failed_response_raises_its_error(tmp_path: Path) -
     with pytest.raises(ProviderUnavailable, match="The server had an error") as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()], stream=False))
 
-    assert (info.value.status_code, info.value.code) == (500, "server_error")
+    assert (info.value.status_code, info.value.code) == (None, "server_error")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("events", "retryable"), [(_text_events("")[:1], True), (_text_events("Pack"), False)])
+@pytest.mark.parametrize(("events", "requests"), [(_text_events("")[:1], 5), (_text_events("Pack"), 1)])
 async def test_responses_stream_without_completion_fails(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     events: list[dict[str, Any]],
-    retryable: bool,
+    requests: int,
 ) -> None:
     """An early end is retried like a dropped connection only while nothing reached the caller."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, _responses_reply(*events))
 
-    with pytest.raises(ProviderError, match=r"without response\.completed") as info:
-        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+    with pytest.raises(ProviderUnavailable, match=r"without response\.completed") as info:
+        await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.code, info.value.retryable) == ("incomplete_stream", retryable)
+    assert (info.value.code, len(built.requests)) == ("incomplete_stream", requests)
 
 
 _SEARCH_CALL = {"id": "ws_1", "type": "web_search_call", "status": "in_progress", "action": {"type": "search"}}
@@ -813,9 +823,9 @@ def _argument_delta(delta: str) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("events", "drop_connection", "retryable", "requests"),
+    ("events", "drop_connection", "requests"),
     [
-        ([_text_events("")[0], _SERVER_ERROR], False, True, 5),
+        ([_text_events("")[0], _SERVER_ERROR], False, 5),
         (
             [
                 _text_events("")[0],
@@ -824,10 +834,9 @@ def _argument_delta(delta: str) -> dict[str, Any]:
                 _SERVER_ERROR,
             ],
             False,
-            False,
             1,
         ),
-        ([_text_events("")[0], _item_event("added", _FUNCTION_CALL), _argument_delta('{"city"')], True, False, 1),
+        ([_text_events("")[0], _item_event("added", _FUNCTION_CALL), _argument_delta('{"city"')], True, 5),
         (
             [
                 _text_events("")[0],
@@ -836,7 +845,6 @@ def _argument_delta(delta: str) -> dict[str, Any]:
                 _SERVER_ERROR,
             ],
             False,
-            True,
             5,
         ),
     ],
@@ -847,24 +855,25 @@ def _argument_delta(delta: str) -> dict[str, Any]:
         "finished-reasoning-then-error-event",
     ],
 )
-async def test_responses_failure_after_exposed_output_is_final(
+async def test_responses_failure_is_final_once_a_hosted_tool_started(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     events: list[dict[str, Any]],
     drop_connection: bool,
-    retryable: bool,
     requests: int,
 ) -> None:
-    """A retry after a hosted tool or function call started could run the tool again, so the failure stands."""
+    """A retry after a hosted tool started could run the tool again, so the failure stands.
+
+    A function call still streaming its arguments is the model's unfinished output, which a retry writes again.
+    """
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     reply = {**_responses_reply(*events), "drop_connection": drop_connection}
     built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, reply)
 
-    with pytest.raises(ProviderError) as info:
+    with pytest.raises(ProviderUnavailable):
         await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.retryable, len(built.requests)) == (retryable, requests)
-    assert (info.value.code == "incomplete_stream") is not retryable
+    assert len(built.requests) == requests
 
 
 _IDLE_LIMIT_SECONDS = 0.5
@@ -1335,24 +1344,20 @@ async def test_authored_reasoning_stores_the_output_text_as_agno_did(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("summary", [False, True], ids=["without-summary", "with-summary"])
-async def test_a_whole_reply_with_authored_reasoning_yields_the_reasoning_deltas_its_stream_would(
+async def test_the_stored_copy_of_the_output_text_never_streams_as_reasoning(
     tmp_path: Path,
     *,
     summary: bool,
 ) -> None:
-    """The stored copy of the output text stays out of the deltas: only a reasoning summary is reasoning."""
+    """With ``reasoning`` authored, only a reasoning summary streams as reasoning; the text's stored copy does not."""
     config = {**_OPENAI_RESPONSES, "extra_kwargs": {"reasoning": {"effort": "low"}}}
-    deltas = {}
-    for stream in (True, False):
-        root = tmp_path / ("streamed" if stream else "blocking")
-        root.mkdir()
-        built = _Built(root, config, _reasoning_reply(stream=stream, summary=summary))
-        events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()], stream=stream))]
-        deltas[stream] = [event for event in events if isinstance(event, (ReasoningDelta, TextDelta))]
+    built = _Built(tmp_path, config, _reasoning_reply(stream=True, summary=summary))
+
+    events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
 
     expected = [TextDelta(_PACK)]
-    assert deltas[True] == ([ReasoningDelta("Think. "), *expected] if summary else expected)
-    assert deltas[False] == deltas[True]
+    deltas = [event for event in events if isinstance(event, (ReasoningDelta, TextDelta))]
+    assert deltas == ([ReasoningDelta("Think. "), *expected] if summary else expected)
 
 
 @pytest.mark.asyncio

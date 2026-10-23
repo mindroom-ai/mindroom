@@ -2,7 +2,7 @@
 """What every adapter does to finish a turn: record the answering model and timings, split ``<think>`` reasoning.
 
 The ``mindroom_model`` provenance key is persisted with every assistant message and read by usage accounting,
-so each adapter stamps it through one function. A turn that arrived whole yields the deltas a stream would have.
+so each adapter stamps it through one function.
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "finished_assistant_message",
+    "output_started",
     "split_thinking",
     "stamp_finished_turn",
-    "whole_turn_deltas",
 ]
 
 
@@ -43,6 +43,16 @@ def stamp_finished_turn(
     if first_output_at is not None:
         message.metrics.time_to_first_token = first_output_at - started
     return message
+
+
+def output_started(first_output_at: float | None, event: StreamEvent) -> float | None:
+    """Return when the turn's first output arrived: ``first_output_at``, or now when ``event`` is that output.
+
+    Text, reasoning, and complete tool calls are output; usage reports and stream progress are not.
+    """
+    if first_output_at is None and isinstance(event, TextDelta | ReasoningDelta | ToolCallReady):
+        return time.monotonic()
+    return first_output_at
 
 
 def finished_assistant_message(
@@ -67,27 +77,6 @@ def finished_assistant_message(
     if usage is not None:
         message.metrics = usage
     return stamp_finished_turn(message, identity, started=started, first_output_at=first_output_at)
-
-
-def whole_turn_deltas(
-    *,
-    reasoning: str | None,
-    content: str | None,
-    tool_calls: Sequence[dict[str, Any]],
-) -> list[StreamEvent]:
-    """Return the deltas of a turn that arrived whole: its reasoning, its text, then each tool call.
-
-    A caller that reads a reply from its deltas, such as a blocking team turn keeping the text its members
-    already returned when the attempt fails, then gets the same reply whether the request streamed or not.
-    ``reasoning`` is the reasoning the reply carried, not the copy a route stores for Agno parity.
-    """
-    events: list[StreamEvent] = []
-    if reasoning:
-        events.append(ReasoningDelta(reasoning))
-    if content:
-        events.append(TextDelta(content))
-    events.extend(ToolCallReady(call) for call in tool_calls)
-    return events
 
 
 def split_thinking(content: str) -> tuple[str | None, str]:

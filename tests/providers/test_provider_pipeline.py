@@ -39,6 +39,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
     complete,
+    hosted_tool_started,
 )
 from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -162,6 +163,19 @@ async def test_transient_failure_before_output_is_retried_and_its_usage_carried(
 
 
 @pytest.mark.asyncio
+async def test_a_transient_failure_is_reissued_after_its_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.2)
+    inner = _ScriptedProvider([[_transient()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    await _drain(provider, ModelRequest(messages=[_user()]))
+
+    assert (len(inner.requests), loop.time() - started >= 0.2) == (2, True)
+
+
+@pytest.mark.asyncio
 async def test_failure_after_visible_output_is_not_retried() -> None:
     inner = _ScriptedProvider([[TextDelta("partial"), _transient()], [_turn()]])
     provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
@@ -191,6 +205,47 @@ async def test_progress_events_are_not_visible_output() -> None:
     events = await _drain(provider, ModelRequest(messages=[_user()]))
 
     assert (len(inner.requests), events[0]) == (2, StreamProgress())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [_transient(), 1.0],
+    ids=["provider-error", "stall"],
+)
+async def test_a_failure_after_a_hosted_tool_committed_the_attempt_is_final(failure: Exception | float) -> None:
+    """A retry could run the hosted tool again, so the stage reissues nothing, for its own stall too."""
+    inner = _ScriptedProvider([[StreamProgress(commits=True), failure, _turn()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=0.05))
+
+    with pytest.raises(ProviderUnavailable):
+        await _drain(provider, ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "commits"),
+    [
+        ("tool_search_tool_regex", False),
+        ("tool_search_tool_bm25", False),
+        ("tool_search_tool_result", False),
+        ("tool_search_call", False),
+        ("tool_search_output", False),
+        ("compaction", False),
+        ("web_search", True),
+        ("web_fetch", True),
+        ("code_execution", True),
+        ("web_search_call", True),
+        ("file_search_call", True),
+        ("code_interpreter_call", True),
+        ("image_generation_call", True),
+        ("google_search", True),
+    ],
+)
+def test_only_a_hosted_tool_that_reads_keeps_the_attempt_retryable(name: str, *, commits: bool) -> None:
+    """Tool search and compaction repeat no work; every other hosted tool acts or costs, on every route."""
+    assert hosted_tool_started(name) == StreamProgress(commits=commits)
 
 
 @pytest.mark.asyncio
@@ -317,6 +372,18 @@ async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_ro
 
 
 @pytest.mark.asyncio
+async def test_a_media_free_retry_that_is_rejected_too_ends_the_request() -> None:
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
+    inner = _ScriptedProvider([[rejection], [rejection], [_turn()]])
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+
+    with pytest.raises(InvalidRequest):
+        await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert len(inner.requests) == 2
+
+
+@pytest.mark.asyncio
 async def test_input_specific_rejection_retries_without_learning() -> None:
     rejection = InvalidRequest("Image exceeds 5 MB maximum", provider="Scripted Chat", status_code=400)
     inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
@@ -378,6 +445,18 @@ async def test_a_learned_media_limit_stays_with_its_endpoint() -> None:
     await _drain(WrappedProvider(other, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT)), request)
 
     assert other.requests[0].messages[0].images == [_image()]
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_after_a_hosted_tool_committed_the_attempt_is_not_resent_without_media() -> None:
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
+    inner = _ScriptedProvider([[StreamProgress(commits=True), rejection], [_turn()]])
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+
+    with pytest.raises(InvalidRequest):
+        await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert len(inner.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -852,6 +931,23 @@ async def test_usage_seen_before_a_stream_is_abandoned_is_still_recorded(tmp_pat
 
     request_record, response_record = _log_records(tmp_path)
     assert response_record["request_log_id"] == request_record["request_log_id"]
+    assert response_record["usage"]["cache_read_tokens"] == 42
+
+
+@pytest.mark.asyncio
+async def test_a_partial_usage_report_of_an_abandoned_stream_is_recorded(tmp_path: Path) -> None:
+    """A request cut off after only a partial report logs that usage, as every other consumer settles it."""
+    usage = MessageMetrics(input_tokens=3, output_tokens=1, cache_read_tokens=42)
+    inner = _ScriptedProvider([[UsageReported(usage, final=False), TextDelta("ok"), TextDelta("never read"), _turn()]])
+    stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
+
+    with capture_logs() as logs:
+        assert isinstance(await anext(stream), UsageReported)
+        await stream.aclose()
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    assert (usage_log["usage_available"], usage_log["cache_read_tokens"]) == (True, 42)
+    _, response_record = _log_records(tmp_path)
     assert response_record["usage"]["cache_read_tokens"] == 42
 
 
