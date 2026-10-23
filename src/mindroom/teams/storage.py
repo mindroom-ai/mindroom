@@ -18,7 +18,7 @@ from mindroom.tool_system.context_bound_streams import context_bound_async_strea
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
     from contextlib import AbstractContextManager
 
     from mindroom.agent_loop.run import Persist
@@ -38,7 +38,6 @@ class TeamStorage:
     store: ConversationStore
     session: ConversationSession
     scope: HistoryScope
-    storage_factory: Callable[[], ConversationStore] | None
 
 
 @dataclass
@@ -81,7 +80,7 @@ def scope_storage(scope_context: ScopeSessionContext, *, session_id: str) -> Tea
         scope_id=scope_context.scope.scope_id,
         is_team=True,
     )
-    return TeamStorage(scope_context.storage, session, scope_context.scope, scope_context.storage_factory)
+    return TeamStorage(scope_context.storage, session, scope_context.scope)
 
 
 def persist_into(records: TeamRunRecords | None, storage: TeamStorage | None) -> Persist[AnyRunRecord]:
