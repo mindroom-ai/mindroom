@@ -2,7 +2,7 @@
 
 These fixtures pin what MindRoom sent and stored while Agno 3.0.9 ran it, so the owned runtime can prove it changes no persisted data and no model-visible bytes (`docs/dev/2026-10-20-replace-agno-design.md`).
 The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime; the owned code's parity tests read them.
-The scripts still run from the history trees that hold Agno's provider layer (`tests/agno_parity/capture_providers.py` at `b1d5c30b1`, `tests/agno_parity/capture_prompts.py` at `58bbd84fb`), and a rerun reproduces every committed golden's values.
+The scripts still run from the history trees that hold Agno's provider layer (`tests/agno_parity/capture_providers.py` at `b1d5c30b1`, `tests/agno_parity/capture_prompts.py` at `58bbd84fb`), and a rerun reproduces the goldens those commits stored, which is how the send order of request bodies and prompt requests was recorded.
 The tool goldens are the exception: `tests.agno_parity.regenerate_tool_goldens` rewrites them from the owned toolkit adapter, so a deliberate tool change regenerates them instead of editing them by hand.
 A deliberate change to model-visible bytes, a provider request, or the `io.mindroom.ai_run` metadata edits its golden by hand in the same commit; the storage, run, history, and codec goldens hold data Agno wrote and never change.
 
