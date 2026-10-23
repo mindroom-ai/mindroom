@@ -13,7 +13,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
 
     from mindroom.ai import AIStreamChunk
-    from mindroom.llm.runs import ToolExecution
 
 SSE_DONE = "data: [DONE]\n\n"
 
@@ -184,8 +183,10 @@ def is_error_response(text: str) -> bool:
     if any(stripped.startswith(p) for p in error_prefixes):
         return True
 
-    # Raw provider errors that reached the reply as text
-    return _looks_like_raw_provider_error(stripped)
+    # Raw provider errors that reached the reply as text, some as serialized JSON-ish payloads
+    return bool(_RAW_PROVIDER_ERROR_PREFIX_RE.search(stripped)) or stripped.casefold().startswith(
+        _RAW_PROVIDER_JSON_PREFIXES,
+    )
 
 
 _RAW_PROVIDER_ERROR_PREFIX_RE = re.compile(
@@ -199,15 +200,6 @@ _RAW_PROVIDER_JSON_PREFIXES = (
     '{"type": "error"',
     "{'type': 'error'",
 )
-
-
-def _looks_like_raw_provider_error(text: str) -> bool:
-    """Detect raw provider error payloads surfaced as text."""
-    lowered = text.casefold()
-    if _RAW_PROVIDER_ERROR_PREFIX_RE.search(text):
-        return True
-    # Some providers return error payloads directly as serialized JSON-ish text.
-    return lowered.startswith(_RAW_PROVIDER_JSON_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -262,32 +254,19 @@ class CompletionStreamState:
         return cls(completion_id=new_completion_id(), created=int(time.time()), model=model)
 
 
-def _chunk_json(
-    completion_id: str,
-    created: int,
-    model: str,
-    delta: dict,
-    finish_reason: str | None = None,
-) -> str:
-    """Build a JSON string for a single SSE chunk."""
-    chunk = _ChatCompletionChunk(
-        id=completion_id,
-        created=created,
-        model=model,
-        choices=[
-            _ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason),
-        ],
-    )
-    return chunk.model_dump_json()
-
-
 def sse_chunk(
     state: CompletionStreamState,
     delta: dict,
     finish_reason: str | None = None,
 ) -> str:
     """Build one framed SSE line for a streaming chunk."""
-    return f"data: {_chunk_json(state.completion_id, state.created, state.model, delta=delta, finish_reason=finish_reason)}\n\n"
+    chunk = _ChatCompletionChunk(
+        id=state.completion_id,
+        created=state.created,
+        model=state.model,
+        choices=[_ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason)],
+    )
+    return f"data: {chunk.model_dump_json()}\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -295,77 +274,28 @@ def sse_chunk(
 # ---------------------------------------------------------------------------
 
 
-def _extract_tool_call_id(tool: ToolExecution) -> str:
-    """Extract the required tool call identifier for streaming tool events."""
-    tool_call_id = str(tool.tool_call_id).strip()
+def format_stream_tool_event(event: ToolStarted | ToolCompleted, tool_state: ToolStreamState) -> str:
+    """Format one tool event as an inline tool block whose id the call's start and completion share."""
+    tool_call_id = str(event.tool.tool_call_id).strip()
     if not tool_call_id:
         msg = "Streaming tool events require a non-empty tool_call_id"
         raise ValueError(msg)
-    return tool_call_id
-
-
-def _allocate_next_tool_id(tool_state: ToolStreamState) -> str:
-    tool_id = str(tool_state.next_tool_id)
-    tool_state.next_tool_id += 1
-    return tool_id
-
-
-def _resolve_started_tool_id(tool: ToolExecution, tool_state: ToolStreamState) -> str:
-    tool_call_id = _extract_tool_call_id(tool)
-
-    existing_tool_id = tool_state.tool_ids_by_call_id.get(tool_call_id)
-    if existing_tool_id is not None:
-        return existing_tool_id
-
-    tool_id = _allocate_next_tool_id(tool_state)
-    tool_state.tool_ids_by_call_id[tool_call_id] = tool_id
-    return tool_id
-
-
-def _resolve_completed_tool_id(tool: ToolExecution, tool_state: ToolStreamState) -> str:
-    tool_call_id = _extract_tool_call_id(tool)
-
-    existing_tool_id = tool_state.tool_ids_by_call_id.pop(tool_call_id, None)
-    if existing_tool_id is not None:
-        return existing_tool_id
-
-    return _allocate_next_tool_id(tool_state)
-
-
-def _inject_tool_metadata(tool_message: str, *, tool_id: str, state: Literal["start", "done"]) -> str:
-    return f'<tool id="{tool_id}" state="{state}">{tool_message}</tool>'
-
-
-def _escape_tool_payload_text(text: str) -> str:
-    return escape(text, quote=True)
-
-
-def _format_openai_tool_call_display(tool_name: str, args_preview: str | None) -> str:
-    safe_tool_name = _escape_tool_payload_text(tool_name)
-    if not args_preview:
-        return f"{safe_tool_name}()"
-    return f"{safe_tool_name}({_escape_tool_payload_text(args_preview)})"
-
-
-def _format_openai_stream_tool_message(tool: ToolExecution, *, completed: bool) -> str:
-    _, trace = format_tool_completed_event(tool) if completed else format_tool_started_event(tool)
+    started = isinstance(event, ToolStarted)
+    ids = tool_state.tool_ids_by_call_id
+    tool_id = ids.get(tool_call_id) if started else ids.pop(tool_call_id, None)
+    if tool_id is None:
+        # A completion that was never announced still gets a fresh id.
+        tool_id = str(tool_state.next_tool_id)
+        tool_state.next_tool_id += 1
+        if started:
+            ids[tool_call_id] = tool_id
+    _, trace = format_tool_started_event(event.tool) if started else format_tool_completed_event(event.tool)
     # A present tool always formats to a trace.
     assert trace is not None
-    call_display = _format_openai_tool_call_display(trace.tool_name, trace.args_preview)
-    if not completed:
-        return call_display
-
-    if trace.result_preview is None:
-        return f"{call_display}\n"
-    return f"{call_display}\n{_escape_tool_payload_text(trace.result_preview)}"
-
-
-def format_stream_tool_event(event: ToolStarted | ToolCompleted, tool_state: ToolStreamState) -> str:
-    """Format one tool event as an inline tool block whose id the call's start and completion share."""
-    started = isinstance(event, ToolStarted)
-    tool_id = (_resolve_started_tool_id if started else _resolve_completed_tool_id)(event.tool, tool_state)
-    message = _format_openai_stream_tool_message(event.tool, completed=not started)
-    return _inject_tool_metadata(message, tool_id=tool_id, state="start" if started else "done")
+    message = f"{escape(trace.tool_name, quote=True)}({escape(trace.args_preview or '', quote=True)})"
+    if not started:
+        message += f"\n{escape(trace.result_preview or '', quote=True)}"
+    return f'<tool id="{tool_id}" state="{"start" if started else "done"}">{message}</tool>'
 
 
 def finalize_pending_tools(tool_state: ToolStreamState) -> str | None:
