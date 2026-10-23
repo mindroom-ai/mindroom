@@ -222,6 +222,8 @@ def _estimated_message_chars(message: Message) -> int:
 
 def _estimate_message_media_chars(message: Message) -> int:
     """Estimate serialized character cost for a message's media payloads."""
+    # TODO(simplify): Estimation strips every non-empty media field before counting characters, so this adds only two
+    # characters per empty media list. Drop the media count. Operators would see estimates move by a few tokens at most.
     return sum(
         len(stable_serialize(media_payload_snapshot(media_value)))
         for _tag, media_value in message_media_entries(message)
