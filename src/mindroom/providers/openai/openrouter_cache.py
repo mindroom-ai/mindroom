@@ -1,15 +1,9 @@
 """Apply the Claude prompt-cache ladder to OpenRouter Chat Completions requests.
 
-OpenRouter forwards ``cache_control`` markers on Chat Completions content parts and function tool definitions
-to Anthropic-family upstreams (Anthropic, Vertex, Bedrock, and Azure), which only cache up to explicit
-breakpoints. Other OpenRouter model families cache implicitly or use different markers, so only requests whose
-model ID routes to Anthropic are marked.
-
-Breakpoint placement reuses :mod:`mindroom.providers.cache_ladder`: the shared system prefix, the
-newest cacheable part of the two newest cacheable messages, and the last tool definition, all with one TTL and
-at most four markers. This module only translates between the OpenAI message shape and those rules, on the
-complete ``chat.completions.create`` keyword arguments, and leaves any request that already carries authored
-markers untouched.
+OpenRouter forwards ``cache_control`` markers on content parts and function tools to Anthropic-family upstreams,
+which cache only up to explicit breakpoints, so only model ids routed to Anthropic are marked. Placement follows
+:mod:`mindroom.providers.cache_ladder`: the shared system prefix, the two newest cacheable messages, and the last
+tool, with one TTL and at most four markers.
 """
 
 from __future__ import annotations
