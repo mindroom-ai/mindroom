@@ -44,9 +44,7 @@ class CodexAuthError(CliLoginError):
 
 def normalize_codex_model_id(model_id: str) -> str:
     """Return the Codex endpoint model slug from either bare or LLM-plugin-style IDs."""
-    normalized = model_id.strip()
-    if normalized.startswith(_CODEX_MODEL_PREFIX):
-        normalized = normalized.removeprefix(_CODEX_MODEL_PREFIX)
+    normalized = model_id.strip().removeprefix(_CODEX_MODEL_PREFIX)
     return _CODEX_MODEL_ALIASES.get(normalized, normalized)
 
 

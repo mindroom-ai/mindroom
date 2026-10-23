@@ -36,10 +36,7 @@ class KimiAuthError(CliLoginError):
 
 def normalize_kimi_model_id(model_id: str) -> str:
     """Return the Kimi endpoint model slug from either bare or CLI-config-style IDs."""
-    normalized = model_id.strip()
-    if normalized.startswith(_KIMI_MODEL_PREFIX):
-        normalized = normalized.removeprefix(_KIMI_MODEL_PREFIX)
-    return normalized
+    return model_id.strip().removeprefix(_KIMI_MODEL_PREFIX)
 
 
 def borrow_kimi_token(*, kimi_home: str | Path | None = None) -> str:
