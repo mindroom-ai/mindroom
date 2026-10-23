@@ -425,30 +425,28 @@ class _MemberRuns:
     async def run(self, member: TeamMember, task: str) -> RunRecord:
         """Run ``member`` on the leader's task as a child of the team run; the task text is its whole input."""
         ctx = self._member_context(str(uuid4()))
-        ended: list[RunRecord] = []
         stream = run_agent(
             member.spec,
             [Message(role="user", content=task)],
             ctx=ctx,
             hooks=member.hooks(ctx.run_id),
-            persist=self._capture(ended),
+            persist=self._persist,
             request_template=self._request_template(member),
         )
-        return await self._finish(member, ctx.run_id, stream, ended)
+        return await self._finish(member, ctx.run_id, stream)
 
     async def resume(self, member: TeamMember, paused: RunRecord, plan: ResumePlan) -> RunRecord:
         """Resume ``member``'s paused run, under that run's hooks, from its stored messages, which hold no history."""
-        ended: list[RunRecord] = []
         stream = resume_planned(
             member.spec,
             plan,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
             ctx=self._member_context(paused.run_id),
             hooks=member.hooks(paused.run_id),
-            persist=self._capture(ended),
+            persist=self._persist,
             request_template=self._request_template(member),
         )
-        return await self._finish(member, paused.run_id, stream, ended)
+        return await self._finish(member, paused.run_id, stream)
 
     def _request_template(self, member: TeamMember) -> ModelRequest:
         return replace(member.request_template, stream=self.stream)
@@ -457,29 +455,19 @@ class _MemberRuns:
         """Return a member run's context: the team run's, so its tools share the team's state, under its own run id."""
         return replace(self.ctx, run_id=run_id, parent_run_id=self.record.run_id)
 
-    def _capture(self, ended: list[RunRecord]) -> Persist[RunRecord]:
-        async def persist(record: RunRecord) -> None:
-            ended.append(record)
-            # The team keeps member runs in the order they first ended; a member resumed within the run ends twice,
-            # and its later record replaces the paused one where it stood, as Agno continued the paused output in place.
-            run_ids = [run.run_id for run in self.record.ended_member_runs]
-            if record.run_id in run_ids:
-                self.record.ended_member_runs[run_ids.index(record.run_id)] = record
-            else:
-                self.record.ended_member_runs.append(record)
-            if self.persist is not None:
-                await self.persist(record)
+    async def _persist(self, record: RunRecord) -> None:
+        # The team keeps member runs in the order they first ended; a member resumed within the run ends twice, and
+        # its later record replaces the paused one where it stood, as Agno continued the paused output in place.
+        run_ids = [run.run_id for run in self.record.ended_member_runs]
+        if record.run_id in run_ids:
+            self.record.ended_member_runs[run_ids.index(record.run_id)] = record
+        else:
+            self.record.ended_member_runs.append(record)
+        if self.persist is not None:
+            await self.persist(record)
 
-        return persist
-
-    async def _finish(
-        self,
-        member: TeamMember,
-        run_id: str,
-        stream: AsyncIterator[RunEvent],
-        ended: list[RunRecord],
-    ) -> RunRecord:
-        """Forward the member's events and return its terminal record.
+    async def _finish(self, member: TeamMember, run_id: str, stream: AsyncIterator[RunEvent]) -> RunRecord:
+        """Forward the member's events and return the terminal record its loop stored however it ended.
 
         A member whose run fails is stored ``ERROR`` by its loop and still reaches the leader, as Agno absorbed a
         member's error into the member's run, with the reason its record carries (``handover_content``); only
@@ -502,7 +490,7 @@ class _MemberRuns:
                 run_id=run_id,
                 error=str(error),
             )
-        return ended[-1]
+        return next(run for run in self.record.ended_member_runs if run.run_id == run_id)
 
 
 async def _forward(stream: AsyncIterator[RunEvent], emit: Emit) -> None:
