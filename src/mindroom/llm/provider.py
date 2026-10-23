@@ -318,12 +318,19 @@ class ModelProvider(Protocol):
         ...
 
     def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Send one request and yield its events; ``TurnCompleted`` is the last one."""
+        """Send one request and yield its events; ``TurnCompleted`` is the last one.
+
+        A stream cut off before the provider finished the turn ends without it.
+        """
         ...
 
 
 async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
-    """Drain one request's stream and return its finished turn."""
+    """Drain one request's stream and return its finished turn.
+
+    The request pipeline already turns a stream that ends without its turn into ``incomplete_stream_error``; a bare
+    adapter's stream raises it here.
+    """
     completed: TurnCompleted | None = None
     async for event in provider.stream(request):
         if isinstance(event, TurnCompleted):

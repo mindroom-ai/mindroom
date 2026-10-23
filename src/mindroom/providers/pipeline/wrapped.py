@@ -17,7 +17,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import ProviderError, incomplete_stream_error
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY
 from mindroom.llm.provider import ReasoningDelta, ReportedUsage, StreamProgress, TextDelta, ToolCallReady, TurnCompleted
 from mindroom.llm.usage import add_usage
@@ -104,10 +104,13 @@ async def attempts(
     ``retry`` sees only the failures of attempts that committed nothing, and returns how to reissue the request, or
     None to let the failure propagate; ``next_event`` reads each event, so a stage can bound the wait for it. A failed
     attempt's partial usage is settled before the retry, and the finished turn carries the failed attempts' usage.
+    An attempt whose stream ends without ``TurnCompleted`` ended before the provider finished the turn, on every
+    route, and fails with the retryable ``incomplete_stream_error``.
     """
     carried: MessageMetrics | None = None
     while True:
         committed = False
+        finished = False
         usage = ReportedUsage()
         try:
             events = inner.stream(request)
@@ -116,10 +119,14 @@ async def attempts(
                     try:
                         event = await next_event(events)
                     except StopAsyncIteration:
-                        return
+                        break
                     usage.observe(event)
                     committed = committed or _commits_attempt(event)
+                    finished = finished or isinstance(event, TurnCompleted)
                     yield _with_carried_usage(event, carried)
+            if finished:
+                return
+            raise incomplete_stream_error(provider=inner.identity.provider_name)
         except ProviderError as error:
             if committed or (reissue := retry(error)) is None:
                 raise

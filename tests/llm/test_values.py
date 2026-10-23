@@ -318,10 +318,10 @@ async def test_complete_drains_the_stream_and_returns_the_turn() -> None:
 async def test_complete_raises_when_the_stream_never_completes_the_turn() -> None:
     provider = _ScriptedProvider([TextDelta("partial")])
 
-    with pytest.raises(ProviderError, match="without completing the turn") as info:
+    with pytest.raises(ProviderUnavailable, match="without completing the turn") as info:
         await complete(provider, ModelRequest(messages=[]))
 
-    assert (info.value.provider, info.value.code, info.value.retryable) == ("Synthetic", "incomplete_stream", False)
+    assert (info.value.provider, info.value.code, info.value.retryable) == ("Synthetic", "incomplete_stream", True)
 
 
 def test_model_request_defaults_are_immutable_and_empty() -> None:

@@ -152,8 +152,6 @@ class ResponsesAdapter:
             raise provider_error(error, provider=self.identity.provider_name) from error
         finally:
             await sdk_stream.close()
-        if not accumulator.completed:
-            raise accumulator.incomplete_error()
 
     async def _completed(
         self,
@@ -194,6 +192,9 @@ class ResponsesAdapter:
                 async for event in events:
                     first_token = output_started(first_token, event)
                     yield event
+            if not accumulator.completed:
+                # The stream ended before ``response.completed``, so the turn did not finish.
+                return
             parts = accumulator.finish()
         else:
             parts = await self._completed(client, kwargs, request)
