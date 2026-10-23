@@ -110,11 +110,6 @@ class ToolConfigOverrideError(ValueError):
     """Raised when authored tool config overrides are invalid."""
 
 
-def _is_authored_override_inherit(value: object) -> bool:
-    """Return whether an authored override value clears an inherited higher-level override."""
-    return value == _AUTHORED_OVERRIDE_INHERIT
-
-
 def apply_authored_overrides(
     base: dict[str, object],
     overrides: dict[str, object] | None,
@@ -125,7 +120,7 @@ def apply_authored_overrides(
         return resolved
 
     for field_name, value in overrides.items():
-        if _is_authored_override_inherit(value):
+        if value == _AUTHORED_OVERRIDE_INHERIT:
             resolved.pop(field_name, None)
         else:
             resolved[field_name] = value
@@ -214,24 +209,16 @@ def _validate_text_authored_override_value(
     tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> object:
     """Validate one authored override for a text-like config field."""
-    if field.type == "string[]":
-        try:
-            return _normalize_string_array_override(value, preserve_empty_list=True)
-        except TypeError as exc:
-            msg = f"{full_path}: {exc}."
-            raise ToolConfigOverrideError(msg) from exc
-
     agent_override_field = _agent_override_field(tool_name, field.name, tool_metadata=tool_metadata)
-    if agent_override_field is not None and agent_override_field.type == "string[]":
-        try:
+    try:
+        if field.type == "string[]":
+            return _normalize_string_array_override(value, preserve_empty_list=True)
+        if agent_override_field is not None and agent_override_field.type == "string[]":
             normalized = _normalize_string_array_override(value)
-        except TypeError as exc:
-            msg = f"{full_path}: {exc}."
-            raise ToolConfigOverrideError(msg) from exc
-        if normalized is None:
-            return None
-        return ", ".join(normalized)
-
+            return None if normalized is None else ", ".join(normalized)
+    except TypeError as exc:
+        msg = f"{full_path}: {exc}."
+        raise ToolConfigOverrideError(msg) from exc
     if not isinstance(value, str):
         msg = f"{full_path}: expected a string or null."
         raise ToolConfigOverrideError(msg)
@@ -247,7 +234,7 @@ def _validate_authored_override_value(
     tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> object:
     """Validate one authored override value against its declared config field type."""
-    if _is_authored_override_inherit(value):
+    if value == _AUTHORED_OVERRIDE_INHERIT:
         return value
 
     if value is None:
@@ -381,15 +368,10 @@ def _run_authored_override_validator(
     validator: ToolAuthoredOverrideValidator,
 ) -> None:
     """Run one tool-specific authored-override validator against normalized overrides."""
-    if not overrides or validator == ToolAuthoredOverrideValidator.DEFAULT:
-        return
-    if validator == ToolAuthoredOverrideValidator.MCP:
+    if overrides and validator == ToolAuthoredOverrideValidator.MCP:
         from mindroom.mcp.registry import validate_mcp_agent_overrides  # noqa: PLC0415
 
         validate_mcp_agent_overrides(tool_name, overrides)
-        return
-    msg = f"Unsupported authored override validator '{validator}'."
-    raise ValueError(msg)
 
 
 def validate_authored_tool_entry_overrides(
@@ -551,7 +533,7 @@ def _apply_tool_config_init_values(
         if field.name not in values:
             continue
         value = values[field.name]
-        if skip_inherited and _is_authored_override_inherit(value):
+        if skip_inherited and value == _AUTHORED_OVERRIDE_INHERIT:
             continue
         _set_tool_config_init_kwarg(
             init_kwargs,
@@ -597,21 +579,11 @@ def _pop_implicit_toolkit_filters(
 ) -> tuple[list[str] | None, list[str] | None]:
     """Remove universal filters that the concrete constructor did not declare."""
     declared_names = {field.name for field in metadata.config_fields or ()}
-    include_tools = (
+    include_tools, exclude_tools = (
         None
-        if "include_tools" in declared_names
-        else _normalize_string_array_override(
-            init_kwargs.pop("include_tools", None),
-            preserve_empty_list=True,
-        )
-    )
-    exclude_tools = (
-        None
-        if "exclude_tools" in declared_names
-        else _normalize_string_array_override(
-            init_kwargs.pop("exclude_tools", None),
-            preserve_empty_list=True,
-        )
+        if name in declared_names
+        else _normalize_string_array_override(init_kwargs.pop(name, None), preserve_empty_list=True)
+        for name in ("include_tools", "exclude_tools")
     )
     return include_tools, exclude_tools
 
@@ -1089,13 +1061,7 @@ def _compute_resolved_tool_state_for_runtime(
     if not plugin_entries:
         builtin_registry = BUILTIN_TOOL_REGISTRY.copy()
         builtin_metadata = BUILTIN_TOOL_METADATA.copy()
-        mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
-        _merge_mcp_tool_state(
-            builtin_registry,
-            builtin_metadata,
-            mcp_registry,
-            mcp_metadata,
-        )
+        _merge_mcp_tool_state(builtin_registry, builtin_metadata, *resolved_mcp_tool_state(config))
         return _ResolvedToolState(builtin_registry, builtin_metadata, {})
 
     plugin_bases, skipped_plugin_sources = plugin_module._collect_plugin_bases(
@@ -1157,38 +1123,15 @@ def _compute_resolved_tool_state_for_runtime(
         active_plugins.extend(candidate_active_plugins)
 
     desired_registry, desired_metadata = resolved_tool_state(active_plugins, validation_registrations)
-    mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
-    _merge_mcp_tool_state(
-        desired_registry,
-        desired_metadata,
-        mcp_registry,
-        mcp_metadata,
-    )
-    unavailable_tool_metadata = _unavailable_tool_metadata_without_resolved_tools(
-        unavailable_tool_metadata,
-        desired_registry,
-        desired_metadata,
-    )
+    _merge_mcp_tool_state(desired_registry, desired_metadata, *resolved_mcp_tool_state(config))
+    # Skipped-plugin declarations that collide with available runtime tools are dropped.
+    resolved_tool_names = {*desired_registry, *desired_metadata}
     return _ResolvedToolState(
         desired_registry,
         desired_metadata,
-        unavailable_tool_metadata,
+        {name: metadata for name, metadata in unavailable_tool_metadata.items() if name not in resolved_tool_names},
         frozenset(unresolved_plugin_tool_sources),
     )
-
-
-def _unavailable_tool_metadata_without_resolved_tools(
-    unavailable_tool_metadata: Mapping[str, ToolMetadata],
-    tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
-    tool_metadata: Mapping[str, ToolMetadata],
-) -> dict[str, ToolMetadata]:
-    """Drop skipped-plugin declarations that collide with available runtime tools."""
-    resolved_tool_names = {*tool_registry, *tool_metadata}
-    return {
-        tool_name: metadata
-        for tool_name, metadata in unavailable_tool_metadata.items()
-        if tool_name not in resolved_tool_names
-    }
 
 
 def _merge_mcp_tool_state(
@@ -1213,12 +1156,11 @@ def resolved_tool_metadata_for_runtime(
     tolerate_plugin_load_errors: bool = False,
 ) -> dict[str, ToolMetadata]:
     """Return tool metadata visible for one runtime config without mutating global state."""
-    resolved_state = _resolved_tool_state_for_runtime(
+    return _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-    )
-    return resolved_state.tool_metadata
+    ).tool_metadata
 
 
 def listable_tool_metadata(runtime_paths: RuntimePaths, config: Config) -> dict[str, ToolMetadata]:
@@ -1235,30 +1177,6 @@ def listable_tool_metadata(runtime_paths: RuntimePaths, config: Config) -> dict[
             tolerate_plugin_load_errors=True,
         ).items()
         if not egress_tool_unavailable(name, runtime_paths)
-    }
-
-
-def _tool_validation_snapshot_from_state(
-    tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
-    tool_metadata: Mapping[str, ToolMetadata],
-    *,
-    unavailable_plugin_tool_names: frozenset[str] = frozenset(),
-) -> dict[str, ToolValidationInfo]:
-    """Project runtime tool state into a validation-only snapshot."""
-    return {
-        tool_name: ToolValidationInfo(
-            name=tool_name,
-            config_fields=tuple(metadata.config_fields or ()),
-            agent_override_fields=tuple(metadata.agent_override_fields or ()),
-            authored_override_validator=metadata.authored_override_validator,
-            file_access=metadata.file_access,
-            supports_toolkit_filters=metadata.supports_toolkit_filters,
-            requires_room_context=metadata.requires_room_context,
-            requires_primary_runtime=metadata.requires_primary_runtime,
-            runtime_loadable=tool_name in tool_registry,
-            unavailable_due_to_plugin_load_error=tool_name in unavailable_plugin_tool_names,
-        )
-        for tool_name, metadata in tool_metadata.items()
     }
 
 
@@ -1364,15 +1282,21 @@ def resolved_tool_validation_snapshot_for_runtime(
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
-    validation_metadata = {
-        **resolved_state.tool_metadata,
-        **resolved_state.unavailable_tool_metadata,
+    return {
+        tool_name: ToolValidationInfo(
+            name=tool_name,
+            config_fields=tuple(metadata.config_fields or ()),
+            agent_override_fields=tuple(metadata.agent_override_fields or ()),
+            authored_override_validator=metadata.authored_override_validator,
+            file_access=metadata.file_access,
+            supports_toolkit_filters=metadata.supports_toolkit_filters,
+            requires_room_context=metadata.requires_room_context,
+            requires_primary_runtime=metadata.requires_primary_runtime,
+            runtime_loadable=tool_name in resolved_state.tool_registry,
+            unavailable_due_to_plugin_load_error=tool_name in resolved_state.unavailable_tool_metadata,
+        )
+        for tool_name, metadata in {**resolved_state.tool_metadata, **resolved_state.unavailable_tool_metadata}.items()
     }
-    return _tool_validation_snapshot_from_state(
-        resolved_state.tool_registry,
-        validation_metadata,
-        unavailable_plugin_tool_names=frozenset(resolved_state.unavailable_tool_metadata),
-    )
 
 
 def unresolved_plugin_tool_sources_for_runtime(
@@ -1382,12 +1306,11 @@ def unresolved_plugin_tool_sources_for_runtime(
     tolerate_plugin_load_errors: bool = False,
 ) -> frozenset[str]:
     """Return plugin names or specs whose tool namespaces could not be resolved."""
-    resolved_state = _resolved_tool_state_for_runtime(
+    return _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-    )
-    return resolved_state.unresolved_plugin_tool_sources
+    ).unresolved_plugin_tool_sources
 
 
 def serialize_tool_validation_snapshot(
@@ -1448,14 +1371,13 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         raise TypeError(msg)
 
     snapshot: dict[str, ToolValidationInfo] = {}
-    for raw_tool_name, raw_info in payload.items():
-        if not isinstance(raw_tool_name, str):
+    for tool_name, raw_info in payload.items():
+        if not isinstance(tool_name, str):
             msg = "Tool validation snapshot must be a JSON object keyed by tool name."
             raise TypeError(msg)
         if not isinstance(raw_info, dict):
-            msg = f"Tool validation snapshot entry for '{raw_tool_name}' must be an object."
+            msg = f"Tool validation snapshot entry for '{tool_name}' must be an object."
             raise TypeError(msg)
-        tool_name = raw_tool_name
         raw_info_mapping = cast("dict[str, object]", raw_info)
         raw_validator = raw_info_mapping.get(
             "authored_override_validator",
@@ -1475,36 +1397,21 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         except ValueError as exc:
             msg = f"Tool validation snapshot entry for '{tool_name}' has unsupported file_access '{raw_file_access}'."
             raise TypeError(msg) from exc
-        raw_runtime_loadable = _deserialize_tool_validation_bool(
-            raw_info_mapping,
-            tool_name=tool_name,
-            field_name="runtime_loadable",
-            default=True,
-        )
-        raw_unavailable_due_to_plugin_load_error = _deserialize_tool_validation_bool(
-            raw_info_mapping,
-            tool_name=tool_name,
-            field_name="unavailable_due_to_plugin_load_error",
-            default=False,
-        )
-        raw_requires_room_context = _deserialize_tool_validation_bool(
-            raw_info_mapping,
-            tool_name=tool_name,
-            field_name="requires_room_context",
-            default=False,
-        )
-        raw_requires_primary_runtime = _deserialize_tool_validation_bool(
-            raw_info_mapping,
-            tool_name=tool_name,
-            field_name="requires_primary_runtime",
-            default=False,
-        )
-        raw_supports_toolkit_filters = _deserialize_tool_validation_bool(
-            raw_info_mapping,
-            tool_name=tool_name,
-            field_name="supports_toolkit_filters",
-            default=False,
-        )
+        flags = {
+            field_name: _deserialize_tool_validation_bool(
+                raw_info_mapping,
+                tool_name=tool_name,
+                field_name=field_name,
+                default=default,
+            )
+            for field_name, default in (
+                ("runtime_loadable", True),
+                ("unavailable_due_to_plugin_load_error", False),
+                ("requires_room_context", False),
+                ("requires_primary_runtime", False),
+                ("supports_toolkit_filters", False),
+            )
+        }
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1517,11 +1424,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
             ),
             authored_override_validator=authored_override_validator,
             file_access=file_access,
-            supports_toolkit_filters=raw_supports_toolkit_filters,
-            requires_room_context=raw_requires_room_context,
-            requires_primary_runtime=raw_requires_primary_runtime,
-            runtime_loadable=raw_runtime_loadable,
-            unavailable_due_to_plugin_load_error=raw_unavailable_due_to_plugin_load_error,
+            **flags,
         )
     return snapshot
 
