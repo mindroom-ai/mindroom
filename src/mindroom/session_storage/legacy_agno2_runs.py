@@ -6,6 +6,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.session_storage.schema import table_names
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
@@ -47,13 +48,7 @@ def decode_session_json(raw_value: object) -> object:
 # tests/session_storage/test_factories.py::test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order.
 def has_blob_runs(connection: sqlite3.Connection, names: TableNames) -> bool:
     """Return whether the database may still hold Agno 2 run blobs, from its schema alone."""
-    tables = {
-        name
-        for (name,) in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
-            (names.sessions, names.summaries),
-        )
-    }
+    tables = table_names(connection)
     if names.sessions not in tables or names.summaries in tables:
         return False
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(names.sessions)})")}

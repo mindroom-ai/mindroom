@@ -18,8 +18,14 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.session_storage import store as store_module
-from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import ConversationStore, open_conversation_store, persist_to, runs_without
+from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.store import (
+    ConversationStore,
+    migrate_database,
+    open_conversation_store,
+    persist_to,
+    runs_without,
+)
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 
 if TYPE_CHECKING:
@@ -836,6 +842,71 @@ def test_load_finds_member_rows_without_scanning_the_session_per_run(
     step = plan[plan.index("RECURSIVE STEP") + 1 :]
     # The runs table is read once, to materialize the child set; each step only probes that set's index.
     assert "SEARCH children USING AUTOMATIC COVERING INDEX (parent_run_id=?)" in step
+
+
+# --- migrations -------------------------------------------------------------------------------------------------
+
+
+def _database_with_values(tmp_path: Path) -> Path:
+    path = tmp_path / "migrating.db"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("CREATE TABLE legacy (value INTEGER)")
+        connection.executemany("INSERT INTO legacy VALUES (?)", [(1,), (2,)])
+    return path
+
+
+def _not_yet_copied(connection: sqlite3.Connection) -> bool:
+    return "copied" not in table_names(connection)
+
+
+def test_a_failed_migration_changes_nothing_and_releases_the_write_lock_at_once(tmp_path: Path) -> None:
+    """A failure while a cursor is still reading rolls back by itself, not when the dropped cursor lets the close finish."""
+    path = _database_with_values(tmp_path)
+
+    def copy_then_fail(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE copied (value INTEGER)")
+        reading = connection.execute("SELECT value FROM legacy")
+        (value,) = reading.fetchone()
+        connection.execute("INSERT INTO copied VALUES (?)", (value,))
+        msg = "interrupted copy"
+        raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="interrupted copy") as interrupted:
+        migrate_database(path, needed=_not_yet_copied, apply=copy_then_fail)
+
+    # The failure's traceback keeps the reading cursor alive, as it does for a caller that logs or re-raises it.
+    assert interrupted.traceback
+    with closing(sqlite3.connect(path, timeout=0, isolation_level=None)) as other:
+        other.execute("BEGIN IMMEDIATE")
+        assert _not_yet_copied(other)
+        other.rollback()
+
+
+def test_a_migration_another_opener_finished_while_this_one_waited_does_not_run_again(tmp_path: Path) -> None:
+    """The migration is asked for again once the write lock is held, so racing openers migrate the database once."""
+    path = _database_with_values(tmp_path)
+    answers = iter([True, False])
+
+    migrate_database(path, needed=lambda _connection: next(answers), apply=lambda _connection: pytest.fail("ran twice"))
+
+    assert next(answers, None) is None
+
+
+def test_a_migration_that_is_not_due_opens_no_write_transaction(tmp_path: Path) -> None:
+    """A migrated database costs one read, so it never waits for another writer's lock."""
+    path = _database_with_values(tmp_path)
+    holder = sqlite3.connect(path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        migrate_database(
+            path,
+            needed=lambda _connection: False,
+            apply=lambda _connection: pytest.fail("not due"),
+            timeout=0,
+        )
+    finally:
+        holder.rollback()
+        holder.close()
 
 
 # --- session rows -----------------------------------------------------------------------------------------------

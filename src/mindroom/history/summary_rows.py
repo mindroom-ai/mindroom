@@ -34,7 +34,8 @@ from mindroom.constants import (
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.history.summary_rows_schema import NON_VISIBLE_RUN_STATUS_VALUES, loads_sql, run_scope_key_sql
-from mindroom.session_storage.store import delete_run_subtrees_in_transaction, table_names
+from mindroom.session_storage.schema import table_names
+from mindroom.session_storage.store import delete_run_subtrees_in_transaction
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:

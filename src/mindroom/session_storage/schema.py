@@ -8,9 +8,13 @@ usage tables are MindRoom's own; their DDL lives with their owners.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from mindroom.history.summary_rows_schema import summary_rows_schema_sql, summary_rows_table_names
 from mindroom.usage.storage import quote_identifier, usage_table_sql
+
+if TYPE_CHECKING:
+    import sqlite3
 
 # The columns of Agno 3's sessions table, which the schema preflight requires of an existing database.
 SESSION_COLUMNS = (
@@ -99,6 +103,11 @@ def run_log_sql(names: TableNames) -> tuple[str, ...]:
     )
 
 
+def table_names(connection: sqlite3.Connection) -> set[str]:
+    """Return the names of the database's tables; an older database lacks the ones its migrations add."""
+    return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+
 def _index_sql(table: str, *columns: str) -> str:
     name = quote_identifier(f"idx_{table}_{'_'.join(columns)}")
     return f"CREATE INDEX IF NOT EXISTS {name} ON {quote_identifier(table)} ({', '.join(columns)})"
@@ -109,4 +118,5 @@ __all__ = [
     "TableNames",
     "run_log_sql",
     "schema_sql",
+    "table_names",
 ]

@@ -28,7 +28,7 @@ from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics
 from mindroom.session_storage.codec import run_from_row, run_type
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_runs, move_blob_runs_to_rows
-from mindroom.session_storage.schema import run_log_sql, schema_sql
+from mindroom.session_storage.schema import run_log_sql, schema_sql, table_names
 from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
 from mindroom.usage.storage import TOKEN_FIELDS, project_usage, quote_identifier, usage_upsert_sql
 
@@ -46,13 +46,53 @@ BUSY_TIMEOUT_SECONDS = 30.0
 _NON_VISIBLE_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
 
 
-def connect_conversation_database(path: Path) -> sqlite3.Connection:
-    """Open a connection to the conversation database at ``path``, for the store and the migrations that open it."""
+def connect_conversation_database(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> sqlite3.Connection:
+    """Open a connection to the conversation database at ``path``, for the store and the migrations that open it.
+
+    ``timeout`` is how long a statement waits for another connection's lock; a caller that would rather skip a
+    locked database than wait passes less.
+    """
     # No implicit transactions: every operation begins its own, so its reads cannot straddle a commit.
-    connection = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
+    connection = sqlite3.connect(path, timeout=timeout, isolation_level=None)
     # Deleting a session row cascades to its runs, summary rows, and usage.
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+@contextmanager
+def _begun(connection: sqlite3.Connection, *, write: bool) -> Iterator[None]:
+    """Run the block as one transaction on ``connection``, committing when it exits normally.
+
+    A write takes the write lock first. A block that fails or is interrupted rolls back at once rather than
+    leaving that to a close: a cursor still alive keeps the connection, and with it the write lock, open past its close.
+    """
+    connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+    try:
+        yield
+    except BaseException:
+        connection.rollback()
+        raise
+    connection.commit()
+
+
+def migrate_database(
+    path: Path,
+    *,
+    needed: Callable[[sqlite3.Connection], bool],
+    apply: Callable[[sqlite3.Connection], None],
+    timeout: float = BUSY_TIMEOUT_SECONDS,
+) -> None:
+    """Run a one-time migration of the database at ``path`` in one write transaction, when ``needed`` says it is due.
+
+    ``needed`` reads the schema, so a migrated database costs one read. It is asked again once the write lock is
+    held, because another opener may have migrated the database while this one waited. A migration that fails or
+    is interrupted changes nothing, so the next opener runs it again.
+    """
+    with closing(connect_conversation_database(path, timeout=timeout)) as connection:
+        if needed(connection):
+            with _begun(connection, write=True):
+                if needed(connection):
+                    apply(connection)
 
 
 def open_conversation_store(
@@ -67,21 +107,18 @@ def open_conversation_store(
     Tables are created by the first write. Migrations that recognize an older database by a missing summary-row
     or usage table must run before that write.
     """
-    with closing(connect_conversation_database(path)) as connection:
-        if has_blob_runs(connection, names):
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                # Another opener may have moved them while this one waited for the write lock.
-                if has_blob_runs(connection, names):
-                    for statement in run_log_sql(names):
-                        connection.execute(statement)
-                    move_blob_runs_to_rows(connection, names)
-            except BaseException:
-                # Release the write lock now: a cursor still alive keeps the connection open past its close.
-                connection.rollback()
-                raise
-            connection.commit()
+    migrate_database(
+        path,
+        needed=lambda connection: has_blob_runs(connection, names),
+        apply=lambda connection: _move_blob_runs(connection, names),
+    )
     return ConversationStore(path=path, names=names, prompt_roles=prompt_roles)
+
+
+def _move_blob_runs(connection: sqlite3.Connection, names: TableNames) -> None:
+    for statement in run_log_sql(names):
+        connection.execute(statement)
+    move_blob_runs_to_rows(connection, names)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,17 +136,11 @@ class ConversationStore:
         A write takes the write lock first, so rules that read the log before writing see what they change,
         and creates any missing table. A read is one snapshot.
         """
-        with closing(connect_conversation_database(self.path)) as connection:
-            connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-            try:
-                if write:
-                    for statement in schema_sql(self.names):
-                        connection.execute(statement)
-                yield connection
-            except BaseException:
-                connection.rollback()
-                raise
-            connection.commit()
+        with closing(connect_conversation_database(self.path)) as connection, _begun(connection, write=write):
+            if write:
+                for statement in schema_sql(self.names):
+                    connection.execute(statement)
+            yield connection
 
     def read_session_fields(self, session_id: str) -> SessionFields | None:
         """Read one session row's metadata and ``session_state`` without its runs, or None when the row is missing."""
@@ -555,11 +586,6 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     return persist
 
 
-def table_names(connection: sqlite3.Connection) -> set[str]:
-    """Return the names of the database's tables; an older database lacks the ones its migrations add."""
-    return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-
-
 def _decoded_mapping(raw_value: object) -> dict[str, Any] | None:
     """Return a stored JSON object column, or None when it is empty or unreadable, so one odd row never fails a load."""
     try:
@@ -896,8 +922,8 @@ __all__ = [
     "ConversationStore",
     "connect_conversation_database",
     "delete_run_subtrees_in_transaction",
+    "migrate_database",
     "open_conversation_store",
     "persist_to",
     "runs_without",
-    "table_names",
 ]
