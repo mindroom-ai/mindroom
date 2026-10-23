@@ -45,7 +45,7 @@ from mindroom.history.types import (
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
-from mindroom.native_compaction import checkpoint_summary
+from mindroom.native_compaction import checkpoint_summary, replay_basis
 from mindroom.providers.claude_prompt_cache import as_anthropic_claude
 from mindroom.session_storage.agent_storage import runs_without
 from mindroom.timing import timed
@@ -589,12 +589,15 @@ def _after_native_checkpoint(
     """Split off the runs before the latest readable native checkpoint and return its text as their summary.
 
     A provider checkpoint summarizes everything its request replayed before it, including the previous summary,
-    whichever model wrote it. Its text also covers its own run's prompt, so that run stays in the input: the summary
-    built on the text then always folds it, and an edit or redaction of that run removes the summary too.
+    whichever model wrote it. It stands in only while that is still ``previous_summary`` and the runs before its run:
+    a run that waited for approval sorts after the turns it waited for, and retiring a summary keeps its runs.
+    Its text also covers its own run's prompt, so that run stays in the input: the summary built on the text then
+    always folds it, and an edit or redaction of that run removes the summary too.
     """
     for index in range(len(runs) - 1, 0, -1):
+        basis = replay_basis(previous_summary, runs[:index])
         for message in reversed(runs[index].messages or []):
-            if not message.from_history and (summary := checkpoint_summary(message)) is not None:
+            if not message.from_history and (summary := checkpoint_summary(message, basis)) is not None:
                 return list(runs[:index]), summary, list(runs[index:])
     return [], previous_summary, list(runs)
 
@@ -621,18 +624,6 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
     fallback_model = summarizer.fallback
     shrunk_budget = summarizer.shrunk_budget_tokens
     token_estimator, estimate_kind = _compaction_sizing(summary_model.model)
-    checkpointed, previous_summary, runs = _after_native_checkpoint(previous_summary, runs)
-    budget = summary_model.input_budget_tokens
-    if shrunk_budget is not None:
-        whole_first_run = await asyncio.to_thread(
-            whole_run_input_tokens,
-            previous_summary=previous_summary,
-            first_run=runs[0],
-            history_settings=summarizer.history_settings,
-            token_estimator=token_estimator,
-        )
-        # Start where an earlier failure shrank the input, without truncating a run the full budget holds whole.
-        budget = min(budget, max(shrunk_budget, whole_first_run))
 
     def build(
         max_input_tokens: int,
@@ -647,8 +638,24 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
             token_estimator=estimator,
         )
 
-    summary_input, included_runs = await build(budget, token_estimator)
-    if not included_runs:
+    # A checkpoint too large to leave room for its own run gives way to the history it summarized.
+    for candidate in (_after_native_checkpoint(previous_summary, runs), ([], previous_summary, list(runs))):
+        checkpointed, previous_summary, runs = candidate
+        budget = summary_model.input_budget_tokens
+        if shrunk_budget is not None:
+            whole_first_run = await asyncio.to_thread(
+                whole_run_input_tokens,
+                previous_summary=previous_summary,
+                first_run=runs[0],
+                history_settings=summarizer.history_settings,
+                token_estimator=token_estimator,
+            )
+            # Start where an earlier failure shrank the input, without truncating a run the full budget holds whole.
+            budget = min(budget, max(shrunk_budget, whole_first_run))
+        summary_input, included_runs = await build(budget, token_estimator)
+        if included_runs:
+            break
+    else:
         return None
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
     minimum_progress_input_tokens = await asyncio.to_thread(

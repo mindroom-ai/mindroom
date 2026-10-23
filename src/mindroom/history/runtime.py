@@ -350,7 +350,8 @@ async def prepare_scope_history(
             execution_plan=execution_plan,
         ),
     )
-    native_model = configure_native(session=session)
+    visible_runs = scope_visible_runs(session, scope_context.scope)
+    native_model = configure_native(session=session, runs=visible_runs)
     if state.force_compact_before_next_run and native_model is not None:
         native_model.configure_native_compaction(threshold=None)
     compaction_reply_outcome: CompactionReplyOutcome = "none"
@@ -364,7 +365,6 @@ async def prepare_scope_history(
         native_route=native_route,
         replay_model=native_model,
     )
-    visible_runs = scope_visible_runs(session, scope_context.scope)
     # A native checkpoint response is billed for the transcript it replaced, so native routes keep the estimate.
     reported_history_tokens = (
         _reported_history_tokens(

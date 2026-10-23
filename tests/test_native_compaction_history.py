@@ -40,7 +40,12 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import set_force_compaction_state
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
-from mindroom.native_compaction import checkpoint_estimated_tokens, record_native_checkpoint
+from mindroom.native_compaction import (
+    checkpoint_estimated_tokens,
+    checkpoint_summary,
+    record_native_checkpoint,
+    replay_basis,
+)
 from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
@@ -877,9 +882,10 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     )
     model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
+    later = _completed_run("later", messages=[Message(role="user", content="Later")])
     seeded = _session(
         "session",
-        runs=[_completed_run("folded", messages=[Message(role="user", content="Earlier")])],
+        runs=[_completed_run("folded", messages=[Message(role="user", content="Earlier")]), later],
         summary=SessionSummary(summary="Stale summary."),
     )
     db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
@@ -918,6 +924,11 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     assert expected.native_compaction is not None
     assert model.native_compaction is not None
     assert model.native_compaction.route == expected.native_compaction.route
+    # A checkpoint records the history its request replayed, so text compaction can tell where it still stands in.
+    response = ModelResponse(content="Done")
+    record_native_checkpoint(response, [{"type": "compaction", "content": "Checkpoint."}], model.native_compaction)
+    answer = Message(role="assistant", content="Done", provider_data=response.provider_data)
+    assert checkpoint_summary(answer, replay_basis("Archived summary.", [later])) == "Checkpoint."
     db.close()
 
 

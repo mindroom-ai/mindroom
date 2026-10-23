@@ -39,6 +39,8 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 - A fold survives a crash of its turn: the restarted attempt replays its summary and knows which tool calls already ran and what they returned, and an edit or redaction of the turn's message still removes it through its segment.
 - Text compaction starts from the latest readable native checkpoint, because the provider already summarized everything its request replayed, and re-summarizing that history after a model switch took a local model over an hour.
   The checkpoint's text also covers its own run's prompt, so the summary built on it always folds that run; an edit or redaction of the prompt then removes that summary with the run.
+  Each checkpoint records the summary and run ids its request replayed, and stands in only while those still precede its run, because a completed approval sorts after the turns it waited for and retiring a legacy summary keeps its runs; checkpoints recorded before this are not reused.
+  A checkpoint too large to leave room for its own run in the summary input is not used, so compaction still progresses.
 - A summary input that shrank after a failure keeps that size for the compaction's later chunks, because they would otherwise repeat the failure, and a slow model spends its whole timeout on each one; a chunk still grows to hold its first run whole.
 - A request without persisted replay (team members, workflow participants, scheduled tasks with `history_limit: 0`) compacts run-locally: its summary is an ordinary message of its own run and is stored with it.
 

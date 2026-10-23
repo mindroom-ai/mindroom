@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
     from agno.models.message import Message
     from agno.models.response import ModelResponse
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
 
 logger = get_logger(__name__)
 
@@ -30,6 +32,8 @@ class _NativeCompactionSettings:
 
     route: str
     threshold: int | None
+    # The history these requests replay, recorded with each checkpoint (see ``replay_basis``).
+    basis: str = ""
 
 
 class NativeCompactionModel:
@@ -121,6 +125,7 @@ def record_native_checkpoint(
         state["checkpoint_prefix"] = last is not None
         if last is not None:
             state["items"] = list(items[last:])
+            state["basis"] = settings.basis
             logger.info(
                 "Native compaction checkpoint",
                 threshold_tokens=settings.threshold,
@@ -197,10 +202,20 @@ def native_checkpoint_id(message: Message) -> str | None:
     return message.id
 
 
-def checkpoint_summary(message: Message) -> str | None:
-    """Return the readable text of the message's checkpoint, whatever its route; encrypted checkpoints have none."""
+def replay_basis(summary: str | None, runs: Sequence[RunOutput | TeamRunOutput]) -> str:
+    """Identify the history a request replays: the summary in force and the runs after it, in order."""
+    return hashlib.sha256(json.dumps([summary, [run.run_id for run in runs]]).encode()).hexdigest()
+
+
+def checkpoint_summary(message: Message, basis: str) -> str | None:
+    """Return the readable text of the message's checkpoint, whatever its route, if its request replayed ``basis``.
+
+    Encrypted checkpoints have no readable text, and checkpoints recorded without a basis never match.
+    """
     state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
-    items = checkpoint_items(message, state.get("route")) if isinstance(state, dict) else []
+    if not isinstance(state, dict) or state.get("basis") != basis:
+        return None
+    items = checkpoint_items(message, state.get("route"))
     content = items[0].get("content") if items else None
     return content if isinstance(content, str) else None
 
