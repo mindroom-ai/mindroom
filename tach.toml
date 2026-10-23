@@ -4859,10 +4859,13 @@ depends_on = [
     "mindroom.matrix.health",
     "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
+    "mindroom.model_defaults",
     "mindroom.providers.key_checks",
     "mindroom.providers.model_http_client",
     "mindroom.providers.model_loading",
     "mindroom.providers.names",
+    "mindroom.runtime_env_policy",
+    "mindroom.startup_errors",
     # Deferred import in the Vertex AI Claude connection check, so the anthropic SDK loads only when used.
     "mindroom.providers.anthropic.messages",
 ]
@@ -5996,6 +5999,8 @@ depends_on = [
     "mindroom.providers.prompt_cache_key",
     "mindroom.providers.tool_policy",
     "mindroom.runtime_env_policy",
+    "mindroom.system_prompt",
+    "mindroom.token_budget",
     "mindroom.tool_system.context_bound_streams",
 ]
 
@@ -7932,7 +7937,7 @@ depends_on = ["mindroom.llm"]
 
 [[modules]]
 path = "mindroom.providers.remote_media"
-depends_on = ["mindroom.bounded_bytes", "mindroom.llm"]
+depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config"]
 
 # How a wire reads the arguments of a stored tool call.
 [[modules]]
@@ -7942,7 +7947,10 @@ depends_on = ["mindroom.llm"]
 [[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
+    "mindroom.credentials.sync",
     "mindroom.llm",
+    "mindroom.logging_config",
+    "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
@@ -7955,7 +7963,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.providers.ollama_adapter"
 depends_on = [
+    "mindroom.credentials.sync",
     "mindroom.llm",
+    "mindroom.logging_config",
+    "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
