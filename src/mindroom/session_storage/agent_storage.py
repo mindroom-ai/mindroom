@@ -68,8 +68,8 @@ def save_compaction_usage(
     initial_session: ConversationSession | None,
 ) -> None:
     """Persist one summary response's returned counters independently of conversation changes."""
-    # TODO(simplify): this request alone records no model provenance, so reports attribute it by the legacy rule.
-    # Stamp its `provider_data` with the model, as every other stored request is. Stored data in the usage ledger.
+    # TODO(simplify): this summary request records no model provenance, so reports attribute it by the legacy rule.
+    # Stamp its `provider_data` with the model, as the other usage writers do. Stored usage ledger rows would notice.
     metrics = usage.to_dict()
     created_at = time.time()
     store.save_independent_usage(
