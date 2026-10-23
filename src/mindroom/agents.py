@@ -15,7 +15,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import PromptSpec, model_note_for
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import first_of_each_name, prepare_run_tools
 from mindroom.approval.tool_approval import (
     JOB_APPROVAL_TYPE,
     POLICY_CONFIRMATION_APPROVAL_TYPE,
@@ -158,11 +158,15 @@ class _ToolkitEntry:
     deferred: DeferredToolkit | None = None
 
 
+# A toolkit a run offers, with its entry, or None for one generated beside the assembled toolkits.
+type _OfferedToolkit = tuple[_ToolkitEntry | None, AdaptedToolkit]
+
+
 @dataclass(frozen=True)
 class _AgentToolAssembly:
     """Toolkits and dynamic-tool visibility assembled for one agent instance."""
 
-    # The assembled toolkits in the order a run offers them, ahead of the functions generated for the agent.
+    # The assembled toolkits in the order a run offers them.
     entries: tuple[_ToolkitEntry, ...]
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
@@ -170,11 +174,6 @@ class _AgentToolAssembly:
     # The tool-call policy the loop runs around every call: the hook bridge, then each browser toolkit's
     # computer announcement.
     tool_middleware: tuple[ToolMiddleware, ...]
-
-    @property
-    def toolkits(self) -> tuple[AdaptedToolkit, ...]:
-        """Return what a run offers of each assembled toolkit."""
-        return tuple(entry.adapted for entry in self.entries)
 
     @property
     def deferred_toolkits(self) -> tuple[DeferredToolkit, ...]:
@@ -630,23 +629,22 @@ def _build_registered_agent_tool(
     )
 
 
-def _log_toolkits_without_unique_model_functions(
-    toolkits: Sequence[AdaptedToolkit],
+def _log_toolkits_without_offered_functions(
+    entries: Sequence[_ToolkitEntry],
+    offered: Mapping[str, _ToolkitEntry],
     *,
     agent_name: str,
 ) -> None:
-    """Warn when a configured toolkit offers no function of its own because earlier toolkits took every name."""
-    seen_function_names: set[str] = set()
-    for toolkit in toolkits:
-        function_names = {function.name for function in toolkit.functions}
-        if function_names and function_names <= seen_function_names:
+    """Warn when a run offers no function of a configured toolkit because earlier toolkits took every name."""
+    for entry in entries:
+        function_names = sorted(function.name for function in entry.adapted.functions)
+        if function_names and all(offered.get(name) is not entry for name in function_names):
             logger.warning(
                 "Configured toolkit exposes no unique model functions because function names collide",
                 agent=agent_name,
-                toolkit=toolkit.name,
-                function_names=sorted(function_names),
+                toolkit=entry.adapted.name,
+                function_names=function_names,
             )
-        seen_function_names.update(function_names)
 
 
 def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> dict[str, tuple[str, ...]]:
@@ -1862,7 +1860,7 @@ def team_background_jobs(
         # A team has no execution scope of its own, so its calls run under the grants of the work around them.
         tools=assembled_job_tools(
             {function.name: function for function in entry.adapted.functions},
-            _job_sources(_offered_entries((entry,))),
+            _job_sources(_offered_entries(((entry, entry.adapted),))),
             {},
         ),
     )
@@ -1872,33 +1870,37 @@ def team_background_jobs(
 _MEMORY_SEARCH_TOOL_NAME = "search_memories"
 
 
-def _offers_function(toolkits: Sequence[AdaptedToolkit], function_name: str) -> bool:
-    return any(function.name == function_name for toolkit in toolkits for function in toolkit.functions)
+def _offers_function(entries: Sequence[_ToolkitEntry], function_name: str) -> bool:
+    return any(function.name == function_name for entry in entries for function in entry.adapted.functions)
 
 
 def _agent_toolkits(
-    toolkits: Sequence[AdaptedToolkit],
+    entries: Sequence[_ToolkitEntry],
     knowledge: AgentKnowledge | None,
     skills: SkillsToolkit | None,
     generated_visible: Callable[[Function], bool],
-) -> tuple[AdaptedToolkit, ...]:
+) -> tuple[_OfferedToolkit, ...]:
     """Return the agent's tools in the order the model is offered them: configured toolkits, knowledge search, skills.
 
-    The knowledge search and skill functions are generated beside the configured toolkits, so they get the
-    approval and persona policy here that configured functions got while their toolkits were built.
+    Each toolkit comes with its entry; the knowledge search and skill functions are generated beside the configured
+    toolkits, so they have none, and they get the approval and persona policy here that configured functions got
+    while their toolkits were built.
     """
-    adapted = list(toolkits)
+    offered: list[_OfferedToolkit] = [(entry, entry.adapted) for entry in entries]
     if knowledge is not None:
         search = knowledge.search_function(
-            memory_search_available=_offers_function(toolkits, _MEMORY_SEARCH_TOOL_NAME),
+            memory_search_available=_offers_function(entries, _MEMORY_SEARCH_TOOL_NAME),
         )
         if generated_visible(search):
-            adapted.append(
-                AdaptedToolkit(name=KNOWLEDGE_SEARCH_TOOL_NAME, functions=(adapt_function(search),), instructions=None),
+            search_toolkit = AdaptedToolkit(
+                name=KNOWLEDGE_SEARCH_TOOL_NAME,
+                functions=(adapt_function(search),),
+                instructions=None,
             )
-    if skills is not None and (offered := _prune_toolkit_functions(skills, generated_visible)) is not None:
-        adapted.append(adapt_toolkit(offered))
-    return tuple(adapted)
+            offered.append((None, search_toolkit))
+    if skills is not None and (visible_skills := _prune_toolkit_functions(skills, generated_visible)) is not None:
+        offered.append((None, adapt_toolkit(visible_skills)))
+    return tuple(offered)
 
 
 def _deferred_toolkits(entries: Sequence[_ToolkitEntry]) -> tuple[DeferredToolkit, ...]:
@@ -1912,18 +1914,13 @@ def _without_hidden_functions(entry: _ToolkitEntry) -> _ToolkitEntry:
     return replace(entry, adapted=replace(entry.adapted, functions=functions))
 
 
-def _offered_entries(entries: Sequence[_ToolkitEntry]) -> dict[str, _ToolkitEntry]:
-    """Map each function a run offers from ``entries`` to its entry.
+def _offered_entries(toolkits: Sequence[_OfferedToolkit]) -> dict[str, _ToolkitEntry]:
+    """Map each function a run of ``toolkits`` offers to its entry, as ``first_of_each_name`` selects the run's functions.
 
-    A run offers the assembled toolkits first, in this order, and keeps the first function of each name, as
-    ``offered_functions`` selects them, so a later same-named function and the functions generated beside the
-    assembled toolkits are absent.
+    A generated function has no entry, so it is absent, and so is any function a same-named earlier one shadows.
     """
-    offered: dict[str, _ToolkitEntry] = {}
-    for entry in entries:
-        for function in entry.adapted.functions:
-            offered.setdefault(function.name, entry)
-    return offered
+    pairs = ((entry, function) for entry, toolkit in toolkits for function in toolkit.functions)
+    return {function.name: entry for entry, function in first_of_each_name(pairs) if entry is not None}
 
 
 def _job_sources(offered: Mapping[str, _ToolkitEntry]) -> dict[str, tuple[str, Toolkit]]:
@@ -2141,13 +2138,31 @@ def create_agent(
         skill_authoring=persona is None,
     )
 
-    _log_toolkits_without_unique_model_functions(tool_assembly.toolkits, agent_name=agent_name)
-    offered = _offered_entries(tool_assembly.entries)
+    entity_view = config.resolve_entity(agent_name)
+    enabled_knowledge = (
+        knowledge
+        if not disable_runtime_capabilities
+        and (persona is None or persona.kept_knowledge != ())
+        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
+        else None
+    )
+    # Minimal mode presents skill contents as context documents instead of through skill functions.
+    offered_skills = skills if agent_mode == "minimal" else prompt_skills
+    offered_toolkits = _agent_toolkits(
+        tool_assembly.entries,
+        enabled_knowledge,
+        offered_skills,
+        partial(_generated_function_visible, config, tool_function_filter),
+    )
+    # Owners and job sources come from the same selection over the same toolkits as the functions a run offers.
+    offered = _offered_entries(offered_toolkits)
+    _log_toolkits_without_offered_functions(tool_assembly.entries, offered, agent_name=agent_name)
     tool_owners = {name: entry.owner for name, entry in offered.items()}
+    toolkits = tuple(toolkit for _entry, toolkit in offered_toolkits)
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
     # A subagent runs inside its caller's response, whose CLI belongs to the caller, so its shell gets none.
     windowed_toolkits = (
-        wrap_native_shell_window(tool_assembly.toolkits, tool_owners)
+        wrap_native_shell_window(toolkits, tool_owners)
         if agent_cli_in_shell
         and agent_mode == "standard"
         and delegation_depth == 0
@@ -2159,27 +2174,12 @@ def create_agent(
     if cli_shell:
         instructions = [*instructions, STANDARD_CLI_NOTE]
 
-    entity_view = config.resolve_entity(agent_name)
-    enabled_knowledge = (
-        knowledge
-        if not disable_runtime_capabilities
-        and (persona is None or persona.kept_knowledge != ())
-        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
-        else None
-    )
-    # Minimal mode presents skill contents as context documents instead of through skill functions.
-    offered_skills = skills if agent_mode == "minimal" else prompt_skills
     spec = AgentSpec(
         id=agent_name,
         name=agent_config.display_name,
         model=provider,
         system_message=None,
-        toolkits=_agent_toolkits(
-            tool_assembly.toolkits if windowed_toolkits is None else windowed_toolkits,
-            enabled_knowledge,
-            offered_skills,
-            partial(_generated_function_visible, config, tool_function_filter),
-        ),
+        toolkits=toolkits if windowed_toolkits is None else windowed_toolkits,
         tool_call_limit=entity_view.max_tool_calls_per_turn,
     )
     prepared = prepare_run_tools(spec)
@@ -2240,7 +2240,7 @@ def create_agent(
         "Created agent",
         agent=agent_name,
         display_name=agent_config.display_name,
-        tool_count=len(tool_assembly.toolkits),
+        tool_count=len(tool_assembly.entries),
     )
     # The agent's calls can run as jobs whenever the instance runs them, granted as the agent is now.
     tool_jobs = (

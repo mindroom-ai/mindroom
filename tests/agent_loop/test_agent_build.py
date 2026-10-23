@@ -23,9 +23,12 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.llm.provider import ModelRequest
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.store import ConversationStore
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
+from tests.agent_loop.helpers import spec
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -264,6 +267,16 @@ def ping(text: str) -> str:
     return text
 
 
+def search_knowledge_base(query: str) -> str:
+    """Search the configured index.
+
+    Args:
+        query: What to look for.
+
+    """
+    return query
+
+
 def test_the_toolkit_whose_function_a_run_offers_owns_its_name_for_approvals_and_jobs(tmp_path: Path) -> None:
     """Two toolkits share a function name: the run offers the first one's, so approvals and tool jobs name it."""
     config, runtime_paths = _config(tmp_path, tools=["calculator", "wikipedia"])
@@ -287,6 +300,21 @@ def test_the_toolkit_whose_function_a_run_offers_owns_its_name_for_approvals_and
     assert (job_tool.function, job_tool.toolkit_name, job_tool.toolkit) == (offered, "calculator", built["calculator"])
 
 
+def test_a_configured_toolkit_the_run_offers_nothing_of_is_reported(tmp_path: Path) -> None:
+    """A toolkit whose every function an earlier one shadows is reported; one the run offers any function of is not."""
+    config, runtime_paths = _config(tmp_path, tools=["calculator", "wikipedia", "arxiv"])
+    surfaces = {"calculator": [ping], "wikipedia": [ping], "arxiv": [ping, search_knowledge_base]}
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        return Toolkit(name=tool_name, tools=surfaces[tool_name])
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
+        _build(config, runtime_paths, persist_runtime_state=False)
+
+    shadowed = [log for log in logs if log["event"].startswith("Configured toolkit exposes no unique")]
+    assert [(log["toolkit"], log["function_names"]) for log in shadowed] == [("wikipedia", ["ping"])]
+
+
 def test_a_function_hidden_across_toolkits_leaves_the_run_and_its_owners(tmp_path: Path) -> None:
     """An MCP function that collides with a later local one is hidden, so the run offers and owns the local one."""
     config, runtime_paths = _config(tmp_path, tools=["wikipedia", "calculator"])
@@ -305,6 +333,50 @@ def test_a_function_hidden_across_toolkits_leaves_the_run_and_its_owners(tmp_pat
     assert (server.name, server.functions) == ("demo", ())
     assert _offered(build)["ping"] is calculator.functions[0]
     assert build.tool_owners == {"ping": "calculator"}
+
+
+def test_a_configured_function_named_like_a_generated_one_is_what_the_run_offers_owns_and_runs_as_a_job(
+    tmp_path: Path,
+) -> None:
+    """A configured function takes the knowledge search's name, so the run, approvals, and tool jobs all name it."""
+    config, runtime_paths = _config(tmp_path)
+    config.background_tool_jobs.enabled = True
+    built: dict[str, Toolkit] = {}
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        built[tool_name] = Toolkit(name=tool_name, tools=[search_knowledge_base])
+        return built[tool_name]
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
+        build = _build(config, runtime_paths, knowledge=_knowledge(), persist_runtime_state=False)
+
+    configured, generated = build.spec.toolkits[:2]
+    assert (configured.name, generated.name) == ("calculator", "search_knowledge_base")
+    [offered] = configured.functions
+    assert _offered(build)["search_knowledge_base"] is offered
+    assert build.tool_owners == {"search_knowledge_base": "calculator"}
+    assert build.tool_jobs is not None
+    job_tool = build.tool_jobs.tools["search_knowledge_base"]
+    assert (job_tool.function, job_tool.toolkit_name, job_tool.toolkit) == (offered, "calculator", built["calculator"])
+    assert [log["toolkit"] for log in logs if log["event"] == "duplicate_tool_name"] == ["search_knowledge_base"]
+    assert not [log for log in logs if log["event"].startswith("Configured toolkit exposes no unique")]
+
+
+@pytest.mark.parametrize("generated_first", [False, True])
+def test_owners_follow_the_run_selection_in_any_offer_order(*, generated_first: bool) -> None:
+    """A name is owned exactly when the run offers it from an assembled toolkit, wherever generated tools sit."""
+    toolkit = Toolkit(name="calculator", tools=[search_knowledge_base])
+    entry = agents_module._ToolkitEntry(toolkit=toolkit, adapted=adapt_toolkit(toolkit), owner="calculator")
+    generated = adapt_toolkit(Toolkit(name="search_knowledge_base", tools=[search_knowledge_base]))
+    offered = [(None, generated), (entry, entry.adapted)]
+    if not generated_first:
+        offered.reverse()
+
+    owners = agents_module._offered_entries(offered)
+    functions = prepare_run_tools(spec(ScriptedModel([]), *(adapted for _entry, adapted in offered))).functions
+
+    assert (functions["search_knowledge_base"] is generated.functions[0]) is generated_first
+    assert owners == ({} if generated_first else {"search_knowledge_base": entry})
 
 
 def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp_path: Path) -> None:

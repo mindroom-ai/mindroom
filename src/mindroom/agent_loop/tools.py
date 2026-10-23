@@ -25,7 +25,7 @@ from mindroom.tool_system.invocation import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.provider import ToolSpec
@@ -51,19 +51,37 @@ class PreparedTools:
         return tuple(sorted((function.definition() for function in self.functions.values()), key=lambda s: s.name))
 
 
+def first_of_each_name[T](
+    pairs: Iterable[tuple[T, ToolFunction]],
+    on_dropped: Callable[[T, ToolFunction], None] | None = None,
+) -> Iterator[tuple[T, ToolFunction]]:
+    """Yield the pairs whose function is the first of its name, in order, the selection a run offers.
+
+    Each later pair of a taken name is dropped, as Agno dropped it, and passed to ``on_dropped``.
+    """
+    names: set[str] = set()
+    for source, function in pairs:
+        if function.name in names:
+            if on_dropped is not None:
+                on_dropped(source, function)
+            continue
+        names.add(function.name)
+        yield source, function
+
+
 def offered_functions(spec: AgentSpec) -> Iterator[tuple[AdaptedToolkit, ToolFunction]]:
     """Yield each function a run of ``spec`` offers, in offer order, with the toolkit it belongs to.
 
-    The first function of a repeated name wins and the rest are logged and dropped, as Agno did.
+    The functions are those ``first_of_each_name`` selects over the toolkits; each one it drops is logged.
     """
-    names: set[str] = set()
-    for toolkit in spec.toolkits:
-        for function in toolkit.functions:
-            if function.name in names:
-                logger.warning("duplicate_tool_name", agent=spec.id, tool_name=function.name, toolkit=toolkit.name)
-                continue
-            names.add(function.name)
-            yield toolkit, function
+
+    def log_dropped(toolkit: AdaptedToolkit, function: ToolFunction) -> None:
+        logger.warning("duplicate_tool_name", agent=spec.id, tool_name=function.name, toolkit=toolkit.name)
+
+    return first_of_each_name(
+        ((toolkit, function) for toolkit in spec.toolkits for function in toolkit.functions),
+        log_dropped,
+    )
 
 
 def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
@@ -288,6 +306,7 @@ __all__ = [
     "PreparedTools",
     "ToolBatch",
     "dispatch_tool_calls",
+    "first_of_each_name",
     "media_follow_up",
     "offered_functions",
     "plan_tool_batch",
