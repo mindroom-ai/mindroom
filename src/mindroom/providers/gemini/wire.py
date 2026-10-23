@@ -612,7 +612,8 @@ def read_chunk(
 
     Gemini repeats cumulative usage on every streamed chunk, so only usage on a finished candidate counts.
     A whole response without candidates, such as a blocked prompt, still counts its prompt usage, as Agno's
-    non-streaming parser did; Agno's streaming parser dropped it, so a streamed one does not.
+    non-streaming parser did; Agno's streaming parser dropped it, so a streamed one does not. A malformed tool
+    call raises after its usage is recorded, so the attempt the guidance retry replaces still counts.
     """
     if not chunk.candidates:
         if whole_response and chunk.usage_metadata is not None:
@@ -620,6 +621,9 @@ def read_chunk(
         return []
     candidate = chunk.candidates[0]
     finish_reason = None if candidate.finish_reason is None else candidate.finish_reason.value
+    if finish_reason is not None and chunk.usage_metadata is not None:
+        usage = _usage_metrics(chunk.usage_metadata)
+        reply.usage = usage if reply.usage is None else reply.usage + usage
     if finish_reason == "MALFORMED_FUNCTION_CALL":
         msg = f"Generation ended with finish reason: {finish_reason}"
         raise ProviderError(msg, provider=provider, code=MALFORMED_TOOL_CALL)
@@ -631,9 +635,6 @@ def read_chunk(
     events = [event for part in parts or () for event in _read_part(reply, part)]
     if finish_reason is not None:
         reply.finish_reason = finish_reason
-        if chunk.usage_metadata is not None:
-            usage = _usage_metrics(chunk.usage_metadata)
-            reply.usage = usage if reply.usage is None else reply.usage + usage
     return events
 
 

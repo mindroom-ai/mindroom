@@ -110,7 +110,8 @@ class GeminiProvider:
         """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.
 
         Media uploads and downloads happen first, so their SDK and transport errors are normalized too; a
-        failure after a native tool ran is final, because a retry would run the tool again.
+        failure after a native tool ran is final, because a retry would run the tool again. Usage a failed attempt
+        already reported, such as a malformed tool call's, is yielded before its error.
         """
         started = time.monotonic()
         reply = GeminiReply()
@@ -144,6 +145,8 @@ class GeminiProvider:
                 for event in events:
                     yield event
         except Exception as error:
+            if reply.usage is not None:
+                yield UsageReported(reply.usage)
             self._raise_provider_error(error, hosted_tool_ran=reply.hosted_tool_ran)
         provider_data: dict[str, Any] = {}
         if reply.thought_signature is not None:

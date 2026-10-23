@@ -25,7 +25,7 @@ from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.media import Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.gemini.adapter import GeminiProvider
@@ -658,6 +658,38 @@ async def test_a_malformed_tool_call_is_answered_once_with_guidance_that_is_not_
     assert MALFORMED_FUNCTION_CALL_GUIDANCE not in _texts(wire.body(0))
     assert _texts(wire.body(1)) == [*_texts(wire.body(0)), MALFORMED_FUNCTION_CALL_GUIDANCE]
     assert [message.content for message in messages] == ["Weather in Paris?"]
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "blocking"])
+@pytest.mark.asyncio
+async def test_the_usage_of_a_malformed_tool_call_counts_toward_the_retried_turn(
+    runtime_paths: RuntimePaths,
+    *,
+    stream: bool,
+) -> None:
+    """The provider bills the attempt that wrote the malformed call, so its usage joins the guidance retry's turn."""
+    candidate = {"content": {"role": "model", "parts": []}, "finishReason": "MALFORMED_FUNCTION_CALL"}
+    malformed = {"candidates": [candidate], "usageMetadata": {"promptTokenCount": 30, "candidatesTokenCount": 5}}
+    answered = {
+        "candidates": [{"content": {"role": "model", "parts": [{"text": "Sunny."}]}, "finishReason": "STOP"}],
+        "usageMetadata": {"promptTokenCount": 40, "candidatesTokenCount": 9},
+    }
+    replies = [sse_response([malformed]), sse_response([answered])]
+    if not stream:
+        replies = [httpx.Response(200, json=malformed), httpx.Response(200, json=answered)]
+    wire = Wire(*replies)
+    provider = build_model_provider(_gemini_config(wire), runtime_paths, "gemini")
+    request = ModelRequest(messages=[_user("Weather in Paris?")], stream=stream)
+
+    events = [event async for event in provider.stream(request)]
+
+    reports = [event.usage for event in events if isinstance(event, UsageReported)]
+    turn = events[-1]
+    assert isinstance(turn, TurnCompleted)
+    assert [(usage.input_tokens, usage.output_tokens) for usage in reports] == [(30, 5), (40, 9)]
+    assert (turn.message.metrics.input_tokens, turn.message.metrics.output_tokens) == (70, 14)
+    assert (turn.message.provider_data or {})[AGGREGATE_USAGE_KEY] is True
+    assert len(wire.requests) == 2
 
 
 @pytest.mark.asyncio
