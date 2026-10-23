@@ -773,6 +773,9 @@ def _is_folded(
     )
 
 
+# TODO(simplify): the session totals in `session_data` repeat what the usage ledger's run snapshots record.
+# Report undated totals from the ledger and stop writing them, once a migration keeps pre-ledger history.
+# Operators would notice in admin and private usage totals, and stored data.
 def _record_run_usage(
     connection: sqlite3.Connection,
     names: TableNames,

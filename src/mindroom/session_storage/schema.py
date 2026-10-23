@@ -84,6 +84,9 @@ class TableNames:
         """The runs table."""
         # Agno 3 (agno/db/base.py, BaseDb.__init__) names the runs table ``<sessions>_runs``, except that its default
         # sessions table ``agno_sessions``, which is the storage name ``agno``, keeps the runs table ``agno_runs``.
+        # TODO(simplify): only the storage name `agno` keeps a runs table that is not `<sessions>_runs`.
+        # Name every runs table `<sessions>_runs`, renaming `agno_runs` once.
+        # Stored data of an agent named `agno` would notice. (#3075)
         return "agno_runs" if self.storage_name == "agno" else f"{self.sessions}_runs"
 
     @property
