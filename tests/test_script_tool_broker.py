@@ -716,11 +716,21 @@ async def test_script_broker_closes_a_filtered_requested_toolkit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "message"),
+    [("Not this time.", "Not this time."), (None, "Not approved by requester")],
+    ids=["with-a-reason", "without-a-reason"],
+)
 async def test_script_broker_requests_approval_before_body_and_denial_prevents_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    reason: str | None,
+    message: str,
 ) -> None:
-    """A durable background origin must reach approval before the selected tool body."""
+    """A durable background origin must reach approval before the selected tool body.
+
+    A denial without a reason tells the script what a denied call tells the model.
+    """
     events: list[str] = []
 
     class RecordingToolkit(Toolkit):
@@ -736,7 +746,7 @@ async def test_script_broker_requests_approval_before_body_and_denial_prevents_e
         tmp_path,
         events=events,
         require_approval=True,
-        approval_decision=ToolApprovalDecision(approved=False, reason="Not this time."),
+        approval_decision=ToolApprovalDecision(approved=False, reason=reason),
     )
 
     receipt = await _call_through_gateway(broker, _request(call_id="approval-call"), token)
@@ -744,7 +754,7 @@ async def test_script_broker_requests_approval_before_body_and_denial_prevents_e
     assert receipt.state is ScriptCallState.FAILED
     assert receipt.error == {
         "kind": "approval_denied",
-        "message": "Not this time.",
+        "message": message,
         "retryable": False,
     }
     assert events == [

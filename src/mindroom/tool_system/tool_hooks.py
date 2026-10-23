@@ -26,6 +26,7 @@ from mindroom.hooks import (
     emit_gate,
 )
 from mindroom.llm.request_context import current_llm_request_log_context
+from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.timing import elapsed_ms_since, emit_timing_event
@@ -728,7 +729,7 @@ async def _execute_bridge(
     if origin is not None and approval_gate is not None:
         decision = await approval_gate(origin, tool_name, deepcopy(args))
         if not decision.approved:
-            reason = decision.reason or "The bound requester declined this background tool call."
+            reason = denial_note_for(decision.reason)
             await _finish_blocked_tool_call(
                 timing=timing,
                 hook_registry=hook_registry,
