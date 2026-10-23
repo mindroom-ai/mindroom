@@ -92,12 +92,14 @@ def classify_compaction_decision(  # noqa: PLR0911
     force_compact_before_next_run: bool,
     current_history_tokens: int | None,
     allow_native_compaction: bool = True,
+    summary_tokens: int = 0,
 ) -> CompactionDecision:
     """Classify compaction as none or required before the next reply.
 
     Between the trigger and hard budgets, native provider compaction owns the
     history, so a run without an active native route (a text-only provider, or a
-    scheduled run with a history limit) compacts at the trigger budget instead.
+    scheduled run with a history limit) compacts at the trigger budget instead,
+    unless its saved summary alone already exceeds the trigger budget.
     """
     trigger_budget = plan.replay_budget_tokens
     hard_budget = plan.hard_replay_budget_tokens
@@ -124,6 +126,9 @@ def classify_compaction_decision(  # noqa: PLR0911
     if hard_budget is not None and current_history_tokens > hard_budget:
         return decision(mode="required", reason="history_exceeds_hard_budget", fitted_replay_tokens=hard_budget)
     if not allow_native_compaction:
+        # Compacting cannot get under a trigger the summary alone exceeds, so it would rewrite the summary every reply.
+        if summary_tokens >= trigger_budget:
+            return decision(mode="none", reason="summary_over_trigger", fitted_replay_tokens=current_history_tokens)
         return decision(mode="required", reason="over_trigger_native_disabled", fitted_replay_tokens=trigger_budget)
     return decision(mode="none", reason="within_hard_budget", fitted_replay_tokens=current_history_tokens)
 

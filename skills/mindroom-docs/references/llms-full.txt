@@ -2995,7 +2995,7 @@ Set these fields under `defaults.compaction`, an agent's `compaction`, or a team
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | `false` disables automatic compaction for the scope, both before and during a reply |
-| `threshold_tokens` | int, >= 1 | `null` | Compaction trigger in tokens: the native provider trigger on native routes, and the point where text compaction runs on every other route. Mutually exclusive with `threshold_percent` |
+| `threshold_tokens` | int, >= 1 | `null` | Compaction trigger in tokens: the native provider trigger on native routes, and the point where text compaction runs on every other route, unless the saved summary alone already exceeds it. Mutually exclusive with `threshold_percent` |
 | `threshold_percent` | float, > 0 and < 1 | `null` | The same trigger as a fraction of the effective replay window. When neither threshold is set, the trigger is 80% of that window |
 | `replay_window_tokens` | int, >= 1 | `null` | Cap replayed history and compaction planning below the model's real `context_window` without lowering the provider request limit. The smaller of the two applies; when the model window is unknown, this value alone sets the replay window |
 | `reserve_tokens` | int, >= 0 | `16384` | Headroom kept free for the current prompt, tool definitions, and output; set it at least to the model's maximum output tokens, including any thinking budget |
