@@ -466,7 +466,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
             paused,
             _resume_request(paused),
             approved={("checker", APPROVED_CALL): decision},
-            denied={("writer", "call-elsewhere"): None},
+            denied={("writer", "call-elsewhere"): "no"},
             ctx=ctx,
         )
     without_checker = replace(team, members=team.members[:1])

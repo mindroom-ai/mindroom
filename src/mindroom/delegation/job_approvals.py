@@ -10,6 +10,8 @@ from mindroom.tool_jobs.approvals import ask_job_approvals
 from mindroom.tool_jobs.runtime import get_background_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
@@ -21,7 +23,7 @@ if TYPE_CHECKING:
 async def request_child_approvals(
     child: DelegationChild,
     response: RunRecord,
-    toolkit_owners: dict[tuple[str, str], str | None],
+    toolkit_owners: Mapping[tuple[str, str], str | None],
     *,
     owner: ToolExecutionIdentity,
     config: Config,

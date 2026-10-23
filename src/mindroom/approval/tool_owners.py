@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 
 def validate_approval_tool_owners(
-    owners: Mapping[tuple[str, str], str | None],
+    owners: Mapping[tuple[str, str], str],
     calls: Sequence[ApprovalCall],
     requirements: Sequence[RunRequirement],
 ) -> None:
@@ -57,7 +57,7 @@ def validate_approval_tool_owners(
         require_original_toolkit(owners, call)
 
 
-def require_original_toolkit(owners: Mapping[tuple[str, str], str | None], call: ApprovalCall) -> None:
+def require_original_toolkit(owners: Mapping[tuple[str, str], str], call: ApprovalCall) -> None:
     """Refuse an approved ``call`` unless its agent still offers the function from the toolkit the approval recorded.
 
     ``owners`` maps ``(agent id, function name)`` to the authored toolkit the rebuilt agent offers the function from,

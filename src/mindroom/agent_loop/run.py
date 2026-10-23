@@ -42,9 +42,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Agno's text for a denial that carries no note of its own.
-REJECTED_TEXT = "Function call was rejected by the user"
-
 type Persist[R] = Callable[[R], Awaitable[None]]
 
 
@@ -115,7 +112,7 @@ def resume_agent(
     messages: list[Message],
     *,
     approved: Sequence[ApprovedCall] = (),
-    denied: Mapping[str, str | None] = {},
+    denied: Mapping[str, str] = {},
     external_results: Mapping[str, str] = {},
     ctx: RunContext,
     hooks: LoopHooks = NO_HOOKS,
@@ -128,8 +125,7 @@ def resume_agent(
     must be covered once: a confirmation by one approved call whose name and argument digest match or by a denial,
     an external execution by its result; anything else raises ``ValueError`` here, before any call runs, and
     ``paused`` is left unchanged. Approved calls run from their stored arguments and announce themselves as tool
-    events; denied calls answer with their note (``REJECTED_TEXT`` without one); external results answer as they
-    are. The returned stream ends as ``run_agent``'s does.
+    events; denied calls answer with their note; external results answer as they are. The returned stream ends as ``run_agent``'s does.
     """
     plan = plan_resume(spec, paused, approved=approved, denied=denied, external_results=external_results)
     return resume_planned(
@@ -157,7 +153,7 @@ def plan_resume(
     paused: RunRecord,
     *,
     approved: Sequence[ApprovedCall] = (),
-    denied: Mapping[str, str | None] = {},
+    denied: Mapping[str, str] = {},
     external_results: Mapping[str, str] = {},
 ) -> ResumePlan:
     """Check and record the decisions for a resume of ``paused`` without running anything; see ``resume_agent``.
@@ -237,7 +233,7 @@ def decide_requirements(
     record: AnyRunRecord,
     *,
     approved: Sequence[ApprovedCall],
-    denied: Mapping[str, str | None],
+    denied: Mapping[str, str],
     external_results: Mapping[str, str],
 ) -> list[RunRequirement]:
     """Apply the decisions to the calls the record waits for and return their requirements, in record order.
@@ -272,7 +268,7 @@ def decide_requirements(
     for call in approved:
         requirements[call.tool_call_id].confirm()
     for call_id, note in denied.items():
-        requirements[call_id].reject(note or REJECTED_TEXT)
+        requirements[call_id].reject(note)
     for call_id, result in external_results.items():
         requirements[call_id].set_external_execution_result(result)
     waited_for = confirmations | externals
@@ -413,7 +409,6 @@ def paused_content(tools: Sequence[ToolExecution]) -> str:
 
 
 __all__ = [
-    "REJECTED_TEXT",
     "ApprovedCall",
     "Persist",
     "ResumePlan",

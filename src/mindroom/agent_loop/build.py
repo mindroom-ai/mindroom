@@ -87,7 +87,7 @@ class AgentBuild:
     tool_jobs: JobActor | None = None
 
 
-def tool_owners_by_agent(*builds: AgentBuild) -> dict[tuple[str, str], str | None]:
+def tool_owners_by_agent(*builds: AgentBuild) -> dict[tuple[str, str], str]:
     """Return the authored toolkit of each function the builds offer, keyed ``(agent id, function)`` as approvals look it up."""
     return {(build.spec.id, name): toolkit for build in builds for name, toolkit in build.tool_owners.items()}
 

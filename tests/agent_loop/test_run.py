@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import pytest
 
 from mindroom.agent_loop.model_loop import NO_HOOKS, LoopHooks
-from mindroom.agent_loop.run import REJECTED_TEXT, paused_content, resume_agent, run_agent
+from mindroom.agent_loop.run import paused_content, resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
@@ -446,7 +446,7 @@ async def _resume(
     paused: RunRecord,
     *,
     approved: Sequence[ApprovalCall] = (),
-    denied: dict[str, str | None] | None = None,
+    denied: dict[str, str] | None = None,
     external_results: dict[str, str] | None = None,
     hooks: LoopHooks = NO_HOOKS,
 ) -> tuple[list[Any], RunRecord, _Store]:
@@ -676,7 +676,7 @@ def _gated_add(call_id: str = "c1", **arguments: int) -> ToolExecution:
     [
         ((), {}, "uncovered"),
         ((_approval("c1", "add", {"a": 1, "b": 2}), _approval("c1", "add", {"a": 1, "b": 2})), {}, "duplicate"),
-        ((_approval("c1", "add", {"a": 1, "b": 2}),), {"c1": None}, "both"),
+        ((_approval("c1", "add", {"a": 1, "b": 2}),), {"c1": "no"}, "both"),
         ((_approval("c1", "add", {"a": 1, "b": 2}), _approval("c9", "add", {"a": 1, "b": 2})), {}, "unknown"),
         ((_approval("c1", "add", {"a": 1, "b": 3}),), {}, "digest"),
         ((_approval("c1", "echo", {"a": 1, "b": 2}),), {}, "name"),
@@ -685,7 +685,7 @@ def _gated_add(call_id: str = "c1", **arguments: int) -> ToolExecution:
 @pytest.mark.asyncio
 async def test_a_resume_refuses_decisions_that_do_not_match_the_paused_calls_exactly(
     approved: Sequence[ApprovalCall],
-    denied: dict[str, str | None],
+    denied: dict[str, str],
     reason: str,
 ) -> None:
     paused = _paused_record(_gated_add())
@@ -735,21 +735,6 @@ async def test_a_resume_refuses_an_approved_tool_the_agent_no_longer_offers() ->
             paused,
             approved=[_approval("c1", "add", {"a": 1, "b": 2})],
         )
-
-
-@pytest.mark.asyncio
-async def test_a_denial_without_a_note_answers_with_agno_s_default_text() -> None:
-    paused = _paused_record(_gated_add())
-    model = ScriptedModel([answer("ok")])
-
-    _, record, _ = await _resume(spec(model, gated(add)), paused, denied={"c1": None})
-
-    tool_message = model.requests[0].messages[-1]
-    assert (tool_message.content, tool_message.tool_call_error) == (REJECTED_TEXT, True)
-    assert record.tools is not None
-    assert record.tools[0].confirmation_note == REJECTED_TEXT
-    assert record.requirements is not None
-    assert record.requirements[0].confirmation is False
 
 
 @pytest.mark.asyncio

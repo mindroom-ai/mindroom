@@ -128,7 +128,7 @@ class _RoutedDecisions:
     """The resume's decisions routed to the calls the paused team waits for, by ``TeamCallKey``."""
 
     approved: dict[TeamCallKey, ApprovedCall]
-    denied: dict[TeamCallKey, str | None]
+    denied: dict[TeamCallKey, str]
     external_results: dict[TeamCallKey, str]
 
 
@@ -136,7 +136,7 @@ def _route_decisions(
     persisted: TeamRunRecord,
     decisions: ResumeDecisions,
     *,
-    toolkit_owners: Mapping[tuple[str, str], str | None],
+    toolkit_owners: Mapping[tuple[str, str], str],
 ) -> _RoutedDecisions:
     """Route each decision to the waiting member or leader call it names, checking an approved call's toolkit owner.
 
@@ -206,7 +206,7 @@ class TeamResume:
     settings: ResolvedHistorySettings
     plan: ResolvedReplayPlan | None
     user_id: str | None
-    toolkit_owners: Mapping[tuple[str, str], str | None]
+    toolkit_owners: Mapping[tuple[str, str], str]
 
     def events(self, paused: TeamRunRecord, decisions: ResumeDecisions) -> AsyncIterator[TeamRunEvent]:
         """Resume ``paused`` with ``decisions`` routed to the calls the team waits for; the stream ends with ``RunFinished``.

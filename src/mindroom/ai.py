@@ -1758,9 +1758,6 @@ async def ai_response(  # noqa: C901
         record = attempt_result.record
         if attempt_result.user_error is not None:
             error = attempt_result.user_error
-            if isinstance(record, RunRecord):
-                # A failed run stored its record and raised; a delegated child's observer learns the failure from it.
-                observe_child_record(record)
             if skipped := skip_unapproved_attempt(
                 ctx.participation,
                 reason="run_failed_before_decision",

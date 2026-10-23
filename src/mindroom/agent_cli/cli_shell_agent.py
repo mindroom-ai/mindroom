@@ -56,12 +56,11 @@ def standard_cli_eligible(
 
 def wrap_native_shell_window(
     toolkits: Sequence[AdaptedToolkit],
-    owners: Mapping[str, str | None],
+    owners: Mapping[str, str],
 ) -> tuple[AdaptedToolkit, ...] | None:
     """Return ``toolkits`` with the native `run_shell_command` running inside its own CLI window; None without one.
 
-    ``owners`` maps each configured function to its authored toolkit, None for one without an authored toolkit; only
-    the shell tool's own command is windowed.
+    ``owners`` maps each configured function to its authored toolkit; only the shell tool's own command is windowed.
     """
     if owners.get("run_shell_command") != "shell":
         return None

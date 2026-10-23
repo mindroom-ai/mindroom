@@ -56,7 +56,7 @@ class ResumeDecisions:
     """
 
     approved: tuple[ApprovalCall, ...] = ()
-    denied: Mapping[str, str | None] = field(default_factory=dict)
+    denied: Mapping[str, str] = field(default_factory=dict)
     external_results: Mapping[str, str] = field(default_factory=dict)
 
 

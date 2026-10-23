@@ -166,15 +166,14 @@ class PreparedAgentToolCatalog:
     async def prepare(
         self,
         toolkits: Sequence[AdaptedToolkit],
-        owners: Mapping[str, str | None],
+        owners: Mapping[str, str],
         *,
         include: Callable[[ToolFunction], bool] | None = None,
     ) -> None:
         """Bind the run's functions under their authored toolkit; skip functions ``include`` rejects.
 
-        ``owners`` maps each function the run offers to its authored toolkit, None for one a configured toolkit
-        carries without that origin; a function it does not name was generated for the agent, such as the knowledge
-        search and the skill readers, and is reached as ``agent``. Only the first function of a name is bound,
+        ``owners`` maps each function the run offers to its authored toolkit; a function it does not name was
+        generated for the agent, such as the knowledge search and the skill readers, and is reached as ``agent``. Only the first function of a name is bound,
         because only that one is what the run offers.
         """
         async with self._lock:
@@ -203,7 +202,7 @@ class PreparedAgentToolCatalog:
         self,
         toolkit: AdaptedToolkit,
         functions: Sequence[ToolFunction],
-        owners: Mapping[str, str | None] | None = None,
+        owners: Mapping[str, str] | None = None,
     ) -> None:
         """Bind ``functions`` of ``toolkit``, under their owner from ``owners``, or under the toolkit without one."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
