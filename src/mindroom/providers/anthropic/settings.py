@@ -23,10 +23,10 @@ type ClaudeRouteKind = Literal["anthropic", "vertexai_claude", "bedrock_claude"]
 ENDPOINT_VARIABLES: dict[ClaudeRouteKind, str] = {"vertexai_claude": "ANTHROPIC_VERTEX_BASE_URL"}
 
 # Agno's Claude default; a reply that reaches it is answered as cut off instead of run (the loop's policy).
-DEFAULT_MAX_TOKENS = 8192
+_DEFAULT_MAX_TOKENS = 8192
 # The anthropic SDK rejects non-streaming requests whose max_tokens project past ten minutes unless the
 # client has an explicit timeout; 3600 s is the SDK's own ceiling for non-streaming operations.
-DEFAULT_TIMEOUT_SECONDS = 3600.0
+_DEFAULT_TIMEOUT_SECONDS = 3600.0
 
 _COMMON_KEYS = frozenset(
     {
@@ -64,7 +64,7 @@ class ClaudeSettings:
     ``context_management`` value there (or inside its ``extra_body``) wins over the top-level field.
     """
 
-    max_tokens: int | None = DEFAULT_MAX_TOKENS
+    max_tokens: int | None = _DEFAULT_MAX_TOKENS
     thinking: Mapping[str, Any] | None = None
     output_config: Mapping[str, Any] | None = None
     temperature: float | None = None
@@ -76,7 +76,7 @@ class ClaudeSettings:
     betas: Sequence[str] | None = None
     context_management: Mapping[str, Any] | None = None
     request_params: Mapping[str, Any] | None = None
-    timeout: float | None = DEFAULT_TIMEOUT_SECONDS
+    timeout: float | None = _DEFAULT_TIMEOUT_SECONDS
     default_headers: Mapping[str, str] | None = field(default=None, metadata=SECRET)
     client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
     # Direct API credentials; Vertex and Bedrock authenticate with Google and AWS credentials and ignore a key.
@@ -120,8 +120,6 @@ def parse_claude_settings(route: ClaudeRouteKind, extra_kwargs: Mapping[str, Any
 
 __all__ = [
     "ACCEPTED_KEYS",
-    "DEFAULT_MAX_TOKENS",
-    "DEFAULT_TIMEOUT_SECONDS",
     "ENDPOINT_VARIABLES",
     "ClaudeRouteKind",
     "ClaudeSettings",

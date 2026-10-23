@@ -111,12 +111,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-PROVIDER_NAMES: dict[ClaudeRouteKind, str] = {
+_PROVIDER_NAMES: dict[ClaudeRouteKind, str] = {
     "anthropic": "Anthropic",
     "vertexai_claude": "VertexAI",
     "bedrock_claude": "AwsBedrock",
 }
-STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
+_STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
 _VERTEX_ENDPOINTS = {
     "global": "https://aiplatform.googleapis.com/v1",
     "us": "https://aiplatform.us.rep.googleapis.com/v1",
@@ -378,7 +378,7 @@ class ClaudeProvider:
         compaction_edit = uses_compaction_edit(extra_body.get("context_management", params.get("context_management")))
         betas = list(self.settings.betas or [])
         if output_format is not None or (strict_tools and self.route == "anthropic"):
-            betas.append(STRUCTURED_OUTPUTS_BETA)
+            betas.append(_STRUCTURED_OUTPUTS_BETA)
         if request.native_compaction is not None or compaction_edit:
             betas.append(COMPACTION_BETA)
         if betas:
@@ -594,19 +594,17 @@ def _bedrock_client(kwargs: dict[str, Any]) -> AsyncAnthropicBedrockMantle:
     return AsyncAnthropicBedrockMantle(**kwargs)
 
 
-def claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> Capabilities:
+def _claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> Capabilities:
     """Return what one Claude route offers for this model."""
-    provider = PROVIDER_NAMES[route]
-    endpoint = native_compaction_endpoint(route, settings)
     return Capabilities(
         structured_output="native" if route == "anthropic" and supports_structured_outputs(model_id) else "json_mode",
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=native_tool_search_supported(route, model_id),
         native_compaction=native_compaction_supported(
-            provider=provider,
+            provider=_PROVIDER_NAMES[route],
             model_id=model_id,
             settings=settings,
-            endpoint=endpoint,
+            endpoint=native_compaction_endpoint(route, settings),
         ),
         # Vertex summaries always keep the provider's sampling default; the newest Claude generations reject
         # non-default sampling on every route.
@@ -714,17 +712,10 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     else:
         authored = _bedrock_kwargs(authored, runtime_paths)
     settings = parse_claude_settings(route, authored)
-    provider_name = PROVIDER_NAMES[route]
+    provider_name = _PROVIDER_NAMES[route]
     identity = ModelIdentity(id=model_config.id, provider=provider_name, provider_name=provider_name)
-    capabilities = claude_capabilities(route, model_config.id, settings)
+    capabilities = _claude_capabilities(route, model_config.id, settings)
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
 
 
-__all__ = [
-    "PROVIDER_NAMES",
-    "STRUCTURED_OUTPUTS_BETA",
-    "ClaudeProvider",
-    "build_provider",
-    "claude_capabilities",
-    "native_compaction_endpoint",
-]
+__all__ = ["ClaudeProvider", "build_provider", "native_compaction_endpoint"]

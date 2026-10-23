@@ -78,7 +78,7 @@ _NON_STRUCTURED_OUTPUT_ALIASES = frozenset(
     },
 )
 
-TRAILING_USER_MESSAGE = "continue"
+_TRAILING_USER_MESSAGE = "continue"
 _ROLE_MAP = {"system": "system", "developer": "system", "user": "user", "assistant": "assistant", "tool": "user"}
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 _IMAGE_MEDIA_TYPES = {
@@ -187,7 +187,7 @@ def format_claude_messages(
         turns.append({"role": _ROLE_MAP[message.role], "content": content})
     merged = _merged_turns(turns)
     if append_trailing_user_message and merged and merged[-1]["role"] == "assistant":
-        merged.append({"role": "user", "content": [{"type": "text", "text": TRAILING_USER_MESSAGE}]})
+        merged.append({"role": "user", "content": [{"type": "text", "text": _TRAILING_USER_MESSAGE}]})
     return FormattedConversation(messages=merged, system=" ".join(system_texts))
 
 
@@ -364,7 +364,7 @@ def _document_block(file: File, *, citations: bool) -> dict[str, Any] | None:
     return block
 
 
-def serialize_content_blocks(blocks: Sequence[Any]) -> list[dict[str, Any]]:
+def _serialized_content_blocks(blocks: Sequence[Any]) -> list[dict[str, Any]]:
     """Serialize response blocks or stored block dicts in order; an unknown spelling of redacted thinking is fixed."""
     serialized: list[dict[str, Any]] = []
     for block in blocks:
@@ -389,7 +389,7 @@ def _stored_assistant_blocks(message: Message) -> list[dict[str, Any]] | None:
     tool_call_ids = {call.get("id") for call in message.tool_calls or [] if isinstance(call, dict)}
     return [
         dict(block)
-        for block in serialize_content_blocks(stored)
+        for block in _serialized_content_blocks(stored)
         if block.get("type") != "tool_use" or block.get("id") in tool_call_ids
     ]
 
@@ -591,7 +591,7 @@ def assistant_message_from_response(
             server_tool_blocks.append(block.model_dump())
     provider_data: dict[str, Any] = {}
     if response.content:
-        provider_data["content_blocks"] = serialize_content_blocks(response.content)
+        provider_data["content_blocks"] = _serialized_content_blocks(response.content)
     if thinking:
         provider_data["signature"] = signature
     if server_tool_blocks:
@@ -617,14 +617,12 @@ def _stored_reasoning(blocks: list[str], *, streamed: bool) -> str | None:
 
 
 __all__ = [
-    "TRAILING_USER_MESSAGE",
     "FormattedConversation",
     "assistant_message_from_response",
     "format_claude_messages",
     "format_claude_tools",
     "inline_url_media",
     "parse_claude_usage",
-    "serialize_content_blocks",
     "stop_reason_of",
     "supports_prefill",
     "supports_structured_outputs",
