@@ -1099,6 +1099,65 @@ async def _prepare_openai_team_execution(
     )
 
 
+async def _prepare_team_turn(
+    team_name: str,
+    prompt: str,
+    session_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    team_models: TeamTurnModelSelection,
+    scope_context: ScopeSessionContext | None,
+    *,
+    execution_identity: ToolExecutionIdentity | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    stream: bool,
+) -> tuple[BuiltTeam, PreparedTeamExecution] | JSONResponse:
+    """Build the team and prepare its turn, or return the error response a failure of either gets."""
+    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+    try:
+        with tool_execution_identity(execution_identity):
+            members, built, mode = await asyncio.to_thread(
+                _build_team,
+                team_name,
+                config,
+                runtime_paths,
+                execution_identity,
+                scope_context,
+                unavailable_bases,
+                refresh_scheduler,
+                models=team_models,
+            )
+    except Exception:
+        logger.exception("Team build failed", team=team_name)
+        return _error_response(500, "Team execution failed", error_type="server_error")
+
+    logger.info(
+        "Team streaming request" if stream else "Team completion request",
+        team=team_name,
+        mode=mode.value,
+        members=len(members.builds),
+        session_id=session_id,
+    )
+
+    try:
+        prepared = await _prepare_openai_team_execution(
+            scope_context=scope_context,
+            team_name=team_name,
+            built=built,
+            prompt=prepend_knowledge_availability_notice(prompt, unavailable_bases),
+            config=config,
+            runtime_paths=runtime_paths,
+            thread_history=thread_history,
+            team_model_name=team_models.team_model_name,
+            execution_identity=execution_identity,
+        )
+    except Exception:
+        logger.exception("Team member preparation failed", team=team_name)
+        return _error_response(500, "Team execution failed", error_type="server_error")
+    return built, prepared
+
+
 async def _non_stream_team_completion(
     team_name: str,
     model_id: str,
@@ -1112,8 +1171,6 @@ async def _non_stream_team_completion(
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
-    scope_context: ScopeSessionContext | None = None
-    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     requester_id = execution_identity.requester_id if execution_identity is not None else None
     with open_bound_scope_session_context(
         member_names=[],
@@ -1122,51 +1179,23 @@ async def _non_stream_team_completion(
         config=config,
         execution_identity=execution_identity,
         team_name=team_name,
-    ) as opened_scope_context:
-        scope_context = opened_scope_context
-        try:
-            members, built, mode = await asyncio.to_thread(
-                _build_team,
-                team_name,
-                config,
-                runtime_paths,
-                execution_identity,
-                scope_context,
-                unavailable_bases,
-                refresh_scheduler,
-                models=team_models,
-            )
-        except Exception:
-            logger.exception("Team build failed", team=team_name)
-            return _error_response(500, "Team execution failed", error_type="server_error")
-
-        logger.info(
-            "Team completion request",
-            team=team_name,
-            mode=mode.value,
-            members=len(members.builds),
-            session_id=session_id,
+    ) as scope_context:
+        turn = await _prepare_team_turn(
+            team_name,
+            prompt,
+            session_id,
+            config,
+            runtime_paths,
+            thread_history,
+            team_models,
+            scope_context,
+            execution_identity=execution_identity,
+            refresh_scheduler=refresh_scheduler,
+            stream=False,
         )
-
-        try:
-            prompt = prepend_knowledge_availability_notice(
-                prompt,
-                unavailable_bases,
-            )
-            prepared = await _prepare_openai_team_execution(
-                scope_context=scope_context,
-                team_name=team_name,
-                built=built,
-                prompt=prompt,
-                config=config,
-                runtime_paths=runtime_paths,
-                thread_history=thread_history,
-                team_model_name=team_models.team_model_name,
-                execution_identity=execution_identity,
-            )
-        except Exception:
-            logger.exception("Team member preparation failed", team=team_name)
-            return _error_response(500, "Team execution failed", error_type="server_error")
+        if isinstance(turn, JSONResponse):
+            return turn
+        built, prepared = turn
         records = TeamRunRecords()
         try:
             with (
@@ -1223,7 +1252,7 @@ async def _non_stream_team_completion(
         return _OpenAIJSONResponse(content=result.model_dump())
 
 
-async def _stream_team_completion(  # noqa: C901, PLR0915
+async def _stream_team_completion(  # noqa: C901
     team_name: str,
     model_id: str,
     prompt: str,
@@ -1237,9 +1266,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     stack = ExitStack()
-    scope_context: ScopeSessionContext | None = None
     stream: AsyncGenerator[TeamRunEvent, None] | None = None
-    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     requester_id = execution_identity.requester_id if execution_identity is not None else None
 
     async def _cleanup() -> None:
@@ -1258,52 +1285,23 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 team_name=team_name,
             ),
         )
-        try:
-            with tool_execution_identity(execution_identity):
-                members, built, mode = await asyncio.to_thread(
-                    _build_team,
-                    team_name,
-                    config,
-                    runtime_paths,
-                    execution_identity,
-                    scope_context,
-                    unavailable_bases,
-                    refresh_scheduler,
-                    models=team_models,
-                )
-        except Exception:
-            logger.exception("Team build failed", team=team_name)
-            await _cleanup()
-            return _error_response(500, "Team execution failed", error_type="server_error")
-
-        logger.info(
-            "Team streaming request",
-            team=team_name,
-            mode=mode.value,
-            members=len(members.builds),
-            session_id=session_id,
+        turn = await _prepare_team_turn(
+            team_name,
+            prompt,
+            session_id,
+            config,
+            runtime_paths,
+            thread_history,
+            team_models,
+            scope_context,
+            execution_identity=execution_identity,
+            refresh_scheduler=refresh_scheduler,
+            stream=True,
         )
-
-        try:
-            prompt = prepend_knowledge_availability_notice(
-                prompt,
-                unavailable_bases,
-            )
-            prepared = await _prepare_openai_team_execution(
-                scope_context=scope_context,
-                team_name=team_name,
-                built=built,
-                prompt=prompt,
-                config=config,
-                runtime_paths=runtime_paths,
-                thread_history=thread_history,
-                team_model_name=team_models.team_model_name,
-                execution_identity=execution_identity,
-            )
-        except Exception:
-            logger.exception("Team member preparation failed", team=team_name)
+        if isinstance(turn, JSONResponse):
             await _cleanup()
-            return _error_response(500, "Team execution failed", error_type="server_error")
+            return turn
+        built, prepared = turn
         try:
             request_log_context = _openai_team_request_log_context(
                 team_name=team_name,
