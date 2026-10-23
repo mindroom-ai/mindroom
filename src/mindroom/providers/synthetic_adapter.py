@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelRequest, StreamEvent
 
 _PROVIDER = "Synthetic"
-LOREM = (
+_LOREM = (
     "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et "
     "dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex "
     "ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat "
@@ -67,40 +67,27 @@ class SyntheticSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class ResponsePlan:
-    """One conversation's response, split around its shell call when it makes one."""
+class _ResponsePlan:
+    """One conversation's response, split around its shell call; a response without one is all prefix."""
 
-    body: str
-    split_at: int | None
+    prefix: str
+    suffix: str
     tool_call_id: str | None
 
-    @property
-    def prefix(self) -> str:
-        """The text streamed before the shell call, or the whole response without one."""
-        return self.body if self.split_at is None else self.body[: self.split_at]
 
-    @property
-    def suffix(self) -> str:
-        """The text the request after the shell result streams; empty without a call."""
-        return "" if self.split_at is None else self.body[self.split_at :]
-
-
-def plan_response(settings: SyntheticSettings, user_history: Sequence[str], *, shell_available: bool) -> ResponsePlan:
+def _plan_response(settings: SyntheticSettings, user_history: Sequence[str], *, shell_available: bool) -> _ResponsePlan:
     """Return the response for the seed and the user messages so far; the plan is the same on every replay."""
     digest = hashlib.sha256(f"{settings.seed}\0{'\0'.join(user_history)}".encode()).digest()
     randomizer = random.Random(int.from_bytes(digest))  # noqa: S311 - replayable synthetic behavior
     response_chars = randomizer.randint(settings.min_response_chars, settings.max_response_chars)
-    body = (LOREM * ((response_chars // len(LOREM)) + 1))[:response_chars]
+    body = (_LOREM * ((response_chars // len(_LOREM)) + 1))[:response_chars]
     if not shell_available or randomizer.random() >= settings.tool_call_probability:
-        return ResponsePlan(body=body, split_at=None, tool_call_id=None)
-    return ResponsePlan(
-        body=body,
-        split_at=randomizer.randint(1, response_chars - 1),
-        tool_call_id=f"synthetic-{digest.hex()[:16]}",
-    )
+        return _ResponsePlan(prefix=body, suffix="", tool_call_id=None)
+    split_at = randomizer.randint(1, response_chars - 1)
+    return _ResponsePlan(prefix=body[:split_at], suffix=body[split_at:], tool_call_id=f"synthetic-{digest.hex()[:16]}")
 
 
-def shell_call(tool_call_id: str) -> dict[str, Any]:
+def _shell_call(tool_call_id: str) -> dict[str, Any]:
     """Return the stored-shape tool call that runs ``echo hi`` through the shell tool."""
     arguments = json.dumps({"args": ["echo", "hi"]}, separators=(",", ":"))
     return {"id": tool_call_id, "type": "function", "function": {"name": SHELL_TOOL, "arguments": arguments}}
@@ -131,7 +118,7 @@ class SyntheticProvider:
         settings = self.settings
         shell_available = request.tool_choice != "none" and any(tool.name == SHELL_TOOL for tool in request.tools)
         user_history = [message.get_content_string() for message in request.messages if message.role == "user"]
-        plan = plan_response(settings, user_history, shell_available=shell_available)
+        plan = _plan_response(settings, user_history, shell_available=shell_available)
         last_message = request.messages[-1] if request.messages else None
         continuation = (
             plan.tool_call_id is not None
@@ -150,7 +137,7 @@ class SyntheticProvider:
                 first_text_at = time.monotonic()
             if request.stream:
                 yield TextDelta(chunk)
-        tool_calls = [] if continuation or plan.tool_call_id is None else [shell_call(plan.tool_call_id)]
+        tool_calls = [] if continuation or plan.tool_call_id is None else [_shell_call(plan.tool_call_id)]
         if request.stream:
             for call in tool_calls:
                 yield ToolCallReady(call)
@@ -176,13 +163,4 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Sy
     )
 
 
-__all__ = [
-    "LOREM",
-    "SHELL_TOOL",
-    "ResponsePlan",
-    "SyntheticProvider",
-    "SyntheticSettings",
-    "build_provider",
-    "plan_response",
-    "shell_call",
-]
+__all__ = ["SHELL_TOOL", "SyntheticProvider", "SyntheticSettings", "build_provider"]
