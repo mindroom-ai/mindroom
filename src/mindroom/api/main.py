@@ -5,6 +5,7 @@ import asyncio
 import threading
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -691,36 +692,44 @@ def _list_entities(config_data: dict[str, Any], section: str) -> list[dict[str, 
     return [{"id": entity_id, **entity_data} for entity_id, entity_data in config_data.get(section, {}).items()]
 
 
+# The entity mutations take the config last, so a route binds the rest with `partial`.
 def _upsert_section_entity(
-    candidate_config: dict[str, Any],
     section: str,
     entity_id: str,
     entity_data: dict[str, Any],
+    candidate_config: dict[str, Any],
 ) -> None:
     candidate_config.setdefault(section, {})[entity_id] = _sanitize_entity_payload(entity_data)
 
 
 def _create_section_entity(
-    candidate_config: dict[str, Any],
     section: str,
     default_entity_id: str,
     entity_data: dict[str, Any],
+    candidate_config: dict[str, Any],
 ) -> str:
     base_entity_id = entity_data.get("display_name", default_entity_id).lower().replace(" ", "_")
     entity_id = _resolve_unique_entity_id(base_entity_id, candidate_config.setdefault(section, {}))
-    _upsert_section_entity(candidate_config, section, entity_id, entity_data)
+    _upsert_section_entity(section, entity_id, entity_data, candidate_config)
     return entity_id
 
 
 def _delete_section_entity(
-    candidate_config: dict[str, Any],
     section: str,
     entity_id: str,
     not_found_detail: str,
+    candidate_config: dict[str, Any],
 ) -> None:
     if section not in candidate_config or entity_id not in candidate_config[section]:
         raise HTTPException(status_code=404, detail=not_found_detail)
     del candidate_config[section][entity_id]
+
+
+async def _write_config[T](request: Request, mutate: Callable[[dict[str, Any]], T], error_prefix: str) -> T:
+    """Apply one mutation to the committed config off the event loop."""
+    return await asyncio.to_thread(
+        lambda: config_lifecycle.write_committed_config(request, mutate, error_prefix=error_prefix),
+    )
 
 
 def _set_config_generation_header(response: Response, generation: int) -> None:
@@ -923,15 +932,10 @@ async def update_agent(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a specific agent."""
-
-    def mutate(candidate_config: dict[str, Any]) -> None:
-        _upsert_section_entity(candidate_config, "agents", agent_id, agent_data)
-
-    await asyncio.to_thread(
-        config_lifecycle.write_committed_config,
+    await _write_config(
         request,
-        mutate,
-        error_prefix="Failed to save agent",
+        partial(_upsert_section_entity, "agents", agent_id, agent_data),
+        "Failed to save agent",
     )
     return {"success": True}
 
@@ -943,15 +947,10 @@ async def create_agent(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Create a new agent."""
-
-    def mutate(candidate_config: dict[str, Any]) -> str:
-        return _create_section_entity(candidate_config, "agents", "new_agent", agent_data)
-
-    agent_id = await asyncio.to_thread(
-        config_lifecycle.write_committed_config,
+    agent_id = await _write_config(
         request,
-        mutate,
-        error_prefix="Failed to create agent",
+        partial(_create_section_entity, "agents", "new_agent", agent_data),
+        "Failed to create agent",
     )
     return {"id": agent_id, "success": True}
 
@@ -963,15 +962,10 @@ async def delete_agent(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Delete an agent."""
-
-    def mutate(candidate_config: dict[str, Any]) -> None:
-        _delete_section_entity(candidate_config, "agents", agent_id, "Agent not found")
-
-    await asyncio.to_thread(
-        config_lifecycle.write_committed_config,
+    await _write_config(
         request,
-        mutate,
-        error_prefix="Failed to delete agent",
+        partial(_delete_section_entity, "agents", agent_id, "Agent not found"),
+        "Failed to delete agent",
     )
     return {"success": True}
 
@@ -990,16 +984,7 @@ async def update_team(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a specific team."""
-
-    def mutate(candidate_config: dict[str, Any]) -> None:
-        _upsert_section_entity(candidate_config, "teams", team_id, team_data)
-
-    await asyncio.to_thread(
-        config_lifecycle.write_committed_config,
-        request,
-        mutate,
-        error_prefix="Failed to save team",
-    )
+    await _write_config(request, partial(_upsert_section_entity, "teams", team_id, team_data), "Failed to save team")
     return {"success": True}
 
 
@@ -1010,15 +995,10 @@ async def create_team(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Create a new team."""
-
-    def mutate(candidate_config: dict[str, Any]) -> str:
-        return _create_section_entity(candidate_config, "teams", "new_team", team_data)
-
-    team_id = await asyncio.to_thread(
-        config_lifecycle.write_committed_config,
+    team_id = await _write_config(
         request,
-        mutate,
-        error_prefix="Failed to create team",
+        partial(_create_section_entity, "teams", "new_team", team_data),
+        "Failed to create team",
     )
     return {"id": team_id, "success": True}
 
@@ -1030,15 +1010,10 @@ async def delete_team(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Delete a team."""
-
-    def mutate(candidate_config: dict[str, Any]) -> None:
-        _delete_section_entity(candidate_config, "teams", team_id, "Team not found")
-
-    await asyncio.to_thread(
-        config_lifecycle.write_committed_config,
+    await _write_config(
         request,
-        mutate,
-        error_prefix="Failed to delete team",
+        partial(_delete_section_entity, "teams", team_id, "Team not found"),
+        "Failed to delete team",
     )
     return {"success": True}
 
@@ -1048,7 +1023,7 @@ async def get_models(request: Request, _user: Annotated[dict, Depends(verify_use
     """Get all model configurations."""
     return config_lifecycle.read_committed_config(
         request,
-        lambda config_data: dict(config_data.get("models", {})) if config_data.get("models") else {},
+        lambda config_data: dict(config_data.get("models") or {}),
     )
 
 
@@ -1062,16 +1037,9 @@ async def update_model(
     """Update a model configuration."""
 
     def mutate(candidate_config: dict[str, Any]) -> None:
-        if "models" not in candidate_config:
-            candidate_config["models"] = {}
-        candidate_config["models"][model_id] = model_data
+        candidate_config.setdefault("models", {})[model_id] = model_data
 
-    await asyncio.to_thread(
-        config_lifecycle.write_committed_config,
-        request,
-        mutate,
-        error_prefix="Failed to save model",
-    )
+    await _write_config(request, mutate, "Failed to save model")
     return {"success": True}
 
 
@@ -1080,7 +1048,7 @@ async def get_room_models(request: Request, _user: Annotated[dict, Depends(verif
     """Get room-specific model overrides."""
     return config_lifecycle.read_committed_config(
         request,
-        lambda config_data: dict(config_data.get("room_models", {})) if config_data.get("room_models") else {},
+        lambda config_data: dict(config_data.get("room_models") or {}),
     )
 
 
@@ -1095,12 +1063,7 @@ async def update_room_models(
     def mutate(candidate_config: dict[str, Any]) -> None:
         candidate_config["room_models"] = room_models
 
-    await asyncio.to_thread(
-        config_lifecycle.write_committed_config,
-        request,
-        mutate,
-        error_prefix="Failed to save room models",
-    )
+    await _write_config(request, mutate, "Failed to save room models")
     return {"success": True}
 
 
@@ -1109,14 +1072,10 @@ async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(v
     """Get list of available rooms."""
 
     def read_rooms(config_data: dict[str, Any]) -> list[str]:
-        rooms: set[str] = set()
-        rooms.update(config_data.get("rooms", {}))
-        for agent_data in config_data.get("agents", {}).values():
-            agent_rooms = agent_data.get("rooms", [])
-            rooms.update(agent_rooms)
-        for team_data in config_data.get("teams", {}).values():
-            team_rooms = team_data.get("rooms", [])
-            rooms.update(team_rooms)
+        rooms: set[str] = set(config_data.get("rooms", {}))
+        for section in ("agents", "teams"):
+            for entity_data in config_data.get(section, {}).values():
+                rooms.update(entity_data.get("rooms", []))
         return sorted(rooms)
 
     return config_lifecycle.read_committed_config(request, read_rooms)
