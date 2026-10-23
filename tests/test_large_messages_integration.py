@@ -26,6 +26,7 @@ from mindroom.matrix.large_messages import (
     prepare_large_message,
     should_send_oversized_nonterminal_streaming_edit,
 )
+from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
     ReplacementStreamingResponse,
@@ -478,8 +479,8 @@ async def test_message_with_formatted_body_no_tools() -> None:
 
     assert result["info"]["mimetype"] == "application/json"
     assert result["filename"] == "message-content.json"
-    assert "format" not in result
-    assert "formatted_body" not in result
+    assert result["format"] == "org.matrix.custom.html"
+    assert result["formatted_body"] == markdown_to_html(result["body"])
 
     uploaded_data = client.uploads[0]["data"]
     uploaded_payload = json.loads(uploaded_data.read().decode("utf-8"))
@@ -509,8 +510,8 @@ async def test_large_message_with_plain_tool_markers_uploads_full_content_json()
 
     assert result["msgtype"] == "m.file"
     assert result["info"]["mimetype"] == "application/json"
-    assert "format" not in result
-    assert "formatted_body" not in result
+    assert result["formatted_body"] == markdown_to_html(result["body"])
+    assert "🔧 <code>web_search</code> [1]" in result["formatted_body"]
     assert _TOOL_TRACE_KEY not in result
 
     # Uploaded sidecar should preserve full original content.

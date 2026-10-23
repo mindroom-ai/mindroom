@@ -76,6 +76,7 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
 _FILE_FALLBACK_KEYS = ("url", "file", "filename", "info")
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
+_HTML_PREVIEW_SHRINK_MARGIN = 0.9
 _MATRIX_EVENT_HARD_LIMIT = 64000
 _MEGOLM_AES_BLOCK_BYTES = 16
 _MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES = 5
@@ -382,6 +383,20 @@ def _build_nonterminal_streaming_edit_preview(
     return None
 
 
+def _set_preview_text(preview_content: dict[str, Any], text: str, full_text: str) -> None:
+    """Show *text* in one preview, keeping its HTML and sidecar size in step.
+
+    A preview that holds the whole text keeps the reply's own HTML, mention
+    pills included; a truncated one renders the text it shows.
+    """
+    preview_content["body"] = text
+    if "formatted_body" in preview_content and text != full_text:
+        preview_content["formatted_body"] = markdown_to_html(text)
+    sidecar_metadata = preview_content.get("io.mindroom.long_text")
+    if isinstance(sidecar_metadata, dict):
+        preview_content["io.mindroom.long_text"] = {**sidecar_metadata, "preview_size": len(text)}
+
+
 def _build_terminal_edit_preview(
     content: dict[str, Any],
     source_content: dict[str, Any],
@@ -399,20 +414,17 @@ def _build_terminal_edit_preview(
 
     def build_inner(inner_limit: int) -> dict[str, Any]:
         inner_content = dict(preview_content)
-        inner_content["body"] = (
+        _set_preview_text(
+            inner_content,
             _create_preview(
                 preview_text,
                 inner_limit,
                 continuation_indicator=continuation_indicator,
             )
             if inner_limit > 0
-            else ""
+            else "",
+            preview_text,
         )
-        sidecar_metadata = inner_content.get("io.mindroom.long_text")
-        if isinstance(sidecar_metadata, dict):
-            sidecar_metadata = dict(sidecar_metadata)
-            sidecar_metadata["preview_size"] = len(inner_content["body"])
-            inner_content["io.mindroom.long_text"] = sidecar_metadata
         return inner_content
 
     def build_event(inner_content: dict[str, Any], outer_limit: int) -> dict[str, Any]:
@@ -432,17 +444,11 @@ def _build_terminal_edit_preview(
     if not fits(empty_inner, 0):
         raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
 
-    maximum_inner_limit = len(preview_body.encode("utf-8"))
-    full_inner = build_inner(maximum_inner_limit)
-    if fits(full_inner, 0):
-        fitted_inner = full_inner
-    else:
-        inner_limit = _largest_fitting_limit(
-            maximum_inner_limit,
-            lambda candidate_limit: fits(build_inner(candidate_limit), 0),
-        )
-        fitted_inner = build_inner(inner_limit)
-
+    fitted_inner = _fit_preview(
+        build_inner,
+        len(preview_body.encode("utf-8")),
+        lambda inner_content: calculate_event_size(build_event(inner_content, 0)),
+    )
     outer_limit = _largest_fitting_limit(
         len(fitted_inner["body"].encode("utf-8")),
         lambda candidate_limit: fits(fitted_inner, candidate_limit),
@@ -465,35 +471,54 @@ def _fit_regular_preview(
 
     def build_event(preview_limit: int) -> dict[str, Any]:
         event = dict(preview_content)
-        event["body"] = (
+        _set_preview_text(
+            event,
             _create_preview(
                 preview_text,
                 preview_limit,
                 continuation_indicator=continuation_indicator,
             )
             if preview_limit > 0
-            else ""
+            else "",
+            preview_text,
         )
-        sidecar_metadata = event.get("io.mindroom.long_text")
-        if isinstance(sidecar_metadata, dict):
-            sidecar_metadata = dict(sidecar_metadata)
-            sidecar_metadata["preview_size"] = len(event["body"])
-            event["io.mindroom.long_text"] = sidecar_metadata
         return event
 
     empty_preview = build_event(0)
     if calculate_event_size(empty_preview) > _MATRIX_EVENT_HARD_LIMIT:
         raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
 
-    maximum_preview_limit = len(preview_body.encode("utf-8"))
-    full_preview = build_event(maximum_preview_limit)
-    if calculate_event_size(full_preview) <= _MATRIX_EVENT_HARD_LIMIT:
-        return full_preview
-    preview_limit = _largest_fitting_limit(
-        maximum_preview_limit,
-        lambda candidate_limit: calculate_event_size(build_event(candidate_limit)) <= _MATRIX_EVENT_HARD_LIMIT,
-    )
-    return build_event(preview_limit)
+    return _fit_preview(build_event, len(preview_body.encode("utf-8")), calculate_event_size)
+
+
+def _fit_preview(
+    build: Callable[[int], dict[str, Any]],
+    maximum: int,
+    event_size: Callable[[dict[str, Any]], int],
+) -> dict[str, Any]:
+    """Return the preview built at the largest byte limit whose event fits, or close to it.
+
+    The caller has proven that the empty preview fits. A plain preview takes
+    the exact largest limit. Each HTML preview candidate renders Markdown, which
+    takes tens of milliseconds on the event loop for a long preview, so an HTML
+    preview instead shrinks in proportion to its overshoot: one to three
+    renders where a bisection takes about twenty, for a preview somewhat
+    shorter than the largest.
+    """
+    preview = build(maximum)
+    if event_size(preview) <= _MATRIX_EVENT_HARD_LIMIT:
+        return preview
+    if "formatted_body" not in preview:
+        return build(
+            _largest_fitting_limit(maximum, lambda limit: event_size(build(limit)) <= _MATRIX_EVENT_HARD_LIMIT),
+        )
+    overhead = event_size(build(0))
+    budget = _MATRIX_EVENT_HARD_LIMIT - overhead
+    limit = maximum
+    while (used := event_size(preview) - overhead) > budget:
+        limit = int(limit * budget / used * _HTML_PREVIEW_SHRINK_MARGIN)
+        preview = build(limit)
+    return preview
 
 
 def _largest_fitting_limit(maximum: int, fits: Callable[[int], bool]) -> int:
@@ -969,6 +994,11 @@ async def prepare_large_message(
             file_info=file_info,
             original_size=current_size,
         )
+        if isinstance(source_content.get("formatted_body"), str):
+            # Clients render the preview until the sidecar loads, so it carries
+            # the HTML of the text it shows; fitting re-renders it if truncated.
+            modified_content["format"] = "org.matrix.custom.html"
+            modified_content["formatted_body"] = source_content["formatted_body"]
     else:
         logger.warning(
             "large_message_sidecar_unavailable_using_text_fallback",
