@@ -25,7 +25,6 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
 from mindroom.providers.errors import classify_provider_error
-from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
@@ -64,8 +63,10 @@ __all__ = [
 ]
 
 _ENCRYPTED_REASONING = "reasoning.encrypted_content"
-# The events that end a response; each carries the response with its usage.
-_TERMINAL_EVENT_TYPES = frozenset({"response.completed", "response.incomplete", "response.failed"})
+# The events that end a response's turn, completed or incomplete; each carries the response with its usage.
+_ENDED_EVENT_TYPES = frozenset({"response.completed", "response.incomplete"})
+# The events that end a response, a failed one included.
+_TERMINAL_EVENT_TYPES = _ENDED_EVENT_TYPES | {"response.failed"}
 _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 # The output items the model writes itself; every other item is a hosted tool's call or output.
 _MODEL_ITEM_TYPES = frozenset({"message", "reasoning", "function_call"})
@@ -209,7 +210,7 @@ def responses_input(
     """
     prepared, explicit = _prepare_continuation(messages, explicit_replay=portable_replay)
     route = native_compaction.route if native_compaction is not None else None
-    prepared = native_replay_messages(repair_legacy_tool_calls(prepared), route)
+    prepared = native_replay_messages(prepared, route)
     replay_store = False if explicit else store
     formatted = _agno_input(prepared, store=replay_store)
     # Ordered output is restored only for the spans the request still sends.
@@ -406,8 +407,7 @@ def _record_completed_output(
     portable_replay: bool,
     native_compaction: NativeCompactionReplay | None,
 ) -> None:
-    """Record storage provenance, the native checkpoint, and ordered output when replay will need it."""
-    parts.provider_data[_STORED_KEY] = store is not False
+    """Record the replay mode, the native checkpoint, and ordered output when replay will need it."""
     parts.provider_data[_PORTABLE_KEY] = portable_replay
     record = _ProviderDataRecord(provider_data=parts.provider_data)
     record_native_checkpoint(record, items, native_compaction)
@@ -438,12 +438,20 @@ def _read_ended_response(
     """Record what a response that ended says about its turn, the same whether it streamed or arrived whole.
 
     A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
-    status and the incomplete reason; only a completed response's output is recorded for replay.
+    status and the incomplete reason. Both record the response id, its storage provenance, and, when unstored, its
+    reasoning; only a completed response's output is recorded for replay.
     """
     parts.status = response.status
     parts.incomplete_reason = _incomplete_reason(response)
     if response.usage is not None:
         parts.usage = _usage(response.usage)
+    if response.id:
+        parts.provider_data["response_id"] = response.id
+    if store is False:
+        for output in response.output:
+            if output.type == "reasoning":
+                parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
+    parts.provider_data[_STORED_KEY] = store is not False
     if response.status == "completed":
         _record_completed_output(
             parts,
@@ -452,8 +460,6 @@ def _read_ended_response(
             portable_replay=portable_replay,
             native_compaction=native_compaction,
         )
-    else:
-        parts.provider_data[_STORED_KEY] = store is not False
 
 
 def responses_stop_reason(status: str | None, incomplete_reason: str | None, *, tool_calls: bool) -> StopReason | None:
@@ -527,24 +533,26 @@ class ResponsesStream:
         elif event.type == "response.function_call_arguments.delta" and self._tool_use:
             self._tool_use["function"]["arguments"] += current.delta
         elif event.type == "response.output_item.done":
-            if self._tool_use:
-                self.parts.tool_calls.append(self._tool_use)
-                events.append(ToolCallReady(self._tool_use))
-                self._tool_use = {}
+            events.extend(self._ready_call())
             _record_tool_search_items(self.parts, [current.item])
             if self.store is False or self.portable_replay:
                 self._items[current.output_index] = current.item.model_dump(mode="json", exclude_none=True)
-        elif event.type in {"response.completed", "response.incomplete"}:
+        elif event.type in _ENDED_EVENT_TYPES:
+            # A call the response ended in the middle of is kept, as a blocking response keeps every call it lists.
+            events.extend(self._ready_call())
             self._end(current.response)
         return events
 
+    def _ready_call(self) -> list[StreamEvent]:
+        """Add the function call in progress, if any, to the turn and return its ready event."""
+        if not self._tool_use:
+            return []
+        call, self._tool_use = self._tool_use, {}
+        self.parts.tool_calls.append(call)
+        return [ToolCallReady(call)]
+
     def _end(self, response: Response) -> None:
         self.ended = True
-        if self.store is False:
-            for item in response.output:
-                if item.type == "reasoning":
-                    self.parts.provider_data["reasoning_output"] = item.model_dump(exclude_none=True)
-        self.parts.provider_data["response_id"] = response.id
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [
             self._items[index] for index in sorted(self._items)
         ]
@@ -607,7 +615,7 @@ def parse_response(
     """
     if response.error:
         raise _response_error(response.error.code, response.error.message, provider=wire.provider_name)
-    parts = ResponsesTurnParts(provider_data={"response_id": response.id} if response.id else {})
+    parts = ResponsesTurnParts()
     # The SDK's output union does not narrow on ``type``.
     for output in cast("list[Any]", response.output):
         if output.type == "message":
@@ -621,10 +629,7 @@ def parse_response(
                     "function": {"name": output.name, "arguments": output.arguments},
                 },
             )
-        elif output.type == "reasoning" and store is False:
-            parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
     parts.reasoning = _reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
-    parts.provider_data[_STORED_KEY] = store is not False
     parts.provider_data["response_status"] = response.status
     parts.provider_data["incomplete_reason"] = _incomplete_reason(response)
     _record_tool_search_items(parts, response.output)

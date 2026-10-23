@@ -271,12 +271,13 @@ def _cli_login_error(error: CliLoginError, *, provider: str) -> ProviderError:
 
     A token refresh that failed on the network or with a transient status is the provider's transient failure, as
     ``provider_failure`` decides; any other login failure, such as a missing login or a refresh token the CLI's
-    server rejected, is final and tells the user to log in again.
+    server rejected, is final and tells the user to log in again. It carries the status that server answered, or
+    401 for a login the server never answered, as a missing API key does.
     """
     return provider_failure(error, provider=provider) or AuthenticationFailed(
         str(error),
         provider=provider,
-        status_code=401,
+        status_code=error.status_code or 401,
     )
 
 

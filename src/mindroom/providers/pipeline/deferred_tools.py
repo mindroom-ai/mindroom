@@ -27,9 +27,8 @@ __all__ = ["portable_tool_search_stream"]
 
 
 def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, Any]:
-    function = call.get("function")
-    # A persisted id-only placeholder has no function; ``providers/legacy_stored_tool_calls.py`` drops it later.
-    if not isinstance(function, dict) or function.get("name") not in deferred:
+    function = call["function"]
+    if function["name"] not in deferred:
         return call
     wrapped = json.dumps({"name": function["name"], "arguments": call_arguments(function)}, ensure_ascii=False)
     return {**call, "function": {**function, "name": CALL_TOOL_NAME, "arguments": wrapped}}

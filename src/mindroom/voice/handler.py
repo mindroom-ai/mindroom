@@ -29,7 +29,7 @@ from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.helper_usage import record_system_usage
-from mindroom.llm.media import Audio
+from mindroom.llm.media import Audio, canonical_mime_type
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics
@@ -479,7 +479,7 @@ async def _download_audio(
 
 def _stt_upload_filename_and_mime_type(mime_type: str | None) -> tuple[str, str]:
     """Return multipart filename and MIME type for an STT upload."""
-    normalized_mime_type = (mime_type or "audio/ogg").split(";", 1)[0].strip().lower() or "audio/ogg"
+    normalized_mime_type = canonical_mime_type(mime_type) or "audio/ogg"
     if not normalized_mime_type.startswith("audio/"):
         logger.warning(
             "Non-audio MIME type declared for STT upload; using OGG fallback",

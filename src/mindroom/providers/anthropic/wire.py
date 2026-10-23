@@ -31,7 +31,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.providers.claude_wire_blocks import as_dict
-from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.stored_tool_calls import call_arguments
 
 if TYPE_CHECKING:
@@ -170,7 +169,7 @@ def format_claude_messages(
     """
     turns: list[dict[str, Any]] = []
     system_texts: list[str] = []
-    for message in repair_legacy_tool_calls(messages):
+    for message in messages:
         if message.role in {"system", "developer"}:
             system_texts.append(message.get_content_string())
             continue

@@ -258,6 +258,9 @@ def test_an_untyped_provider_payload_reads_as_its_typed_twin(error_type: str, me
         ("Not authorized to invoke the model", True),
         (f"{_OAUTH_HOST_UNREACHABLE} (Caused by NewConnectionError)", False),
         ("Workspace author is unknown", False),
+        ("invalid_auth: the access token was revoked", True),
+        ("Unauthorised to invoke the model", True),
+        ("The summary input held 40100 tokens", False),
     ],
 )
 def test_untyped_text_names_the_credentials_as_the_provider_classifier_does(text: str, *, authentication: bool) -> None:
@@ -265,6 +268,27 @@ def test_untyped_text_names_the_credentials_as_the_provider_classifier_does(text
     reply = get_user_friendly_error_message(Exception(text))
 
     assert reply.startswith("❌ Authentication failed") is authentication
+
+
+@pytest.mark.parametrize(
+    ("text", "rate_limited"),
+    [
+        ("Rate limit exceeded", True),
+        ("rate_limit_exceeded: slow down", True),
+        ("HTTP 429 Too Many Requests", True),
+        ("Quota exceeded for this project", True),
+        # Words that only hold "rate", and a number that only holds "429".
+        ("Failed to generate a response for this model", False),
+        ("Could not separate the tool arguments", False),
+        ("The retry strategy gave up", False),
+        ("The summary input held 4290 tokens", False),
+    ],
+)
+def test_untyped_text_reads_as_rate_limited_only_for_its_whole_words(text: str, *, rate_limited: bool) -> None:
+    """Text without a provider payload says a request was throttled only when rate, 429, or quota is a whole word."""
+    reply = get_user_friendly_error_message(Exception(text))
+
+    assert reply.startswith("⏱️ Rate limited") is rate_limited
 
 
 def test_json_provider_error_is_case_insensitive() -> None:

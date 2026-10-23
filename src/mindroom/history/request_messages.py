@@ -14,6 +14,7 @@ from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
 from mindroom.constants import prompt_roles_for_history_storage
+from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
@@ -63,7 +64,8 @@ def scope_history_messages(
     ``runs`` are the session's runs in stored order. The two limits are the request's own, which a replay plan may
     narrow from the configured policy. Each message is a copy marked ``from_history``, so a request never changes a
     stored run and is never stored again. Prompt roles, ``system_message_role`` included, never replay. Tool calls
-    beyond ``max_tool_calls_from_history`` are left out, and so is every media item except the newest viewed images.
+    are read in the shape current releases store, and those beyond ``max_tool_calls_from_history`` are left out, as is
+    every media item except the newest viewed images.
     """
     selected = _selected_messages(
         runs,
@@ -72,7 +74,7 @@ def scope_history_messages(
         num_history_messages=num_history_messages,
         prompt_roles=prompt_roles_for_history_storage(system_message_role),
     )
-    history = [_history_copy(message) for message in selected]
+    history = repair_legacy_tool_calls([_history_copy(message) for message in selected])
     if max_tool_calls_from_history is not None:
         history = filter_tool_calls(history, max_tool_calls_from_history)
     return project_history_media_for_replay(history)
@@ -194,10 +196,12 @@ def build_resume_request(
 ) -> list[Message]:
     """Return the request that resumes a paused run: its stored system message, the summary, history, then the rest.
 
-    ``paused`` holds the paused run's stored messages, which never include history copies. Its stored system message is
-    reused, so a signed reasoning block in the paused request stays valid against an unchanged prefix. A run paused
-    while Agno rendered the summary inside that system message keeps that single summary.
+    ``paused`` holds the paused run's stored messages, which never include history copies; their tool calls are read in
+    the shape current releases store, as history's are. Its stored system message is reused, so a signed reasoning
+    block in the paused request stays valid against an unchanged prefix. A run paused while Agno rendered the summary
+    inside that system message keeps that single summary.
     """
+    paused = repair_legacy_tool_calls(paused)
     system = next((message for message in paused if message.role == "system"), None)
     messages = [
         *([] if system is None else [system]),

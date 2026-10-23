@@ -1,4 +1,4 @@
-"""Stored tool-call shapes earlier releases wrote, which every wire still replays from history.
+"""Stored tool-call shapes earlier releases wrote, read in the current shape where stored runs become requests.
 
 Each repair returns request-only copies; stored history is never rewritten.
 """
@@ -19,18 +19,20 @@ __all__ = ["repair_legacy_tool_calls"]
 # LEGACY_COMPAT: Persisted Anthropic tool calls without empty arguments.
 # Legacy format: Agno writers omitted the arguments field for empty Anthropic tool calls.
 # Last legacy release: v2026.9.43; replacement: v2026.9.44 included the upstream Agno 3.0.7 writer fix.
-# Handling: Supply `{}` arguments in copies of affected calls, on every wire, until those histories are migrated
-# or dropped.
-# Coverage: tests/providers/test_openai_family_wire.py::test_legacy_tool_replay_supplies_missing_arguments,
+# Handling: Supply `{}` arguments in the request copies of affected calls, for every route, where stored history and
+# a paused run become request messages, until those histories are migrated or dropped.
+# Coverage: tests/test_history_legacy_tool_calls.py::test_a_stored_call_without_arguments_replays_with_empty_arguments,
 # tests/providers/test_provider_families.py::test_every_family_replays_the_tool_calls_any_provider_stored
 
 
 # LEGACY_COMPAT: Persisted sparse OpenAI tool placeholders and orphan results.
 # Legacy format: Streamed OpenAI history retained id-only tool placeholders and their orphan tool results.
 # Last legacy release: v2026.7.172; replacement: v2026.7.173 filtered sparse placeholders during writes.
-# Handling: Remove each placeholder and its matching result on every wire while preserving unchanged message
-# identities.
-# Coverage: tests/providers/test_openai_family_wire.py::test_legacy_tool_replay_removes_placeholders_and_orphans,
+# Handling: Remove each placeholder and its matching result, for every route, where stored history and a paused run
+# become request messages, before the tool-call window counts results, preserving unchanged message identities.
+# Coverage: tests/test_history_legacy_tool_calls.py::test_placeholders_and_their_results_never_replay,
+# tests/test_history_legacy_tool_calls.py::test_the_tool_call_window_counts_only_calls_that_replay,
+# tests/test_history_legacy_tool_calls.py::test_a_paused_run_resumes_without_its_placeholders,
 # tests/providers/test_provider_families.py::test_every_family_replays_the_tool_calls_any_provider_stored
 def repair_legacy_tool_calls(messages: Sequence[Message]) -> list[Message]:
     """Supply missing call arguments and drop id-only placeholder calls with their results."""

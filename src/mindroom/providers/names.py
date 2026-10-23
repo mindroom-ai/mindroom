@@ -5,11 +5,14 @@ _PROVIDER_ALIASES = {"gemini": "google", "openai_codex": "codex", "kimi_code": "
 
 
 def canonical_provider(provider: str) -> str:
-    """Return the normalized provider key used for model dispatch and identity checks."""
+    """Return a provider name's normalized spelling, aliases kept; ``provider_route`` resolves the aliases."""
     return provider.strip().lower().replace("-", "_")
 
 
 def provider_route(provider: str) -> str:
-    """Return the route a configured ``provider`` value selects: its normalized key with aliases resolved."""
+    """Return the route a configured ``provider`` value selects, which model dispatch and pricing compare.
+
+    It is the value's normalized spelling with aliases resolved, so ``gemini`` selects ``google``.
+    """
     canonical = canonical_provider(provider)
     return _PROVIDER_ALIASES.get(canonical, canonical)

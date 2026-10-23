@@ -18,7 +18,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.logging_config import get_logger
-from mindroom.providers.errors import classify_provider_error, is_credential_error
+from mindroom.providers.errors import classify_provider_error, is_credential_error, whole_words
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -32,6 +32,10 @@ _MISSING_PROVIDER_KEY_PATTERN = re.compile(
     r"|missing credentials\. please pass an `api_key`"  # Newer OpenAI SDK
     r"|could not resolve authentication method",  # Anthropic SDK
 )
+# Wording of text without a provider payload, read as whole words: a 401 status, and a throttled request's rate,
+# 429, or quota.
+_UNAUTHORIZED_WORDING = whole_words("401")
+_RATE_LIMIT_WORDING = whole_words("rate", "429", "quotas?")
 _PROVIDER_UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 _RATE_LIMITED = "⏱️ Rate limited. Please wait a moment and try again."
 
@@ -116,7 +120,7 @@ def get_user_friendly_error_message(
 
     A provider error's type alone decides its message, since the provider's status and wording were read when it
     was classified. An error of another kind that holds a provider's error payload reads as that payload's typed
-    error would; only one without a payload is matched by the keywords in its text.
+    error would; only one without a payload is matched by the whole words in its text.
 
     Args:
         error: The exception that occurred
@@ -183,10 +187,11 @@ def _untyped_error_message(error: Exception, safe_error: str, runtime_paths: Run
         typed = classify_provider_error(message, provider=provider or "", error_type=error_type)
         return _provider_error_message(typed, safe_error, runtime_paths)
     # Only distinguish the most important error types
-    if "401" in error_str or is_credential_error(error_str):
+    if _UNAUTHORIZED_WORDING.search(error_str) or is_credential_error(error_str):
         return _authentication_failed(provider, safe_error)
-    if any(x in error_str for x in ["rate", "429", "quota"]):
+    if _RATE_LIMIT_WORDING.search(error_str):
         return _RATE_LIMITED
+    # No word holds "timeout" by accident, while a name such as ConnectTimeoutError holds it on purpose.
     if "timeout" in error_str:
         return "⏰ Request timed out. Please try again."
     # Generic error with the actual error message for transparency

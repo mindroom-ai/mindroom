@@ -36,7 +36,7 @@ from mindroom.providers.claude_wire_blocks import (
     TOOL_SEARCH_TOOL_TYPE,
     as_dict,
 )
-from mindroom.providers.names import canonical_provider
+from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -56,7 +56,7 @@ def native_tool_search_supported(provider: str, model_id: str) -> bool:
     Every Claude model since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 supports the search tool, so gating denylists
     the closed pre-4.5 set and new model releases take the native path without a code change.
     """
-    if canonical_provider(provider) not in _NATIVE_TOOL_SEARCH_PROVIDERS:
+    if provider_route(provider) not in _NATIVE_TOOL_SEARCH_PROVIDERS:
         return False
     return not model_id.startswith(TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES)
 

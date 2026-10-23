@@ -49,7 +49,18 @@ _OPENAI_RESPONSES = {
     "extra_kwargs": {"base_url": "https://proxy.example/v1"},
 }
 _CEREBRAS = {"provider": "cerebras", "id": "gpt-oss-120b", "api_key": "test-key"}
-PROVIDER_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLOUD_ML_", "GEMINI_", "GOOGLE_", "OLLAMA_", "OPENAI_", "CEREBRAS_")
+_GROQ = {"provider": "groq", "id": "openai/gpt-oss-120b", "api_key": "test-key"}
+PROVIDER_ENV_PREFIXES = (
+    "ANTHROPIC_",
+    "AWS_",
+    "CLOUD_ML_",
+    "GEMINI_",
+    "GOOGLE_",
+    "OLLAMA_",
+    "OPENAI_",
+    "CEREBRAS_",
+    "GROQ_",
+)
 # The SDK warns on every request that names the Claude id above; a module that drives that family filters it.
 CLAUDE_DEPRECATION_FILTER = f"ignore:The model '{_ANTHROPIC['id']}' is deprecated:DeprecationWarning"
 
@@ -181,6 +192,13 @@ def _chat_reply() -> httpx.Response:
     )
 
 
+def _groq_reply() -> httpx.Response:
+    """A Groq stream: its usage arrives in Groq's ``x_groq`` extension of the finishing chunk."""
+    finish = _chat_chunk({}, finish_reason="stop")
+    finish["x_groq"] = {"id": "req_1", "usage": {"prompt_tokens": 40, "completion_tokens": 9, "total_tokens": 49}}
+    return sse_response([_chat_chunk({"content": "ok"}), finish, "[DONE]"])
+
+
 def _responses_reply() -> httpx.Response:
     return sse_response(
         _responses_events("ok", {"input_tokens": 40, "output_tokens": 9, "total_tokens": 49}),
@@ -252,4 +270,5 @@ FAMILIES = {
         omitted_media="video",
     ),
     "cerebras": Family(_CEREBRAS, _chat_reply, _chat_tools, omitted_media="audio"),
+    "groq": Family(_GROQ, _groq_reply, _chat_tools, omitted_media="audio"),
 }

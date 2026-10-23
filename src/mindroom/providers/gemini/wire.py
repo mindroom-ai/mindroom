@@ -25,7 +25,6 @@ from mindroom.llm.media import IMAGE_HEADER_BYTES, image_mime_type
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
-from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.remote_media import download_media
 from mindroom.providers.stored_tool_calls import call_arguments
 
@@ -115,7 +114,7 @@ async def format_contents(
     """
     contents: list[dict[str, Any]] = []
     system_instruction: str | list[Any] | None = None
-    for message in repair_legacy_tool_calls(messages):
+    for message in messages:
         if message.role in ("system", "developer"):
             system_instruction = message.content
             continue

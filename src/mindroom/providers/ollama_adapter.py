@@ -37,7 +37,6 @@ from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
-from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.remote_media import download_media
 from mindroom.providers.stored_tool_calls import call_arguments
 from mindroom.providers.tool_policy import provider_tools_disabled
@@ -106,10 +105,7 @@ class OllamaProvider:
 
         A reply that arrives whole has its ``<think>`` reasoning split out, as Agno did for non-streamed replies.
         """
-        messages = [
-            await _format_message(message, self.identity.provider_name)
-            for message in repair_legacy_tool_calls(request.messages)
-        ]
+        messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
         chat_kwargs = self._chat_kwargs(request)
         reply = _OllamaReply()
         started = time.monotonic()

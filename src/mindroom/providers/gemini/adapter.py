@@ -57,11 +57,7 @@ _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GeminiSettings:
-    """The ``extra_kwargs`` a Gemini model accepts, named as Agno's ``Gemini`` fields.
-
-    Agno's ``response_modalities`` and ``speech_config`` are retired: they ask for image or audio output, which
-    replies do not carry.
-    """
+    """The ``extra_kwargs`` a Gemini model accepts, named as Agno's ``Gemini`` fields."""
 
     api_key: str | None = field(default=None, metadata=SECRET)
     vertexai: bool = False

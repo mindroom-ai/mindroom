@@ -46,7 +46,7 @@ class Capabilities:
     """What a provider route supports, so policy code stops probing adapter classes.
 
     ``streams_only`` marks a route whose endpoint only streams, so a non-streaming request is streamed too and gets
-    the stream retry and idle limit.
+    the stream retry and idle limit, unless its caller retries it itself.
     """
 
     structured_output: Literal["native", "json_schema", "json_mode"] = "json_mode"
@@ -152,7 +152,11 @@ class ToolCallReady:
 
 @dataclass(frozen=True, slots=True)
 class UsageReported:
-    """Usage the provider reported; ``final=False`` for a partial report before the turn ends."""
+    """Usage the provider reported; ``final=False`` for a partial report before the turn ends.
+
+    An adapter yields the usage a stream chunk carries before that chunk's output events, so a reply stopped while
+    the output is delivered still settles what the provider billed; each partial report replaces the one before.
+    """
 
     usage: MessageMetrics
     final: bool = True

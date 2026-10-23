@@ -230,7 +230,8 @@ Matrix sync callback
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `providers/model_loading.py` | Which key a configured model authenticates with: the dashboard key and the missing-key checks the CLI and dashboard report |
-| `providers/names.py` | `canonical_provider`, the one provider-name spelling model dispatch, pricing, and the wire adapters compare, and `provider_route`, which also resolves provider aliases such as `gemini`, in a module that imports nothing |
+| `providers/key_checks.py` | The request that proves a provider API key valid, which `mindroom doctor` and the dashboard's provider setup send |
+| `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, and `canonical_provider`, its normalized spelling, in a module that imports nothing |
 | `providers/anthropic/messages.py` | The owned Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names; unknown keys fail at construction |
 | `providers/anthropic/wire.py` | Claude Messages API formatting of owned messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |
@@ -256,7 +257,7 @@ Matrix sync callback
 | `providers/assistant_turn.py` | What every adapter does to finish a turn: the `mindroom_model` provenance stamp and timings |
 | `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
 | `providers/remote_media.py` | Downloads URL media for the adapters that send media only inline |
-| `providers/stored_tool_calls.py` | How every wire reads the tool calls stored in history, so a call another provider stored replays on any route; `legacy_stored_tool_calls.py` repairs the shapes earlier releases stored |
+| `providers/stored_tool_calls.py` | How a wire that sends tool-call arguments as an object reads a stored call's arguments, so a call another provider stored replays on any route |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
@@ -275,6 +276,7 @@ Matrix sync callback
 | `history/legacy_compaction_state.py` | One-time conversion, when a conversation database opens, of earlier compaction state, the compaction archive, and unpositioned run rows into the log |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
+| `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, read in the current shape where stored history and paused runs become requests |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
 | `history/session_runs.py` | Finished Matrix turns of an agent's conversations, live and compacted, with the approval hold-back and redaction filter background workers share |
 | `history/` | Persisted history: what a request replays from stored runs, the replay budget, compaction before and during a reply, summary rows, and interrupted-turn replay |

@@ -719,6 +719,24 @@ _OPENAI_HTTP_CASES = [
         1,
         1,
     ),
+    # A word of the auth family names the credentials beside an underscore and in British spelling, as the
+    # Agno-backed runtime's reply read them.
+    _Case(
+        "http_403_invalid_auth",
+        _openai_status(403, "invalid_auth: the access token was revoked", "invalid_request_error"),
+        AuthenticationFailed,
+        AUTHENTICATION,
+        1,
+        1,
+    ),
+    _Case(
+        "http_403_unauthorised",
+        _openai_status(403, "Unauthorised to use this model", "invalid_request_error"),
+        AuthenticationFailed,
+        AUTHENTICATION,
+        1,
+        1,
+    ),
     _Case(
         "http_413",
         _openai_status(413, "Request Entity Too Large", "invalid_request_error"),
@@ -1294,7 +1312,24 @@ async def test_a_failed_request_is_retried_and_reported_as_the_parity_table_says
 # --- A response the provider ended incomplete --------------------------------------------------------------------
 
 
-def _incomplete_response(reason: str) -> dict[str, Any]:
+# A call the output limit cut off mid-arguments, as the response lists it and as the turn keeps it.
+_CUT_OFF_CALL_ITEM = {
+    "id": "fc_1",
+    "type": "function_call",
+    "call_id": "call_1",
+    "name": "get_weather",
+    "arguments": '{"city": "Par',
+    "status": "incomplete",
+}
+_CUT_OFF_CALL = {
+    "id": "fc_1",
+    "call_id": "call_1",
+    "type": "function",
+    "function": {"name": "get_weather", "arguments": '{"city": "Par'},
+}
+
+
+def _incomplete_response(reason: str, *, cut_off_call: bool) -> dict[str, Any]:
     output = [
         {
             "id": "msg_1",
@@ -1303,6 +1338,7 @@ def _incomplete_response(reason: str) -> dict[str, Any]:
             "status": "incomplete",
             "content": [{"type": "output_text", "text": _PARTIAL, "annotations": []}],
         },
+        *([_CUT_OFF_CALL_ITEM] if cut_off_call else []),
     ]
     usage = {"input_tokens": 40, "output_tokens": 9, "total_tokens": 49}
     return {
@@ -1314,19 +1350,41 @@ def _incomplete_response(reason: str) -> dict[str, Any]:
     }
 
 
-def _incomplete(reason: str, *, stream: bool) -> Reply:
+def _incomplete(reason: str, *, stream: bool, cut_off_call: bool) -> Reply:
+    response = _incomplete_response(reason, cut_off_call=cut_off_call)
     if not stream:
-        return _json(200, _incomplete_response(reason))
-    ended = {"type": "response.incomplete", "sequence_number": 2, "response": _incomplete_response(reason)}
-    return _responses_stream(_response_text(_PARTIAL), ended)
+        return _json(200, response)
+    call_events = [
+        {
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 1,
+            "item": {**_CUT_OFF_CALL_ITEM, "arguments": "", "status": "in_progress"},
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 3,
+            "item_id": "fc_1",
+            "output_index": 1,
+            "delta": _CUT_OFF_CALL_ITEM["arguments"],
+        },
+    ]
+    ended = {"type": "response.incomplete", "sequence_number": 4, "response": response}
+    return _responses_stream(_response_text(_PARTIAL), *(call_events if cut_off_call else []), ended)
 
 
 # A response that ended incomplete ends the turn with its stop reason after one request, streamed or blocking, as a
 # blocking one did on the Agno-backed runtime; that runtime failed a streamed one as an incomplete stream instead.
+# The turn keeps a call the response ended in the middle of, as a blocking response and a Chat reply did there.
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("reason", "stop_reason"),
-    [("max_output_tokens", "output_limit"), ("content_filter", "content_filter")],
+    ("reason", "stop_reason", "cut_off_call"),
+    [
+        ("max_output_tokens", "output_limit", False),
+        ("content_filter", "content_filter", False),
+        ("max_output_tokens", "output_limit", True),
+    ],
+    ids=["output_limit", "content_filter", "output_limit-cut_off_call"],
 )
 @pytest.mark.parametrize(
     ("route", "stream"),
@@ -1337,6 +1395,7 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
     stream: bool,
     reason: str,
     stop_reason: str,
+    cut_off_call: bool,
     tmp_path: Path,
 ) -> None:
     """The output limit and the content filter end a streamed and a blocking reply the same way, without a retry."""
@@ -1344,7 +1403,7 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
 
     def respond(request: httpx.Request) -> httpx.Response:
         sent.append(request)
-        answer = _incomplete(reason, stream=stream)()
+        answer = _incomplete(reason, stream=stream, cut_off_call=cut_off_call)()
         assert isinstance(answer, httpx.Response)
         return answer
 
@@ -1353,6 +1412,7 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
     turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=stream))
 
     assert (turn.content, turn.stop_reason, turn.usage.output_tokens, len(sent)) == (_PARTIAL, stop_reason, 9, 1)
+    assert turn.tool_calls == ([_CUT_OFF_CALL] if cut_off_call else [])
 
 
 # Each route's answer to a request its server failed, which the SDK and the stream retry would both reissue.
@@ -1453,7 +1513,10 @@ async def test_a_cli_login_refresh_failure_is_retried_only_when_it_is_transient(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An expired CLI login refreshes inside the request; a network failure or a transient status there is retried."""
+    """An expired CLI login refreshes inside the request; a network failure or a transient status there is retried.
+
+    The error carries the status the login server answered; a refresh that never reached it is a transport failure.
+    """
     attempts: list[str] = []
 
     def refresh(url: str, **_kwargs: object) -> httpx.Response:
@@ -1472,6 +1535,8 @@ async def test_a_cli_login_refresh_failure_is_retried_only_when_it_is_transient(
 
     assert (type(raised.value), len(attempts)) == (error, refreshes)
     assert get_user_friendly_error_message(raised.value).startswith(message)
+    status = refresh_reply.status_code if isinstance(refresh_reply, httpx.Response) else None
+    assert raised.value.status_code == status
 
 
 _CHAT_COMPLETION = {

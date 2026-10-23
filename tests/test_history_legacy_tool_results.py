@@ -147,6 +147,7 @@ _RESULTS = {
     "cerebras": _chat_results,
     "gemini": _gemini_results,
     "gemini_vertexai": _gemini_results,
+    "groq": _chat_results,
     "ollama": _chat_results,
     "openai_chat": _chat_results,
     "openai_responses": _responses_results,

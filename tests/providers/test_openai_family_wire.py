@@ -158,43 +158,28 @@ async def _adapter_turn(built: _Built, request: ModelRequest) -> Any:  # noqa: A
     return await complete(built.adapter, request)
 
 
-# --- Legacy history -------------------------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_legacy_tool_replay_supplies_missing_arguments(tmp_path: Path) -> None:
-    call = {"id": "call_1", "type": "function", "function": {"name": "list_rooms"}}
-    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
-    history = [
-        _user(),
-        Message(role="assistant", tool_calls=[call]),
-        Message(role="tool", tool_call_id="call_1", content="[]"),
-    ]
-
-    await _turn(built, ModelRequest(messages=history))
-
-    assert built.body()["messages"][1]["tool_calls"][0]["function"] == {"name": "list_rooms", "arguments": "{}"}
-    assert "arguments" not in call["function"]
-
-
-@pytest.mark.asyncio
-async def test_legacy_tool_replay_removes_placeholders_and_orphans(tmp_path: Path) -> None:
-    history = [
-        _user(),
-        Message(role="assistant", tool_calls=[{"id": "call_0"}, _CALL]),
-        Message(role="tool", tool_call_id="call_0", content="orphan"),
-        Message(role="tool", tool_call_id="call_1", content="sunny"),
-    ]
-    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
-
-    await _turn(built, ModelRequest(messages=history))
-
-    sent = built.body()["messages"]
-    assert [message.get("tool_call_id") for message in sent if message["role"] == "tool"] == ["call_1"]
-    assert sent[1]["tool_calls"] == [_CALL]
-
-
 # --- Chat parsing ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_usage_on_several_chat_chunks_adds_up_as_agno_summed_it(tmp_path: Path) -> None:
+    """Each chunk's usage adds to the turn's, so every partial report and the final one hold the running sum.
+
+    Agno added every usage-bearing chunk to the assistant message's metrics; a server that repeats its cumulative
+    usage on each chunk is counted once per chunk.
+    """
+    first = {"prompt_tokens": 40, "completion_tokens": 1, "total_tokens": 41}
+    reply = _chat_reply(_chunk({"content": "ok"}, usage=first), _chunk({}, finish_reason="stop"))
+    built = _Built(tmp_path, _OPENAI_CHAT, reply)
+
+    events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
+
+    reports = [event for event in events if isinstance(event, UsageReported)]
+    assert [(report.usage.input_tokens, report.usage.output_tokens, report.final) for report in reports] == [
+        (40, 1, False),
+        (82, 13, False),
+        (82, 13, True),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1003,16 +988,38 @@ def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_request_overrides_reach_the_body(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("authored", "temperature"),
+    [
+        ({}, 0.2),
+        ({"temperature": 0.5}, 0.2),
+        ({"request_params": {"temperature": 0.7}}, 0.7),
+        ({"extra_body": {"temperature": 0.9}}, 0.9),
+    ],
+    ids=["override", "over-configured", "request_params-wins", "extra_body-wins"],
+)
+async def test_a_temperature_override_is_sent_as_the_models_temperature(
+    tmp_path: Path,
+    authored: dict[str, Any],
+    temperature: float,
+) -> None:
+    """An override replaces the model's temperature, so it sits where the SDK puts its ``temperature`` keyword.
+
+    Agno set the override on the model, so authored ``request_params`` and ``extra_body`` still win over it.
+    """
     built = _Built(
         tmp_path,
-        {**_OPENAI_CHAT, "id": "gpt-4.1"},
+        {**_OPENAI_CHAT, "id": "gpt-4.1", "extra_kwargs": authored},
         _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
     )
 
-    await _turn(built, ModelRequest(messages=[_user()], overrides=RequestOverrides(temperature=0.2)))
+    tool = ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object"})
 
-    assert built.body()["temperature"] == 0.2
+    await _turn(built, ModelRequest(messages=[_user()], tools=[tool], overrides=RequestOverrides(temperature=0.2)))
+
+    body = built.body()
+    assert list(body) == ["messages", "model", "stream", "stream_options", "temperature", "tools"]
+    assert body["temperature"] == temperature
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,8 @@ import httpx
 import pytest
 
 from mindroom.config.models import DebugConfig, ModelConfig
+from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
+from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
 from mindroom.llm.media import Audio, Image, Video
 from mindroom.llm.messages import Message
@@ -29,6 +31,7 @@ from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.synthetic_adapter import SHELL_TOOL
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
+from mindroom.session_storage.codec import run_from_row
 from tests.providers.family_support import (
     CLAUDE_DEPRECATION_FILTER,
     FAMILIES,
@@ -165,15 +168,34 @@ _STORED_CALLS = [
     {"id": "call_bare", "type": "function", "function": {"name": "get_weather"}},
     {"id": "call_placeholder"},
 ]
-_STORED_TOOL_TURN = [
-    Message(role="user", content="Weather?"),
-    Message(role="assistant", tool_calls=_STORED_CALLS),
-    *(
-        Message(role="tool", tool_call_id=call["id"], tool_name="get_weather", content="sunny")
-        for call in _STORED_CALLS
-    ),
-    Message(role="user", content="And tomorrow?"),
-]
+_STORED_RUN = {
+    "run_id": "run-1",
+    "agent_id": "code",
+    "status": "COMPLETED",
+    "messages": [
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "tool_calls": _STORED_CALLS},
+        *(
+            {"role": "tool", "tool_call_id": call["id"], "tool_name": "get_weather", "content": "sunny"}
+            for call in _STORED_CALLS
+        ),
+    ],
+}
+
+
+def _stored_tool_turn() -> list[Message]:
+    """The request a new prompt sends after the stored run, assembled from its row as a reply assembles it."""
+    run = run_from_row("agent", json.dumps(_STORED_RUN))
+    assert run is not None
+    history = scope_history_messages(
+        [run],
+        scope=HistoryScope(kind="agent", scope_id="code"),
+        num_history_runs=None,
+        num_history_messages=None,
+        max_tool_calls_from_history=None,
+    )
+    prompt = Message(role="user", content="And tomorrow?")
+    return build_request(system=(), summary=None, history=history, turn=TurnMessages(prompt=prompt))
 
 
 def _replayed_tool_turn(family: str, body: dict[str, Any]) -> tuple[list[object], int]:
@@ -207,12 +229,12 @@ async def test_every_family_replays_the_tool_calls_any_provider_stored(family: s
 
     await complete(
         _pipeline(spec.adapter(tmp_path, wire)),
-        ModelRequest(messages=_STORED_TOOL_TURN, tools=[_tool("get_weather")]),
+        ModelRequest(messages=_stored_tool_turn(), tools=[_tool("get_weather")]),
     )
 
     body = wire.body()
     assert "call_placeholder" not in json.dumps(body)
-    as_text = family in {"openai_chat", "openai_responses", "cerebras"}
+    as_text = family in {"openai_chat", "openai_responses", "cerebras", "groq"}
     assert _replayed_tool_turn(family, body) == (['{"city": "Par', "", "{}"] if as_text else [{}, {}, {}], 3)
 
 

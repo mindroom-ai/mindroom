@@ -92,7 +92,7 @@ from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.model_loading import uses_alternative_auth
-from mindroom.providers.names import canonical_provider
+from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
@@ -715,7 +715,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     with ``auth_token``; Vertex and Bedrock resolve their project, region, and credentials from the runtime
     env. A key the dashboard saved for the model arrives as ``model_config.api_key``.
     """
-    route = cast("ClaudeRouteKind", canonical_provider(model_config.provider))
+    route = cast("ClaudeRouteKind", provider_route(model_config.provider))
     authored = dict(model_config.extra_kwargs or {})
     if route == "anthropic":
         api_key = model_config.configured_api_key()
