@@ -56,8 +56,8 @@ def _configured_model(config: Config, runtime_paths: RuntimePaths, model_name: s
 
 
 def _build_adapter(
-    config: Config,
     model_config: ModelConfig,
+    config: Config,
     runtime_paths: RuntimePaths,
     *,
     execution_identity: ToolExecutionIdentity | None,
@@ -101,7 +101,7 @@ def build_model_provider(
     does not accept.
     """
     model_config = _configured_model(config, runtime_paths, model_name)
-    adapter = _build_adapter(config, model_config, runtime_paths, execution_identity=execution_identity)
+    adapter = _build_adapter(model_config, config, runtime_paths, execution_identity=execution_identity)
     logger.info(
         "Using AI model",
         model=model_name,
@@ -151,4 +151,4 @@ def stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: Runtim
 def model_capabilities(config: Config, runtime_paths: RuntimePaths, model_name: str) -> Capabilities:
     """Return what the route of the model configured as ``model_name`` supports; building its adapter sends nothing."""
     model_config = _configured_model(config, runtime_paths, model_name)
-    return _build_adapter(config, model_config, runtime_paths, execution_identity=None).capabilities
+    return _build_adapter(model_config, config, runtime_paths, execution_identity=None).capabilities
