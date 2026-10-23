@@ -16,6 +16,7 @@ from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import collect_streamed_response_content, run_delegated_child_response, stream_agent_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
+from mindroom.approval.receipt import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner, approval_decisions
 from mindroom.approval.tool_owners import (
     authorize_prepared_tool_call,
@@ -45,6 +46,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
@@ -93,28 +95,30 @@ async def _collect_agent_continuation(
 ) -> _CollectedAgentContinuation:
     """Collect ordered events while leaving terminal fallback text for lifecycle settlement.
 
-    A failure of the resumed run propagates as its exception once the stream has reported it.
+    A failure of the resumed run propagates as its exception once the stream has reported it, and a failure while
+    the events are presented closes the stream before it propagates.
     """
     response: RunRecord | None = None
     saw_content_delta = False
     current_tools: list[ToolExecution] = []
     await presentation.publish(progress)
-    async for event in events:
-        if isinstance(event, RunFinished):
-            assert isinstance(event.record, RunRecord)
-            response = event.record
-        elif isinstance(event, ContentDelta):
-            presentation.append_text(event.text)
-            saw_content_delta = saw_content_delta or bool(event.text)
-            await presentation.publish(progress)
-        elif isinstance(event, ToolStarted):
-            presentation.start_tool(event.tool)
-            await presentation.publish(progress)
-        elif isinstance(event, ToolCompleted):
-            presentation.complete_tool(event.tool)
-            if event.parent_run_id is None:
-                current_tools.append(event.tool)
-            await presentation.publish(progress)
+    async with closing_async_stream(events):
+        async for event in events:
+            if isinstance(event, RunFinished):
+                assert isinstance(event.record, RunRecord)
+                response = event.record
+            elif isinstance(event, ContentDelta):
+                presentation.append_text(event.text)
+                saw_content_delta = saw_content_delta or bool(event.text)
+                await presentation.publish(progress)
+            elif isinstance(event, ToolStarted):
+                presentation.start_tool(event.tool)
+                await presentation.publish(progress)
+            elif isinstance(event, ToolCompleted):
+                presentation.complete_tool(event.tool)
+                if event.parent_run_id is None:
+                    current_tools.append(event.tool)
+                await presentation.publish(progress)
     if response is None:
         msg = "Agent continuation did not yield its final run"
         raise RuntimeError(msg)
@@ -331,9 +335,13 @@ async def _stream_continuation_turn(
 ) -> CompletedApprovalRun | PausedAttempt:
     """Stream resumed work and any fresh attempts into the continued reply through the shared response driver.
 
-    A recovered CLI call runs without a model request, so its follow-up, the turn with no ``resumed_attempt``, sends
-    the approval receipt with its first request; a resumed run already sent it.
+    A recovered CLI call runs without a model request, so its follow-up, the turn with no ``resumed_attempt``, reads
+    the approval receipt in its first attempt's run; a resumed run already read it.
     """
+    if resumed_attempt is None:
+        run_id = str(uuid4())
+        ctx = replace(ctx, run_id=run_id)
+        add_approval_receipt_reader(run_id)
     tool_context = runtime_context_from_dispatch_context(tool_dispatch)
     run_metadata: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
@@ -354,7 +362,6 @@ async def _stream_continuation_turn(
         reusable_build=reusable_build,
         resumed_attempt=resumed_attempt,
         initial_continuation_count=initial_continuation_count,
-        approval_receipt=resumed_attempt is None,
         delegation_depth=delegation_depth,
         media=media,
         on_completed=completed.append,

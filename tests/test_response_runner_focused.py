@@ -4696,6 +4696,8 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         forwarded_progress.append(kwargs["progress"])
         receipt = approval_receipt._context.get()
         assert receipt is not None
+        # The paused run the continuation names reads the receipt.
+        assert receipt.readers == {continuation.run_id}
         projected = messages_with_approval_receipt(
             [LoopMessage(role="system", content="base rules"), LoopMessage(role="tool", content="published")],
             receipt.receipt_text,

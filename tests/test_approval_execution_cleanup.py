@@ -5,26 +5,32 @@ The agent continuation has no handle to close: the owned conversation store hold
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mindroom.approval.execution import _collect_agent_continuation
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
+from mindroom.llm.events import ContentDelta
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.types import ConversationSession
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
+
+    from mindroom.llm.events import RunEvent
 
 
 def _identity() -> ToolExecutionIdentity:
@@ -101,3 +107,31 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
         )
 
     assert cleanup_order == ["finalize", "scope"]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_continuation_whose_publication_fails_closes_its_run_stream() -> None:
+    """A stop that lands while the resumed reply publishes stops the resumed run then, not when it is collected."""
+    closed: list[bool] = []
+
+    async def events() -> AsyncIterator[RunEvent]:
+        try:
+            yield ContentDelta("Working.")
+            yield ContentDelta(" More.")
+        finally:
+            closed.append(True)
+
+    published: list[StructuredStreamChunk] = []
+
+    async def progress(chunk: StructuredStreamChunk) -> None:
+        published.append(chunk)
+        if len(published) > 1:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await _collect_agent_continuation(
+            events(),
+            CollectedStreamPresentation(show_tool_calls=True),
+            progress=progress,
+        )
+    assert closed == [True]

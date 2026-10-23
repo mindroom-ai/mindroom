@@ -167,6 +167,35 @@ def test_the_notice_asks_to_acknowledge_with_collect() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_tool_call_that_ends_the_reply_leaves_its_ended_jobs_for_the_next_reply(tmp_path: Path) -> None:
+    """No request reads the result of a call that ends the reply, so a job cancelled meanwhile is told next time."""
+    conversation = await _conversation(tmp_path)
+
+    async def switch_away(job_id: str) -> str:
+        """Cancel a background job and end the reply.
+
+        Args:
+            job_id: The job to cancel.
+
+        """
+        await conversation.cancel(job_id)
+        return "switched"
+
+    stopping = replace(adapt_function(Function.from_callable(switch_away)), stop_after_tool_call=True)
+    model = ScriptedModel([calls(tool_call("switch_away", "switch", job_id="job_a"))])
+    try:
+        await conversation.start("job_a")
+        with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
+            response = await run_job_turn(job_actor(), model, "work", generated=(stopping,))
+        assert _tool_results(response) == ["switched"]
+        assert not (await lookup(conversation.runtime, "job_a", owner=conversation.owner, depth=0)).consumed
+        with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
+            assert "`job_a` (tool_job_a) cancelled" in str(await _turn_start_job_note())
+    finally:
+        await conversation.runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_the_notice_names_each_job_and_how_it_ended(tmp_path: Path) -> None:
     """Each ended job gets one line with its ID, tool, and status."""
     conversation = await _conversation(tmp_path)

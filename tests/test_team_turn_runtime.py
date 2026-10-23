@@ -603,9 +603,9 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The leader loop gets mid-turn compaction before each request, and the notices around tools.
+    """The leader loop gets mid-turn compaction and the approval receipt hook before each request, and the notices.
 
-    A fresh turn carries no approval receipt; only a resume does.
+    No approval receipt is bound around a fresh turn, so none of its requests carries one.
     """
     team = squad_turn(tmp_path, monkeypatch, leader=[answer("Alone.", usage(50, 5))])
     captured: dict[str, Any] = {}
@@ -629,7 +629,10 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
 
     hooks = captured["hooks"]
     assert isinstance(hooks, LoopHooks)
-    assert [hook.__qualname__.split(".")[0] for hook in hooks.before_request] == ["mid_turn_compaction_hook"]
+    assert [hook.__qualname__.split(".")[0] for hook in hooks.before_request] == [
+        "mid_turn_compaction_hook",
+        "approval_receipt_hook",
+    ]
     assert (len(hooks.after_tool_batch), len(hooks.on_resume_entry)) == (1, 1)
     assert hooks.tool_middleware == ()
     [compaction] = [kwargs for kwargs in compactions if kwargs["is_team"]]
@@ -828,7 +831,7 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
         (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),),
     )
 
-    with approval_receipt_context(receipt):
+    with approval_receipt_context(receipt, run_id=raised.paused.run_id):
         await team.resume(raised.paused, approved=True, approvals=(call,))
 
     def receipt_roles(model: str) -> list[list[str]]:
@@ -842,6 +845,56 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
     assert receipt_roles("writer-model") == [[]]
     record, members = team.stored_runs()
     assert all(receipt not in json.dumps(run.to_dict()) for run in [record, *members])
+
+
+@pytest.mark.asyncio
+async def test_a_member_continued_after_its_own_delegation_in_an_approval_resume_never_reads_the_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the runs the approval resumes read its receipt, each once.
+
+    The resumed leader hands the writer a fresh task; the writer delegates to the helper and continues with the
+    helper's answer. No approval resumed the writer, so neither of its requests carries the receipt.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "checker", "Touch it")],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
+        helper=[],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    paused = raised.value.paused
+    team.models["default"] = ScriptedModel(
+        [delegate("call-polish", "writer", "Polish it"), answer("The writer polished it.", usage(50, 5))],
+    )
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    team.models["writer-model"] = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "call-sub", agent_name="helper", task="Dig"), metrics=usage(10, 1)),
+            answer("Polished with the helper's find."),
+        ],
+    )
+    team.models["helper-model"] = ScriptedModel([answer("Helper found it.")])
+    call = member_approval("call-touch", "dangerous")
+    receipt = build_approval_receipt(
+        (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),),
+    )
+
+    with approval_receipt_context(receipt, run_id=paused.run_id):
+        result = await team.resume(paused, approved=True, approvals=(call,))
+
+    def carries(model: str) -> list[bool]:
+        return [any(receipt in str(m.content) for m in r.messages) for r in team.models[model].requests]
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert carries("checker-model") == [True]
+    assert carries("default") == [True, False]
+    assert carries("writer-model") == [False, False]
+    assert carries("helper-model") == [False]
 
 
 @pytest.mark.asyncio
@@ -1390,6 +1443,62 @@ async def test_a_member_s_delegation_card_adds_no_marker_and_the_approved_reply_
     record, member, state = _delegation_state(team)
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
     assert [child.status for child in state.children] == ["completed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval_rule", "helper", "helper_flags"),
+    [
+        pytest.param(
+            "touch",
+            [calls(tool_call("touch", "call-helper", label="deep"), metrics=usage(5, 1)), answer("Dug deep.")],
+            [False, True],
+            id="child-call",
+        ),
+        pytest.param("run_subagent", [answer("Dug.")], [False], id="delegation-card"),
+    ],
+)
+async def test_a_member_continued_with_the_result_of_a_delegation_an_approval_decided_reads_the_receipt_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    approval_rule: str,
+    helper: list[list[ScriptStep]],
+    helper_flags: list[bool],
+) -> None:
+    """The member whose delegation the approval answers reads its receipt once, as the leader the card belongs to does.
+
+    The approval decides the helper's call the writer's delegation waits on, or the card of the writer's delegation
+    itself; the writer then continues with the helper's answer. A helper the approved card starts runs fresh and
+    never reads the receipt.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: dug.")],
+        helper=helper,
+        approval_rules=[ApprovalRuleConfig(match=approval_rule, action="require_approval")],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    paused = raised.value.paused
+    _, _, state = _delegation_state(team)
+    approvals = _saved_approval_calls(state)
+    receipt = build_approval_receipt(
+        tuple(replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True) for call in approvals),
+    )
+
+    with approval_receipt_context(receipt, run_id=paused.run_id):
+        result = await team.resume(paused, approved=True, approvals=approvals)
+
+    def carries(model: str) -> list[bool]:
+        return [any(receipt in str(m.content) for m in r.messages) for r in team.models[model].requests]
+
+    assert isinstance(result, CompletedApprovalRun)
+    # Each model's fresh request, then its first request after the approval.
+    assert carries("helper-model") == helper_flags
+    assert carries("writer-model") == [False, True]
+    assert carries("default") == [False, True]
 
 
 @pytest.mark.asyncio

@@ -101,8 +101,8 @@ class LoopHooks:
       mode's checkpoint of the batch).
     - ``tool_middleware``: wraps every tool call the loop executes, outermost first (job admission, the hook bridge).
     - ``after_tool_batch``: awaited in order with the live messages and the batch's result messages after the
-      results and any media follow-up are appended, before the loop decides to stop, pause, or continue
-      (queued-message and job notices).
+      results and any media follow-up are appended, before the loop decides to pause or continue; a batch whose
+      result stops the run runs none (queued-message and job notices).
     - ``on_resume_entry``: awaited in order by a resume with the live messages after the decided calls' results are
       appended and before the loop continues.
     - ``on_loop_end``: called once when the loop ends without an exception, with the final state and the last
@@ -298,8 +298,9 @@ async def _run_tool_batch(
             yield ToolCompleted(call.execution)
     results = [*batch.refused, *executed]
     progress.calls_so_far += len(results)
-    await append_tool_results(state.messages, results, hooks.after_tool_batch)
     progress.stopped = any(result.stop_after_tool_call for result in results)
+    # No later request reads what a hook would add after a batch that stops the run, so none runs, as in Agno's loop.
+    await append_tool_results(state.messages, results, () if progress.stopped else hooks.after_tool_batch)
     # A call of this batch paused, or a tool left a decision on the record (a delegation whose member paused).
     progress.paused = batch.paused or _waits_for_decision(state.record)
 

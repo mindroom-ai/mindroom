@@ -1242,6 +1242,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
+    "mindroom.approval.receipt",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.execution",
@@ -1253,6 +1254,7 @@ depends_on = [
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.settings",
+    "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
@@ -1264,6 +1266,7 @@ visibility = ["mindroom.response_runner"]
 path = "mindroom.approval.resume"
 depends_on = [
     "mindroom.agent_loop",
+    "mindroom.approval.receipt",
     "mindroom.history.native",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
@@ -1322,8 +1325,12 @@ depends_on = [
     "mindroom.llm",
 ]
 visibility = [
+    "mindroom.approval.execution",
+    "mindroom.approval.resume",
+    "mindroom.delegation.execution",
     "mindroom.loop_hooks",
     "mindroom.response_runner",
+    "mindroom.teams",
 ]
 
 [[modules]]
@@ -3260,6 +3267,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
+    "mindroom.approval.receipt",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.authorization",
@@ -5132,6 +5140,7 @@ depends_on = [
     "mindroom.background_tasks",
 ]
 visibility = [
+    "mindroom.approval.execution",
     "mindroom.approval.resume",
     "mindroom.agent_loop",
     "mindroom.teams",
@@ -5942,6 +5951,7 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.llm",
     "mindroom.logging_config",
+    "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.tool_function",
@@ -7598,6 +7608,7 @@ depends_on = [
     "mindroom.delegation.personas",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.approval.receipt",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.sessions",

@@ -223,13 +223,36 @@ def member_delegation_card(requirement: RunRequirement, member_ids: Collection[s
     """Return the member and its own call id when ``requirement`` is the card of a delegation call a member made.
 
     The team holds such a card, so its requirement names no member and its call id is ``member_id:call_id`` for one
-    of ``member_ids``. A child's projected tool id, ``delegation_id:call_id``, names no member, so it is not such a card.
+    of ``member_ids``. A child's call as its parent holds it (``child_card_id``) names no member, so it is not such a
+    card.
     """
     card_id = requirement.tool_execution.tool_call_id
     if requirement.member_agent_id is not None or not card_id:
         return None
     member_id, _, call_id = card_id.partition(":")
     return (member_id, call_id) if call_id and member_id in member_ids else None
+
+
+def pending_call_slot(requirement: RunRequirement, member_ids: Collection[str]) -> tuple[str | None, str | None]:
+    """Return the member whose slot shows the call ``requirement`` waits on, None for the team's, and its id there.
+
+    A member's own call shows in its member's slot, and the card of a member's own delegation call shows as that
+    call; the leader's own calls and a child's calls its parent holds show in the team's slot under their own id.
+    ``member_ids`` are the team's member ids, and a member it returns is as the requirement or card names it.
+    """
+    if card := member_delegation_card(requirement, member_ids):
+        return card
+    return requirement.member_agent_id, requirement.tool_execution.tool_call_id
+
+
+def child_card_id(delegation_id: str, call_id: str) -> str:
+    """Return the id a delegated child's paused call has on its parent, ``delegation_id:call_id``, which its card uses."""
+    return f"{delegation_id}:{call_id}"
+
+
+def child_call_id(delegation_id: str, card_id: str) -> str:
+    """Return the child's own call id from the id ``child_card_id`` gave that call on the child's parent."""
+    return card_id.removeprefix(f"{delegation_id}:")
 
 
 class ChildResponseRunner(Protocol):

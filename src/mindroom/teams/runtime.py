@@ -153,9 +153,6 @@ def continue_team(
     requirements on the team run, and the leader sends no request.
     """
     record = resumed_record(paused)
-    # The resumed record keeps the members that ended before the pause, as Agno's continuation of its live run did,
-    # in a list of its own, so the resume leaves ``paused`` as it was.
-    record.ended_member_runs = list(paused.ended_member_runs)
     record.member_responses = []
     # Agno's continuation started the leader's text afresh; the paused notice is not part of the answer.
     record.content = None
@@ -186,7 +183,8 @@ def continue_team(
                 if resumed.status is RunStatus.paused:
                     propagate_member_pause(record, plan.member, resumed)
                 else:
-                    content = resumed.content or MEMBER_TASK_COMPLETED
+                    # A failed resume keeps the member's paused content, so the leader reads why it failed instead.
+                    content = resumed.error or resumed.content or MEMBER_TASK_COMPLETED
                     results.append(MEMBER_RESULT_LINE.format(name=plan.member.spec.name, content=content))
             if plans and not any(not r.is_resolved() for r in record.requirements or ()):
                 _answer_delegations(record, messages, results)
@@ -436,7 +434,7 @@ class _MemberRuns:
             member.spec,
             [Message(role="user", content=task)],
             ctx=ctx,
-            hooks=member.hooks(False),
+            hooks=member.hooks(),
             persist=self._capture(ended),
             request_template=self._request_template(member),
         )
@@ -450,7 +448,7 @@ class _MemberRuns:
             plan,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
             ctx=self._member_context(paused.run_id),
-            hooks=member.hooks(True),
+            hooks=member.hooks(),
             persist=self._capture(ended),
             request_template=self._request_template(member),
         )
@@ -487,8 +485,9 @@ class _MemberRuns:
     ) -> RunRecord:
         """Forward the member's events and return its terminal record.
 
-        A member whose run fails is stored ``ERROR`` by its loop and still reaches the leader, as its record's text,
-        as Agno absorbed a member's error into the member's run; only cancellation propagates.
+        A member whose run fails is stored ``ERROR`` by its loop and still reaches the leader, as Agno absorbed a
+        member's error into the member's run: a fresh run as its record's text, a resumed one as its ``error``; only
+        cancellation propagates.
         """
         try:
             async with closing_async_stream(stream):

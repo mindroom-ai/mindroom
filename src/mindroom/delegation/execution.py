@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, ca
 from uuid import uuid4
 
 from mindroom.agent_loop.build import tool_owners_by_agent
+from mindroom.approval.receipt import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
@@ -54,6 +55,8 @@ from mindroom.delegation.state import (
     DelegationChild,
     DelegationPendingTool,
     DelegationState,
+    child_call_id,
+    child_card_id,
     delegation_card_id,
 )
 from mindroom.delegation.storage import freeze_delegation_storage
@@ -256,7 +259,7 @@ async def _run_child(
                     fresh=fresh,
                 ),
             )
-            observation.response = response.response
+            observation.keep_outcome(response.response)
             return response
     finally:
         _RUNNING_CHILD_ID.reset(token)
@@ -513,7 +516,7 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
     child_state = DelegationState.from_metadata(response.metadata)
     for tool in paused.tools:
         projected = deepcopy(tool)
-        projected.tool_call_id = f"{child.delegation_id}:{tool.tool_call_id}"
+        projected.tool_call_id = child_card_id(child.delegation_id, str(tool.tool_call_id))
         state.pending_tools.append(projected.to_dict())
         state.pending_tool_sources[projected.tool_call_id] = deepcopy(
             child_state.pending_tool_sources.get(str(tool.tool_call_id))
@@ -1046,6 +1049,12 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     caller_identity = replace(execution_identity, agent_name=caller)
     resolve_result = partial(_resolve_delegation_requirement, requirement, on_event=on_event)
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
+    if decisions is not None and (
+        requirement_key in decisions or (retained is not None and retained.delegation_id == pending_id)
+    ):
+        # The approval decided this call's card or the calls of the child it waits on, and the run that made the call
+        # continues with its result, so that run reads the approval's receipt.
+        add_approval_receipt_reader(requirement.member_run_id or response.run_id)
     excluded = toolkit_is_background_excluded("delegate", config, runtime_paths)
     # A child saved before a crash keeps its accepted owner when startup policy changes.
     if retained is not None:
@@ -1218,11 +1227,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             child_reasons = None
             child_calls = ()
             if pending_id == child.delegation_id and decisions is not None:
-                prefix = f"{child.delegation_id}:"
-                child_decisions = {key.removeprefix(prefix): value for key, value in decisions.items()}
-                child_reasons = {key.removeprefix(prefix): value for key, value in (denial_reasons or {}).items()}
+                delegation_id = child.delegation_id
+                child_decisions = {child_call_id(delegation_id, key): value for key, value in decisions.items()}
+                child_reasons = {
+                    child_call_id(delegation_id, key): value for key, value in (denial_reasons or {}).items()
+                }
                 child_calls = tuple(
-                    replace(call, tool_call_id=call.tool_call_id.removeprefix(prefix)) for call in approval_calls
+                    replace(call, tool_call_id=child_call_id(delegation_id, call.tool_call_id))
+                    for call in approval_calls
                 )
             try:
                 # The reply records a background child's call before its job starts, as for any managed call: the

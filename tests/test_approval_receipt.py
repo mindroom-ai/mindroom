@@ -27,7 +27,7 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
-from tests.agent_loop.helpers import collect, context, spec
+from tests.agent_loop.helpers import collect, context, echo, spec, toolkit
 from tests.approval_continuation_helpers import carries_approval_receipt
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import (
@@ -215,15 +215,15 @@ def test_a_stored_response_chain_keeps_the_receipt_provider_visible() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_hook_projects_the_receipt_into_the_first_request_only() -> None:
-    """A resumed run's first request carries the bound receipt; later requests and the stored run never do."""
-    model = ScriptedModel([answer("first"), answer("second")])
+async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only() -> None:
+    """The run the receipt names reads it in its first request only; another run and every stored run never do."""
+    model = ScriptedModel([calls(tool_call("echo", "call-1", text="x")), answer("first"), answer("second")])
     hook = approval_receipt_hook(Capabilities())
 
-    with approval_receipt.approval_receipt_context("trusted approval receipt"):
+    with approval_receipt.approval_receipt_context("trusted approval receipt", run_id="run-1"):
         _, first = await collect(
             run_agent(
-                spec(model),
+                spec(model, toolkit(echo)),
                 [Message(role="user", content="Go")],
                 ctx=context(),
                 hooks=LoopHooks(before_request=(hook,)),
@@ -238,30 +238,45 @@ async def test_the_hook_projects_the_receipt_into_the_first_request_only() -> No
             ),
         )
 
-    assert model.requests[0].messages[0].content == "You are Code.\n\ntrusted approval receipt"
-    assert model.requests[1].messages[0].content == "You are Code."
+    assert [request.messages[0].content for request in model.requests] == [
+        "You are Code.\n\ntrusted approval receipt",
+        "You are Code.",
+        "You are Code.",
+    ]
     assert all(
         "trusted approval receipt" not in str(message.content) for message in [*first.messages, *second.messages]
     )
 
 
-def _leader_delegating_to_code(tmp_path: Path) -> tuple[Config, RuntimePaths, ToolExecutionIdentity]:
-    """Return a ``leader`` that may delegate to ``code`` and needs approval to write a report, with its turn's identity."""
+def _leader_delegating_to_code(
+    tmp_path: Path,
+    *,
+    report_writer: str = "leader",
+    helper: bool = False,
+) -> tuple[Config, RuntimePaths, ToolExecutionIdentity]:
+    """Return a ``leader`` that may delegate to ``code``, with its turn's identity.
+
+    ``report_writer`` is the agent offered the report tool, whose ``write_report`` needs approval. With ``helper``,
+    ``code`` may in turn delegate to a ``helper`` agent.
+    """
     paths = _runtime_paths(tmp_path)
     requester = "@alice:example.org"
-    config = with_responder_access(
-        Config(
-            agents={
-                "leader": AgentConfig(display_name="Leader", tools=["report"], delegate_to=["code"]),
-                "code": AgentConfig(display_name="Code"),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            memory={"backend": "none"},
-            tool_approval={"rules": [{"match": "write_report", "action": "require_approval"}]},
-        ),
-        "code",
-        users=[requester],
+    names = ("leader", "code", "helper") if helper else ("leader", "code")
+    agents = {
+        name: AgentConfig(display_name=name.title(), tools=["report"] if name == report_writer else [])
+        for name in names
+    }
+    agents["leader"].delegate_to = ["code"]
+    if helper:
+        agents["code"].delegate_to = ["helper"]
+    config = Config(
+        agents=agents,
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+        tool_approval={"rules": [{"match": "write_report", "action": "require_approval"}]},
     )
+    for name in names[1:]:
+        with_responder_access(config, name, users=[requester])
     entity_ids(config, paths)
     identity = ToolExecutionIdentity(
         "matrix",
@@ -307,7 +322,7 @@ async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receip
         assert isinstance(paused, PausedAttempt)
         approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
         decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
-        with approval_receipt_context(build_approval_receipt(decided)):
+        with approval_receipt_context(build_approval_receipt(decided), run_id=paused.run_id):
             result = await resume(
                 approval_executor(config, paths),
                 paused,
@@ -324,11 +339,102 @@ async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receip
 
 
 @pytest.mark.asyncio
-async def test_a_turn_opted_into_the_receipt_sends_it_once_across_its_delegations(
+async def test_an_approved_child_and_the_parent_it_answers_each_read_the_receipt_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fresh turn that carries the receipt, as a recovered CLI call's follow-up does, sends it with its first request.
+    """The approved child reads the receipt when it resumes, and its parent when it continues with the child's answer.
+
+    The approval card belongs to the parent's turn, so the continuation names the parent's run.
+    """
+    config, paths, identity = _leader_delegating_to_code(tmp_path, report_writer="code")
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-1", agent_name="code", task="Write the report")),
+            answer("The report is written."),
+        ],
+    )
+    code = ScriptedModel([calls(tool_call("write_report", "call-1")), answer("Written.")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+
+    with registered_report_tool():
+        paused = await respond("leader", "Have the report written", **options)
+        assert isinstance(paused, PausedAttempt)
+        approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
+        decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
+        with approval_receipt_context(build_approval_receipt(decided), run_id=paused.run_id):
+            result = await resume(
+                approval_executor(config, paths),
+                paused,
+                approvals,
+                agent_name="leader",
+                **options,
+                decisions={call.tool_call_id: True for call in approvals},
+            )
+
+    assert isinstance(result, CompletedApprovalRun)
+    # Each model's fresh request, then its first request after the approval.
+    assert _receipt_flags(code) == [False, True]
+    assert _receipt_flags(leader) == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_every_run_between_the_card_and_a_nested_child_s_approved_call_reads_the_receipt_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each run that continues with the answer of an approved call below it reads the receipt, as the child does.
+
+    The leader delegates to ``code``, which delegates to ``helper``, whose gated call the approval decides: ``helper``
+    reads it when it resumes, and ``code`` and the leader each when they continue with their child's answer.
+    """
+    config, paths, identity = _leader_delegating_to_code(tmp_path, report_writer="helper", helper=True)
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-1", agent_name="code", task="Have the report written")),
+            answer("The report is written."),
+        ],
+    )
+    code = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-2", agent_name="helper", task="Write the report")),
+            answer("The helper wrote it."),
+        ],
+    )
+    helper = ScriptedModel([calls(tool_call("write_report", "call-1")), answer("Written.")])
+    ScriptedAgents({"leader": leader, "code": code, "helper": helper}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+
+    with registered_report_tool() as report:
+        paused = await respond("leader", "Have the report written", **options)
+        assert isinstance(paused, PausedAttempt)
+        approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
+        decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
+        with approval_receipt_context(build_approval_receipt(decided), run_id=paused.run_id):
+            result = await resume(
+                approval_executor(config, paths),
+                paused,
+                approvals,
+                agent_name="leader",
+                **options,
+                decisions={call.tool_call_id: True for call in approvals},
+            )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert len(report.written) == 1
+    # Each model's fresh request, then its first request after the approval.
+    assert _receipt_flags(helper) == [False, True]
+    assert _receipt_flags(code) == [False, True]
+    assert _receipt_flags(leader) == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_turn_the_receipt_names_sends_it_once_across_its_delegations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh turn that reads the receipt, as a recovered CLI call's follow-up does, sends it with its first request.
 
     No continuation after a delegation repeats it, and the fresh children the turn starts never get it.
     """
@@ -349,11 +455,12 @@ async def test_a_turn_opted_into_the_receipt_sends_it_once_across_its_delegation
         room_id=identity.room_id,
         thread_id=identity.thread_id,
         requester_id=identity.requester_id,
+        run_id="turn-run",
     )
 
     with (
         registered_report_tool(),
-        approval_receipt_context("Trusted approval receipt."),
+        approval_receipt_context("Trusted approval receipt.", run_id="turn-run"),
         tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
     ):
         chunks = [
@@ -365,7 +472,6 @@ async def test_a_turn_opted_into_the_receipt_sends_it_once_across_its_delegation
                 config=config,
                 execution_identity=identity,
                 supports_native_tool_approval=True,
-                approval_receipt=True,
             )
         ]
 

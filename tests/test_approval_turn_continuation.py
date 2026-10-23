@@ -337,7 +337,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
 
     async def resume() -> CompletedApprovalRun | PausedAttempt:
         resume_starts.append(len(model.requests))
-        with approval_receipt_context(f"Trusted approval receipt {len(resume_starts)}."):
+        with approval_receipt_context(f"Trusted approval receipt {len(resume_starts)}.", run_id=continuation.run_id):
             return await execution.continue_run(
                 continuation,
                 paused_answer=paused_answer,

@@ -319,9 +319,6 @@ def queued_notice_after_tool_batch(notice_text: str) -> AfterToolBatchHook:
     """
 
     async def after_tool_batch(messages: list[Message], results: Sequence[Message]) -> None:
-        if any(result.stop_after_tool_call for result in results):
-            # The batch ends the run, so no later request could carry the notice and the judge has nothing to decide.
-            return
         _append_queued_notice_if_needed(messages=messages, function_call_results=results, notice_text=notice_text)
         context = _queued_message_notice_context.get()
         if context is None or context.mid_turn_gate is None:

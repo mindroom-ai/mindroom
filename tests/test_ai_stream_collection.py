@@ -202,3 +202,28 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
     assert body == "Before. After."
     assert trace == []
     assert seen_kwargs["show_tool_calls"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_collector_whose_update_fails_closes_the_stream_before_the_failure_propagates() -> None:
+    """The stream's producer stops when its collector fails, not whenever the abandoned stream is collected."""
+    closed: list[bool] = []
+
+    async def stream() -> AsyncGenerator[object, None]:
+        try:
+            yield ContentDelta("Working.")
+            yield ContentDelta(" More.")
+        finally:
+            closed.append(True)
+
+    async def fail() -> None:
+        msg = "delivery failed"
+        raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await collect_streamed_response_content(
+            stream(),
+            presentation=CollectedStreamPresentation(show_tool_calls=True),
+            on_update=fail,
+        )
+    assert closed == [True]

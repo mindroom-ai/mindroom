@@ -851,7 +851,7 @@ async def test_the_request_cap_ends_a_runaway_tool_loop_and_logs_the_pinned_even
 
 
 @pytest.mark.asyncio
-async def test_a_turn_opted_into_the_approval_receipt_sends_it_with_its_first_request_only(
+async def test_a_turn_that_reads_the_approval_receipt_sends_it_with_its_first_request_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
@@ -871,8 +871,8 @@ async def test_a_turn_opted_into_the_approval_receipt_sends_it_with_its_first_re
         tools=(PROBE_TOOL, "thread_model"),
     )
 
-    with approval_receipt_context("Trusted approval receipt."):
-        await _stream(reply, approval_receipt=True)
+    with approval_receipt_context("Trusted approval receipt.", run_id="run-1"):
+        await _stream(reply, run_id="run-1")
 
     assert probe.calls == ["a"]
     first, *later = reply.model.requests
@@ -896,7 +896,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without a job actor, participation decides first and compaction rewrites next; a fresh reply has no receipt.
+    """Without a job actor, participation decides first, compaction rewrites next, and the receipt hook comes last.
 
     The rest of the hooks are wired. A reply with a job actor projects its job definitions before participation.
     """
@@ -916,6 +916,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     assert [function.__qualname__.split(".")[0] for function in hooks.before_request] == [
         "participation_hook",
         "mid_turn_compaction_hook",
+        "approval_receipt_hook",
     ]
     assert hooks.answer_tool_calls is None
     assert hooks.rewrite_tool_calls is None

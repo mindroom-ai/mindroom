@@ -16,10 +16,11 @@ from typing import TYPE_CHECKING, cast
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.ai import run_delegated_child_response
+from mindroom.approval.receipt import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, forward_resume, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
-from mindroom.delegation.state import member_delegation_card
+from mindroom.delegation.state import member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
@@ -211,9 +212,15 @@ class TeamResume:
         """Resume ``paused`` with ``decisions`` routed to the calls the team waits for; the stream ends with ``RunFinished``.
 
         Routing and the loop's own coverage check run here, before the stream starts, so a resume that no longer fits
-        is refused before anything runs.
+        is refused before anything runs. A member run whose own paused call an approval decided reads that approval's
+        receipt.
         """
         routed = _route_decisions(paused, decisions, toolkit_owners=self.toolkit_owners)
+        decided = {*routed.approved, *routed.denied}
+        for requirement in paused.requirements or ():
+            key = (requirement.member_agent_id, requirement.tool_execution.tool_call_id)
+            if requirement.member_run_id is not None and key in decided:
+                add_approval_receipt_reader(requirement.member_run_id)
         session = self.storage.session
         events = continue_team(
             self.spec,
@@ -340,11 +347,12 @@ def drive_team_delegations(
     return _tag_member_delegation_events(cast("AsyncIterator[TeamRunEvent]", driven), owners)
 
 
-def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> str:
-    """Return the slot of the run that waits on ``requirement``: its member's, or the team's for the leader's own call."""
-    if requirement.member_agent_id is None:
-        return "team"
-    return f"agent:{presentation.resolve_member_id(requirement.member_agent_id, requirement.member_agent_name)}"
+def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str | None]:
+    """Return the slot that shows the call ``requirement`` waits on and the call's id there, by ``pending_call_slot``."""
+    member_id, call_id = pending_call_slot(requirement, presentation.config_names_by_id.values())
+    if member_id is None:
+        return "team", call_id
+    return f"agent:{presentation.resolve_member_id(member_id, requirement.member_agent_name)}", call_id
 
 
 def _append_unstreamed_run_content(
@@ -381,7 +389,8 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
     for requirement in paused.requirements:
         if member_delegation_card(requirement, member_names):
             continue
-        presentation.start_tool(_waiting_slot(presentation, requirement), requirement.tool_execution)
+        scope, _ = _waiting_slot(presentation, requirement)
+        presentation.start_tool(scope, requirement.tool_execution)
     return replace(
         paused,
         response_text=presentation.render_body(),
@@ -406,14 +415,7 @@ def blocking_team_pause(
     pending where the pause waits on them; a member's own delegation card waits on that member's call.
     """
     presentation = TeamStreamPresentation.new(config_names, display_names, show_tool_calls=show_tool_calls)
-    member_names = presentation.config_names_by_id.values()
-    waiting: set[tuple[str, str | None]] = set()
-    for requirement in paused.requirements:
-        if card := member_delegation_card(requirement, member_names):
-            member_name, call_id = card
-            waiting.add((f"agent:{presentation.resolve_member_id(member_name, None)}", call_id))
-        else:
-            waiting.add((_waiting_slot(presentation, requirement), requirement.tool_execution.tool_call_id))
+    waiting = {_waiting_slot(presentation, requirement) for requirement in paused.requirements}
     presentation.append_consensus(finished_run_text(record))
     calls = [("team", tool) for tool in record.tools or ()]
     for member in members:
@@ -567,7 +569,6 @@ async def continue_paused_team_run(
                     history_settings=settings,
                     tool_middleware=built.leader_middleware,
                     jobs=built.leader_jobs,
-                    approval_receipt=True,
                 ),
                 request_template=ModelRequest(
                     messages=(),

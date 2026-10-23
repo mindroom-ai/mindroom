@@ -289,7 +289,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
 
     monkeypatch.setattr(execution.client(), "room_typing", room_typing)
     run_ids = []
-    with approval_receipt_context("Trusted approval receipt."):
+    with approval_receipt_context("Trusted approval receipt.", run_id=continuation.run_id):
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
@@ -1066,7 +1066,10 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         assert stored is not None
         return [run.to_dict() for run in stored.runs]
 
-    with tool_runtime_context(runtime), approval_receipt_context("Trusted approval receipt."):
+    with (
+        tool_runtime_context(runtime),
+        approval_receipt_context("Trusted approval receipt.", run_id=continuation.run_id),
+    ):
         if missing_shell_function:
             saved_before = stored_runs()
             # A saved shell call loses its own toolkit first; any other call loses minimal mode's shell.
