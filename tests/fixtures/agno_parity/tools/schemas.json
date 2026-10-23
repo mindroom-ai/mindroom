@@ -18038,7 +18038,7 @@
     "functions": [
       {
         "name": "add_memory",
-        "description": "Store a specific fact or piece of information in your memory.\nUse this when explicitly asked to remember something, or when you\nencounter important information worth retaining for future conversations.",
+        "description": "Store a specific fact or piece of information in your memory.\nUse this when explicitly asked to remember something, or when you\nencounter important information worth retaining for future conversations.\nTo correct something already stored, use update_memory on that entry instead of adding a new one.",
         "parameters": {
           "type": "object",
           "properties": {
