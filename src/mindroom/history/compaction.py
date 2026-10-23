@@ -694,14 +694,10 @@ async def _summarize_chunk(  # noqa: PLR0915
 ) -> _SummaryChunk | None:
     """Summarize the longest prefix of ``runs`` that fits one summary input; None when not even one run fits.
 
-    A failed attempt retries the same or a smaller input when safe. A safeguard
-    refusal from the primary model switches once to the fallback model. The
-    input remains unchanged when it fits the fallback model, otherwise it is
-    rebuilt under that model's own budget. A refusal or failure from the
-    fallback propagates. The switch shares the retry policy's attempt bound,
-    so a refusal after an earlier shrink or transient retry propagates without
-    a fallback call. All other failures keep the shrink and transient
-    same-input retry behavior.
+    A failed attempt retries the same or a smaller input when safe. A safeguard refusal from the primary model
+    switches once to the fallback model, rebuilding the input only when it exceeds the fallback's own budget; a
+    refusal or failure from the fallback propagates. The switch counts against the retry policy's attempt bound, so a
+    refusal after an earlier shrink or transient retry propagates without a fallback call.
     """
     summary_model = summarizer.model
     fallback_model = summarizer.fallback
@@ -767,9 +763,6 @@ async def _summarize_chunk(  # noqa: PLR0915
                 duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
                 error=str(exc) or type(exc).__name__,
             )
-            # The attempt bound covers the fallback call too: a refusal after an
-            # earlier shrink or transient retry propagates instead of issuing a
-            # third provider call.
             if fallback_model is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
                 fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model.model)
                 fits_fallback = (
