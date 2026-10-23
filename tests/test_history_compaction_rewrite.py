@@ -472,6 +472,38 @@ async def test_a_checkpoint_too_large_for_the_summary_input_gives_way_to_the_his
 
 
 @pytest.mark.asyncio
+async def test_a_fallback_too_small_for_the_checkpoint_summarizes_the_history_it_covers() -> None:
+    """A safeguard refusal still reaches a fallback whose input budget the checkpoint alone exceeds."""
+    run_1 = _completed_run("run-1")
+    run_2 = _completed_run(
+        "run-2",
+        messages=[
+            Message(role="user", content="run-2 question"),
+            checkpointed_answer({"type": "compaction", "content": "word " * 10_000}, replay_basis(None, [run_1])),
+        ],
+    )
+    fallback = SummaryModel(FakeModel(id="fallback-model-id", provider="fake"), "fallback", 4_000)
+    summary_mock = AsyncMock(
+        side_effect=[
+            ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
+            SessionSummary(summary="fallback summary"),
+        ],
+    )
+
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+        summary, _ = await summarize_runs(
+            _summarizer(input_budget_tokens=30_000, fallback=fallback),
+            None,
+            [run_1, run_2],
+        )
+
+    assert summary == "fallback summary"
+    fallback_input = summary_mock.await_args_list[1].kwargs["summary_input"]
+    assert "run-1 question" in fallback_input
+    assert "run-2 question" in fallback_input
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_before_an_approval_pause_does_not_cover_the_turns_it_waited_for(tmp_path: Path) -> None:
     """A completed approval sorts after the turns it waited for, which its earlier checkpoint never saw."""
     config, runtime_paths = _make_config(tmp_path)
