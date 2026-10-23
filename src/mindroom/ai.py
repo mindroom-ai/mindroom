@@ -147,6 +147,7 @@ logger = get_logger(__name__)
 __all__ = [
     "AIStreamChunk",
     "ResponseTurnContext",
+    "agent_run_metadata_content",
     "ai_response",
     "build_matrix_run_metadata",
     "collect_streamed_response_content",
@@ -628,6 +629,44 @@ def _reported_usage(usage: MessageMetrics | None, key: str) -> int | None:
         return None
     value = usage.to_dict().get(key)
     return value if isinstance(value, int) else None
+
+
+def agent_run_metadata_content(
+    config: Config,
+    record: AnyRunRecord | None,
+    *,
+    model_name: str,
+    run_id: str | None,
+    session_id: str | None,
+    status: RunStatus,
+    prepared_history: PreparedHistoryState | None,
+    last_request: MessageMetrics | None = None,
+    observed_tool_calls: int = 0,
+) -> dict[str, Any]:
+    """Return the run metadata an agent reply or approval resume publishes for its run ``record``.
+
+    ``prepared_history`` is the history the run was prepared with, None for an approval resume, which prepares none.
+    A streamed reply also passes its last request's usage, whose counts describe the context, and the tool calls it
+    saw, which count for a run that left no record.
+    """
+    metrics = record.metrics if record is not None else None
+    return build_ai_run_metadata_content(
+        config=config,
+        model_name=model_name,
+        run_id=run_id,
+        session_id=(record.session_id if record is not None else None) or session_id,
+        status=status,
+        model=record.model if record is not None else None,
+        model_provider=record.model_provider if record is not None else None,
+        metrics=metrics,
+        context_metrics=metrics,
+        context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
+        context_raw_input_tokens=_reported_usage(last_request, "input_tokens"),
+        context_cache_read_tokens=_reported_usage(last_request, "cache_read_tokens"),
+        context_cache_write_tokens=_reported_usage(last_request, "cache_write_tokens"),
+        tool_count=len(record.tools) if record is not None and record.tools is not None else observed_tool_calls,
+        prepared_history=prepared_history,
+    )
 
 
 def _track_stream_tool_started(
@@ -1689,19 +1728,13 @@ async def ai_response(  # noqa: C901
     ) -> dict[str, Any] | None:
         if run_metadata_collector is None:
             return None
-        metrics = record.metrics if record is not None else None
-        return build_ai_run_metadata_content(
-            config=config,
+        return agent_run_metadata_content(
+            config,
+            record,
             model_name=prepared_run.runtime_model_name,
             run_id=run_id,
-            session_id=(record.session_id if record is not None else None) or session_id,
+            session_id=session_id,
             status=status,
-            model=record.model if record is not None else None,
-            model_provider=record.model_provider if record is not None else None,
-            metrics=metrics,
-            context_metrics=metrics,
-            context_input_tokens=prepared_run.prepared_history.prepared_context_tokens,
-            tool_count=len(record.tools) if record is not None and record.tools is not None else 0,
             prepared_history=prepared_run.prepared_history,
         )
 
@@ -2115,7 +2148,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901, PLR0915
+    async def _run_streaming_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -2161,7 +2194,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             return
         prepared_run = run_context.prepared_run
         run.unseen_event_ids = prepared_run.unseen_event_ids
-        prepared_context_input_tokens = prepared_run.prepared_history.prepared_context_tokens
         run.run_metadata = run_context.metadata
 
         storage = _attempt_storage(run, prepared_run.build, session_id=session_id, agent_name=agent_name)
@@ -2182,29 +2214,16 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         ) -> dict[str, Any] | None:
             if run_metadata_collector is None:
                 return None
-            record = attempt_state.terminal.record
-            metrics = record.metrics if record is not None else None
-            usage = attempt_state.latest_request_usage
-            return build_ai_run_metadata_content(
-                config=config,
+            return agent_run_metadata_content(
+                config,
+                attempt_state.terminal.record,
                 model_name=prepared_run.runtime_model_name,
                 run_id=run_id,
                 session_id=event_session_id or session_id,
                 status=status,
-                model=record.model if record is not None else None,
-                model_provider=record.model_provider if record is not None else None,
-                metrics=metrics,
-                context_metrics=metrics,
-                context_input_tokens=prepared_context_input_tokens,
-                context_raw_input_tokens=_reported_usage(usage, "input_tokens"),
-                context_cache_read_tokens=_reported_usage(usage, "cache_read_tokens"),
-                context_cache_write_tokens=_reported_usage(usage, "cache_write_tokens"),
-                tool_count=(
-                    len(record.tools)
-                    if record is not None and record.tools is not None
-                    else attempt_state.observed_tool_calls
-                ),
                 prepared_history=prepared_run.prepared_history,
+                last_request=attempt_state.latest_request_usage,
+                observed_tool_calls=attempt_state.observed_tool_calls,
             )
 
         state = _StreamingAttemptState()

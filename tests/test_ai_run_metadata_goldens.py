@@ -1,8 +1,9 @@
 """The owned builder publishes the ``io.mindroom.ai_run`` metadata MindRoom published under Agno 3.0.9.
 
 ``tests/fixtures/agno_parity/events/ai_run.json`` holds the metadata each captured run published, keyed by run id.
-Each entry is rebuilt with ``build_ai_run_metadata_content`` from what its call site passes: the run's record as the
-run goldens hold it, a team's member runs, the prepared history the record's metadata keeps, and the capture's model
+Each entry is rebuilt by the function its call site publishes it through, ``agent_run_metadata_content`` for an
+agent reply or approval resume and ``team_run_metadata_content`` for a team reply, from the run's record as the run
+goldens hold it, a team's member runs, the prepared history the record's metadata keeps, and the capture's model
 config. The capture normalized timers and ids in the stored runs and in the metadata alike, so the two compare as
 they are.
 """
@@ -17,13 +18,12 @@ from typing import Any
 
 import pytest
 
-from mindroom.ai_run_metadata import build_ai_run_metadata_content
+from mindroom.ai import agent_run_metadata_content
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.history.types import CompactionDecision, PreparedHistoryState, ResolvedReplayPlan
 from mindroom.llm.runs import AnyRunRecord, RunRecord, TeamRunRecord, run_record_from_dict
-from mindroom.teams.attempt import team_tool_executions
-from mindroom.teams.runtime import team_usage
+from mindroom.teams.attempt import team_run_metadata_content
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "agno_parity"
 _GOLDEN: dict[str, dict[str, Any]] = json.loads((_FIXTURES / "events" / "ai_run.json").read_text(encoding="utf-8"))
@@ -89,15 +89,8 @@ def _prepared_history(record: AnyRunRecord) -> PreparedHistoryState:
     )
 
 
-def _last_request_counts(record: AnyRunRecord) -> dict[str, Any]:
-    """Return the usage counters of the run's last request, which its last assistant message stores."""
-    metrics = [message for message in record.messages if message.role == "assistant"][-1].metrics
-    assert metrics is not None
-    return metrics.to_dict()
-
-
 def _published(run_id: str) -> dict[str, Any]:
-    """Build one run's metadata as its call site does."""
+    """Build one run's metadata through the function its call site publishes it with."""
     store, record = _RUNS[run_id]
     prepared = None if run_id in _RESUMED else _prepared_history(record)
     if run_id == "run-error":
@@ -106,42 +99,27 @@ def _published(run_id: str) -> dict[str, Any]:
         # replaced it.
         _, failed = _RUNS["run-native-error"]
         record = replace(failed, run_id=record.run_id, session_id=record.session_id)
-    common: dict[str, Any] = {
-        "config": _CONFIG,
+    assert record.session_id is not None
+    identity: dict[str, Any] = {
         "model_name": _MODEL_NAMES[store],
         "run_id": record.run_id,
         "session_id": record.session_id,
         "status": record.status,
-        "model": record.model,
-        "model_provider": record.model_provider,
-        "context_metrics": record.metrics,
         "prepared_history": prepared,
     }
     if isinstance(record, TeamRunRecord):
-        members = [
+        # The member runs that ended while the team ran, which the live team record holds.
+        record.ended_member_runs = [
             member for _, member in _RUNS.values() if isinstance(member, RunRecord) and member.parent_run_id == run_id
         ]
-        # As ``TeamAttempt.metadata_content`` passes them.
-        return build_ai_run_metadata_content(
-            **common,
-            metrics=team_usage(record, members),
-            context_input_tokens=None if prepared is None else prepared.prepared_context_tokens,
-            tool_count=len(team_tool_executions(record, members)),
-        )
-    if prepared is None:
-        # As the approval resume passes them.
-        return build_ai_run_metadata_content(**common, metrics=record.metrics, tool_count=len(record.tools or ()))
-    # As the blocking and streamed agent replies pass them; a streamed reply also passes its last request's counts.
-    last_request = _last_request_counts(record) if run_id in _STREAMED else {}
-    return build_ai_run_metadata_content(
-        **common,
-        metrics=record.metrics,
-        context_input_tokens=prepared.prepared_context_tokens,
-        context_raw_input_tokens=last_request.get("input_tokens"),
-        context_cache_read_tokens=last_request.get("cache_read_tokens"),
-        context_cache_write_tokens=last_request.get("cache_write_tokens"),
-        tool_count=len(record.tools or ()),
+        return team_run_metadata_content(_CONFIG, record, **identity)
+    # A streamed reply also passes its last request's usage, which its last assistant message stores.
+    last_request = (
+        [message for message in record.messages if message.role == "assistant"][-1].metrics
+        if run_id in _STREAMED
+        else None
     )
+    return agent_run_metadata_content(_CONFIG, record, **identity, last_request=last_request)
 
 
 def _expected(run_id: str) -> dict[str, Any]:

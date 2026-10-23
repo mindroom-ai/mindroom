@@ -1244,7 +1244,6 @@ depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
-    "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
@@ -6346,6 +6345,7 @@ expose = [
     "stream_agent_response",
     "run_delegated_child_response",
     "collect_streamed_response_content",
+    "agent_run_metadata_content",
 ]
 from = ["mindroom.ai"]
 

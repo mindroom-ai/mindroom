@@ -14,8 +14,12 @@ from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_cli_approval
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
-from mindroom.ai import collect_streamed_response_content, run_delegated_child_response, stream_agent_response
-from mindroom.ai_run_metadata import build_ai_run_metadata_content
+from mindroom.ai import (
+    agent_run_metadata_content,
+    collect_streamed_response_content,
+    run_delegated_child_response,
+    stream_agent_response,
+)
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner, approval_decisions
 from mindroom.approval.tool_owners import (
@@ -260,17 +264,15 @@ async def _continue_persisted_agent(
         status=response.status,
         tool_executions=collected.tool_executions,
         completed_tools=tuple(presentation.tool_trace),
-        metadata_content=build_ai_run_metadata_content(
-            config=config,
+        metadata_content=agent_run_metadata_content(
+            config,
+            response,
             model_name=model_name,
             run_id=response.run_id,
-            session_id=response.session_id or continuation.session_id,
+            session_id=continuation.session_id,
             status=response.status,
-            model=response.model,
-            model_provider=response.model_provider,
-            metrics=response.metrics,
-            context_metrics=response.metrics,
-            tool_count=len(response.tools or ()),
+            # An approval resume prepares no history of its own.
+            prepared_history=None,
         ),
     )
     return await _stream_continuation_turn(
