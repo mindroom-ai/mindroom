@@ -451,37 +451,32 @@ def _select_team_request(
     return _SelectedTeamRequest(TeamIntent.DM_AUTO_TEAM, normalized_available_responders)
 
 
-def _sender_unavailable_team_agents_message(agent_names: list[str], *, prefix: str) -> str:
-    """Return the rejection message for requested agents hidden from this sender."""
-    if len(agent_names) == 1:
-        return f"{prefix} includes agent '{agent_names[0]}' that is not available to you in this room."
-    return (
-        f"{prefix} includes agents "
-        + ", ".join(f"'{agent_name}'" for agent_name in agent_names)
-        + " that are not available to you in this room."
-    )
+# How a rejection reads for one agent and for several, by the status that rejected them.
+_REJECTION_PHRASES: dict[TeamMemberStatus, tuple[str, str]] = {
+    TeamMemberStatus.NOT_IN_ROOM: ("is not available in this room", "are not available in this room"),
+    TeamMemberStatus.HIDDEN_FROM_SENDER: (
+        "is not available to you in this room",
+        "are not available to you in this room",
+    ),
+    TeamMemberStatus.NOT_MATERIALIZABLE: (
+        "could not be materialized for this request",
+        "could not be materialized for this request",
+    ),
+}
 
 
-def _room_unavailable_team_agents_message(agent_names: list[str], *, prefix: str) -> str:
-    """Return the rejection message for team members that are not available in the room."""
+def _rejected_agents_message(status: TeamMemberStatus, agent_names: list[str], *, prefix: str) -> str:
+    """Return the rejection message for requested agents that ``status`` rejected."""
+    one, several = _REJECTION_PHRASES[status]
     if len(agent_names) == 1:
-        return f"{prefix} includes agent '{agent_names[0]}' that is not available in this room."
-    return (
-        f"{prefix} includes agents "
-        + ", ".join(f"'{agent_name}'" for agent_name in agent_names)
-        + " that are not available in this room."
-    )
+        return f"{prefix} includes agent '{agent_names[0]}' that {one}."
+    quoted = ", ".join(f"'{agent_name}'" for agent_name in agent_names)
+    return f"{prefix} includes agents {quoted} that {several}."
 
 
 def not_materializable_team_agents_message(agent_names: list[str], *, prefix: str) -> str:
     """Return the rejection message for members that could not be materialized."""
-    if len(agent_names) == 1:
-        return f"{prefix} includes agent '{agent_names[0]}' that could not be materialized for this request."
-    return (
-        f"{prefix} includes agents "
-        + ", ".join(f"'{agent_name}'" for agent_name in agent_names)
-        + " that could not be materialized for this request."
-    )
+    return _rejected_agents_message(TeamMemberStatus.NOT_MATERIALIZABLE, agent_names, prefix=prefix)
 
 
 def _evaluate_team_members(
@@ -610,10 +605,10 @@ def _team_resolution_reason(
     """Return one shared user-facing explanation for a rejected team request."""
     rejection_statuses = {member.status for member in rejected_members}
     if len(rejection_statuses) > 1:
-        return _mixed_team_resolution_reason(rejected_members, reason_prefix=reason_prefix)
+        details = "; ".join(_team_resolution_member_detail(member) for member in rejected_members)
+        return f"{reason_prefix} cannot be satisfied: {details}"
 
     [status] = rejection_statuses
-    names = [member.name for member in rejected_members]
     if status is TeamMemberStatus.UNSUPPORTED_FOR_TEAM:
         first_unsupported_member = rejected_members[0]
         return config.unsupported_team_agent_message(
@@ -621,17 +616,7 @@ def _team_resolution_reason(
             prefix=reason_prefix,
             private_targets=first_unsupported_member.private_targets,
         )
-    if status is TeamMemberStatus.NOT_MATERIALIZABLE:
-        return not_materializable_team_agents_message(names, prefix=reason_prefix)
-    if status is TeamMemberStatus.NOT_IN_ROOM:
-        return _room_unavailable_team_agents_message(names, prefix=reason_prefix)
-    return _sender_unavailable_team_agents_message(names, prefix=reason_prefix)
-
-
-def _mixed_team_resolution_reason(rejected_members: list[TeamResolutionMember], *, reason_prefix: str) -> str:
-    """Return a per-member explanation when one reject has mixed failure causes."""
-    details = [_team_resolution_member_detail(member) for member in rejected_members]
-    return f"{reason_prefix} cannot be satisfied: " + "; ".join(details)
+    return _rejected_agents_message(status, [member.name for member in rejected_members], prefix=reason_prefix)
 
 
 def _unsupported_team_member_detail(member: TeamResolutionMember) -> str:
@@ -659,11 +644,7 @@ def _team_resolution_member_detail(member: TeamResolutionMember) -> str:
     """Return a member-specific reason fragment for mixed team-request rejects; ``member`` is not eligible."""
     if member.status is TeamMemberStatus.UNSUPPORTED_FOR_TEAM:
         return _unsupported_team_member_detail(member)
-    if member.status is TeamMemberStatus.NOT_MATERIALIZABLE:
-        return f"agent '{member.name}' could not be materialized for this request"
-    if member.status is TeamMemberStatus.NOT_IN_ROOM:
-        return f"agent '{member.name}' is not available in this room"
-    return f"agent '{member.name}' is not available to you in this room"
+    return f"agent '{member.name}' {_REJECTION_PHRASES[member.status][0]}"
 
 
 def resolve_configured_team(
