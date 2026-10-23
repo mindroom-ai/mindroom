@@ -163,13 +163,15 @@ def format_claude_messages(
     messages: Sequence[Message],
     *,
     append_trailing_user_message: bool,
+    citations: bool = True,
 ) -> FormattedConversation:
     """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
 
     System and developer messages are extracted and joined with a space. Consecutive same-role turns merge
     into one, dropping the earlier assistant turn's thinking: the API verifies an assistant message's thinking
     sequence against one original response. A conversation that ends with an assistant turn gets a trailing
-    ``continue`` user turn when the model rejects prefill.
+    ``continue`` user turn when the model rejects prefill. Documents ask for citations unless ``citations`` is
+    False, as a request with structured output must be: the API rejects citations beside an output format.
     """
     turns: list[dict[str, Any]] = []
     system_texts: list[str] = []
@@ -178,7 +180,7 @@ def format_claude_messages(
             system_texts.append(message.get_content_string())
             continue
         if message.role == "user":
-            content = _user_blocks(message)
+            content = _user_blocks(message, citations=citations)
         elif message.role == "assistant":
             content = _assistant_blocks(message)
             if not content:
@@ -214,7 +216,7 @@ def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return merged
 
 
-def _user_blocks(message: Message) -> list[Any]:
+def _user_blocks(message: Message, *, citations: bool) -> list[Any]:
     content = message.content or ""
     blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
     for image in message.images or ():
@@ -222,7 +224,7 @@ def _user_blocks(message: Message) -> list[Any]:
         if block is not None:
             blocks.append(block)
     for file in message.files or ():
-        block = _document_block(file)
+        block = _document_block(file, citations=citations)
         if block is not None:
             blocks.append(block)
     # Audio and video are not Claude inputs; the media fallback replaces them with a note before the request.
@@ -346,7 +348,7 @@ def _image_block(image: Image) -> dict[str, Any] | None:
     }
 
 
-def _document_block(file: File) -> dict[str, Any] | None:
+def _document_block(file: File, *, citations: bool) -> dict[str, Any] | None:
     if file.url is not None:
         # Only a document ``inline_url_media`` left remote reaches here.
         source: dict[str, Any] = {"type": "url", "url": file.url}
@@ -368,7 +370,10 @@ def _document_block(file: File) -> dict[str, Any] | None:
             source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
         else:
             source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
-    return {"type": "document", "source": source, "citations": {"enabled": True}}
+    block: dict[str, Any] = {"type": "document", "source": source}
+    if citations:
+        block["citations"] = {"enabled": True}
+    return block
 
 
 def serialize_content_blocks(blocks: Sequence[Any]) -> list[dict[str, Any]]:
@@ -577,8 +582,13 @@ def assistant_message_from_response(
     response: AnthropicMessage | BetaMessage,
     *,
     record_context_management: bool,
+    streamed: bool,
 ) -> Message:
     """Build the assistant message of one finished response.
+
+    The stored reasoning is the one Agno stored for the same request: a ``streamed`` response joins its thinking
+    blocks and its redacted thinking blocks, as Agno summed their deltas, and a non-streamed one keeps only the
+    last block of each, as Agno's response parser did.
 
     ``provider_data`` keeps ``content_blocks`` (the response blocks in order, as the API produced them),
     ``server_tool_blocks`` (every other block, including types the SDK does not know), the thinking ``signature``,
@@ -588,7 +598,7 @@ def assistant_message_from_response(
     texts: list[str] = []
     thinking: list[str] = []
     signature: str | None = None
-    redacted: str | None = None
+    redacted: list[str] = []
     server_tool_blocks: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []
     for block in response.content:
@@ -602,7 +612,7 @@ def assistant_message_from_response(
             block,
             (RedactedThinkingBlock, BetaRedactedThinkingBlock),
         ):
-            redacted = block.data
+            redacted.append(block.data)
         elif block.type == "tool_use" and isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
             tool_calls.append(tool_call_from_block(block))
         else:
@@ -620,12 +630,18 @@ def assistant_message_from_response(
     return Message(
         role="assistant",
         content="".join(texts) or None,
-        reasoning_content="".join(thinking) if thinking else None,
-        redacted_reasoning_content=redacted,
+        reasoning_content=_stored_reasoning(thinking, streamed=streamed),
+        redacted_reasoning_content=_stored_reasoning(redacted, streamed=streamed),
         tool_calls=tool_calls or None,
         provider_data=provider_data,
         metrics=parse_claude_usage(response.usage),
     )
+
+
+def _stored_reasoning(blocks: list[str], *, streamed: bool) -> str | None:
+    if not blocks:
+        return None
+    return "".join(blocks) if streamed else blocks[-1]
 
 
 __all__ = [

@@ -15,7 +15,6 @@ from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ReportedUsage
 from mindroom.logging_config import get_logger
-from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.pipeline.wrapped import is_visible_output, with_carried_usage
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -24,9 +23,18 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
 
-__all__ = ["guidance_retry_stream"]
+__all__ = ["MALFORMED_FUNCTION_CALL_GUIDANCE", "guidance_retry_stream"]
 
 logger = get_logger(__name__)
+
+# The guidance Agno's retry loop sent once after a malformed function call; this stage sends the same text.
+MALFORMED_FUNCTION_CALL_GUIDANCE = """The previous function call was malformed. Please try again with a valid function call.
+
+Guidelines:
+- Generate the function call JSON directly, do not generate code
+- Use the function name exactly as defined (no namespace prefixes like 'default_api.')
+- Ensure all required parameters are provided with correct types
+"""
 
 
 async def guidance_retry_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:

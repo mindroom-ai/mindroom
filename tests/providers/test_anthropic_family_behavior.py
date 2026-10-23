@@ -32,10 +32,12 @@ from mindroom.llm.provider import (
     ToolSpec,
     TurnCompleted,
     UsageReported,
+    complete,
 )
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
 from mindroom.providers.anthropic.wire import supports_prefill
+from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.system_prompt import render_session_context
 from tests.providers.anthropic_family_support import (
     CLAUDE_USAGE,
@@ -49,7 +51,7 @@ from tests.providers.anthropic_family_support import (
     route_provider,
     sse_reply,
 )
-from tests.providers.golden_support import Wire, sse_response
+from tests.providers.golden_support import Wire, pipeline_provider, sse_response
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -194,6 +196,30 @@ async def test_a_whole_reply_yields_the_output_its_stream_would_before_the_turn(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "blocking"])
+async def test_stored_reasoning_is_what_agno_stored_for_the_stream_mode(tmp_path: Path, *, stream: bool) -> None:
+    """A streamed reply stores its thinking blocks joined, a blocking reply only the last, as Agno did.
+
+    Agno summed a stream's thinking and redacted thinking deltas, and its response parser kept the last block of each.
+    """
+    blocks = [
+        {"type": "thinking", "thinking": "First. ", "signature": "sig-1"},
+        {"type": "redacted_thinking", "data": "redacted-1"},
+        {"type": "thinking", "thinking": "Second.", "signature": "sig-2"},
+        {"type": "redacted_thinking", "data": "redacted-2"},
+        {"type": "text", "text": "Done."},
+    ]
+    reply = sse_reply(blocks) if stream else json_reply(blocks)
+    provider = route_provider("anthropic", tmp_path, Wire(reply), extra_kwargs={"thinking": {"type": "adaptive"}})
+
+    message = (await claude_turn(provider, ModelRequest(messages=_user(), stream=stream))).message
+
+    expected = ("First. Second.", "redacted-1redacted-2") if stream else ("Second.", "redacted-2")
+    assert (message.reasoning_content, message.redacted_reasoning_content) == expected
+    assert (message.provider_data or {})["signature"] == "sig-2"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cumulative", [False, True], ids=["output_only", "cumulative"])
 async def test_a_completed_stream_counts_its_usage_once(tmp_path: Path, *, cumulative: bool) -> None:
     """Input usage reported at the start is not counted again when the final delta repeats it."""
@@ -297,7 +323,7 @@ async def test_refusal_completes_with_the_refusal_stop_reason(tmp_path: Path) ->
     ("status", "body", "expected", "retryable"),
     [
         (429, {"type": "rate_limit_error", "message": "Rate limited"}, RateLimited, True),
-        (529, {"type": "overloaded_error", "message": "Overloaded"}, RateLimited, True),
+        (529, {"type": "overloaded_error", "message": "Overloaded"}, ProviderUnavailable, True),
         (503, {"type": "api_error", "message": "Unavailable"}, ProviderUnavailable, True),
         (
             400,
@@ -327,6 +353,56 @@ async def test_sdk_status_errors_map_to_the_shared_provider_errors(
     assert raised.value.provider == "Anthropic"
     assert body["message"] in str(raised.value)
     assert len(wire.requests) == 1, "sdk_max_retries=0 must stop the SDK's own retries"
+
+
+def _stream_failing_with(error_type: str) -> httpx.Response:
+    """A stream that starts the message, then sends an ``error`` event of ``error_type``."""
+    start = claude_message([], usage={**CLAUDE_USAGE, "output_tokens": 1}) | {"stop_reason": None}
+    error = {"type": "error", "error": {"type": error_type, "message": "Internal server error"}}
+    return sse_response([{"type": "message_start", "message": start}, error], named=True)
+
+
+@pytest.mark.asyncio
+async def test_a_mid_stream_api_error_before_output_reissues_the_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``api_error`` event after the 200 status, before any output, is retried like the same HTTP failure."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    wire = Wire(_stream_failing_with("api_error"), sse_reply([{"type": "text", "text": "hello world"}]))
+    provider = pipeline_provider(route_provider("anthropic", tmp_path, wire))
+
+    with isolated_provider_environment():
+        turn = await complete(provider, ModelRequest(messages=_user()))
+
+    assert (turn.content, len(wire.requests)) == ("hello world", 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "expected"),
+    [
+        ("overloaded_error", ProviderUnavailable),
+        ("api_error", ProviderUnavailable),
+        ("timeout_error", ProviderUnavailable),
+        ("rate_limit_error", RateLimited),
+        ("invalid_request_error", ProviderError),
+    ],
+)
+async def test_a_mid_stream_error_event_is_classified_by_its_error_type(
+    tmp_path: Path,
+    error_type: str,
+    expected: type[ProviderError],
+) -> None:
+    """The SDK reports a stream's error event with the 200 status, so the event's error type decides the error."""
+    wire = Wire(_stream_failing_with(error_type))
+    provider = route_provider("anthropic", tmp_path, wire)
+
+    with pytest.raises(ProviderError) as raised:
+        await claude_turn(provider, ModelRequest(messages=_user()))
+
+    assert type(raised.value) is expected
+    assert (raised.value.status_code, raised.value.retryable) == (None, expected is not ProviderError)
 
 
 @pytest.mark.asyncio
@@ -489,6 +565,25 @@ async def test_authored_output_config_and_stop_sequences_reach_the_request(tmp_p
     assert body["output_config"]["effort"] == "low"
     assert body["output_config"]["format"]["type"] == "json_schema"
     assert provider.settings.output_config == {"effort": "low"}, "the format never leaks into the authored setting"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("structured", [False, True], ids=["plain", "structured-output"])
+async def test_documents_ask_for_citations_except_under_structured_output(tmp_path: Path, *, structured: bool) -> None:
+    """The API rejects citations beside an output format, so a structured answer sends its documents without them."""
+    wire = Wire(json_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
+    provider = route_provider("anthropic", tmp_path, wire)
+    document = File(content=b"Paris is in France.", mime_type="text/plain")
+    messages = [Message(role="user", content="Where is Paris?", files=[document])]
+    request = ModelRequest(messages=messages, response_format=_Answer if structured else None, stream=False)
+
+    await claude_turn(provider, request)
+
+    body = wire.body()
+    (block,) = [block for block in body["messages"][-1]["content"] if block["type"] == "document"]
+    assert ("citations" in block, "output_config" in body) == (not structured, structured)
+    if not structured:
+        assert block["citations"] == {"enabled": True}
 
 
 @pytest.mark.asyncio

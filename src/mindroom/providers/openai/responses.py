@@ -1,6 +1,7 @@
 """The Responses API adapter for the OpenAI and Codex routes.
 
-Codex only streams, so a non-streaming request on that route still streams and returns the drained turn.
+Codex only streams (its capabilities say ``streams_only``), so a non-streaming request on that route still streams
+and returns the drained turn.
 """
 
 from __future__ import annotations
@@ -119,13 +120,12 @@ class ResponsesAdapter:
             settings=self.settings,
             wire=self.wire,
         )
-        # Codex rejects both sampling and output-limit fields.
+        # Codex rejects sampling fields.
         codex = self.wire.route == "codex"
         return with_overrides(
             kwargs,
             request.overrides,
             temperature=not codex and not self.capabilities.provider_default_sampling,
-            output_limit_key=None if codex else "max_output_tokens",
         )
 
     async def _streamed(
@@ -169,6 +169,7 @@ class ResponsesAdapter:
             store=request_store(self.wire, request),
             portable_replay=request.portable_replay,
             native_compaction=request.native_compaction,
+            text_as_reasoning=self.settings.reasoning is not None,
         )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
@@ -177,12 +178,13 @@ class ResponsesAdapter:
         first_token: float | None = None
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
         client = await self.clients.client(request.overrides)
-        if request.stream or self.wire.route == "codex":
+        if request.stream or self.capabilities.streams_only:
             accumulator = ResponsesStream(
                 wire=self.wire,
                 store=request_store(self.wire, request),
                 portable_replay=request.portable_replay,
                 native_compaction=request.native_compaction,
+                text_as_reasoning=self.settings.reasoning is not None and self.settings.reasoning_summary is None,
             )
             try:
                 events = self._streamed(client, kwargs, accumulator)

@@ -22,9 +22,9 @@ from mindroom.llm.media import Audio, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, ToolSpec, complete
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
-from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import wrap_provider
+from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.synthetic_adapter import SHELL_TOOL

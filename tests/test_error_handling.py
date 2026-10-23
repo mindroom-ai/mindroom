@@ -146,9 +146,13 @@ _OAUTH_HOST_UNREACHABLE = (
             id="rate-limited-wording-holds-auth",
         ),
         pytest.param(
-            ProviderError("Permission denied", provider="OpenAI", status_code=403),
-            "❌ Authentication failed (OpenAI): Permission denied",
-            id="typed-403",
+            ProviderError(
+                "Project proj_1 does not have access to model gpt-6-astra",
+                provider="OpenAI",
+                status_code=403,
+            ),
+            "⚠️ Error: Project proj_1 does not have access to model gpt-6-astra",
+            id="typed-403-keeps-keywords",
         ),
         pytest.param(
             ProviderError("Credentials were rejected", provider="VertexAI", status_code=401),
@@ -168,7 +172,7 @@ _OAUTH_HOST_UNREACHABLE = (
     ],
 )
 def test_typed_provider_errors_are_decided_by_type_before_keywords(error: Exception, expected: str) -> None:
-    """A typed transient, rate-limit, or 401/403 error picks its message by type; other errors match keywords."""
+    """A typed transient, rate-limit, or 401 error picks its message by type; other errors, a 403 included, match keywords."""
     assert get_user_friendly_error_message(error) == expected
 
 

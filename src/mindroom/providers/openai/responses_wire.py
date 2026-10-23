@@ -452,13 +452,16 @@ def _exposes_no_output(event: ResponseStreamEvent) -> bool:
 class ResponsesStream:
     """Fold streamed Responses events into deltas and one finished turn.
 
-    ``exposed`` turns true once the attempt produced anything a retry could duplicate.
+    ``exposed`` turns true once the attempt produced anything a retry could duplicate. ``text_as_reasoning``
+    also records the output text in the stored reasoning, in event order with any summary text, as Agno did for a
+    model config that authors ``reasoning`` without ``reasoning_summary``.
     """
 
     wire: ResponsesWire
     store: bool | None
     portable_replay: bool
     native_compaction: NativeCompactionReplay | None
+    text_as_reasoning: bool = False
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
     completed: bool = False
     exposed: bool = False
@@ -489,6 +492,8 @@ class ResponsesStream:
         events: list[StreamEvent] = []
         if event.type == "response.output_text.delta":
             self._content.append(current.delta)
+            if self.text_as_reasoning:
+                self._reasoning.append(current.delta)
             events.append(TextDelta(current.delta))
         elif event.type == "response.reasoning_summary_text.delta":
             self._reasoning.append(current.delta)
@@ -574,8 +579,13 @@ def parse_response(
     store: bool | None,
     portable_replay: bool,
     native_compaction: NativeCompactionReplay | None,
+    text_as_reasoning: bool = False,
 ) -> ResponsesTurnParts:
-    """Read one non-streamed response into a finished turn."""
+    """Read one non-streamed response into a finished turn.
+
+    ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary, as
+    Agno did for a model config that authors ``reasoning``.
+    """
     if response.error:
         raise responses_event_error(response.error.code, response.error.message, provider=wire.provider_name)
     parts = ResponsesTurnParts(
@@ -601,7 +611,7 @@ def parse_response(
             if store is False:
                 parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
             summary.extend(item.text for item in output.summary if item.text)
-    parts.reasoning = "".join(summary) if summary else None
+    parts.reasoning = "".join(summary) if summary else (response.output_text if text_as_reasoning else None)
     if response.usage is not None:
         parts.usage = _usage(response.usage)
     parts.provider_data[_STORED_KEY] = store is not False

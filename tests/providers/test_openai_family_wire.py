@@ -528,7 +528,7 @@ async def test_http_errors_map_to_typed_provider_errors(
         ({"message": "Timed out", "code": "408"}, True),
         ({"message": "Bad input", "code": "400"}, False),
     ],
-    ids=["overloaded-type", "rate-limit-status", "transient-status", "client-status"],
+    ids=["overloaded-type", "overloaded-status", "transient-status", "client-status"],
 )
 async def test_mid_stream_error_events_are_retryable_when_transient(
     tmp_path: Path,
@@ -556,8 +556,8 @@ async def test_mid_stream_error_events_are_retryable_when_transient(
         ),
         (
             {"message": "Slow down", "code": 529},
-            RateLimited,
-            "⏱️ Rate limited. Please wait a moment and try again.",
+            ProviderUnavailable,
+            "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly.",
         ),
         (
             {"message": "Service Unavailable", "code": 503},
@@ -567,13 +567,13 @@ async def test_mid_stream_error_events_are_retryable_when_transient(
     ],
     ids=["429", "529", "503"],
 )
-async def test_a_rate_limit_error_event_inside_a_stream_reads_as_a_rate_limit(
+async def test_a_stream_error_event_reads_as_the_status_its_code_names(
     tmp_path: Path,
     error: dict[str, Any],
     error_type: type[ProviderError],
     user_message: str,
 ) -> None:
-    """A stream's error event with a rate-limit code reads as a rate limit, as that HTTP status does."""
+    """A stream's error event reads as the HTTP status its code names does: 429 rate-limited, 529 and 503 unavailable."""
     reply = _chat_reply({"data": {"error": error}})
     built = _Built(tmp_path, {**_OPENAI_CHAT, "extra_kwargs": {"max_retries": 0}}, reply)
 
@@ -984,47 +984,9 @@ async def test_request_overrides_reach_the_body(tmp_path: Path) -> None:
         _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
     )
 
-    await _turn(
-        built,
-        ModelRequest(messages=[_user()], overrides=RequestOverrides(temperature=0.2, max_output_tokens=64)),
-    )
+    await _turn(built, ModelRequest(messages=[_user()], overrides=RequestOverrides(temperature=0.2)))
 
-    body = built.body()
-    assert (body["temperature"], body["max_completion_tokens"]) == (0.2, 64)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("config", "configured", "sent"),
-    [
-        ({**_OPENAI_CHAT, "id": "gpt-4.1", "extra_kwargs": {"max_tokens": 10}}, "max_tokens", "max_completion_tokens"),
-        (
-            {
-                "provider": "openrouter",
-                "id": "z-ai/glm-5.3",
-                "api_key": "k",
-                "extra_kwargs": {"max_completion_tokens": 10},
-            },
-            "max_completion_tokens",
-            "max_tokens",
-        ),
-    ],
-    ids=["openai", "openrouter"],
-)
-async def test_output_limit_override_replaces_the_configured_limit_field(
-    tmp_path: Path,
-    config: dict[str, Any],
-    configured: str,
-    sent: str,
-) -> None:
-    """A request never carries both limit names: the override replaces whichever the config set."""
-    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
-
-    await _turn(built, ModelRequest(messages=[_user()], overrides=RequestOverrides(max_output_tokens=64)))
-
-    body = built.body()
-    assert body[sent] == 64
-    assert configured not in body
+    assert built.body()["temperature"] == 0.2
 
 
 @pytest.mark.asyncio
@@ -1294,6 +1256,79 @@ async def test_responses_reasoning_summary_and_verbosity_reach_the_body(tmp_path
 
     body = built.body()
     assert (body["reasoning"], body["text"]) == ({"effort": "high", "summary": "auto"}, {"verbosity": "low"})
+
+
+_PACK = "Pack light."
+_PACK_MESSAGE = {
+    "id": "msg_1",
+    "type": "message",
+    "role": "assistant",
+    "status": "completed",
+    "content": [{"type": "output_text", "text": _PACK, "annotations": []}],
+}
+_PACK_REASONING = {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Think. "}]}
+_PACK_SUMMARY_DELTA = {
+    "type": "response.reasoning_summary_text.delta",
+    "sequence_number": 1,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 0,
+    "delta": "Think. ",
+}
+
+
+def _reasoning_reply(*, stream: bool, summary: bool) -> dict[str, Any]:
+    output = [_PACK_REASONING, _PACK_MESSAGE] if summary else [_PACK_MESSAGE]
+    if not stream:
+        return _json_reply(_response(output=output))
+    created, text = _text_events(_PACK)
+    return _responses_reply(created, *([_PACK_SUMMARY_DELTA] if summary else []), text, _completed(output))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stream", "extra_kwargs", "summary", "stored"),
+    [
+        (True, {}, False, None),
+        (True, {"reasoning": {"effort": "low"}}, False, _PACK),
+        (True, {"reasoning": {"effort": "low", "summary": "auto"}}, True, f"Think. {_PACK}"),
+        (True, {"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
+        (False, {}, False, None),
+        (False, {"reasoning": {"effort": "low"}}, False, _PACK),
+        (False, {"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
+    ],
+    ids=[
+        "streamed-unset",
+        "streamed-authored",
+        "streamed-authored-summary-in-reasoning",
+        "streamed-reasoning-summary",
+        "blocking-unset",
+        "blocking-authored",
+        "blocking-with-summary",
+    ],
+)
+async def test_authored_reasoning_stores_the_output_text_as_agno_did(
+    tmp_path: Path,
+    *,
+    stream: bool,
+    extra_kwargs: dict[str, Any],
+    summary: bool,
+    stored: str | None,
+) -> None:
+    """With ``reasoning`` authored, Agno stored the output text as reasoning unless a summary took its place.
+
+    A stream copied every text delta, after any summary text, unless ``reasoning_summary`` was set; a blocking
+    response stored its summary when it had one and its output text otherwise.
+    """
+    built = _Built(
+        tmp_path,
+        {**_OPENAI_RESPONSES, "extra_kwargs": extra_kwargs},
+        _reasoning_reply(stream=stream, summary=summary),
+    )
+
+    turn = await _turn(built, ModelRequest(messages=[_user()], stream=stream))
+
+    assert (turn.content, turn.message.reasoning_content) == (_PACK, stored)
 
 
 @pytest.mark.asyncio

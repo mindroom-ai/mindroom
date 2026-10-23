@@ -108,9 +108,10 @@ def retrying_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, reissuing it after a retryable failure that came before any visible output.
 
-    Non-streaming requests pass through unchanged: their callers own deadlines and retry policy.
+    Non-streaming requests pass through unchanged, since their callers own deadlines and retry policy, except on a
+    route that only streams: it streams every request, so each one gets the stream's retries and idle limit.
     """
-    if not request.stream:
+    if not request.stream and not inner.capabilities.streams_only:
         return inner.stream(request)
     return _retried(inner, request, idle_timeout_seconds)
 

@@ -28,6 +28,9 @@ logger = get_logger(__name__)
 # Claude error event or an early Responses end without visible output.
 _TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
 
+# A provider error with this status reports rejected credentials, whatever its wording.
+_UNAUTHORIZED_STATUS = 401
+
 # Errors raised before any provider request when a model has no API key at all.
 _MISSING_PROVIDER_KEY_PATTERN = re.compile(
     r"_api_key not set"  # OpenAI-family routes' missing_api_key_error, e.g. "OPENROUTER_API_KEY not set."
@@ -183,7 +186,7 @@ def get_user_friendly_error_message(  # noqa: PLR0911
     # Only distinguish the most important error types
     if (
         match_keywords and any(x in error_str for x in ["401", "auth", "unauthorized", "api key", "api_key", "apikey"])
-    ) or (isinstance(error, ProviderError) and error.status_code in {401, 403}):
+    ) or (isinstance(error, ProviderError) and error.status_code == _UNAUTHORIZED_STATUS):
         provider = _extract_provider_from_error(error)
         provider_hint = f" ({provider})" if provider else ""
         return f"{agent_prefix}❌ Authentication failed{provider_hint}: {safe_error}"
