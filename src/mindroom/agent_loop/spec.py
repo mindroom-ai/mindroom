@@ -51,6 +51,8 @@ class RunContext:
     session: ConversationSession | None = None
     history_scope: HistoryScope | None = None
     # The state a run without a session shares with its tools, and with the member runs ``replace`` makes of it.
+    # It is an ``__init__`` field so that ``replace`` carries it over: ``replace`` passes on only ``__init__`` fields,
+    # so a member run's context would otherwise start with a new empty dict.
     _own_state: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
