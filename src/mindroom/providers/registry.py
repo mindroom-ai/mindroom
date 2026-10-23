@@ -25,10 +25,10 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import Capabilities, ModelProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["build_model_provider"]
+__all__ = ["build_model_provider", "model_capabilities"]
 
 logger = get_logger(__name__)
 
@@ -113,3 +113,14 @@ def build_model_provider(
         media_fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
         request_log=request_log,
     )
+
+
+def model_capabilities(config: Config, runtime_paths: RuntimePaths, model_name: str) -> Capabilities:
+    """Return what the route of the model configured as ``model_name`` supports; building its adapter sends nothing."""
+    adapter = _build_adapter(
+        config.models[model_name],
+        runtime_paths,
+        execution_identity=None,
+        codex_default_instructions=config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"),
+    )
+    return adapter.capabilities
