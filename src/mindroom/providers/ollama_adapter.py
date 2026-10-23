@@ -333,7 +333,8 @@ def _stop_reason(reply: _OllamaReply) -> StopReason | None:
         return None
     if reply.done_reason == "length":
         return "output_limit"
-    if reply.done_reason != "stop":
+    # A server from before ``done_reason`` existed, or an Ollama-compatible one, ends a normal reply without it.
+    if reply.done_reason not in {None, "stop"}:
         return "incomplete"
     return "tool_use" if reply.tool_calls else "end"
 

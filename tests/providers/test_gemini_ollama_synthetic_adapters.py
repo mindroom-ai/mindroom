@@ -1485,12 +1485,14 @@ async def test_ollama_parses_text_tool_calls_usage_and_length_stops(tmp_path: Pa
         ([_ollama_done(content="Hi")], "end"),
         ([_ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}])], "tool_use"),
         ([_ollama_done("load")], "incomplete"),
+        # Servers from before done_reason existed, and some Ollama-compatible ones, end a normal reply without one.
+        ([{key: value for key, value in _ollama_done(content="Hi").items() if key != "done_reason"}], "end"),
         (
             [{"model": "qwen3.8:27b", "done": False, "message": {"role": "assistant", "content": "Hi"}}],
             None,
         ),
     ],
-    ids=["stop", "stop-with-tool-calls", "load", "no-done-chunk"],
+    ids=["stop", "stop-with-tool-calls", "load", "no-done-reason", "no-done-chunk"],
 )
 async def test_ollama_stop_reasons(chunks: list[dict[str, Any]], stop: str | None, tmp_path: Path) -> None:
     """Done reasons map to stop reasons; a stream that ends without its ``done`` chunk has neither one nor usage."""
