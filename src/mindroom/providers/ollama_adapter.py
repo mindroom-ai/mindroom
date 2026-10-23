@@ -106,31 +106,27 @@ class OllamaProvider:
         A reply that arrives whole has its ``<think>`` reasoning split out, as Agno did for non-streamed replies.
         """
         messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
+        model = self.identity.id.strip()
         chat_kwargs = self._chat_kwargs(request)
         reply = _OllamaReply()
         started = time.monotonic()
         first_output_at: float | None = None
         try:
+            client = self._sdk_client()
             if request.stream:
-                chunks = await self._sdk_client().chat(
-                    model=self.identity.id.strip(),
-                    messages=messages,
-                    stream=True,
-                    **chat_kwargs,
-                )
+                chunks = await client.chat(model=model, messages=messages, stream=True, **chat_kwargs)
                 async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
                     async for chunk in responses:
                         for event in _read_chunk(reply, chunk) or [StreamProgress()]:
                             first_output_at = output_started(first_output_at, event)
                             yield event
             else:
-                response = await self._sdk_client().chat(
-                    model=self.identity.id.strip(),
-                    messages=messages,
-                    **chat_kwargs,
-                )
+                response = await client.chat(model=model, messages=messages, **chat_kwargs)
                 first_output_at = time.monotonic()
-                _read_whole_reply(reply, cast("ChatResponse", response))
+                _read_chunk(reply, cast("ChatResponse", response))
+                # Agno's Ollama split only a reply that contains an opening ``<think>`` tag.
+                if "<think>" in reply.content:
+                    reply.reasoning, reply.content = split_thinking(reply.content)
         except Exception as error:
             raise _provider_error(error, provider=self.identity.provider_name) from error
         if request.stream and not reply.done:
@@ -263,16 +259,6 @@ def _read_image(path: Path, provider: str) -> bytes:
         logger.warning("ollama_media_file_unreadable", path=str(path), error=str(error))
         msg = "The image attachment could not be read"
         raise InvalidRequest(msg, provider=provider) from error
-
-
-def _read_whole_reply(reply: _OllamaReply, response: ChatResponse) -> None:
-    """Read a reply that arrived whole, splitting out its ``<think>`` reasoning.
-
-    Agno's Ollama split only a reply that contains an opening ``<think>`` tag.
-    """
-    _read_chunk(reply, response)
-    if "<think>" in reply.content:
-        reply.reasoning, reply.content = split_thinking(reply.content)
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
