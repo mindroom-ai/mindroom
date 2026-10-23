@@ -67,13 +67,9 @@ async def suggest_responder(
             selection = await judge_responder(message, available_entity_names, config, runtime_paths, thread_context)
             if selection is not None:
                 return selection
-        entity_descriptions = []
-        for entity_name in available_entity_names:
-            description = describe_agent(entity_name, config)
-            entity_descriptions.append(f"{entity_name}:\n  {description}")
-
-        agents_info = "\n\n".join(entity_descriptions)
-
+        agents_info = "\n\n".join(
+            f"{entity_name}:\n  {describe_agent(entity_name, config)}" for entity_name in available_entity_names
+        )
         prompt = config.render_prompt(
             "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE",
             agents_info=agents_info,
