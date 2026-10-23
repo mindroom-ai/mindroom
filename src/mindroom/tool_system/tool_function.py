@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping
 
     from mindroom.llm.media import Audio, File, Image, Video
+    from mindroom.tool_system.invocation import ToolMiddleware
 
 type ToolkitClose = Callable[[], Awaitable[None]]
 type ToolkitConnect = Callable[[], Awaitable[ToolkitClose | None]]
@@ -34,6 +35,9 @@ class ToolFunction:
     they were built with. Realtime calls repeat the second processing pass Agno ran on a marked function.
     ``actor_state`` is what the function keeps on the agent or team Agno would inject into it: one dict per adapted
     toolkit, shared by its functions and calls and never stored.
+    ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
+    caller runs (the computer announcement of the browser that gives an agent its worker computer), as Agno ran a
+    function's ``tool_hooks`` inside the agent's.
     """
 
     name: str
@@ -49,6 +53,7 @@ class ToolFunction:
     injected_params: frozenset[str] = frozenset()
     entrypoint_processed: bool = False
     actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
+    middleware: tuple[ToolMiddleware, ...] = ()
 
     def definition(self) -> ToolSpec:
         """Return the model-facing definition a provider adapter formats: every field Agno serialized, None kept."""

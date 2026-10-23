@@ -239,7 +239,7 @@ async def run_tool_call(
     *,
     middleware: Sequence[ToolMiddleware] = (),
 ) -> object:
-    """Run one tool call through ``middleware`` to its entrypoint and return what it returned, drained if it streamed.
+    """Run one tool call through ``middleware``, then the function's own, to its entrypoint; return what it returned.
 
     Runners outside the model loop that hand the tool's own value onward (background scripts, the MCP gateway,
     scheduled calls) use this; an exception the call raises propagates.
@@ -288,7 +288,7 @@ async def _run_chain(call: ToolCall, middleware: Sequence[ToolMiddleware]) -> ob
         return await _run_entrypoint(call.function, arguments, call.context)
 
     call_next: ToolNext = leaf
-    for step in reversed(middleware):
+    for step in reversed((*middleware, *call.function.middleware)):
         call_next = _link(step, call, call_next)
     return await call_next(call.arguments)
 

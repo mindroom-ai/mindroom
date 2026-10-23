@@ -1371,18 +1371,16 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     persona_tools = persona.tools if persona is not None else None
     plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
-    tool_middleware: list[ToolMiddleware] = [
-        _build_agent_tool_middleware(
-            hook_registry=hook_registry,
-            plugins=plugins,
-            agent_name=agent_name,
-            dispatch_context=(
-                ToolDispatchContext(execution_identity=execution_identity) if execution_identity is not None else None
-            ),
-            config=config,
-            runtime_paths=runtime_paths,
+    hook_middleware = _build_agent_tool_middleware(
+        hook_registry=hook_registry,
+        plugins=plugins,
+        agent_name=agent_name,
+        dispatch_context=(
+            ToolDispatchContext(execution_identity=execution_identity) if execution_identity is not None else None
         ),
-    ]
+        config=config,
+        runtime_paths=runtime_paths,
+    )
     include_matrix_room_runtime_tools = (
         execution_identity is not None
         and execution_identity.channel == "matrix"
@@ -1492,16 +1490,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         entry = adapt_entry(toolkit, tool_entry, authored_name) if toolkit is not None else None
         if built_functions is not None:
             persona_built[tool_name] = built_functions
-        if toolkit is not None:
-            announcement = computer_announcement_middleware(
-                toolkit,
-                tool_name,
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-            if announcement is not None:
-                tool_middleware.append(announcement)
         return entry
 
     def adapt_entry(toolkit: Toolkit, tool_entry: EffectiveToolConfig, authored_name: str) -> _ToolkitEntry:
@@ -1513,6 +1501,19 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             # Deferred before it is adapted, so its instructions leave the prompt for the search results.
             deferred = defer_toolkit(authored_name, metadata.description if metadata else "", toolkit)
         adapted = adapt_toolkit(toolkit)
+        announcement = computer_announcement_middleware(
+            toolkit,
+            tool_name,
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        if announcement is not None:
+            # The browser's own calls announce the computer, so they do whoever offers them, a deferred one's too.
+            functions = tuple(
+                replace(function, middleware=(*function.middleware, announcement)) for function in adapted.functions
+            )
+            adapted = replace(adapted, functions=functions)
         if not routes_through_worker(tool_name):
             adapted = replace(adapted, connect=run_connection(toolkit))
         if supports_native_tool_approval:
@@ -1598,7 +1599,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
-        tool_middleware=tuple(tool_middleware),
+        tool_middleware=(hook_middleware,),
     )
 
 
