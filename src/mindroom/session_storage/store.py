@@ -246,8 +246,8 @@ class ConversationStore:
         visible over a stored paused, cancelled, or errored row, takes the next position after every run and
         summary row. With ``record_usage``, the run's usage replaces its earlier snapshot in the usage ledger,
         which outlives removed runs, and the session totals change by the difference, in the same transaction.
-        A frozen run's usage is final and changes neither. A run that names a requester gives a session row that has
-        none the requester, whoever created the row.
+        A frozen run's usage is final and changes neither. The first requester a written run names is stored on a
+        session row that has none; no other write of the store names a requester.
 
         With ``state``, a ``session_state_snapshot`` of the state the run ran with, the run and the state commit in
         one transaction, so a failure leaves neither. The state is written only when the row does not already hold it.
@@ -690,7 +690,7 @@ def _adopt_requester(
     session_id: str,
     requester_id: str | None,
 ) -> None:
-    """Give a session row that has no requester yet the requester of a run saved into it, the only writer of the column.
+    """Give a session row that has no requester the requester of a run saved into it; no other write names one.
 
     A conversation's first run names its requester, but the row is often created before that run is saved, by a
     write that knows no requester, such as a fold or a helper's usage, so a created row has none. The first requester
