@@ -31,9 +31,6 @@ if TYPE_CHECKING:
 MEMBER_PAUSED_RESULT = "Member '{name}' requires human input before continuing."
 COLLABORATE_MEMBER_PAUSED_RESULT = "Agent {name}: Requires human input before continuing."
 NO_MEMBER_RESPONSE = "No response from the member agent."
-# How Agno's non-stream collaborate delegation labeled each member's result, and its text for a member left blank.
-_COLLABORATE_MEMBER_RESULT = "Agent {name}: {result}"
-_COLLABORATE_BLANK_RESULT = "No Response"
 
 # Runs one member on the leader's task and returns its terminal record, whatever its status.
 type MemberRunner = Callable[[TeamMember, str], Coroutine[Any, Any, RunRecord]]
@@ -155,7 +152,7 @@ def collaborate_result_text(
         elif stream:
             pieces.append(_streamed_result(child))
         else:
-            pieces.append(_COLLABORATE_MEMBER_RESULT.format(name=member.spec.name, result=_labeled_result(child)))
+            pieces.append(f"Agent {member.spec.name}: {_labeled_result(child)}")
     return "".join(pieces)
 
 
@@ -172,7 +169,7 @@ def _labeled_result(child: RunRecord) -> str:
             return content
         if child.tools:
             return ",".join(tool.result or "" for tool in child.tools)
-        return _COLLABORATE_BLANK_RESULT
+        return "No Response"
     return _json_text(content)
 
 
