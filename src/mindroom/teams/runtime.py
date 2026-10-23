@@ -217,19 +217,6 @@ def team_paused_content(record: TeamRunRecord) -> str:
     return "Team run paused. The following require input:\n" + "\n".join(parts)
 
 
-def _keep_ended_member_run(ended: list[RunRecord], record: RunRecord) -> None:
-    """Keep a member run's terminal ``record`` in ``ended``, the member runs in the order they first ended.
-
-    A member resumed within the run ends twice; its later record replaces the paused one where it stood, as Agno
-    continued the paused member's output in place.
-    """
-    run_ids = [member.run_id for member in ended]
-    if record.run_id in run_ids:
-        ended[run_ids.index(record.run_id)] = record
-    else:
-        ended.append(record)
-
-
 def team_usage_runs(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[tuple[AnyRunRecord, RunMetrics]]:
     """Return the runs whose own metrics make up the turn's usage, with those metrics: the leader's, then each member's.
 
@@ -468,7 +455,13 @@ class _MemberRuns:
     def _capture(self, ended: list[RunRecord]) -> Persist[RunRecord]:
         async def persist(record: RunRecord) -> None:
             ended.append(record)
-            _keep_ended_member_run(self.record.ended_member_runs, record)
+            # The team keeps member runs in the order they first ended; a member resumed within the run ends twice,
+            # and its later record replaces the paused one where it stood, as Agno continued the paused output in place.
+            run_ids = [run.run_id for run in self.record.ended_member_runs]
+            if record.run_id in run_ids:
+                self.record.ended_member_runs[run_ids.index(record.run_id)] = record
+            else:
+                self.record.ended_member_runs.append(record)
             if self.persist is not None:
                 await self.persist(record)
 
