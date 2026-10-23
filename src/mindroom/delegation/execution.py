@@ -1049,11 +1049,21 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     caller_identity = replace(execution_identity, agent_name=caller)
     resolve_result = partial(_resolve_delegation_requirement, requirement, on_event=on_event)
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
-    if decisions is not None and (
-        requirement_key in decisions or (retained is not None and retained.delegation_id == pending_id)
-    ):
-        # The approval decided this call's card or the calls of the child it waits on, and the run that made the call
-        # continues with its result, so that run reads the approval's receipt.
+    # What the decisions answer for this call: its own card, or the calls of the child it waits on, which go to that
+    # child under its own call ids.
+    card_decision = None if decisions is None else decisions.get(requirement_key)
+    child_decisions = None
+    child_reasons = None
+    child_calls: tuple[ApprovalCall, ...] = ()
+    if decisions is not None and retained is not None and retained.delegation_id == pending_id:
+        delegation_id = retained.delegation_id
+        child_decisions = {child_call_id(delegation_id, key): value for key, value in decisions.items()}
+        child_reasons = {child_call_id(delegation_id, key): value for key, value in (denial_reasons or {}).items()}
+        child_calls = tuple(
+            replace(call, tool_call_id=child_call_id(delegation_id, call.tool_call_id)) for call in approval_calls
+        )
+    if card_decision is not None or child_decisions is not None:
+        # The run that made the call continues with its result, so that run reads the approval's receipt.
         add_approval_receipt_reader(requirement.member_run_id or response.run_id)
     excluded = toolkit_is_background_excluded("delegate", config, runtime_paths)
     # A child saved before a crash keeps its accepted owner when startup policy changes.
@@ -1140,7 +1150,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     # Approval and the before hook must settle before a child can start.
     gated = tool_may_require_approval(config, tool.tool_name or "run_subagent")
-    approved_here = decisions is not None and decisions.get(requirement_key) is True
+    approved_here = card_decision is True
     if gated and retained is None and not approved_here and state.gates.get(requirement_key) is not False:
         # Saved gates live in session storage that worker code can write, so only an approval
         # consumed by this continuation can start a fresh child; otherwise ask again.
@@ -1158,7 +1168,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return None
     if state.gates.get(requirement_key) is False:
         return resolve_result("Delegation denied by requester; child was not executed.")
-    if decisions is not None and requirement_key in decisions:
+    if card_decision is not None:
         # The approved gate card shows the projected call; the child starts from this separate requirement.
         call = next((call for call in approval_calls if call.tool_call_id == requirement_key), None)
         if call is None or not call.binds_arguments(tool.tool_args):
@@ -1223,19 +1233,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if child.result is None or background is not None:
             # Scope violations must propagate; they are not ordinary child failures.
             _validate_child_scope(child, target, caller_identity=caller_identity, config=config, depth=delegation_depth)
-            child_decisions = None
-            child_reasons = None
-            child_calls = ()
-            if pending_id == child.delegation_id and decisions is not None:
-                delegation_id = child.delegation_id
-                child_decisions = {child_call_id(delegation_id, key): value for key, value in decisions.items()}
-                child_reasons = {
-                    child_call_id(delegation_id, key): value for key, value in (denial_reasons or {}).items()
-                }
-                child_calls = tuple(
-                    replace(call, tool_call_id=child_call_id(delegation_id, call.tool_call_id))
-                    for call in approval_calls
-                )
             try:
                 # The reply records a background child's call before its job starts, as for any managed call: the
                 # child's own tools run unrecorded in its job, so a restart's account names the delegation.
