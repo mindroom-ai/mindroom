@@ -23,7 +23,7 @@ just cluster-kind-down
 
 ## Prerequisites
 
-- Docker running
+- Docker 28 or newer running
 - `just` and Nix (`nix-shell`) for the `just cluster-kind-*` recipes
 - kind (`brew install kind` or [install guide](https://kind.sigs.k8s.io/docs/user/quick-start/#installation))
 - kubectl (`brew install kubectl`)
