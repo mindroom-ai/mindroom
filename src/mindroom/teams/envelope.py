@@ -4,7 +4,8 @@
 turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply delivers
 no tool trace and renders from the finished run's records, as Agno's blocking team reply did: each member run's text
 in the order the runs ended, then the consensus. Its pause and the text a stopped or failed blocking turn records
-render from the records too. The streamed reply shows its trace through its chunks and keeps the configured order.
+render from the records too. The streamed reply shows its trace through its chunks and keeps the configured order;
+it adds each failed member run's reason when the team run ends, as a resumed reply does.
 ``run_prepared_team`` runs an OpenAI-compatible API team turn under the same leader hooks and storage.
 """
 
@@ -753,6 +754,10 @@ class _TeamTurn:
             yield AttemptResolved(HandledAttempt(metadata_content=self.failure_metadata(attempt)))
             return
         record = attempt.records.terminal(self.entity_name)
+        # A failed member run's deltas never show why it failed; the document adds its reason now the team run ended.
+        shown_reasons = attempt.show_failure_reasons(record)
+        if shown_reasons:
+            self.sync_live_turn_recorder(run, attempt)
         if record.status is RunStatus.paused:
             paused = self.resolve_paused(attempt, record, blocking=False)
             if paused.response_text:
@@ -763,6 +768,9 @@ class _TeamTurn:
                 )
             yield AttemptResolved(paused)
             return
+        if shown_reasons and (chunk := attempt.chunk()) is not None:
+            emitted_output = True
+            yield chunk
         # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
         # carries the trigger either, so the next turn still reads it.
         yield AttemptResolved(
@@ -847,8 +855,8 @@ class _TeamTurn:
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
         # its trace through its chunks. A blocking reply renders the finished runs, as Agno's did; a streamed one
-        # records the document its events built, in the configured member order. The "No team response generated."
-        # fallback is display chrome, not replayable assistant text.
+        # records the document its events built and its failed member runs' reasons, in the configured member order.
+        # The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
             leader_text = finished_run_text(record)
             has_visible_output = bool(format_team_response(record, members)) or bool(leader_text.strip())

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_loop.spec import RunContext
@@ -77,7 +77,6 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord, RunRecord, RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.streaming import ProgressPublisher
-    from mindroom.teams.attempt import TeamReplyText
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.teams.spec import TeamMode, TeamSpec
     from mindroom.teams.storage import TeamRunRecords, TeamStorage
@@ -315,37 +314,17 @@ def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirem
     return f"agent:{presentation.resolve_member_id(member_id, requirement.member_agent_name)}", call_id
 
 
-def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | dict[str, Any] | None:
-    """Return what ``run`` hands over (``handover_content``) that its events have not shown.
-
-    A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
-    unless that is not its content: a failed run hands over why it failed.
-    """
-    handover = run.handover_content
-    return None if streamed and handover == run.content else handover
-
-
-def _append_unshown_handovers(
-    presentation: TeamStreamPresentation,
-    record: TeamRunRecord,
-    members: Sequence[RunRecord],
-    reply: TeamReplyText,
-) -> None:
-    """Add to each resumed run's slot what the run hands over and its events did not show (``_unshown_handover``).
+def _show_unshown_handovers(attempt: TeamAttempt, record: TeamRunRecord) -> None:
+    """Add to each resumed run's slot what the run hands over and its events did not show (``show_unshown_handover``).
 
     The leader's goes to the consensus and each member run's to its member's slot, as Agno's resume added their
     content: a run that pauses again without text adds its paused notice, and a member run that fails adds the reason
     its run recorded, credentials redacted, also after text it streamed and when its record still holds the content
-    it had before the pause. Each member run is matched by its run id, so an earlier run of the same member keeps its
-    text without standing for a later one, and each addition starts a paragraph of its own. A run without content
-    adds nothing, where Agno's resume added its messages' text, which repeated what the run wrote before the pause.
+    it had before the pause. A run without content adds nothing, where Agno's resume added its messages' text, which
+    repeated what the run wrote before the pause.
     """
-    # The leader is one run whose text only the consensus holds.
-    presentation.append_consensus(_unshown_handover(record, streamed=bool(reply.consensus)), separate=True)
-    for member in members:
-        member_id = presentation.resolve_member_id(member.agent_id, member.agent_name)
-        handover = _unshown_handover(member, streamed=member.run_id in reply.streamed_member_runs)
-        presentation.append_member(member_id, handover, separate=True)
+    for run in (record, *record.ended_member_runs):
+        attempt.show_unshown_handover(run)
 
 
 def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
@@ -574,7 +553,7 @@ async def continue_paused_team_run(
                         if attempt.apply(event):
                             await publish_team_presentation(progress, presentation)
             continued = attempt.records.terminal(entity_name)
-            _append_unshown_handovers(presentation, continued, continued.ended_member_runs, attempt.reply)
+            _show_unshown_handovers(attempt, continued)
             paused = paused_attempt_from_response(
                 continued,
                 fallback_session_id=session_id,
