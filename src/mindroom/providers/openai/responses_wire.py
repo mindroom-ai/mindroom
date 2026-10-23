@@ -539,7 +539,7 @@ class ResponsesStream:
     def incomplete_error(self) -> ProviderError:
         """Return the error for a stream that ended without ``response.completed``, retried like a dropped connection."""
         message = "OpenAI Responses stream ended without response.completed"
-        return ProviderUnavailable(message, provider=self.wire.provider_name, status_code=200, code=INCOMPLETE_STREAM)
+        return ProviderUnavailable(message, provider=self.wire.provider_name, code=INCOMPLETE_STREAM)
 
     def finish(self) -> ResponsesTurnParts:
         """Return the finished turn after ``response.completed``."""
