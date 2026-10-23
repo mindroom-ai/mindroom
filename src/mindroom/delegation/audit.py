@@ -285,6 +285,8 @@ async def finish_child_record(
     return f"{receipt}\nSubagent ID: {child.subagent_id}" if child.subagent_id is not None else receipt
 
 
+# TODO(simplify): This repeats lifecycle.child_execution_identity's check with its own error type and text. Take
+# the identity from that one check. Nobody would notice; only the error of a mismatch no prepared child has changes.
 def _child_identity(child: DelegationChild) -> ToolExecutionIdentity:
     identity = parse_tool_execution_identity_payload(
         child.execution_identity,
