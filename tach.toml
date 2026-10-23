@@ -2615,7 +2615,7 @@ depends_on = [
 # The stored tool-call shapes earlier releases wrote, read where stored runs become requests.
 [[modules]]
 path = "mindroom.history.legacy_stored_tool_calls"
-depends_on = []
+depends_on = ["mindroom.history.message_content"]
 visibility = ["mindroom.history.request_messages"]
 
 [[modules]]
@@ -7793,6 +7793,7 @@ depends_on = [
     "mindroom.llm",
 ]
 visibility = [
+    "mindroom.history.legacy_stored_tool_calls",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
     "mindroom.history.summary_input",

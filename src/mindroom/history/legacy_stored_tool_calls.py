@@ -3,22 +3,20 @@
 The repair returns a new list and replaces, never edits, a message it changes, so the rows a request is built from are
 never rewritten. Replayed history is kept out of storage by its ``from_history`` mark, but a resumed run stores the
 request it sent, so a legacy paused run is stored repaired, in the shape current releases store.
-
-``with_tool_calls`` is the one rule for narrowing an assistant message's calls, which the repair and the tool-call
-window of ``request_messages`` share.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
+
+from mindroom.history.message_content import with_tool_calls
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.llm.messages import Message
 
-__all__ = ["repair_legacy_tool_calls", "with_tool_calls"]
+__all__ = ["repair_legacy_tool_calls"]
 
 
 # LEGACY_COMPAT: Persisted Anthropic tool calls without empty arguments.
@@ -78,15 +76,3 @@ def repair_legacy_tool_calls(messages: Sequence[Message]) -> list[Message]:
         elif (narrowed := with_tool_calls(message, calls)) is not None:
             repaired.append(narrowed)
     return repaired
-
-
-def with_tool_calls(message: Message, calls: list[dict[str, Any]]) -> Message | None:
-    """Return a copy of an assistant ``message`` holding only ``calls``, or None when it then has no call and no content.
-
-    A message left with nothing would replay as an empty assistant turn that takes a message slot, so every step that
-    narrows a message's calls, the repair here and the tool-call window, drops it instead. A message that keeps its
-    content ends without calls as None, the shape of a message that never had any.
-    """
-    if not calls and not message.content:
-        return None
-    return replace(message, tool_calls=calls or None)
