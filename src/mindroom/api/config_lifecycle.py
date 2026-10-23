@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import weakref
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
@@ -36,7 +36,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     from mindroom.agent_cli.session import TurnToolRegistry
@@ -581,63 +581,6 @@ def _raise_if_generation_mismatch(snapshot: ApiSnapshot, expected_generation: in
         raise _stale_snapshot_error()
 
 
-def _build_mutated_config[T](
-    snapshot: ApiSnapshot,
-    mutate: Callable[[dict[str, Any]], T],
-    runtime_paths: constants.RuntimePaths,
-) -> tuple[T, dict[str, Any], Config]:
-    """Build one validated config payload from a committed snapshot off-lock."""
-    _raise_for_config_load_result(snapshot.config_load_result)
-    if not snapshot.config_data:
-        _raise_missing_loaded_config()
-    candidate_config = deepcopy(snapshot.config_data)
-    result = mutate(candidate_config)
-    validated_config, validated_payload = _validated_config_payload(candidate_config, runtime_paths)
-    return result, validated_payload, validated_config
-
-
-def _commit_mutated_snapshot[T](
-    api_app: FastAPI,
-    initial_state: ApiState,
-    *,
-    expected_revision: int,
-    runtime_paths: constants.RuntimePaths,
-    validated_payload: dict[str, Any],
-    validated_config: Config,
-    result: T,
-) -> T:
-    """Commit one previously validated mutation if the targeted snapshot is still current."""
-    with initial_state.config_lock:
-        current_state = require_api_state(api_app)
-        current = current_state.snapshot
-        if current.revision != expected_revision or current.runtime_paths != runtime_paths:
-            _raise_for_config_load_result(current.config_load_result)
-            raise _stale_snapshot_error()
-        source_fingerprint = _save_config_to_file(
-            validated_payload,
-            runtime_paths=runtime_paths,
-            committed_uses_includes=current.uses_includes,
-        )
-        current_state.snapshot = _published_snapshot(
-            current,
-            config_data=validated_payload,
-            runtime_config=validated_config,
-            config_load_result=ConfigLoadResult(success=True),
-            source_fingerprint=source_fingerprint,
-            source_files=frozenset({runtime_paths.config_path.resolve()}),
-            uses_includes=False,
-        )
-        return result
-
-
-def _validate_replacement_payload(
-    new_config: dict[str, Any],
-    runtime_paths: constants.RuntimePaths,
-) -> tuple[Config, dict[str, Any]]:
-    """Validate one replacement config payload off-lock."""
-    return _validated_config_payload(new_config, runtime_paths)
-
-
 def _validate_raw_config_source(
     source: str,
     runtime_paths: constants.RuntimePaths,
@@ -661,67 +604,53 @@ def _validate_raw_config_source(
     return runtime_config, runtime_config.authored_model_dump(), source_files, source_fingerprint
 
 
-def _commit_replaced_snapshot(
-    api_app: FastAPI,
-    initial_state: ApiState,
-    *,
-    expected_revision: int,
+def _write_target(api_app: FastAPI, state: ApiState, pinned: ApiSnapshot | None) -> ApiSnapshot:
+    """Return the snapshot a write was authored against: the request's pinned snapshot, else the current one."""
+    if pinned is not None:
+        return pinned
+    with state.config_lock:
+        return require_api_state(api_app).snapshot
+
+
+@contextmanager
+def _structured_write_errors(error_prefix: str) -> Iterator[None]:
+    """Turn a failed structured config write into its HTTP error."""
+    try:
+        yield
+    except HTTPException:
+        raise
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors(include_context=False, include_input=False)) from e
+    except _ConfigComposedFromIncludesError as e:
+        raise _composed_from_includes_http_error(e) from e
+    except ConfigRuntimeValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors()) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
+
+
+def _publish_saved_payload(
+    state: ApiState,
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
     validated_config: Config,
-) -> int:
-    """Commit one previously validated replacement payload if the snapshot is still current."""
-    with initial_state.config_lock:
-        current_state = require_api_state(api_app)
-        current = current_state.snapshot
-        if current.revision != expected_revision or current.runtime_paths != runtime_paths:
-            raise _stale_snapshot_error()
-        source_fingerprint = _save_config_to_file(
-            validated_payload,
-            runtime_paths=runtime_paths,
-            committed_uses_includes=current.uses_includes,
-        )
-        current_state.snapshot = _published_snapshot(
-            current,
-            config_data=validated_payload,
-            runtime_config=validated_config,
-            config_load_result=ConfigLoadResult(success=True),
-            source_fingerprint=source_fingerprint,
-            source_files=frozenset({runtime_paths.config_path.resolve()}),
-            uses_includes=False,
-        )
-        return current_state.snapshot.generation
-
-
-def _commit_raw_replaced_snapshot(
-    api_app: FastAPI,
-    initial_state: ApiState,
-    *,
-    expected_revision: int,
-    runtime_paths: constants.RuntimePaths,
-    validated_payload: dict[str, Any],
-    validated_config: Config,
-    source: str,
-    source_files: frozenset[Path],
-    source_fingerprint: str,
-) -> int:
-    """Commit one raw replacement payload if the targeted snapshot is still current."""
-    with initial_state.config_lock:
-        current_state = require_api_state(api_app)
-        current = current_state.snapshot
-        if current.revision != expected_revision or current.runtime_paths != runtime_paths:
-            raise _stale_snapshot_error()
-        _save_raw_config_source_to_file(source, runtime_paths=runtime_paths)
-        current_state.snapshot = _published_snapshot(
-            current,
-            config_data=validated_payload,
-            runtime_config=validated_config,
-            config_load_result=ConfigLoadResult(success=True, uses_includes=validated_config.uses_includes),
-            source_fingerprint=source_fingerprint,
-            source_files=source_files,
-            uses_includes=validated_config.uses_includes,
-        )
-        return current_state.snapshot.generation
+) -> None:
+    """Save a validated payload as the whole config file and publish it; the caller holds the config lock."""
+    current = state.snapshot
+    source_fingerprint = _save_config_to_file(
+        validated_payload,
+        runtime_paths=runtime_paths,
+        committed_uses_includes=current.uses_includes,
+    )
+    state.snapshot = _published_snapshot(
+        current,
+        config_data=validated_payload,
+        runtime_config=validated_config,
+        config_load_result=ConfigLoadResult(success=True),
+        source_fingerprint=source_fingerprint,
+        source_files=frozenset({runtime_paths.config_path.resolve()}),
+        uses_includes=False,
+    )
 
 
 def _build_and_commit_mutation[T](
@@ -733,36 +662,22 @@ def _build_and_commit_mutation[T](
 ) -> T:
     """Build one config mutation off-lock and commit it only if still current."""
     initial_state = require_api_state(api_app)
-    if initial_snapshot is None:
+    snapshot = _write_target(api_app, initial_state, initial_snapshot)
+    with _structured_write_errors(error_prefix):
+        _raise_for_config_load_result(snapshot.config_load_result)
+        if not snapshot.config_data:
+            _raise_missing_loaded_config()
+        candidate_config = deepcopy(snapshot.config_data)
+        result = mutate(candidate_config)
+        validated_config, validated_payload = _validated_config_payload(candidate_config, snapshot.runtime_paths)
         with initial_state.config_lock:
-            snapshot = require_api_state(api_app).snapshot
-    else:
-        snapshot = initial_snapshot
-    try:
-        result, validated_payload, validated_config = _build_mutated_config(
-            snapshot,
-            mutate,
-            snapshot.runtime_paths,
-        )
-        return _commit_mutated_snapshot(
-            api_app,
-            initial_state,
-            expected_revision=snapshot.revision,
-            runtime_paths=snapshot.runtime_paths,
-            validated_payload=validated_payload,
-            validated_config=validated_config,
-            result=result,
-        )
-    except HTTPException:
-        raise
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors(include_context=False, include_input=False)) from e
-    except _ConfigComposedFromIncludesError as e:
-        raise _composed_from_includes_http_error(e) from e
-    except ConfigRuntimeValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors()) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
+            current_state = require_api_state(api_app)
+            current = current_state.snapshot
+            if current.revision != snapshot.revision or current.runtime_paths != snapshot.runtime_paths:
+                _raise_for_config_load_result(current.config_load_result)
+                raise _stale_snapshot_error()
+            _publish_saved_payload(current_state, snapshot.runtime_paths, validated_payload, validated_config)
+            return result
 
 
 def _build_and_commit_replacement(
@@ -775,32 +690,17 @@ def _build_and_commit_replacement(
 ) -> int:
     """Build one replacement payload off-lock and commit it only if still current."""
     initial_state = require_api_state(api_app)
-    if initial_snapshot is None:
-        with initial_state.config_lock:
-            snapshot = require_api_state(api_app).snapshot
-    else:
-        snapshot = initial_snapshot
-    try:
+    snapshot = _write_target(api_app, initial_state, initial_snapshot)
+    with _structured_write_errors(error_prefix):
         _raise_if_generation_mismatch(snapshot, expected_generation)
-        validated_config, validated_payload = _validate_replacement_payload(new_config, snapshot.runtime_paths)
-        return _commit_replaced_snapshot(
-            api_app,
-            initial_state,
-            expected_revision=snapshot.revision,
-            runtime_paths=snapshot.runtime_paths,
-            validated_payload=validated_payload,
-            validated_config=validated_config,
-        )
-    except HTTPException:
-        raise
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors(include_context=False, include_input=False)) from e
-    except _ConfigComposedFromIncludesError as e:
-        raise _composed_from_includes_http_error(e) from e
-    except ConfigRuntimeValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors()) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
+        validated_config, validated_payload = _validated_config_payload(new_config, snapshot.runtime_paths)
+        with initial_state.config_lock:
+            current_state = require_api_state(api_app)
+            current = current_state.snapshot
+            if current.revision != snapshot.revision or current.runtime_paths != snapshot.runtime_paths:
+                raise _stale_snapshot_error()
+            _publish_saved_payload(current_state, snapshot.runtime_paths, validated_payload, validated_config)
+            return current_state.snapshot.generation
 
 
 def _build_and_commit_raw_replacement(
@@ -813,28 +713,29 @@ def _build_and_commit_raw_replacement(
 ) -> int:
     """Build one raw replacement payload off-lock and commit it only if still current."""
     initial_state = require_api_state(api_app)
-    if initial_snapshot is None:
-        with initial_state.config_lock:
-            snapshot = require_api_state(api_app).snapshot
-    else:
-        snapshot = initial_snapshot
+    snapshot = _write_target(api_app, initial_state, initial_snapshot)
     try:
         _raise_if_generation_mismatch(snapshot, expected_generation)
         validated_config, validated_payload, source_files, source_fingerprint = _validate_raw_config_source(
             source,
             snapshot.runtime_paths,
         )
-        return _commit_raw_replaced_snapshot(
-            api_app,
-            initial_state,
-            expected_revision=snapshot.revision,
-            runtime_paths=snapshot.runtime_paths,
-            validated_payload=validated_payload,
-            validated_config=validated_config,
-            source=source,
-            source_files=source_files,
-            source_fingerprint=source_fingerprint,
-        )
+        with initial_state.config_lock:
+            current_state = require_api_state(api_app)
+            current = current_state.snapshot
+            if current.revision != snapshot.revision or current.runtime_paths != snapshot.runtime_paths:
+                raise _stale_snapshot_error()  # noqa: TRY301 - HTTPException passes through unchanged.
+            _save_raw_config_source_to_file(source, runtime_paths=snapshot.runtime_paths)
+            current_state.snapshot = _published_snapshot(
+                current,
+                config_data=validated_payload,
+                runtime_config=validated_config,
+                config_load_result=ConfigLoadResult(success=True, uses_includes=validated_config.uses_includes),
+                source_fingerprint=source_fingerprint,
+                source_files=source_files,
+                uses_includes=validated_config.uses_includes,
+            )
+            return current_state.snapshot.generation
     except HTTPException:
         raise
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
