@@ -198,13 +198,8 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
             (session_id,),
         ).fetchone()
     fresh = open_conversation_store(tmp_path / "fresh.db", store.names)
-    session = ConversationSession(
-        session_id=session_id,
-        kind=kind,
-        owner_id=owner,
-        user_id=user_id,
-        created_at=created_at,
-    )
+    # As the runtime builds the session of a conversation's first turn: it does not know the requester.
+    session = ConversationSession(session_id=session_id, kind=kind, owner_id=owner, created_at=created_at)
 
     outcomes = [fresh.save_run(session, run, record_usage=True) for run in _replayed(rows)]
 
@@ -222,6 +217,7 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
         (row["run_id"], _without_update_time(row["usage_data"]))
         for row in stored_rows(golden, store.names.usage, session_id)
     )
+    assert _session_row(fresh.path, store.names.sessions, session_id)[5] == user_id
     (fresh_session_data,) = _session_row(fresh.path, store.names.sessions, session_id)[6:7]
     assert _sorted_details(json.loads(fresh_session_data)["session_metrics"]) == _sorted_details(
         json.loads(session_data)["session_metrics"],

@@ -874,6 +874,83 @@ def test_ensure_session_row_creates_a_missing_row_from_the_session(store: Conver
     )
 
 
+def _unnamed_session() -> ConversationSession:
+    """A session as a conversation's first turn builds it, before any run has named the requester."""
+    return ConversationSession(session_id="s1", kind="agent", owner_id="code", created_at=1_700_000_000)
+
+
+def _requested_run(run_id: str, requester_id: str | None) -> RunRecord:
+    run = _run(run_id)
+    run.user_id = requester_id
+    return run
+
+
+def _row_requester(store: ConversationStore) -> str | None:
+    [(user_id,)] = _query(store, "SELECT user_id FROM code_sessions")
+    return user_id
+
+
+@pytest.mark.parametrize("save", ["save_run", "save_runs"])
+def test_a_saved_run_gives_a_session_row_created_without_a_requester_the_runs(
+    store: ConversationStore,
+    save: str,
+) -> None:
+    """A conversation's row stores its first run's requester, as Agno's session did, whoever created the row."""
+    session = _unnamed_session()
+    run = _requested_run("r1", "@alice:example.test")
+
+    if save == "save_run":
+        store.save_run(session, run, record_usage=True)
+    else:
+        store.save_runs(session, [run])
+
+    assert _row_requester(store) == "@alice:example.test"
+    assert _loaded(store).user_id == "@alice:example.test"
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_save_of_a_turn_stores_its_requester_on_the_row_a_fold_created(
+    store: ConversationStore,
+) -> None:
+    """The row a first turn's fold or usage write created has no requester; the turn's own save names it."""
+    session = _unnamed_session()
+    store.ensure_session_row(session)
+    assert _row_requester(store) is None
+
+    await persist_to(store, session)(_requested_run("r1", "@alice:example.test"))
+
+    assert _row_requester(store) == "@alice:example.test"
+
+
+def test_a_session_row_keeps_the_first_requester_a_run_named(store: ConversationStore) -> None:
+    """A later run of another requester, or of none, leaves the row's requester alone."""
+    session = _unnamed_session()
+
+    store.save_run(session, _requested_run("r0", None), record_usage=True)
+    assert _row_requester(store) is None
+    store.save_run(session, _requested_run("r1", "@alice:example.test"), record_usage=True)
+    store.save_run(session, _requested_run("r2", "@bob:example.test"), record_usage=True)
+    store.save_run(session, _requested_run("r3", None), record_usage=True)
+
+    assert _row_requester(store) == "@alice:example.test"
+
+
+def test_a_frozen_or_removed_run_does_not_name_the_requester(store: ConversationStore) -> None:
+    """Only a run the store wrote names the row's requester."""
+    _seed(store, [_run("r0"), _run("r1")], _unnamed_session())
+    _summary_after(store, "r1")
+    _remove(store, "gone")
+    _execute(store, "UPDATE code_sessions SET user_id = NULL")
+
+    outcomes = [
+        store.save_run(_unnamed_session(), _requested_run("r0", "@alice:example.test"), record_usage=True),
+        store.save_run(_unnamed_session(), _requested_run("gone", "@alice:example.test"), record_usage=True),
+    ]
+
+    assert outcomes == ["frozen", "removed"]
+    assert _row_requester(store) is None
+
+
 @pytest.mark.asyncio
 async def test_persist_to_saves_the_record_with_its_usage_and_the_session_state_only_when_it_changed(
     store: ConversationStore,

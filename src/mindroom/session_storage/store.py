@@ -209,7 +209,8 @@ class ConversationStore:
         visible over a stored paused, cancelled, or errored row, takes the next position after every run and
         summary row. With ``record_usage``, the run's usage replaces its earlier snapshot in the usage ledger,
         which outlives removed runs, and the session totals change by the difference, in the same transaction.
-        A frozen run's usage is final and changes neither.
+        A frozen run's usage is final and changes neither. A run that names a requester gives a session row that has
+        none the requester, whoever created the row.
 
         Once the save commits, ``session.runs`` holds the run as the store does (see ``_reconcile``).
         """
@@ -417,6 +418,8 @@ class ConversationStore:
             data["messages"] = [message for message in data["messages"] if message["role"] not in self.prompt_roles]
         row = _write_run_row(connection, self.names, data, row_type=row_type, session_id=session_id)
         saved = _SavedRun(data["run_id"], row_type, row)
+        if isinstance(row, _WrittenRow):
+            _adopt_requester(connection, self.names, session_id, data.get("user_id"))
         if not record_usage or row == "frozen":
             return saved
         now = int(time())
@@ -605,6 +608,24 @@ def _ensure_session_row(
         ),
     )
     return json.loads(session_data)["session_state"] if cursor.rowcount else None
+
+
+def _adopt_requester(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    requester_id: str | None,
+) -> None:
+    """Give a session row that has no requester yet the requester of a run saved into it.
+
+    A conversation's first run names its requester, but the row is often created before that run is saved, by a
+    write that knows no requester, such as a fold or a helper's usage. The first requester a run names stays.
+    """
+    if requester_id:
+        connection.execute(
+            f"UPDATE {quote_identifier(names.sessions)} SET user_id = ? WHERE session_id = ? AND user_id IS NULL",  # noqa: S608
+            (requester_id, session_id),
+        )
 
 
 def _record_stored_state(session: ConversationSession, state: dict[str, Any] | None) -> None:
