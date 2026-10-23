@@ -14,7 +14,7 @@ from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
 from mindroom.constants import prompt_roles_for_history_storage
-from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
+from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls, with_tool_calls
 from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
@@ -168,9 +168,8 @@ def filter_tool_calls(messages: Sequence[Message], max_tool_calls: int) -> list[
             if message.tool_call_id in kept_ids:
                 filtered.append(message)
         elif message.role == "assistant" and message.tool_calls:
-            kept = deepcopy(message)
-            kept.tool_calls = [call for call in kept.tool_calls or [] if call.get("id") in kept_ids] or None
-            if kept.tool_calls or kept.content:
+            kept = with_tool_calls(message, [call for call in message.tool_calls if call.get("id") in kept_ids])
+            if kept is not None:
                 filtered.append(kept)
         else:
             filtered.append(message)

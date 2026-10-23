@@ -103,6 +103,34 @@ def test_the_message_window_counts_only_messages_that_replay() -> None:
     assert [message.role for message in _history(run, max_messages=4)] == ["user", "assistant", "tool", "assistant"]
 
 
+def test_a_message_left_without_calls_or_content_takes_no_message_slot() -> None:
+    run = _stored_run(
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "tool_calls": [_PLACEHOLDER]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
+        {"role": "assistant", "content": "It is sunny."},
+    )
+
+    history = _history(run, max_messages=2)
+
+    assert [(message.role, message.content) for message in history] == [
+        ("user", "Weather?"),
+        ("assistant", "It is sunny."),
+    ]
+
+
+def test_a_message_left_with_content_but_no_calls_holds_none() -> None:
+    run = _stored_run(
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "content": "Checking.", "tool_calls": [_PLACEHOLDER]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
+    )
+
+    _user, assistant = _history(run)
+
+    assert (assistant.content, assistant.tool_calls) == ("Checking.", None)
+
+
 def test_a_paused_run_resumes_without_its_placeholders() -> None:
     paused = [
         Message(role="system", content="You are Code."),
