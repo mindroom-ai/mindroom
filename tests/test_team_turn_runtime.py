@@ -1260,9 +1260,18 @@ async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_t
     )
     team.config.agents["checker"].delegate_to = ["helper"]
 
-    await team.stream()
+    chunks = await team.stream()
 
     assert len(team.models["helper-model"].requests) == 2
+    # The driver's events about each member's call land in that member's slot, each call finished with its child.
+    assert [
+        (entry.type, entry.scope_key, (entry.result_preview or "").partition("\n")[0])
+        for entry in chunks[-1].tool_trace or []
+        if entry.tool_name == "run_subagent"
+    ] == [
+        ("tool_call_completed", "agent:writer", "Helper one."),
+        ("tool_call_completed", "agent:checker", "Helper two."),
+    ]
     record, members = team.stored_runs()
     assert (record.status, record.content) == (RunStatus.completed, "Consensus.")
     assert sorted((member.agent_id or "", member.status) for member in members) == [
