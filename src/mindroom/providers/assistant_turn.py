@@ -1,7 +1,7 @@
 """What every adapter does to finish a turn: record the answering model and its timings.
 
 The ``mindroom_model`` provenance key is persisted with every assistant message a model answered, and usage
-accounting and a run's own answers read it. ``stamp_model`` is its one writer: an adapter stamps the turn it
+accounting and a run's own model messages read it. ``stamp_model`` is its one writer: an adapter stamps the turn it
 finishes, and the loop the usage message it keeps for a request cut off before its turn was taken.
 """
 

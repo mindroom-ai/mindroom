@@ -39,6 +39,7 @@ from mindroom.llm.usage import MessageMetrics
 from mindroom.mid_turn import QueuedMessage
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.tool_policy import provider_tools_disabled
@@ -189,14 +190,26 @@ def _run(run_id: str, *messages: Message) -> RunRecord:
     return RunRecord(run_id=run_id, agent_id="mind", session_id="session", messages=list(messages))
 
 
+def _answered(
+    content: str = "",
+    *,
+    tool_calls: list[dict[str, Any]] | None = None,
+    from_history: bool = False,
+) -> Message:
+    """Return an assistant message a model answered, stamped with its model as an adapter stamps every turn."""
+    message = Message(role="assistant", content=content, tool_calls=tool_calls, from_history=from_history)
+    stamp_model(message, _SCRIPTED)
+    return message
+
+
 def _tool_turn(run_id: str, result: str = "tests passed") -> RunRecord:
     """One run with two model replies: a tool-calling step and the final answer."""
     return _run(
         run_id,
         Message(role="user", content="Deploy the web service"),
-        Message(role="assistant", content="", tool_calls=[{"function": {"name": "shell", "arguments": "{}"}}]),
+        _answered(tool_calls=[{"function": {"name": "shell", "arguments": "{}"}}]),
         Message(role="tool", content=result, tool_name="shell", tool_call_id="call"),
-        Message(role="assistant", content="Deployed."),
+        _answered("Deployed."),
     )
 
 
@@ -649,15 +662,18 @@ def test_long_tool_output_keeps_its_start_and_end() -> None:
 
 
 def test_model_replies_count_only_model_visible_runs() -> None:
-    """Each assistant message is one model request; history copies and runs hidden from history do not count."""
+    """Each message the run's model answered is one request; copies, thread replies, and hidden runs do not count."""
     errored = _tool_turn("r4")
     errored.status = RunStatus.error
     child = _tool_turn("r5")
     child.parent_run_id = "r1"
     copied = _run(
         "r3",
-        Message(role="assistant", content="copied", from_history=True),
-        Message(role="assistant", content="new"),
+        _answered("copied", from_history=True),
+        # The thread's earlier reply, which the run's input carries and the run stores with its own messages.
+        Message(role="assistant", content="\n\nThe image is one green pixel."),
+        Message(role="user", content="And now?"),
+        _answered("new"),
     )
     assert count_model_replies(_tool_turn("r1")) == (2, False)
     assert count_model_replies(copied) == (1, False)
@@ -671,9 +687,9 @@ def test_a_chat_skill_manage_call_restarts_the_count() -> None:
     saved = _run(
         "r2",
         Message(role="user", content="Save that as a skill"),
-        Message(role="assistant", content="", tool_calls=[{"function": {"name": "skill_manage", "arguments": "{}"}}]),
+        _answered(tool_calls=[{"function": {"name": "skill_manage", "arguments": "{}"}}]),
         Message(role="tool", content="{}", tool_name="skill_manage", tool_call_id="call"),
-        Message(role="assistant", content="Saved."),
+        _answered("Saved."),
     )
     assert count_model_replies(saved) == (1, True)
 

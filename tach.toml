@@ -9210,7 +9210,7 @@ visibility = ["mindroom.skill_learning.runner", "mindroom.skill_learning.tools"]
 
 [[modules]]
 path = "mindroom.skill_learning.transcript"
-depends_on = ["mindroom.history.conversation_text", "mindroom.history.run_visibility"]
+depends_on = ["mindroom.agent_loop", "mindroom.history.conversation_text", "mindroom.history.run_visibility"]
 visibility = ["mindroom.skill_learning.reviewer", "mindroom.skill_learning.runner"]
 
 [[modules]]

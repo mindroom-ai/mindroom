@@ -399,21 +399,25 @@ async def _persist_quietly[R: AnyRunRecord](persist: Persist[R], record: R) -> N
         logger.exception("terminal_run_persist_failed", run_id=record.run_id, status=record.status.value)
 
 
-def own_answers(record: AnyRunRecord) -> list[str]:
-    """Return the text of each answer the run's own model requests wrote, oldest first.
+def own_model_messages(record: AnyRunRecord) -> list[Message]:
+    """Return each message the run's own model requests answered, oldest first, tool-calling steps included.
 
     A run's input can carry the thread's earlier replies as assistant messages, which the run stores with its own;
     only a message a model answered carries its provenance (``MODEL_PROVENANCE_KEY``), and a history copy is marked
-    ``from_history``, so neither reads as this run's answer.
+    ``from_history``, so neither is this run's.
     """
     return [
-        message.get_content_string()
+        message
         for message in record.messages
         if message.role == "assistant"
-        and message.content
         and not message.from_history
         and MODEL_PROVENANCE_KEY in (message.provider_data or {})
     ]
+
+
+def own_answers(record: AnyRunRecord) -> list[str]:
+    """Return the text of each of the run's own model messages (``own_model_messages``) that has any, oldest first."""
+    return [message.get_content_string() for message in own_model_messages(record) if message.content]
 
 
 def paused_content(tools: Sequence[ToolExecution]) -> str:
@@ -434,6 +438,7 @@ __all__ = [
     "decide_requirements",
     "drive_run",
     "own_answers",
+    "own_model_messages",
     "paused_content",
     "plan_resume",
     "prepare_resume_tools",
