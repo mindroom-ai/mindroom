@@ -40,24 +40,20 @@ def media_payload_snapshot(media_value: object) -> object:
 def _retained_viewed_images(messages: Sequence[Message]) -> set[tuple[int, int]]:
     """Return ``(message, image)`` indexes of the newest viewed images replay keeps within its count and byte caps."""
     retained: set[tuple[int, int]] = set()
-    retained_count = 0
     retained_bytes = 0
-    for message_index in range(len(messages) - 1, -1, -1):
+    for message_index in reversed(range(len(messages))):
         images = messages[message_index].images or []
-        for image_index in range(len(images) - 1, -1, -1):
-            image = images[image_index]
-            content = image.content
-            if not _is_viewed_image(image) or not content:
+        for image_index in reversed(range(len(images))):
+            content = images[image_index].content
+            if not _is_viewed_image(images[image_index]) or not content:
                 continue
-            image_bytes = len(content)
             if (
-                retained_count >= _MAX_HISTORY_VIEWED_IMAGES
-                or image_bytes > _MAX_HISTORY_VIEWED_IMAGE_BYTES - retained_bytes
+                len(retained) >= _MAX_HISTORY_VIEWED_IMAGES
+                or len(content) > _MAX_HISTORY_VIEWED_IMAGE_BYTES - retained_bytes
             ):
                 continue
             retained.add((message_index, image_index))
-            retained_count += 1
-            retained_bytes += image_bytes
+            retained_bytes += len(content)
     return retained
 
 
