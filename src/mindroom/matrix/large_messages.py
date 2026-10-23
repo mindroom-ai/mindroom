@@ -447,10 +447,6 @@ def _fit_preview(
     where a bisection takes about twenty, for a preview somewhat shorter than
     the largest that fits.
     """
-    preview_body = preview_content.get("body")
-    if not isinstance(preview_body, str):
-        msg = "Large-message preview body must be text"
-        raise TypeError(msg)
 
     def build(limit: int) -> dict[str, Any]:
         preview = dict(preview_content)
@@ -462,7 +458,7 @@ def _fit_preview(
     if overhead > _MATRIX_EVENT_HARD_LIMIT:
         raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
     budget = _MATRIX_EVENT_HARD_LIMIT - overhead
-    limit = len(preview_body.encode("utf-8"))
+    limit = len(preview_content["body"].encode("utf-8"))
     preview = build(limit)
     while (used := calculate_event_size(preview) - overhead) > budget:
         limit = int(limit * budget / used * _PREVIEW_SHRINK_MARGIN)
