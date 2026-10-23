@@ -264,7 +264,8 @@ async def test_refreshes_write_the_rows_and_collection_settings_agno_wrote(tmp_p
     assert await _refresh_golden_bases(config, runtime_paths) == ROW_GOLDENS["bases"]
 
 
-def test_rows_agno_wrote_stay_searchable(tmp_path: Path, parity_embedder: _ParityEmbedder) -> None:
+@pytest.mark.asyncio
+async def test_rows_agno_wrote_stay_searchable(tmp_path: Path, parity_embedder: _ParityEmbedder) -> None:
     """A collection Agno created and filled answers the owned read path exactly as Agno's search did."""
     handbook = ROW_GOLDENS["bases"]["handbook"]
     client = chromadb.PersistentClient(path=str(tmp_path))
@@ -283,7 +284,7 @@ def test_rows_agno_wrote_stay_searchable(tmp_path: Path, parity_embedder: _Parit
     for search in SEARCH_GOLDENS["searches"]:
         if search["agent"] != "librarian" or "documents" not in search:
             continue
-        hits = proxy.search(search["query"], limit=10)
+        hits = await proxy.asearch(search["query"], limit=10)
         assert json.loads(_format_search_hits(hits)) == _with_approximate_distances(search["documents"])
 
 

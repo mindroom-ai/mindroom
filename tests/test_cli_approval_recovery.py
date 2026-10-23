@@ -166,12 +166,9 @@ class _Index:
     def __init__(self, searches: list[str]) -> None:
         self.searches = searches
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         self.searches.append(query)
         return [SearchHit(content="saved generated memory")]
-
-    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        return self.search(query, limit=limit)
 
 
 def _knowledge(searches: list[str]) -> AgentKnowledge:

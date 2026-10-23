@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.knowledge.collection_lifetime import read_collection
-from mindroom.knowledge.read_process import read_chroma, read_chroma_async
+from mindroom.knowledge.read_process import read_chroma_async
 from mindroom.knowledge.read_protocol import ReadRequest
 
 if TYPE_CHECKING:
@@ -75,13 +75,8 @@ class ChromaReadProxy:
             published_settings=self.published_settings.to_metadata() if self.published_settings is not None else None,
         )
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
-        """Embed under the caller's credentials, then query outside this process."""
-        embedding = self.embedder.embed([query], purpose="query")[0]
-        return read_chroma(self._request(query, embedding, limit)).hits
-
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        """Start native imports while the parent obtains the query embedding."""
+        """Embed under the caller's credentials, then query outside this process, which starts while the embedding runs."""
 
         async def prepare_request() -> ReadRequest:
             embedding = (await self.embedder.aembed([query], purpose="query"))[0]

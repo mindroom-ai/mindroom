@@ -45,9 +45,6 @@ _CALCULATOR_FUNCTIONS = {
 class _Index:
     """A published index the agent is offered but these tests never search."""
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
-        raise AssertionError((query, limit))
-
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         raise AssertionError((query, limit))
 

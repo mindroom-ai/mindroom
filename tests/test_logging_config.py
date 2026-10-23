@@ -19,7 +19,7 @@ from chromadb.api.client import Client
 from chromadb.config import Settings
 
 from mindroom.constants import RuntimePaths
-from mindroom.knowledge.read_process import read_chroma
+from mindroom.knowledge.read_process import read_chroma_async
 from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.logging_config import (
     bound_log_context,
@@ -34,6 +34,8 @@ from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.knowledge.read_protocol import ReadResult
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -733,11 +735,17 @@ def test_knowledge_read_worker_logs_like_its_parent(
         client.create_collection("docs").add(ids=["a"], embeddings=[[1.0, 0.0]], documents=["alpha"])
     capfd.readouterr()
 
-    assert len(read_chroma(ReadRequest(str(index), "docs", "alpha", [1.0, 0.0])).hits) == 1
+    async def read(collection: str) -> ReadResult:
+        async def request() -> ReadRequest:
+            return ReadRequest(str(index), collection, "alpha", [1.0, 0.0])
+
+        return await read_chroma_async(request)
+
+    assert len(asyncio.run(read("docs")).hits) == 1
     # Chroma names a missing collection in its error, so the name carries the URL credentials.
     missing = "https://reader:synthetic-secret@example.test docs"
     with pytest.raises(RuntimeError, match="NotFoundError"):
-        read_chroma(ReadRequest(str(index), missing, "alpha", [1.0, 0.0]))
+        asyncio.run(read(missing))
 
     stderr = capfd.readouterr().err
     records = _stderr_records(stderr.encode())
