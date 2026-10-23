@@ -641,13 +641,12 @@ def agent_run_metadata_content(
     status: RunStatus,
     prepared_history: PreparedHistoryState | None,
     last_request: MessageMetrics | None = None,
-    observed_tool_calls: int = 0,
 ) -> dict[str, Any]:
     """Return the run metadata an agent reply or approval resume publishes for its run ``record``.
 
     ``prepared_history`` is the history the run was prepared with, None for an approval resume, which prepares none.
-    A streamed reply also passes its last request's usage, whose counts describe the context, and the tool calls it
-    saw, which count for a run that left no record.
+    A streamed reply also passes its last request's usage, whose counts describe the context. The tool calls counted
+    are the ones the record holds: a run that reported a tool call hands over its record however it ends.
     """
     metrics = record.metrics if record is not None else None
     return build_ai_run_metadata_content(
@@ -664,7 +663,7 @@ def agent_run_metadata_content(
         context_raw_input_tokens=_reported_usage(last_request, "input_tokens"),
         context_cache_read_tokens=_reported_usage(last_request, "cache_read_tokens"),
         context_cache_write_tokens=_reported_usage(last_request, "cache_write_tokens"),
-        tool_count=len(record.tools) if record is not None and record.tools is not None else observed_tool_calls,
+        tool_count=len(record.tools or ()) if record is not None else 0,
         prepared_history=prepared_history,
     )
 
@@ -2223,7 +2222,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 status=status,
                 prepared_history=prepared_run.prepared_history,
                 last_request=attempt_state.latest_request_usage,
-                observed_tool_calls=attempt_state.observed_tool_calls,
             )
 
         state = _StreamingAttemptState()

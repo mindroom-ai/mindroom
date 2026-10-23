@@ -2,7 +2,8 @@
 
 Each test loads the sessions one approval resume read, as the capture dumped them just before the resume, into the
 stores the ``code`` and ``helper`` agents use, and continues the paused run through ``AgentApprovalExecution`` with
-the decisions the capture took. The stored rows are compared with the ones Agno wrote after the same resume.
+the decisions the capture took. The stored rows are compared with the ones Agno wrote after the same resume, and the
+run metadata the resume publishes with the metadata Agno's resume published.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, approval_calls_for, approval_executor, resume
 from tests.fakes.scripted_model import answer, usage
 from tests.team_runtime.squad import STORAGE, comparable, golden_run, scripted
+from tests.test_ai_run_metadata_goldens import golden_metadata, published_as_compared
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -221,6 +223,7 @@ async def test_a_paused_approval_resumes_into_the_rows_agno_stored(
     result = await run.resume(run.calls(), approve=approve, prompt="Multiply 6 by 7.")
 
     assert isinstance(result, CompletedApprovalRun)
+    assert published_as_compared(result.metadata_content) == golden_metadata(run_id)
     assert run.executed == ([(6, 7)] if approve else [])
     expected = comparable(golden_run("agent_code", create_session_id(ROOM, thread), run_id))
     assert comparable(run.stored().to_dict()) == _timed_like_the_owned_loop(expected)
@@ -256,6 +259,7 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent_as_agno
     result = await run.resume(calls, approve=True, prompt="Ask the helper to multiply 6 by 7.")
 
     assert isinstance(result, CompletedApprovalRun)
+    assert published_as_compared(result.metadata_content) == golden_metadata("run-delegation-approved")
     assert run.executed == [(6, 7)]
     session_id = create_session_id(ROOM, "$delegation-approved")
     expected = comparable(golden_run("agent_code", session_id, "run-delegation-approved"))

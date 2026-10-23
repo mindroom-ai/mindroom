@@ -184,46 +184,22 @@ class TeamAttempt:
 
     def metadata_content(self, config: Config, *, session_id: str, status: RunStatus) -> dict[str, Any]:
         """Return the run metadata payload: the leader's identity, the team's usage, and the prepared history."""
-        return team_run_metadata_content(
-            config,
-            self.records.record,
+        record = self.records.record
+        prepared_history = self.prepared_history
+        return build_ai_run_metadata_content(
+            config=config,
             model_name=self.runtime_model_name,
-            run_id=self.run_id,
-            session_id=session_id,
+            run_id=record.run_id if record is not None else self.run_id,
+            session_id=(record.session_id if record is not None else None) or session_id,
             status=status,
-            prepared_history=self.prepared_history,
+            model=record.model if record is not None else None,
+            model_provider=record.model_provider if record is not None else None,
+            metrics=team_usage(record, record.ended_member_runs) if record is not None else None,
+            context_metrics=record.metrics if record is not None else None,
+            context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
+            tool_count=len(team_tool_executions(record, record.ended_member_runs)) if record is not None else 0,
+            prepared_history=prepared_history,
         )
 
 
-def team_run_metadata_content(
-    config: Config,
-    record: TeamRunRecord | None,
-    *,
-    model_name: str,
-    run_id: str,
-    session_id: str,
-    status: RunStatus,
-    prepared_history: PreparedHistoryState | None,
-) -> dict[str, Any]:
-    """Return the run metadata a team reply publishes for its run ``record``: the leader's identity and the team's usage.
-
-    ``run_id`` and ``session_id`` name the attempt when no record was handed over; ``prepared_history`` is the
-    history the turn was prepared with, None for an approval resume.
-    """
-    return build_ai_run_metadata_content(
-        config=config,
-        model_name=model_name,
-        run_id=record.run_id if record is not None else run_id,
-        session_id=(record.session_id if record is not None else None) or session_id,
-        status=status,
-        model=record.model if record is not None else None,
-        model_provider=record.model_provider if record is not None else None,
-        metrics=team_usage(record, record.ended_member_runs) if record is not None else None,
-        context_metrics=record.metrics if record is not None else None,
-        context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
-        tool_count=len(team_tool_executions(record, record.ended_member_runs)) if record is not None else 0,
-        prepared_history=prepared_history,
-    )
-
-
-__all__ = ["TeamAttempt", "TeamReplyText", "team_run_metadata_content", "team_tool_executions"]
+__all__ = ["TeamAttempt", "TeamReplyText", "team_tool_executions"]
