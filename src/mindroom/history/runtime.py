@@ -385,9 +385,8 @@ def _reported_history_tokens(
         return None
     answer = messages[anchor]
     summary = session.summary
-    # A summary written after that request started folded runs it held. Agno creates the answer's message before a
-    # mid-turn fold of that request runs, so such a fold also counts as later and the estimate decides. Both stamps
-    # are whole seconds, which cannot order a summary written in the same second, so a tie counts as later too.
+    # A summary written after that request started folded runs it held. Both stamps are whole seconds, which cannot
+    # order a summary written in the same second, so a tie counts as later too.
     if summary is not None and (summary.updated_at is None or summary.updated_at.timestamp() >= answer.created_at):
         return None
     reported = reported_context_tokens(answer, model=model, config=config, model_name=resolved_inputs.active_model_name)
