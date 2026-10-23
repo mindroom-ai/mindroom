@@ -80,7 +80,7 @@ class UsageStorageSource:
     path: Path
     path_label: str
     scope: _UsageStorageScope
-    expected_session_table: str
+    names: TableNames
     source_agent_id: str | None
     allowed_agent_ids: frozenset[str]
     requester_isolated: bool
@@ -459,7 +459,7 @@ def _source(
         path=path,
         path_label=path.relative_to(root).as_posix(),
         scope=scope,
-        expected_session_table=TableNames(storage_name).sessions,
+        names=TableNames(storage_name),
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset(config.agents),
         requester_isolated=requester_isolated,
@@ -491,8 +491,8 @@ def iter_usage_storage_rows(
             if diagnostic is not None:
                 yield diagnostic
                 return
-            table = quote_identifier(source.expected_session_table)
-            usage_table = f"{source.expected_session_table}_usage"
+            table = quote_identifier(source.names.sessions)
+            usage_table = source.names.usage
             has_usage = usage_table in table_names(connection)
             # Session counters cover all history, so a run-only read skips their payload.
             session_data = "session_data" if mode == "both" else "NULL AS session_data"
@@ -520,13 +520,13 @@ def iter_usage_storage_rows(
 
 
 def _validate_schema(connection: sqlite3.Connection, source: UsageStorageSource) -> UsageStorageDiagnostic | None:
-    table = source.expected_session_table
+    table = source.names.sessions
     tables = table_names(connection)
     if _IDENTIFIER.fullmatch(table) is None or table not in tables:
         return _source_diagnostic(source, "unsupported_schema", "session table unavailable")
     if not _REQUIRED_COLUMNS.issubset(_table_columns(connection, table)):
         return _source_diagnostic(source, "unsupported_schema", "session schema unsupported")
-    usage_table = f"{table}_usage"
+    usage_table = source.names.usage
     if usage_table in tables and not _USAGE_REQUIRED_COLUMNS.issubset(
         _table_columns(connection, usage_table),
     ):
@@ -603,7 +603,7 @@ def _read_runs(
 ) -> tuple[list[UsageRunNode], bool]:
     """Read one session's usage snapshots, reporting whether every snapshot was usable."""
     query = (
-        f"SELECT usage_data FROM {quote_identifier(source.expected_session_table + '_usage')} "  # noqa: S608
+        f"SELECT usage_data FROM {quote_identifier(source.names.usage)} "  # noqa: S608
         "WHERE session_id = ?"
     )
     parameters: tuple[object, ...] = (session_id,)

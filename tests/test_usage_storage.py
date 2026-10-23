@@ -15,6 +15,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
@@ -217,7 +218,7 @@ def test_reporting_keeps_usage_after_real_compaction_and_reopen(usage_db: Conver
         path=Path(usage_db.path),
         path_label="code.db",
         scope="shared_agent",
-        expected_session_table="code_sessions",
+        names=TableNames("code"),
         source_agent_id="code",
         allowed_agent_ids=frozenset({"code"}),
         requester_isolated=False,

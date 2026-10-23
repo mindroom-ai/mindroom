@@ -21,6 +21,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
 from tests.conftest import seed_session
@@ -70,7 +71,7 @@ def _source(scope: str = "shared_agent") -> UsageStorageSource:
         path=Path("/not-read.db"),
         path_label=f"{scope}.db",
         scope=scope,  # type: ignore[arg-type]
-        expected_session_table="sessions",
+        names=TableNames("code"),
         source_agent_id=agent,
         allowed_agent_ids=frozenset({"code"}),
         requester_isolated=False,

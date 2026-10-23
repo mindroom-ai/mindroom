@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.history.summary_rows_schema import summary_rows_schema_sql, summary_rows_table_names
-from mindroom.usage.storage import quote_identifier, usage_table_sql
+from mindroom.usage.storage import quote_identifier, usage_table_name, usage_table_sql
 
 if TYPE_CHECKING:
     import sqlite3
@@ -83,7 +83,7 @@ class TableNames:
     @property
     def usage(self) -> str:
         """The usage ledger."""
-        return f"{self.sessions}_usage"
+        return usage_table_name(self.sessions)
 
 
 def schema_sql(names: TableNames) -> tuple[str, ...]:

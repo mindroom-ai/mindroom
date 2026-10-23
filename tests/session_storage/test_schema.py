@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.session_storage.schema import TableNames, run_log_sql, table_names
+from mindroom.session_storage.schema import TableNames, run_log_sql, schema_sql, table_names
 from tests.session_storage.goldens import golden_stores
 
 if TYPE_CHECKING:
@@ -26,6 +26,17 @@ def test_a_databases_tables_are_all_named_after_its_storage_name() -> None:
     assert names.summaries == "code_sessions_summaries"
     assert names.removed_runs == "code_sessions_removed_runs"
     assert names.usage == "code_sessions_usage"
+
+
+def test_the_schema_creates_exactly_the_tables_the_names_give_it() -> None:
+    """The DDL of each owner creates the table ``TableNames`` names, so no table is named in two places."""
+    names = TableNames("code")
+    with closing(sqlite3.connect(":memory:")) as connection:
+        for statement in schema_sql(names):
+            connection.execute(statement)
+        tables = table_names(connection)
+
+    assert tables == {names.sessions, names.runs, names.summaries, names.removed_runs, names.usage}
 
 
 @pytest.mark.parametrize("store", golden_stores(), ids=lambda store: store.label)
