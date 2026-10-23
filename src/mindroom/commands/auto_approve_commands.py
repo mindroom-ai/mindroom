@@ -141,16 +141,19 @@ async def handle_auto_approve_command(
             requester_id=approver_id,
         )
         return (
-            f"Auto-approve is off in {place}.\n\n{_USAGE}"
+            f"Auto-approve for all your tool calls is off in {place}.\n\n{_USAGE}"
             if expires_at is None
-            else f"⚠️ Auto-approve is on in {place} until {_until(expires_at, config)}.\n\nUse `!auto_approve off` to end it."
+            else f"⚠️ Auto-approve for all your tool calls is on in {place} until {_until(expires_at, config)}.\n\nUse `!auto_approve off` to end it."
         )
 
     if requested == "off":
         if not end_auto_approve(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id):
-            return f"Auto-approve is not on in {place}."
+            return f"Auto-approve for all your tool calls is not on in {place}."
         await _publish_windows(client, runtime_paths, room.room_id, logger)
-        return f"✅ Auto-approve is off. Tool calls in {place} ask for approval again."
+        return (
+            f"✅ Auto-approve for all your tool calls is off in {place}; they ask for approval again. "
+            "A tool you auto-approved from an approval card stays approved until you stop it on that card or its time ends."
+        )
 
     duration = _parse_duration(requested)
     if duration is None or not timedelta(minutes=1) <= duration <= AUTO_APPROVE_MAX_DURATION:
@@ -174,7 +177,7 @@ async def handle_auto_approve_command(
     )
     approved_text = f" Approved {approved} waiting tool call{'s' if approved != 1 else ''}." if approved else ""
     return (
-        f"⚠️ Auto-approve is on in {place} until {_until(expires_at, config)}: "
-        f"tool calls you request here run without asking for approval.{approved_text}\n\n"
+        f"⚠️ Auto-approve for all your tool calls is on in {place} until {_until(expires_at, config)}: "
+        f"they run without asking for approval.{approved_text}\n\n"
         "Use `!auto_approve off` to end it."
     )

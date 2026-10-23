@@ -535,7 +535,7 @@ How it works:
 - Only Matrix room admins can set or reset the override"""
 
     if topic in {"auto_approve", "auto-approve", "autoapprove"}:
-        return """**Auto-approve Command**
+        return """**Auto-Approve Command**
 
 Usage: `!auto_approve [<minutes>|<hours>h|off]` - Run your tool calls in this thread without approval for a while
 
@@ -549,7 +549,8 @@ How it works:
 - Every tool call you request in this thread runs without an approval card until the window ends
 - In a room without threads, the window covers the whole room
 - Approval cards already waiting for you in this thread are approved when you turn it on
-- Other people in the thread still approve their own calls"""
+- Other people in the thread still approve their own calls
+- `!auto_approve off` does not stop auto-approval started from an approval card; stop that on the card"""
 
     # General help - dynamically generated from COMMAND_DOCS
     commands_text = "\n".join(_get_command_entries(format_code=True))

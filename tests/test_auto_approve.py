@@ -188,7 +188,7 @@ def test_auto_approve_command_parsing_and_help() -> None:
         assert command is not None
         assert command.type is CommandType.AUTO_APPROVE
         assert command.args == {"args_text": args_text}
-    assert "**Auto-approve Command**" in get_command_help("auto_approve")
+    assert "**Auto-Approve Command**" in get_command_help("auto_approve")
     assert "!auto_approve" in get_command_help()
 
 
@@ -245,19 +245,24 @@ async def test_auto_approve_command_starts_shows_and_ends_the_thread_window(tmp_
     expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
     assert expires_at is not None
     assert timedelta(minutes=119) < expires_at - datetime.now(UTC) <= timedelta(hours=2)
-    assert reply.startswith(f"⚠️ Auto-approve is on in this thread until {expires_at:%Y-%m-%d %H:%M} UTC")
+    assert reply.startswith(
+        f"⚠️ Auto-approve for all your tool calls is on in this thread until {expires_at:%Y-%m-%d %H:%M} UTC",
+    )
 
     reply, _ = await _send(tmp_path, "!auto_approve")
-    assert reply.startswith("⚠️ Auto-approve is on in this thread until")
+    assert reply.startswith("⚠️ Auto-approve for all your tool calls is on in this thread until")
 
     reply, _ = await _send(tmp_path, "!auto_approve off")
-    assert reply == "✅ Auto-approve is off. Tool calls in this thread ask for approval again."
+    assert reply.startswith(
+        "✅ Auto-approve for all your tool calls is off in this thread; they ask for approval again.",
+    )
+    assert "stays approved until you stop it on that card" in reply
     assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
 
     reply, _ = await _send(tmp_path, "!auto_approve")
-    assert reply.startswith("Auto-approve is off in this thread.")
+    assert reply.startswith("Auto-approve for all your tool calls is off in this thread.")
     reply, _ = await _send(tmp_path, "!auto_approve off")
-    assert reply == "Auto-approve is not on in this thread."
+    assert reply == "Auto-approve for all your tool calls is not on in this thread."
 
 
 @pytest.mark.asyncio
@@ -290,7 +295,7 @@ async def test_auto_approve_command_replies_when_publishing_its_state_fails(tmp_
 
     reply, runtime_paths = await _send(tmp_path, "!auto_approve 30", client=client)
 
-    assert reply.startswith("⚠️ Auto-approve is on in this thread until")
+    assert reply.startswith("⚠️ Auto-approve for all your tool calls is on in this thread until")
     assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is not None
 
 
@@ -309,9 +314,11 @@ async def test_auto_approve_command_names_the_whole_room_in_a_room_without_threa
     expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=None, requester_id=HUMAN)
     assert expires_at is not None
     local = expires_at.astimezone(ZoneInfo("Europe/Amsterdam"))
-    assert reply.startswith(f"⚠️ Auto-approve is on in this room until {local:%Y-%m-%d %H:%M %Z}: ")
+    assert reply.startswith(
+        f"⚠️ Auto-approve for all your tool calls is on in this room until {local:%Y-%m-%d %H:%M %Z}: ",
+    )
     reply, _ = await _send(tmp_path, "!auto_approve off", room_mode=True)
-    assert reply == "✅ Auto-approve is off. Tool calls in this room ask for approval again."
+    assert reply.startswith("✅ Auto-approve for all your tool calls is off in this room; they ask for approval again.")
 
 
 @pytest.mark.asyncio
