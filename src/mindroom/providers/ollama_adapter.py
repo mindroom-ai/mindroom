@@ -17,11 +17,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from uuid import uuid4
 
-import httpx
 from pydantic import BaseModel
 
 from mindroom.credentials.sync import get_ollama_host
-from mindroom.llm.errors import InvalidRequest
+from mindroom.llm.errors import InvalidRequest, ProviderError
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -40,7 +39,7 @@ from mindroom.providers.assistant_turn import (
     split_thinking,
     whole_turn_deltas,
 )
-from mindroom.providers.errors import classify_provider_error, transport_error
+from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.remote_media import download_media
 from mindroom.providers.tool_policy import provider_tools_disabled
@@ -111,8 +110,6 @@ class OllamaProvider:
         """
         messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
         chat_kwargs = self._chat_kwargs(request)
-        from ollama import ResponseError  # noqa: PLC0415 - provider SDK loads on first request
-
         reply = _OllamaReply()
         started = time.monotonic()
         first_output_at: float | None = None
@@ -138,15 +135,8 @@ class OllamaProvider:
                 first_output_at = time.monotonic()
                 for event in _whole_reply_events(reply, cast("ChatResponse", response)):
                     yield event
-        except ResponseError as error:
-            # The SDK reports an error the server streams after a 200 response with status -1.
-            raise classify_provider_error(
-                str(error),
-                provider=self.identity.provider_name,
-                status_code=error.status_code if error.status_code > 0 else None,
-            ) from error
-        except (httpx.TransportError, OSError) as error:
-            raise transport_error(error, provider=self.identity.provider_name) from error
+        except Exception as error:
+            raise _provider_error(error, provider=self.identity.provider_name) from error
         message = finished_assistant_message(
             self.identity,
             content=reply.content or None,
@@ -202,6 +192,19 @@ class OllamaProvider:
         if settings.api_key:
             params["headers"] = {"authorization": f"Bearer {settings.api_key}"}
         return {**params, **(settings.client_params or {})}
+
+
+def _provider_error(error: Exception, *, provider: str) -> ProviderError:
+    """Return the normalized error for one failed request; any other exception propagates as it is."""
+    from ollama import ResponseError  # noqa: PLC0415 - provider SDK loads on first request
+
+    if (failure := provider_failure(error, provider=provider)) is not None:
+        return failure
+    if isinstance(error, ResponseError):
+        # The SDK reports an error the server streams after a 200 response with status -1.
+        status_code = error.status_code if error.status_code > 0 else None
+        return classify_provider_error(str(error), provider=provider, status_code=status_code)
+    raise error
 
 
 def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:

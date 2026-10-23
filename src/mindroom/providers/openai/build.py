@@ -23,6 +23,7 @@ from mindroom.model_defaults import (
     ZAI_BASE_URL_DEFAULT,
 )
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
+from mindroom.providers.errors import provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import canonical_provider
@@ -257,6 +258,15 @@ def _sdk_client_kwargs(
     )
 
 
+def _cli_login_error(error: Exception, *, provider: str) -> ProviderError:
+    """Return the error of a CLI login whose token could not be borrowed.
+
+    A token refresh that failed on the network is the provider's transient failure; any other login failure, such
+    as a missing login or a refresh token the CLI's server rejected, is final and tells the user to log in again.
+    """
+    return provider_failure(error, provider=provider) or ProviderError(str(error), provider=provider, status_code=401)
+
+
 def _openai_client(
     api_key: str,
     options: Mapping[str, Any],
@@ -301,12 +311,7 @@ def _chat_client_factory(
             try:
                 token = borrow_kimi_token(kimi_home=settings.kimi_home)
             except KimiAuthError as error:
-                raise ProviderError(
-                    str(error),
-                    provider=route.provider_name,
-                    status_code=401,
-                    code="authentication",
-                ) from error
+                raise _cli_login_error(error, provider=route.provider_name) from error
             return _openai_client(token, options, settings, http_client)
 
         return kimi_client
@@ -512,12 +517,7 @@ def _build_responses(
             try:
                 token, account_id = borrow_codex_key(codex_home=settings.codex_home)
             except CodexAuthError as error:
-                raise ProviderError(
-                    str(error),
-                    provider=provider_name,
-                    status_code=401,
-                    code="authentication",
-                ) from error
+                raise _cli_login_error(error, provider=provider_name) from error
             headers = dict(settings.default_headers or {})
             if account_id:
                 headers["ChatGPT-Account-ID"] = account_id

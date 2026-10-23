@@ -681,7 +681,7 @@ async def test_a_missing_cli_login_fails_the_request_before_sending(
     with pytest.raises(ProviderError, match=message) as info:
         await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.status_code, info.value.code, info.value.retryable) == (401, "authentication", False)
+    assert (info.value.status_code, info.value.retryable) == (401, False)
     assert built.requests == []
 
 

@@ -13,10 +13,9 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import anthropic
-import httpx
 from anthropic import NOT_GIVEN, AsyncAnthropic, AsyncAnthropicVertex
 from anthropic.lib.streaming import (
     ParsedBetaContentBlockStopEvent,
@@ -85,7 +84,7 @@ from mindroom.providers.anthropic.wire import (
 )
 from mindroom.providers.assistant_turn import stamp_finished_turn, whole_turn_deltas
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
-from mindroom.providers.errors import classify_provider_error, google_auth_error, stream_event_error, transport_error
+from mindroom.providers.errors import classify_provider_error, provider_failure, stream_event_error
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -96,6 +95,7 @@ from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dep
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
+    import httpx
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types.beta import BetaMessage
@@ -290,7 +290,7 @@ class ClaudeProvider:
                         # show the provider is still working; the SDK's own convenience events repeat them.
                         yield _progress(event)
         except Exception as error:
-            self._raise_provider_error(error)
+            raise _provider_error(error, provider=self.identity.provider_name) from error
 
     def _finish(
         self,
@@ -503,28 +503,6 @@ class ClaudeProvider:
             client.project_id = project_id
         return client
 
-    def _raise_provider_error(self, error: Exception) -> NoReturn:
-        """Translate an SDK, transport, or Google token failure into the shared provider errors; others propagate.
-
-        An ``error`` event inside the stream reaches here with the stream's committed 200 status, so its error type
-        classifies it.
-        """
-        provider = self.identity.provider_name
-        if isinstance(error, anthropic.APIConnectionError | httpx.TransportError):
-            mapped: ProviderError = transport_error(error, provider=provider)
-        elif isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:
-            mapped = stream_event_error(error.message, provider=provider, error_type=_event_error_type(error.body))
-        elif isinstance(error, anthropic.APIStatusError):
-            mapped = classify_provider_error(error.message, provider=provider, status_code=error.status_code)
-        elif isinstance(error, anthropic.APIError):
-            mapped = ProviderError(str(error), provider=provider)
-        elif (google_auth := google_auth_error(error, provider=provider)) is not None:
-            # The Vertex client mints its Google access token inside the request.
-            mapped = google_auth
-        else:
-            raise error
-        raise mapped from error
-
 
 # The raw API events that report the request's usage so far.
 _USAGE_EVENT_TYPES = frozenset({"message_start", "message_delta"})
@@ -545,6 +523,23 @@ def _progress(event: Any) -> StreamProgress:  # noqa: ANN401 - SDK stream event
     if event.type != "content_block_start" or (block := event.content_block).type in _MODEL_BLOCK_TYPES:
         return StreamProgress()
     return hosted_tool_started(block.name if block.type == SERVER_TOOL_USE_BLOCK_TYPE else block.type)
+
+
+def _provider_error(error: Exception, *, provider: str) -> ProviderError:
+    """Return the shared error for an SDK, transport, or Google token failure; any other exception propagates.
+
+    The Vertex client mints its Google access token inside the request. An ``error`` event inside the stream arrives
+    with the stream's committed 200 status, so its error type classifies it.
+    """
+    if (failure := provider_failure(error, provider=provider)) is not None:
+        return failure
+    if isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:
+        return stream_event_error(error.message, provider=provider, error_type=_event_error_type(error.body))
+    if isinstance(error, anthropic.APIStatusError):
+        return classify_provider_error(error.message, provider=provider, status_code=error.status_code)
+    if isinstance(error, anthropic.APIError):
+        return ProviderError(str(error), provider=provider)
+    raise error
 
 
 def _event_error_type(body: object) -> str | None:

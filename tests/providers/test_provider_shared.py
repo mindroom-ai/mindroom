@@ -16,7 +16,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.providers.errors import classify_provider_error, is_context_window_error, transport_error
+from mindroom.providers.errors import classify_provider_error, is_context_window_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 
 
@@ -65,7 +65,7 @@ def test_context_window_detection_reads_the_code_and_the_wording() -> None:
 
 def test_transport_failures_are_retryable_connection_errors() -> None:
     """A failure before any response is retryable and names its cause."""
-    error = transport_error(httpx.ConnectError("connection refused"), provider="Test")
+    error = provider_failure(httpx.ConnectError("connection refused"), provider="Test")
 
     assert type(error) is ProviderUnavailable
     assert (error.retryable, error.status_code, error.code, str(error)) == (
@@ -74,7 +74,56 @@ def test_transport_failures_are_retryable_connection_errors() -> None:
         "connection_error",
         "connection refused",
     )
-    assert str(transport_error(httpx.ReadError(""), provider="Test")) == "ReadError"
+    read_error = provider_failure(httpx.ReadError(""), provider="Test")
+    assert read_error is not None
+    assert str(read_error) == "ReadError"
+
+
+class _LoginRefreshError(Exception):
+    """A login helper's own error, as a CLI login refresh raises it."""
+
+
+def _wrapped(cause: Exception, *, suppress: bool = False) -> _LoginRefreshError:
+    """Return a login helper's error raised ``from cause``, or ``from None`` with ``cause`` as its context."""
+    wrapped = _LoginRefreshError(f"refresh failed: {cause}")
+    if suppress:
+        wrapped.__context__ = cause
+        wrapped.__suppress_context__ = True
+    else:
+        wrapped.__cause__ = cause
+    return wrapped
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (_wrapped(httpx.ConnectError("connection refused")), "connection_error"),
+        (_wrapped(httpx.ReadTimeout("timed out")), TRANSPORT_TIMEOUT),
+        (_wrapped(ConnectionResetError(104, "reset")), "connection_error"),
+        (_wrapped(_wrapped(TimeoutError())), TRANSPORT_TIMEOUT),
+    ],
+    ids=["refused", "read-timeout", "reset", "nested-timeout"],
+)
+def test_a_transport_failure_wrapped_in_another_error_is_still_retryable(error: Exception, code: str) -> None:
+    """The cause chain decides, so an SDK or login helper that wraps a network failure keeps it transient."""
+    failure = provider_failure(error, provider="Test")
+
+    assert type(failure) is ProviderUnavailable
+    assert (failure.code, str(failure)) == (code, str(error))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _wrapped(httpx.ConnectError("connection refused"), suppress=True),
+        ValueError("invalid literal"),
+        OSError("disk full"),
+    ],
+    ids=["suppressed-cause", "unrelated", "bare-os-error"],
+)
+def test_only_a_transport_failure_is_normalized_as_one(error: Exception) -> None:
+    """A suppressed cause, or an error with no network failure behind it, is left to the adapter's own mapping."""
+    assert provider_failure(error, provider="Test") is None
 
 
 @pytest.mark.parametrize(
@@ -87,7 +136,7 @@ def test_transport_failures_are_retryable_connection_errors() -> None:
 )
 def test_transport_timeouts_carry_the_timeout_code(failure: Exception) -> None:
     """A timeout before any response is retryable and says it timed out by its code, whatever its text."""
-    error = transport_error(failure, provider="Test")
+    error = provider_failure(failure, provider="Test")
 
     assert type(error) is ProviderUnavailable
     assert (error.retryable, error.code) == (True, TRANSPORT_TIMEOUT)

@@ -12,7 +12,7 @@ from typing import Any, cast
 import httpx
 
 from mindroom.llm.errors import ProviderError
-from mindroom.providers.errors import classify_provider_error, stream_event_error, transport_error
+from mindroom.providers.errors import classify_provider_error, provider_failure, stream_event_error
 
 __all__ = [
     "missing_api_key_error",
@@ -48,13 +48,13 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the owned error for one SDK or transport failure; ``provider`` is the metrics provider name."""
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
 
+    if (failure := provider_failure(error, provider=provider)) is not None:
+        return failure
     if isinstance(error, openai.APIStatusError):
         message, code, _ = _error_fields(error.body)
         if message is None:
             message = error.response.text or str(error)
         return classify_provider_error(message, provider=provider, status_code=error.status_code, code=code)
-    if isinstance(error, openai.APIConnectionError | httpx.TransportError):
-        return transport_error(error, provider=provider)
     if isinstance(error, openai.APIError):
         message, code, error_type = _error_fields(error.body)
         return stream_event_error(message or error.message, provider=provider, code=code, error_type=error_type)

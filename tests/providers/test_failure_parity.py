@@ -37,7 +37,7 @@ from tests.providers.anthropic_family_support import ROUTE_CONFIGS, claude_messa
 from tests.providers.family_support import scrub_provider_env
 from tests.providers.gemini_ollama_support import build_adapter
 from tests.providers.golden_support import PacedBytes, ndjson_response, pipeline_provider, sse_response
-from tests.providers.openai_family_support import openai_family_adapter
+from tests.providers.openai_family_support import openai_family_adapter, unsigned_jwt
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -1203,6 +1203,74 @@ async def test_a_failed_request_is_retried_and_reported_as_the_parity_table_says
     assert get_user_friendly_error_message(raised.value).startswith(row.message)
     if row.code is not None:
         assert raised.value.code == row.code
+
+
+# --- CLI login refresh --------------------------------------------------------------------------------------------
+
+
+def _expire_cli_login(route: str, root: Path) -> None:
+    """Replace the route's saved CLI login with one whose access token expired, so each request refreshes it."""
+    if route == "codex":
+        tokens = {"access_token": unsigned_jwt({"exp": 1000}), "refresh_token": "r", "account_id": "parity-account"}
+        auth = {"auth_mode": "chatgpt", "tokens": tokens}
+        (root / "codex" / "auth.json").write_text(json.dumps(auth), encoding="utf-8")
+    else:
+        credentials = {"access_token": "expired", "refresh_token": "r", "expires_at": 1000}
+        (root / "kimi" / "credentials" / "kimi-code.json").write_text(json.dumps(credentials), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "stream", "refresh_reply", "error", "message", "refreshes"),
+    [
+        # A refresh that fails on the network is the provider's transient failure, retried as the Agno-backed
+        # runtime retried it; Kimi's blocking requests get no stream retries, and Codex always streams.
+        ("codex", True, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("codex", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("kimi", True, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("kimi", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, 1),
+        # A refresh token the login server rejects is final and asks the user to log in again.
+        ("codex", True, httpx.Response(400, json={"error": "refresh_token_expired"}), ProviderError, AUTHENTICATION, 1),
+        ("kimi", True, httpx.Response(401, text="invalid_grant"), ProviderError, AUTHENTICATION, 1),
+    ],
+    ids=[
+        "codex-streamed-refused",
+        "codex-blocking-refused",
+        "kimi-streamed-refused",
+        "kimi-blocking-refused",
+        "codex-rejected",
+        "kimi-rejected",
+    ],
+)
+async def test_a_cli_login_refresh_failure_is_retried_only_when_the_network_failed(
+    route: str,
+    stream: bool,
+    refresh_reply: httpx.Response | Exception,
+    error: type[ProviderError],
+    message: str,
+    refreshes: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired CLI login refreshes inside the request; only a network failure there is worth retrying."""
+    attempts: list[str] = []
+
+    def refresh(url: str, **_kwargs: object) -> httpx.Response:
+        attempts.append(url)
+        if isinstance(refresh_reply, Exception):
+            raise refresh_reply
+        return refresh_reply
+
+    monkeypatch.setattr(httpx, "post", refresh)
+    adapter = _adapter(route, tmp_path, lambda _request: pytest.fail("no model request may be sent"))
+    _expire_cli_login(route, tmp_path)
+    provider = pipeline_provider(adapter, idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=stream))
+
+    assert (type(raised.value), len(attempts)) == (error, refreshes)
+    assert get_user_friendly_error_message(raised.value).startswith(message)
 
 
 _CHAT_COMPLETION = {

@@ -9,6 +9,8 @@ rule: rate limits and the transient statuses are retryable, a request that does 
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import httpx
 
 from mindroom.llm.errors import (
@@ -20,12 +22,14 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 __all__ = [
     "classify_provider_error",
-    "google_auth_error",
     "is_context_window_error",
+    "provider_failure",
     "stream_event_error",
-    "transport_error",
 ]
 
 _RATE_LIMIT_STATUS = 429
@@ -130,29 +134,38 @@ def stream_event_error(
     return ProviderError(message, provider=provider, code=code)
 
 
-def transport_error(error: Exception, *, provider: str) -> ProviderUnavailable:
-    """Return the retryable error for a network or transport failure before a response completed.
+def provider_failure(error: BaseException, *, provider: str) -> ProviderError | None:
+    """Return the normalized error a transport or Google sign-in failure is, or None for the adapter's own mapping.
 
-    A timeout carries ``TRANSPORT_TIMEOUT``, also when an SDK re-raised it as its own error, as the OpenAI and
-    Anthropic SDKs raise ``APITimeoutError`` from the HTTP client's timeout.
+    The error and every cause it shows count, so a network failure that an SDK, the Google auth library, or a CLI
+    login refresh wrapped in an error of its own is still the retryable failure it is: a refused or reset
+    connection, a timeout, an HTTP client or aiohttp transport error, or a Google token endpoint that could not be
+    reached or answered with a retryable error. Google credentials the token endpoint rejected, such as a deleted
+    service-account key, are an authentication failure; credentials that cannot be found or loaded stay a
+    configuration error.
     """
-    timed_out = isinstance(error, _TRANSPORT_TIMEOUTS) or isinstance(error.__cause__, _TRANSPORT_TIMEOUTS)
-    code = TRANSPORT_TIMEOUT if timed_out else "connection_error"
-    return ProviderUnavailable(str(error) or type(error).__name__, provider=provider, code=code)
+    import aiohttp  # noqa: PLC0415 - google-genai's transport, loaded only once a request fails
+    from google.auth import exceptions as google_auth  # noqa: PLC0415 - loaded only once a request fails
 
-
-def google_auth_error(error: Exception, *, provider: str) -> ProviderError | None:
-    """Return the normalized error for a failure to mint a Google access token, or None for any other error.
-
-    Vertex clients refresh their token inside the request: a network failure or a retryable token-endpoint
-    response can succeed later, while rejected credentials, such as a deleted service-account key, are final
-    and report as an authentication failure. Credentials that cannot be found or loaded stay a configuration
-    error.
-    """
-    from google.auth import exceptions  # noqa: PLC0415 - google-auth loads with the first Vertex client
-
-    if isinstance(error, exceptions.TransportError) or (isinstance(error, exceptions.RefreshError) and error.retryable):
-        return transport_error(error, provider=provider)
-    if isinstance(error, exceptions.RefreshError):
+    chain = list(_visible_chain(error))
+    transport = (httpx.TransportError, ConnectionError, TimeoutError, aiohttp.ClientError, google_auth.TransportError)
+    if any(
+        isinstance(cause, transport) or (isinstance(cause, google_auth.RefreshError) and cause.retryable)
+        for cause in chain
+    ):
+        timed_out = any(isinstance(cause, _TRANSPORT_TIMEOUTS) for cause in chain)
+        code = TRANSPORT_TIMEOUT if timed_out else "connection_error"
+        return ProviderUnavailable(str(error) or type(error).__name__, provider=provider, code=code)
+    if any(isinstance(cause, google_auth.RefreshError) for cause in chain):
         return ProviderError(f"Google credentials were rejected: {error}", provider=provider, status_code=401)
     return None
+
+
+def _visible_chain(error: BaseException) -> Iterator[BaseException]:
+    """Yield the error and each cause it shows, explicit or implicit, once; a suppressed context ends the chain."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)

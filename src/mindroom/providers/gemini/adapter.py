@@ -14,9 +14,8 @@ import time
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-import httpx
 from pydantic import ValidationError
 
 from mindroom.credentials.sync import get_api_key_for_provider
@@ -24,7 +23,7 @@ from mindroom.llm.errors import InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
-from mindroom.providers.errors import classify_provider_error, google_auth_error, transport_error
+from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
 from mindroom.providers.gemini.wire import (
@@ -137,8 +136,11 @@ class GeminiProvider:
                 first_output_at = time.monotonic()
                 for event in events:
                     yield event
+        except ProviderError:
+            # Media and chunk failures arrive normalized.
+            raise
         except Exception as error:
-            self._raise_provider_error(error)
+            raise _provider_error(error, provider=self.identity.provider_name) from error
         if (malformed := malformed_tool_call_error(reply, provider=self.identity.provider_name)) is not None:
             raise malformed
         provider_data: dict[str, Any] = {}
@@ -157,35 +159,6 @@ class GeminiProvider:
         if reply.usage is not None:
             yield UsageReported(message.metrics)
         yield TurnCompleted(message=message, stop_reason=stop_reason(reply))
-
-    def _raise_provider_error(self, error: Exception) -> NoReturn:
-        """Raise the normalized error for one failed request; unknown failures propagate as they are.
-
-        Media and chunk failures arrive normalized and are re-raised as they are: ``raise error from error`` would
-        make ``__cause__`` point at the error itself, which Rich's traceback renderer follows forever.
-        """
-        import aiohttp  # noqa: PLC0415 - google-genai's production transport loads on first request
-        from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
-
-        provider = self.identity.provider_name
-        if isinstance(error, ProviderError):
-            mapped = error
-        elif isinstance(error, APIError):
-            mapped = classify_provider_error(str(error), provider=provider, status_code=error.code)
-        elif isinstance(error, httpx.TransportError | aiohttp.ClientError | OSError):
-            # aiohttp lets its total timeout (a ``TimeoutError``) and a reset connection escape as plain ``OSError``s.
-            mapped = transport_error(error, provider=provider)
-        elif isinstance(error, ValidationError):
-            # The SDK rejected an authored generation setting; the same request cannot succeed.
-            mapped = InvalidRequest(str(error), provider=provider)
-        elif (google_auth := google_auth_error(error, provider=provider)) is not None:
-            # Vertex AI mints its Google access token inside the request.
-            mapped = google_auth
-        else:
-            raise error
-        if mapped is error:
-            raise error
-        raise mapped from error
 
     def _request_config(
         self,
@@ -283,6 +256,23 @@ class GeminiProvider:
         if settings.timeout is not None:
             params["http_options"] = {"timeout": int(settings.timeout * 1000)}
         return {**params, **(settings.client_params or {})}
+
+
+def _provider_error(error: Exception, *, provider: str) -> ProviderError:
+    """Return the normalized error for one failed request; any other exception propagates as it is.
+
+    Vertex AI mints its Google access token inside the request, so its failures arrive here too.
+    """
+    from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
+
+    if (failure := provider_failure(error, provider=provider)) is not None:
+        return failure
+    if isinstance(error, APIError):
+        return classify_provider_error(str(error), provider=provider, status_code=error.code)
+    if isinstance(error, ValidationError):
+        # The SDK rejected an authored generation setting; the same request cannot succeed.
+        return InvalidRequest(str(error), provider=provider)
+    raise error
 
 
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> GeminiProvider:
