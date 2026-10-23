@@ -185,6 +185,7 @@ def test_registration_option_is_free_without_a_registration_token() -> None:
     ("setting", "expected"),
     [
         ("tuwunel.settings.grant_admin_to_first_user=true", True),
+        ("tuwunel.settings.grant_admin_to_first_user=false", False),
         ("tuwunel.settings.grant_admin_to_first_user=null", False),
         ("tuwunel.settings=null", False),
     ],
