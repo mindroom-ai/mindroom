@@ -1076,12 +1076,11 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if card_decision is not None or child_decisions is not None:
         # The run that made the call continues with its result, so that run reads the approval's receipt.
         add_approval_receipt_reader(requirement.member_run_id or response.run_id)
-    excluded = toolkit_is_background_excluded("delegate", config, runtime_paths)
     # A child saved before a crash keeps its accepted owner when startup policy changes.
     if retained is not None:
         if background is not None and not background.has_job(retained.delegation_id):
             background = None
-    elif excluded:
+    elif toolkit_is_background_excluded("delegate", config, runtime_paths):
         # An excluded delegate toolkit runs its child natively, outside the job runtime.
         background = None
         if BACKGROUND_AFTER in (tool.tool_args or {}):
