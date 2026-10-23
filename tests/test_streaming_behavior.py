@@ -1534,6 +1534,56 @@ class TestStreamingBehavior:
         assert gaps == [pytest.approx(15 * delta_seconds)] * len(gaps)
 
     @pytest.mark.asyncio
+    async def test_replacement_landing_behind_a_same_length_snapshot_counts_it_pending(self) -> None:
+        """A team snapshot that replaces the body during an edit counts in full toward the next edit."""
+        mock_client = _make_matrix_client_mock()
+        first_send_landed = asyncio.Event()
+        streaming = ReplacementStreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=10,
+            min_char_update_interval=0.35,
+            max_idle=10.0,
+            visible_progress_callback=lambda _body, _trace: first_send_landed.set(),
+        )
+        streaming.last_update = float("-inf")
+
+        async def room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
+            _ = (args, kwargs)
+            if mock_client.room_send.await_count == 1:
+                # The team's next snapshot replaces the body, at the same length, while this edit is in flight.
+                streaming._update("abcdefghij")
+            mock_response = MagicMock()
+            mock_response.__class__ = nio.RoomSendResponse
+            mock_response.event_id = "$team_snapshot"
+            return mock_response
+
+        mock_client.room_send.side_effect = room_send
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        clock = 100.0
+
+        with patch("mindroom.streaming.time.time", side_effect=lambda: clock):
+            streaming._update("0123456789")
+            _queue_delivery_request(delivery_queue)
+            await first_send_landed.wait()
+
+            # A progress request with no new text, past the minimum spacing, meets the 10-character threshold.
+            clock = 100.4
+            _queue_delivery_request(delivery_queue, progress_hint=True)
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+
+        assert shutdown_error is None
+        bodies = [
+            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
+            for call in mock_client.room_send.call_args_list
+        ]
+        assert bodies == ["0123456789", "abcdefghij"]
+
+    @pytest.mark.asyncio
     async def test_stale_nonterminal_send_does_not_strand_newer_text(self) -> None:
         """Text that arrived while an edit was in flight stays pending until the throttle delivers it."""
         mock_client = _make_matrix_client_mock()
