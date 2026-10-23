@@ -21,14 +21,10 @@ class _GoogleApplicationCredentialsError(PermanentStartupError):
 def _google_adc_file_type(credentials_path: str) -> str | None:
     """Return the ADC JSON credential type without invoking google-auth loaders."""
     try:
-        with Path(credentials_path).open(encoding="utf-8") as credentials_file:
-            credentials_info = json.load(credentials_file)
+        credentials_info = json.loads(Path(credentials_path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
-
-    if not isinstance(credentials_info, dict):
-        return None
-    credentials_type = credentials_info.get("type")
+    credentials_type = credentials_info.get("type") if isinstance(credentials_info, dict) else None
     return credentials_type if isinstance(credentials_type, str) else None
 
 
