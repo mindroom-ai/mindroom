@@ -1,8 +1,8 @@
 """Stored tool-call shapes earlier releases wrote, read in the current shape where stored runs become requests.
 
-Each repair returns copies, so the rows a request is built from are never rewritten and replayed history is never
-stored again. The one repaired shape that is stored is a paused run's: the resumed run stores the request it sent, so
-a legacy paused run is stored repaired, in the shape current releases store.
+The repair returns a new list and replaces, never edits, a message it changes, so the rows a request is built from are
+never rewritten. Replayed history is kept out of storage by its ``from_history`` mark, but a resumed run stores the
+request it sent, so a legacy paused run is stored repaired, in the shape current releases store.
 """
 
 from __future__ import annotations
