@@ -2896,7 +2896,7 @@
         {
           "authored_override": true,
           "default": true,
-          "description": "Whether to reuse the same sandbox within the current agent session",
+          "description": "Whether to reuse the same sandbox across calls within one reply",
           "label": "Persistent",
           "name": "persistent",
           "options": null,
