@@ -54,7 +54,7 @@ def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
 
 
 def _stream_event_error(message: str, *, provider: str, code: str | None, error_type: str | None) -> ProviderError:
-    """Classify an error event sent inside an already committed 200 stream; a status in ``code`` counts as one."""
+    """Classify an error event sent inside an already committed 200 stream, reading a numeric ``code`` as a status."""
     status = int(code) if code is not None and code.isdecimal() else None
     if status in RATE_LIMIT_STATUSES:
         return RateLimited(message, provider=provider, code=code)
