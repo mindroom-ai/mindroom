@@ -261,9 +261,13 @@ def test_an_untyped_provider_payload_reads_as_its_typed_twin(error_type: str, me
         ("invalid_auth: the access token was revoked", True),
         ("Unauthorised to invoke the model", True),
         ("The summary input held 40100 tokens", False),
-        # A credential name is one lowercase word, so only its whole-word wording reads, as in the classifier.
-        ("Request failed: GoogleAuthError", False),
+        # A credential name is one lowercase word, so only the auth family's own names read, as in the classifier.
         ("Request failed: AuthenticationError", True),
+        ("Request failed: AuthorizationError", True),
+        ("Request failed: UnauthorizedError", True),
+        ("Request failed: AuthError", False),
+        ("Request failed: GoogleAuthError", False),
+        ("Request failed: InvalidApiKeyError", False),
     ],
 )
 def test_untyped_text_names_the_credentials_as_the_provider_classifier_does(text: str, *, authentication: bool) -> None:
@@ -280,12 +284,13 @@ def test_untyped_text_names_the_credentials_as_the_provider_classifier_does(text
         ("rate_limit_exceeded: slow down", True),
         ("HTTP 429 Too Many Requests", True),
         ("Quota exceeded for this project", True),
-        # A name that starts with its keyword is one lowercase word that holds it.
+        # A name that starts with ratelimit or quotaexceeded is one lowercase word that holds the wording.
         ("RetryError[<Future state=finished raised RateLimitError>]", True),
         ("The request ratelimited", True),
         ("QuotaExceededError", True),
-        # A name that holds the keyword after a prefix is one lowercase word with no keyword of its own.
+        # Any other name is one lowercase word with no wording of its own, with or without a prefix.
         ("RetryError[<Future state=finished raised OpenAIRateLimitError>]", False),
+        ("RateError", False),
         ("QuotaError", False),
         # Words that only hold "rate", and a number that only holds "429".
         ("Failed to generate a response for this model", False),
