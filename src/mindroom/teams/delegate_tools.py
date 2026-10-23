@@ -15,7 +15,6 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.delegation.state import handover_content
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.spec import TeamMode
@@ -111,7 +110,7 @@ def member_result_text(child: RunRecord, *, stream: bool) -> str:
 
 def _streamed_result(child: RunRecord) -> str:
     """Return the member's text, else its tool results, else Agno's notice."""
-    content = handover_content(child)
+    content = child.handover_content
     if isinstance(content, str) and content.strip():
         return content
     if isinstance(content, dict):
@@ -127,7 +126,7 @@ def _blocking_result(child: RunRecord) -> str:
     A run whose text is blank gives its tool results, which without tools leaves nothing; any other content, None
     among it, is JSON.
     """
-    content = handover_content(child)
+    content = child.handover_content
     if content is None and not child.tools:
         return NO_MEMBER_RESPONSE
     if isinstance(content, str):
@@ -170,7 +169,7 @@ def _labeled_result(child: RunRecord) -> str:
 
     Unlike a coordinate delegation, the broadcast kept empty tool results and named a blank run without tools.
     """
-    content = handover_content(child)
+    content = child.handover_content
     if content is None and not child.tools:
         return NO_MEMBER_RESPONSE
     if isinstance(content, str):
