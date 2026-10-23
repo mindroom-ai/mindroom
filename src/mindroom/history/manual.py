@@ -101,28 +101,14 @@ def _resolve_active_compaction_settings(
     room_id: str | None,
 ) -> tuple[ResolvedRuntimeModel, CompactionConfig]:
     """Resolve the active model and compaction config for the current scope."""
-    if scope.kind == "agent":
-        runtime_model = config.resolve_runtime_model(
-            entity_name=agent_name,
-            active_model_name=active_model_name,
-            room_id=room_id,
-            runtime_paths=runtime_paths if room_id is not None else None,
-        )
-        return runtime_model, config.resolve_entity(agent_name).compaction_config
-
-    team_name = scope.scope_id
-    if team_name not in config.teams:
+    entity_name: str | None = agent_name
+    if scope.kind != "agent":
         # An ad-hoc team has no authored settings of its own.
-        runtime_model = config.resolve_runtime_model(
-            entity_name=None,
-            active_model_name=active_model_name,
-        )
-        return runtime_model, config.resolve_entity(None).compaction_config
-
+        entity_name = scope.scope_id if scope.scope_id in config.teams else None
     runtime_model = config.resolve_runtime_model(
-        entity_name=team_name,
+        entity_name=entity_name,
         active_model_name=active_model_name,
         room_id=room_id,
         runtime_paths=runtime_paths,
     )
-    return runtime_model, config.resolve_entity(team_name).compaction_config
+    return runtime_model, config.resolve_entity(entity_name).compaction_config
