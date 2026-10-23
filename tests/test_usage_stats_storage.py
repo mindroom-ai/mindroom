@@ -17,6 +17,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
@@ -48,14 +49,15 @@ _SESSION_COLUMNS = """
 """
 
 
-def _source(path: Path, *, table: str = "code_sessions") -> UsageStorageSource:
+def _source(path: Path, *, storage_name: str = "code") -> UsageStorageSource:
     # Existing-history fixtures pass through the same one-time import as startup.
-    migrate_usage_database(path, table)
+    names = TableNames(storage_name)
+    migrate_usage_database(path, names)
     return UsageStorageSource(
         path=path,
         path_label=path.name,
         scope="shared_agent",
-        expected_session_table=table,
+        expected_session_table=names.sessions,
         source_agent_id="code",
         allowed_agent_ids=frozenset({"code"}),
         requester_isolated=False,
@@ -225,7 +227,6 @@ def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) 
     storage = create_state_storage(
         "code",
         tmp_path,
-        session_table="code_sessions",
     )
     seed_session(
         storage,
@@ -346,7 +347,7 @@ def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(tmp_pat
 
 def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path) -> None:
     """Saving a run again, even with a later creation time, keeps the run's original creation date in the ledger."""
-    storage = create_state_storage("code", tmp_path, session_table="code_sessions")
+    storage = create_state_storage("code", tmp_path)
     session = ConversationSession(kind="agent", session_id="session-1", owner_id="code")
     run = RunRecord(
         run_id="run-1",
@@ -379,7 +380,7 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         created_at=1_723_837_600,
         updated_at=1_723_837_600,
     )
-    storage = create_state_storage("engineering", tmp_path, session_table="engineering_sessions")
+    storage = create_state_storage("engineering", tmp_path)
     storage.save_run(
         session,
         TeamRunRecord(
@@ -430,7 +431,7 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         record_usage=True,
     )
 
-    source = _source(tmp_path / "sessions" / "engineering.db", table="engineering_sessions")
+    source = _source(tmp_path / "sessions" / "engineering.db", storage_name="engineering")
     if legacy_encoding:
         with sqlite3.connect(source.path) as connection:
             (session_data,) = connection.execute("SELECT session_data FROM engineering_sessions").fetchone()

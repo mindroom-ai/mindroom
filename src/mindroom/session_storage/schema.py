@@ -52,15 +52,23 @@ _RUNS_INDEXED_COLUMNS = (
 
 @dataclass(frozen=True, slots=True)
 class TableNames:
-    """The tables of one conversation database, all named after its sessions table."""
+    """The tables of the conversation database ``<storage_name>.db``, all named after its sessions table.
 
-    sessions: str
+    This is the one place that pairs a database's name with its sessions table, ``<storage_name>_sessions``.
+    """
+
+    storage_name: str
+
+    @property
+    def sessions(self) -> str:
+        """The sessions table."""
+        return f"{self.storage_name}_sessions"
 
     @property
     def runs(self) -> str:
         """The runs table."""
-        # Agno 3 names the runs table beside its default sessions table ``agno_runs`` (agno/db/base.py, BaseDb.__init__).
-        return "agno_runs" if self.sessions == "agno_sessions" else f"{self.sessions}_runs"
+        # Agno 3 names the runs table beside its default sessions table ``agno_sessions`` (storage name ``agno``) ``agno_runs`` (agno/db/base.py, BaseDb.__init__).
+        return "agno_runs" if self.storage_name == "agno" else f"{self.sessions}_runs"
 
     @property
     def summaries(self) -> str:

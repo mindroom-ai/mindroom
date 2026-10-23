@@ -33,7 +33,7 @@ def _session() -> ConversationSession:
 @pytest.fixture
 def usage_db(tmp_path: Path) -> ConversationStore:
     """Use the production storage owner with a real session row."""
-    storage = create_state_storage("code", tmp_path, session_table="code_sessions")
+    storage = create_state_storage("code", tmp_path)
     storage.ensure_session_row(_session())
     return storage
 

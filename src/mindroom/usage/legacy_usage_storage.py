@@ -44,35 +44,35 @@ def legacy_request_model(models: Mapping[tuple[str, str], object]) -> tuple[str,
 # Replacement: v2026.9.191 introduced independent usage snapshots; no historical billing completeness is inferred.
 # Handling: Detect by schema; seed once transactionally, prefer current rows, retain unknown dates and content-free gaps.
 # Coverage: tests/test_legacy_usage_storage.py.
-def migrate_usage_database(path: Path, session_table: str, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> None:
+def migrate_usage_database(path: Path, names: TableNames, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> None:
     """Seed an existing database once; publication and all imported records commit together."""
     if not path.is_file():
         return
     migrate_database(
         path,
-        needed=lambda connection: _needs_migration(connection, session_table),
-        apply=lambda connection: _create_usage(connection, session_table),
+        needed=lambda connection: _needs_migration(connection, names),
+        apply=lambda connection: _create_usage(connection, names),
         timeout=timeout,
     )
 
 
-def _needs_migration(connection: sqlite3.Connection, session_table: str) -> bool:
+def _needs_migration(connection: sqlite3.Connection, names: TableNames) -> bool:
     tables = table_names(connection)
-    return session_table in tables and f"{session_table}_usage" not in tables
+    return names.sessions in tables and names.usage not in tables
 
 
-def _create_usage(connection: sqlite3.Connection, session_table: str) -> None:
-    connection.execute(usage_table_sql(session_table))
-    _seed_usage(connection, session_table)
+def _create_usage(connection: sqlite3.Connection, names: TableNames) -> None:
+    connection.execute(usage_table_sql(names.sessions))
+    _seed_usage(connection, names)
 
 
-def _seed_usage(connection: sqlite3.Connection, session_table: str) -> None:
-    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(session_table)})")}
+def _seed_usage(connection: sqlite3.Connection, names: TableNames) -> None:
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(names.sessions)})")}
     legacy_column = "runs" if "runs" in columns else "NULL"
-    runs_table = TableNames(session_table).runs
+    runs_table = names.runs
     has_runs = runs_table in table_names(connection)
     for session_id, blob in connection.execute(
-        f"SELECT session_id, {legacy_column} FROM {quote_identifier(session_table)}",  # noqa: S608
+        f"SELECT session_id, {legacy_column} FROM {quote_identifier(names.sessions)}",  # noqa: S608
     ):
         known_ids: set[str] = set()
         if has_runs:
@@ -83,7 +83,7 @@ def _seed_usage(connection: sqlite3.Connection, session_table: str) -> None:
                 known_ids.add(run_id)
                 decoded = _decode(raw)
                 run = {**decoded, "run_id": run_id, "created_at": created_at} if isinstance(decoded, dict) else None
-                _insert_usage(connection, session_table, session_id, run_id, run)
+                _insert_usage(connection, names, session_id, run_id, run)
         decoded_blob = _decode(blob)
         # SQL NULL and JSON null were Agno's native empty-history values.
         if decoded_blob is None:
@@ -95,7 +95,7 @@ def _seed_usage(connection: sqlite3.Connection, session_table: str) -> None:
                 continue
             if run_id is not None:
                 known_ids.add(run_id)
-            _insert_usage(connection, session_table, session_id, run_id, run)
+            _insert_usage(connection, names, session_id, run_id, run)
 
 
 def _decode(raw: object) -> object:
@@ -107,13 +107,13 @@ def _decode(raw: object) -> object:
 
 def _insert_usage(
     connection: sqlite3.Connection,
-    session_table: str,
+    names: TableNames,
     session_id: str,
     run_id: str | None,
     run: object,
 ) -> None:
     payload = json.dumps(project_usage(cast("dict[str, object]", run))) if isinstance(run, dict) else None
-    connection.execute(usage_upsert_sql(session_table), (session_id, run_id, payload))
+    connection.execute(usage_upsert_sql(names.sessions), (session_id, run_id, payload))
 
 
 async def migrate_usage_storage(runtime_paths: RuntimePaths) -> None:
@@ -131,7 +131,7 @@ def _migrate_stores(runtime_paths: RuntimePaths) -> None:
         path = session_dir / f"{directory.name}.db"
         try:
             if not session_dir.is_symlink() and not path.is_symlink():
-                migrate_usage_database(path, f"{directory.name}_sessions", timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)
+                migrate_usage_database(path, TableNames(directory.name), timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)
         except (sqlite3.Error, OSError) as error:
             # Worker code can write session databases, so one unreadable or locked store must not stop startup.
             # Its owner retries the import with the full lock timeout when it next opens the store.

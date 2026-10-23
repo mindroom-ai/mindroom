@@ -178,7 +178,6 @@ def create_scope_session_storage(
             _team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
             runtime_paths,
         ),
-        session_table=f"{storage_name}_sessions",
     )
 
 

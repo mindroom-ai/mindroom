@@ -261,12 +261,12 @@ def _seeded_storage(
 
     Reopening after seeding runs the storage-open migrations, as a restart onto this release would.
     """
-    storage = create_state_storage(name, tmp_path / name, session_table=f"{name}_sessions")
+    storage = create_state_storage(name, tmp_path / name)
     if session is None:
         return storage
     _seed_as_older_release(storage, session)
     _as_older_release(tmp_path / name / "sessions" / f"{name}.db", name)
-    return create_state_storage(name, tmp_path / name, session_table=f"{name}_sessions")
+    return create_state_storage(name, tmp_path / name)
 
 
 _EPOCH = datetime.fromtimestamp(0, UTC)
@@ -2516,7 +2516,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     await store.record_turn(original)
 
     def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
-        return create_state_storage("agent", tmp_path, session_table="agent_sessions")
+        return create_state_storage("agent", tmp_path)
 
     storage = storage_factory()
     store.deps.state_writer.create_storage.side_effect = storage_factory
@@ -2968,7 +2968,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     )
 
     def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
-        return create_state_storage("agent", tmp_path, session_table="agent_sessions")
+        return create_state_storage("agent", tmp_path)
 
     storage = storage_factory()
     later_run = RunRecord(

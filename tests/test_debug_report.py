@@ -276,7 +276,6 @@ def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]
     storage = create_state_storage(
         state_root.name,
         state_root,
-        session_table=f"{state_root.name}_sessions",
     )
     seed_session(
         storage,

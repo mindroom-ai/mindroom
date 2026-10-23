@@ -21,7 +21,7 @@ _REQUEST = contextvars.ContextVar[str]("request", default="none")
 
 
 def _store(tmp_path: Path, name: str = "code") -> ConversationStore:
-    return open_conversation_store(tmp_path / f"{name}.db", TableNames(f"{name}_sessions"))
+    return open_conversation_store(tmp_path / f"{name}.db", TableNames(name))
 
 
 def _blocking(log: list[str], started: threading.Event, release: threading.Event) -> Callable[[ConversationStore], str]:

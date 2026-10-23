@@ -110,7 +110,7 @@ def test_is_empty_completed_run_ignores_runs_with_content_tools_or_other_status(
 
 def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage(tmp_path: Path) -> None:
     """The empty run must disappear from both the in-memory session and persisted history."""
-    storage = create_state_storage("general", tmp_path, session_table="general_sessions")
+    storage = create_state_storage("general", tmp_path)
     session = ConversationSession(
         session_id="session-1",
         kind="agent",
@@ -141,7 +141,7 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
 
 def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tmp_path: Path) -> None:
     """The loop stores the run without the scope session it loaded first, which therefore lacks the run."""
-    storage = create_state_storage("general", tmp_path, session_table="general_sessions")
+    storage = create_state_storage("general", tmp_path)
     live_session = seed_session(
         storage,
         ConversationSession(
@@ -174,7 +174,7 @@ def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tm
 
 def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(tmp_path: Path) -> None:
     """The team discard must purge the run and its member runs from memory and persisted history."""
-    storage = create_state_storage("team_general", tmp_path, session_table="team_general_sessions")
+    storage = create_state_storage("team_general", tmp_path)
     session = ConversationSession(
         session_id="session-1",
         kind="team",

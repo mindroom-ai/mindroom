@@ -270,7 +270,6 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
     storage = create_state_storage(
         "code",
         paths.storage_root / "agents" / "code",
-        session_table="code_sessions",
     )
     metrics = RunMetrics(
         input_tokens=1_000_000,
@@ -353,7 +352,6 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
     storage = create_state_storage(
         "code",
         paths.storage_root / "agents" / "code",
-        session_table="code_sessions",
     )
     with monkeypatch.context() as clock:
         clock.setattr("mindroom.session_storage.store.time", lambda: started)

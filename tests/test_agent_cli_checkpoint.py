@@ -72,7 +72,7 @@ async def _capture(checkpoint: BatchCheckpoint, record: RunRecord, messages: lis
 
 async def _stored_catalog(tmp_path: Path) -> PreparedAgentToolCatalog:
     catalog = await _catalog(tmp_path, [])
-    catalog.store = create_state_storage("helper", tmp_path, session_table="sessions")
+    catalog.store = create_state_storage("helper", tmp_path)
     return catalog
 
 
@@ -161,7 +161,7 @@ async def test_a_checkpoint_and_the_state_its_calls_ran_with_are_stored_together
     assert store is not None
     with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute(
-            "CREATE TRIGGER refuse_run BEFORE UPDATE ON sessions_runs BEGIN SELECT RAISE(ABORT, 'run refused'); END",
+            f"CREATE TRIGGER refuse_run BEFORE UPDATE ON {store.names.runs} BEGIN SELECT RAISE(ABORT, 'run refused'); END",
         )
     catalog.run.session_state["before_approval"] = "kept"
 
@@ -270,7 +270,7 @@ async def test_a_checkpoint_saves_a_session_state_another_thread_keeps_changing(
     A copy that walks the state in Python, even after a shallow copy of its top level, fails with "dictionary changed
     size during iteration" once the interpreter hands over mid-walk; the tiny switch interval makes it do so.
     """
-    store = create_state_storage("helper", tmp_path, session_table="sessions")
+    store = create_state_storage("helper", tmp_path)
     nested: dict[str, Any] = {f"key-{index}": [index] for index in range(2_000)}
     live: dict[str, Any] = {"nested": nested}
     session = ConversationSession(session_id="session", kind="agent", owner_id="helper", session_state=live)

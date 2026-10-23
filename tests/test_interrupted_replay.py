@@ -395,7 +395,6 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
     storage = create_state_storage(
         "test_agent",
         tmp_path,
-        session_table="test_agent_sessions",
     )
     seed_session(
         storage,
@@ -448,7 +447,7 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
 
 def test_an_interrupted_replay_and_the_session_state_it_carries_commit_together_or_neither(tmp_path: Path) -> None:
     """A recovered call's state and the replay run that records it land in one transaction, as the session recorded it."""
-    storage = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    storage = create_state_storage("test_agent", tmp_path)
     seed_session(
         storage,
         ConversationSession(
@@ -516,7 +515,7 @@ def test_an_interrupted_replay_and_the_session_state_it_carries_commit_together_
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
 def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_team: bool) -> None:
     """Replay and later metadata edits must retain the provider's durable usage snapshot."""
-    storage = create_state_storage("test_scope", tmp_path, session_table="test_sessions")
+    storage = create_state_storage("test_scope", tmp_path)
     db_path = tmp_path / "sessions" / "test_scope.db"
     kind: SessionKind = "team" if is_team else "agent"
     session = (
@@ -543,7 +542,7 @@ def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_te
     )
     storage.save_run(session, metered_run, record_usage=True)
     with sqlite3.connect(db_path) as connection:
-        original_usage = connection.execute("SELECT run_id, usage_data FROM test_sessions_usage").fetchall()
+        original_usage = connection.execute("SELECT run_id, usage_data FROM test_scope_sessions_usage").fetchall()
     assert len(original_usage) == 1
     payload = json.loads(original_usage[0][1])
     assert payload["metrics"]["total_tokens"] == 22
@@ -569,7 +568,10 @@ def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_te
             is_team=is_team,
         )
         with sqlite3.connect(db_path) as connection:
-            assert connection.execute("SELECT run_id, usage_data FROM test_sessions_usage").fetchall() == original_usage
+            assert (
+                connection.execute("SELECT run_id, usage_data FROM test_scope_sessions_usage").fetchall()
+                == original_usage
+            )
 
     persisted = storage.load_session("session-1", kind)
     assert persisted is not None
@@ -578,7 +580,7 @@ def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_te
     linked_run.metadata = {**(linked_run.metadata or {}), "matrix_response_event_id": "$reply"}
     storage.save_runs(persisted, [linked_run])
 
-    storage = create_state_storage("test_scope", tmp_path, session_table="test_sessions")
+    storage = create_state_storage("test_scope", tmp_path)
     persisted = storage.load_session("session-1", kind)
     assert persisted is not None
     assert persisted.runs
@@ -587,7 +589,9 @@ def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_te
     assert replay.metadata["matrix_response_event_id"] == "$reply"
     assert "Text emitted before interruption" in _assistant_text(replay)
     with sqlite3.connect(db_path) as connection:
-        assert connection.execute("SELECT run_id, usage_data FROM test_sessions_usage").fetchall() == original_usage
+        assert (
+            connection.execute("SELECT run_id, usage_data FROM test_scope_sessions_usage").fetchall() == original_usage
+        )
 
 
 def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
@@ -693,7 +697,6 @@ def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_
     storage = create_state_storage(
         "test_agent",
         tmp_path,
-        session_table="test_agent_sessions",
     )
     snapshot = build_interrupted_replay_snapshot(
         user_message="Please continue",
@@ -754,7 +757,7 @@ def test_a_stopped_reply_keeps_only_tool_calls_its_fold_did_not_summarize() -> N
 
 def test_an_interrupted_record_without_a_turn_recorder_leaves_out_what_its_folds_summarized(tmp_path: Path) -> None:
     """Paths with no turn recorder, such as the OpenAI-compatible API, still drop the calls a mid-turn fold holds."""
-    storage = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    storage = create_state_storage("test_agent", tmp_path)
     store_fold(
         storage,
         "session-1",

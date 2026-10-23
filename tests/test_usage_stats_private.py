@@ -102,7 +102,6 @@ def seed_private_usage(
     storage = create_state_storage(
         agent,
         resolved.session_state_root,
-        session_table=f"{agent}_sessions",
     )
     seed_session(
         storage,

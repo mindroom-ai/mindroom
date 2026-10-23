@@ -39,7 +39,6 @@ def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path)
     storage = create_state_storage(
         "test_agent",
         tmp_path,
-        session_table="test_agent_sessions",
     )
     seed_session(
         storage,

@@ -79,7 +79,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
         middleware=(hook,),
     )
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.store = create_state_storage("helper", tmp_path, session_table="sessions")
+    catalog.store = create_state_storage("helper", tmp_path)
     receipts = []
 
     async def authorize(key, arguments):

@@ -105,7 +105,6 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
     storage = create_state_storage(
         "usage",
         context.runtime_paths.storage_root / "agents" / "usage",
-        session_table="usage_sessions",
     )
     seed_session(
         storage,

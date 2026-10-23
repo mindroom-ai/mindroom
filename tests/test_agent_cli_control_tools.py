@@ -153,7 +153,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         tmp_path,
         [_toolkit("shell", run_shell_command), adapt_toolkit(Toolkit(name="control", tools=[switch, mutate]))],
     )
-    catalog.store = create_state_storage("helper", tmp_path, session_table="sessions")
+    catalog.store = create_state_storage("helper", tmp_path)
     receipts = []
     owner = _owner(catalog)
     owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")

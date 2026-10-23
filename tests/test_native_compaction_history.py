@@ -118,7 +118,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         ),
         Message(role="tool", tool_call_id="fc_status", content="ready"),
     ]
-    db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(
         db,
         _session(
@@ -129,7 +129,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
             ],
         ),
     )
-    db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     session = db.load_session("session", "agent")
     assert session is not None
     original = [run.to_dict() for run in session.runs]
@@ -273,7 +273,7 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     run.model = model.identity.id
     run.model_provider = model.identity.provider
     session = _session("session", runs=[run])
-    db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(db, session)
     text_compact = AsyncMock(side_effect=AssertionError("Canonical history must remain intact"))
     monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
@@ -341,7 +341,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
             _completed_run("recent", messages=latest),
         ],
     )
-    db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(db, session)
     prepared = await prepare_scope_history(
         agent_name="test_agent",
@@ -423,7 +423,7 @@ async def test_native_activation_respects_history_policy(
             _SCOPE,
             HistoryScopeState(force_compact_before_next_run=True),
         )
-    db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(db, session)
     # A manual request must reach the portable text owner, which returns no outcome here.
     text_compact = AsyncMock(return_value=_ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed"))
@@ -458,7 +458,7 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     old = model.native_compaction_settings(threshold=120000)
     assert old is not None
     session = _session("session", summary=ScopeSummary(text="New portable summary.", updated_at=datetime.now(UTC)))
-    db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(db, session)
     prepared = await prepare_scope_history(
         agent_name="test_agent",
@@ -489,7 +489,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         runs=[_completed_run("folded", messages=[Message(role="user", content="Earlier")])],
         summary=ScopeSummary(text="Stale summary.", updated_at=datetime.now(UTC)),
     )
-    db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(db, seeded)
     compact_runs(db, seeded, _SCOPE, ["folded"], "Archived summary.")
     session = db.load_session("session", "agent")
@@ -538,7 +538,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     config.agents["test_agent"].model = "member"
     config.teams["team"] = TeamConfig(agents=["test_agent"], display_name="Team", role="Coordinate work.")
     leader = responses_adapter(tmp_path, store=False)
-    db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     session = _team_session("session", team_id="team", runs=[_completed_team_run("run", team_id="team")])
     seed_session(db, session)
 

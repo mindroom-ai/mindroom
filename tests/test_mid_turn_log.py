@@ -48,7 +48,7 @@ _ALL_HISTORY = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_too
 @pytest.fixture
 def storage(tmp_path: Path) -> ConversationStore:
     """Use the production conversation storage owner."""
-    return create_state_storage("code", tmp_path, session_table="code_sessions")
+    return create_state_storage("code", tmp_path)
 
 
 def _run(

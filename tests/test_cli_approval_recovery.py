@@ -359,7 +359,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
         _minimal_build(runtime),
         _actions(name, action, requires_confirmation=True, stop_after_tool_call=bool(control)),
     )
-    store = create_state_storage("helper", tmp_path, session_table="sessions")
+    store = create_state_storage("helper", tmp_path)
     persisted, session = _saved(
         store,
         "session",
@@ -499,7 +499,7 @@ async def test_a_later_save_of_the_recovered_session_keeps_the_state_the_recover
     runtime = _helper_runtime(tmp_path, tools=["shell"])
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     build = _with_toolkit(_minimal_build(runtime), _actions("action", action, requires_confirmation=True))
-    store = create_state_storage("helper", tmp_path, session_table="sessions")
+    store = create_state_storage("helper", tmp_path)
     persisted, session = _saved(
         store,
         "session",
@@ -607,7 +607,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
     runtime = _helper_runtime(tmp_path, tools=["shell"])
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     build = _minimal_build(runtime)
-    store = create_state_storage("helper", tmp_path, session_table="sessions")
+    store = create_state_storage("helper", tmp_path)
     marker = tmp_path / "ran"
     arguments = {"command": f"touch {marker}"}
     requirement = _outer_bash_approval(arguments)
@@ -679,7 +679,7 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
     runtime = _helper_runtime(tmp_path, tools=["shell"])
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     build = _minimal_build(runtime)
-    store = create_state_storage("helper", tmp_path, session_table="sessions")
+    store = create_state_storage("helper", tmp_path)
     folded = ToolExecution(
         tool_call_id="folded-bash",
         tool_name="run_shell_command",

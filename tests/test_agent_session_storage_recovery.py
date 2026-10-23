@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 def _storage(state_root: Path) -> ConversationStore:
-    return create_state_storage("general", state_root, session_table="general_sessions")
+    return create_state_storage("general", state_root)
 
 
 def _row(session_id: str, *, kind: SessionKind = "agent", owner: str = "general") -> ConversationSession:
@@ -221,7 +221,6 @@ def test_worker_planted_recovery_lock_fails_promptly(tmp_path: Path, plant: str)
             with session_storage_preflight(
                 state_root,
                 storage_name="general",
-                session_table="general_sessions",
                 timeout_seconds=0.2,
             ):
                 pass
@@ -435,7 +434,7 @@ def test_compatible_old_fixture_and_current_run_rows_survive_reopen(tmp_path: Pa
             connection.commit()
 
     def open_storage() -> ConversationStore:
-        return create_state_storage("code", tmp_path, session_table="code_sessions")
+        return create_state_storage("code", tmp_path)
 
     storage = open_storage()
     storage.save_run(

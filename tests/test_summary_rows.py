@@ -30,7 +30,7 @@ def _session_row() -> ConversationSession:
 
 
 def _open(tmp_path: Path) -> ConversationStore:
-    return create_state_storage("code", tmp_path, session_table="code_sessions")
+    return create_state_storage("code", tmp_path)
 
 
 def _save(storage: ConversationStore, run: RunRecord) -> None:

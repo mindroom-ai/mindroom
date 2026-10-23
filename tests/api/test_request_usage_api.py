@@ -45,7 +45,6 @@ def test_live_voice_duration_exports_separately_from_delegate_tokens(
     storage = create_state_storage(
         "test_agent",
         storage_root / "agents/test_agent",
-        session_table="test_agent_sessions",
     )
     run = _run()
     run.agent_id = "test_agent"
@@ -126,7 +125,6 @@ def test_request_export_flag_authentication_and_cache_variants(
     storage = create_state_storage(
         "test_agent",
         storage_root / "agents/test_agent",
-        session_table="test_agent_sessions",
     )
     run = _run()
     run.agent_id = "test_agent"
@@ -182,7 +180,6 @@ def test_helper_usage_exports_once_without_counting_another_reply(
     storage = create_state_storage(
         "test_agent",
         storage_root / "agents/test_agent",
-        session_table="test_agent_sessions",
     )
     run = RunRecord(
         run_id="ordinary",
