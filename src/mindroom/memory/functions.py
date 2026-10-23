@@ -279,8 +279,8 @@ async def build_memory_prompt_parts(
 ) -> MemoryPromptParts:
     """Split stable entrypoint context from turn-local searched memories.
 
-    A turn in ``conversation`` keeps the entrypoint that conversation last sent while entries are only added and its
-    prompt cache may be warm.
+    A turn in ``conversation`` keeps the entrypoint that conversation last sent while its inlined copy only gains lines
+    and its prompt cache may be warm.
     """
     logger.debug("Building enhanced prompt", agent=agent_name)
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
