@@ -255,7 +255,7 @@ class ConversationStore:
         Once the save commits, ``session.runs`` holds the run as the store does (see ``_reconcile``).
         """
         (saved,) = self._save_encoded(session, [_encoded(run)], record_usage=record_usage, state=state)
-        return saved.outcome
+        return "written" if isinstance(saved.row, _WrittenRow) else saved.row
 
     def save_runs(
         self,
@@ -527,10 +527,6 @@ class _SavedRun:
     run_id: str
     row_type: SessionKind
     row: _WrittenRow | Refusal
-
-    @property
-    def outcome(self) -> SaveOutcome:
-        return "written" if isinstance(self.row, _WrittenRow) else self.row
 
 
 def _reconcile(session: ConversationSession, saved: Iterable[_SavedRun]) -> None:
