@@ -31,7 +31,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dependencies import check_deps_installed, optional_dependency_environment
-from mindroom.tool_system.dynamic_toolkits import defer_toolkit
+from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
     ToolArgumentError,
@@ -228,11 +228,16 @@ def build_toolkit(
     tool_config_overrides: dict[str, object] | None = None,
 ) -> Toolkit:
     """Build one registered tool as agent construction does, with its default configuration or authored overrides."""
-    deferred_toolkits = ()
+    deferred_toolkits = None
     if tool_name == "dynamic_tools":
         # Tool search exists only beside a deferred toolkit, and its own functions do not depend on which one.
         calculator = build_toolkit("calculator", config, runtime_paths)
-        deferred_toolkits = (defer_toolkit("calculator", TOOL_METADATA["calculator"].description, calculator),)
+        deferral = defer_toolkit("calculator", TOOL_METADATA["calculator"].description, calculator)
+        searched = (DeferredToolkit(deferral, adapt_toolkit(calculator).functions),)
+
+        def deferred_toolkits() -> tuple[DeferredToolkit, ...]:
+            return searched
+
     with (
         patch(OFFLINE_CLIENTS[tool_name]) if tool_name in OFFLINE_CLIENTS else nullcontext(),
         patch(REFUSED_REQUESTS[tool_name], side_effect=_refuse_request)

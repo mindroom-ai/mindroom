@@ -34,7 +34,7 @@ from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifet
 from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai_runtime import queued_message_signal_context
-from mindroom.approval import receipt as approval_receipt
+from mindroom.approval import receipt_readers as approval_receipt
 from mindroom.approval.receipt import messages_with_approval_receipt
 from mindroom.approval.response import plan_approval_calls, require_ordered_pause_presentation
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE

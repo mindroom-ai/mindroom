@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from mindroom.history.types import HistoryScope
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider
     from mindroom.tool_system.tool_function import AdaptedToolkit
@@ -34,6 +35,8 @@ class RunContext:
 
     ``parent_run_id`` names the run that started this one, as a team run starts its member runs. ``metadata`` is
     stored on the run record; ``session_state`` is handed to every tool call, which may change it in place.
+    ``history_scope`` is the stored conversation a team run and its member runs belong to, which tools that address
+    history by scope read; None for an agent's own run, whose scope is its agent's.
     """
 
     run_id: str
@@ -42,6 +45,7 @@ class RunContext:
     parent_run_id: str | None = None
     metadata: dict[str, Any] | None = None
     session_state: dict[str, Any] = field(default_factory=dict)
+    history_scope: HistoryScope | None = None
 
 
 __all__ = [

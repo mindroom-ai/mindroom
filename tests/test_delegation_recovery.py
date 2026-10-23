@@ -21,6 +21,7 @@ from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
@@ -175,6 +176,31 @@ async def test_restart_cleanup_uses_latest_attempt_of_the_same_delegation(  # no
     original_run = await read_child_run(original, config, paths)
     assert original_run is not None
     assert original_run.status == RunStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_a_failed_child_settled_from_its_stored_record_hands_over_its_redacted_reason(tmp_path: Path) -> None:
+    """A child's failed run read back after a restart has only its stored content, the raw error; it is redacted."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    child.storage_bindings = freeze_delegation_storage(config, ("leader", "child"))
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    raw = "provider down: api_key=example-secret"
+    stored = RunRecord.from_dict(
+        RunRecord(run_id=child.run_id, session_id=child.session_id, status=RunStatus.error, content=raw).to_dict(),
+    )
+
+    await settle_child_response(child, stored, config=config, runtime_paths=paths)
+
+    assert (child.status, child.result) == ("failed", redact_sensitive_text(raw))
+    assert "example-secret" not in str(child.result)
 
 
 @pytest.mark.asyncio

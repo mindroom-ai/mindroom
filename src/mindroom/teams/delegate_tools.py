@@ -25,7 +25,7 @@ from mindroom.tool_system.tool_function import AdaptedToolkit
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Sequence
 
-    from mindroom.llm.runs import RunRecord, TeamRunRecord
+    from mindroom.llm.runs import RunRecord, TeamRunRecord, ToolExecution
     from mindroom.teams.spec import TeamMember
 
 # The texts Agno gave the leader for a member that paused, per mode, and for one that said nothing.
@@ -35,7 +35,6 @@ NO_MEMBER_RESPONSE = "No response from the member agent."
 # How Agno's non-stream collaborate delegation labeled each member's result, and its text for a member left blank.
 _COLLABORATE_MEMBER_RESULT = "Agent {name}: {result}"
 _COLLABORATE_BLANK_RESULT = "No Response"
-DELEGATE_TOOL_NAMES = frozenset({"delegate_task_to_member", "delegate_task_to_members"})
 
 
 class MemberRunner(Protocol):
@@ -187,6 +186,21 @@ def _json_text(content: object) -> str:
     return json.dumps(content, indent=2, ensure_ascii=False)
 
 
+def waited_on_member(tool: ToolExecution, member: TeamMember) -> bool:
+    """Return whether the leader's delegation call ``tool`` waited on ``member``, a member whose run is paused.
+
+    It did when the delegation answered with the notice it gives when that member pauses: a coordinate call that
+    named the member and answered exactly its notice, or a collaborate call whose result holds the member's piece.
+    A finished member's own text that merely mentions human input never matches.
+    """
+    if tool.tool_name == "delegate_task_to_member":
+        named = (tool.tool_args or {}).get("member_id") == member.spec.id
+        return named and tool.result == MEMBER_PAUSED_RESULT.format(name=member.spec.name)
+    if tool.tool_name == "delegate_task_to_members":
+        return COLLABORATE_MEMBER_PAUSED_RESULT.format(name=member.spec.name) in (tool.result or "")
+    return False
+
+
 def propagate_member_pause(record: TeamRunRecord, member: TeamMember, child: RunRecord) -> None:
     """Copy the paused member's requirements onto the team run, naming the member, and keep its run with the team's.
 
@@ -210,7 +224,6 @@ def propagate_member_pause(record: TeamRunRecord, member: TeamMember, child: Run
 
 __all__ = [
     "COLLABORATE_MEMBER_PAUSED_RESULT",
-    "DELEGATE_TOOL_NAMES",
     "MEMBER_PAUSED_RESULT",
     "NO_MEMBER_RESPONSE",
     "MemberRunner",
@@ -218,4 +231,5 @@ __all__ = [
     "delegate_functions",
     "member_result_text",
     "propagate_member_pause",
+    "waited_on_member",
 ]

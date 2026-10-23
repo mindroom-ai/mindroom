@@ -30,8 +30,8 @@ def computer_announcement_middleware(
 ) -> ToolMiddleware | None:
     """Return the middleware announcing the computer before the browser tool that gives a chat_ui agent its computer.
 
-    None for any other toolkit or agent. The loop runs it after the tool hook bridge, so it announces only calls that
-    plugin before-call hooks let through.
+    None for any other toolkit or agent. Each of the toolkit's functions carries it as its own policy, which runs
+    inside the tool hook bridge, so it announces only calls that plugin before-call hooks let through.
     """
     if (
         tool_name not in {"browser", "browser_mcp"}
@@ -41,7 +41,6 @@ def computer_announcement_middleware(
         return None
     return _announcement_middleware(
         agent_name,
-        frozenset((*toolkit.functions, *toolkit.async_functions)),
         toolkit if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
     )
 
@@ -64,19 +63,14 @@ def _runs_as(agent_name: str) -> bool:
     return context is None or context.agent_name == agent_name
 
 
-def _announcement_middleware(
-    agent_name: str,
-    function_names: frozenset[str],
-    placement: SupportsPrimaryCallPlacement | None,
-) -> ToolMiddleware:
+def _announcement_middleware(agent_name: str, placement: SupportsPrimaryCallPlacement | None) -> ToolMiddleware:
     async def announce_computer(call: ToolCall, call_next: ToolNext) -> object:
         name = call.function.name
-        if name in function_names:
-            try:
-                if _runs_as(agent_name) and _uses_computer(name, call.arguments, placement):
-                    await show_computer_once()
-            except Exception:
-                logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
+        try:
+            if _runs_as(agent_name) and _uses_computer(name, call.arguments, placement):
+                await show_computer_once()
+        except Exception:
+            logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
         return await call_next(call.arguments)
 
     return announce_computer

@@ -1,7 +1,8 @@
 """The final model request of a response that counts toward skill learning, kept for the review to fork.
 
-Like Hermes' review fork, the review replays that request with its tools and request settings unchanged and appends
-the review prompt, so the provider serves the conversation from its prompt cache. Only the ordinary response path
+Like Hermes' review fork, the review replays that request with its tools, as the run's functions declare them, and
+its request settings unchanged and appends the review prompt, so the provider serves the conversation from its prompt
+cache. Only the ordinary response path
 records requests, and it builds its provider for that one response, so the review owns the provider once the response
 has ended.
 """
@@ -44,7 +45,9 @@ def capture_final_request(
     """Return the loop-end hook that records one primary attempt's final request for the skill review.
 
     Each attempt names its own configured ``model_name``, because a same-turn continuation can switch models within one
-    response.
+    response. The request keeps the run's own messages and tool definitions, as its functions declare them: what a
+    pre-request hook projected for that request alone, such as the approval receipt or the wait budget job admission
+    accepts, belongs to the run's own calls, and the review answers its calls with other functions.
     """
 
     def record(state: LoopState, request: ModelRequest) -> None:
@@ -54,7 +57,7 @@ def capture_final_request(
             model=model,
             model_name=model_name,
             run_id=run_id,
-            request=replace(request, messages=messages),
+            request=replace(request, messages=messages, tools=state.offered.specs()),
         )
 
     return record

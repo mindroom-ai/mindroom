@@ -25,6 +25,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta, RunFinished, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext, ToolNext, execute_tool_call, run_tool_call
 from mindroom.tool_system.progress import tool_progress_reporter
@@ -373,6 +374,25 @@ async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: P
         await tools.run_subagent(agent_name="child", task="Run with a replacement attempt")
 
     assert _only_run(tmp_path)["error"] == "replacement provider failure"
+
+
+@pytest.mark.asyncio
+async def test_a_direct_delegation_that_fails_hands_over_and_records_its_redacted_reason(tmp_path: Path) -> None:
+    """A child failure whose text names a credential reaches the caller and the audit record redacted."""
+    tools, config, runtime_paths = _tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+    failure = "child exploded: api_key=example-secret"
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock, side_effect=RuntimeError(failure)),
+    ):
+        result = await tools.run_subagent(agent_name="child", task="Do the work")
+
+    run = _only_run(tmp_path)
+    assert run["error"] == redact_sensitive_text(failure)
+    assert f"Delegation to 'child' failed: {redact_sensitive_text(failure)}" in result
+    assert "example-secret" not in result
 
 
 @pytest.mark.asyncio

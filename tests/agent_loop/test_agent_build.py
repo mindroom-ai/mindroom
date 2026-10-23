@@ -23,12 +23,9 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.llm.provider import ModelRequest
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.store import ConversationStore
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
-from tests.agent_loop.helpers import spec
 from tests.conftest import bind_runtime_paths, test_runtime_paths
-from tests.fakes.scripted_model import ScriptedModel
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -357,23 +354,6 @@ def test_a_configured_function_named_like_a_generated_one_is_what_the_run_offers
     assert (job_tool.function, job_tool.toolkit_name, job_tool.toolkit) == (offered, "calculator", built["calculator"])
     assert [log["toolkit"] for log in logs if log["event"] == "duplicate_tool_name"] == ["search_knowledge_base"]
     assert not [log for log in logs if log["event"].startswith("Configured toolkit exposes no unique")]
-
-
-@pytest.mark.parametrize("generated_first", [False, True])
-def test_owners_follow_the_run_selection_in_any_offer_order(*, generated_first: bool) -> None:
-    """A name is owned exactly when the run offers it from an assembled toolkit, wherever generated tools sit."""
-    toolkit = Toolkit(name="calculator", tools=[search_knowledge_base])
-    entry = agents_module._ToolkitEntry(toolkit=toolkit, adapted=adapt_toolkit(toolkit), owner="calculator")
-    generated = adapt_toolkit(Toolkit(name="search_knowledge_base", tools=[search_knowledge_base]))
-    offered = [(None, generated), (entry, entry.adapted)]
-    if not generated_first:
-        offered.reverse()
-
-    owners = agents_module._offered_entries(offered)
-    functions = prepare_run_tools(spec(ScriptedModel([]), *(adapted for _entry, adapted in offered))).functions
-
-    assert (functions["search_knowledge_base"] is generated.functions[0]) is generated_first
-    assert owners == ({} if generated_first else {"search_knowledge_base": entry})
 
 
 def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp_path: Path) -> None:

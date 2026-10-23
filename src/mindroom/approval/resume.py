@@ -10,11 +10,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.run import resume_agent
 from mindroom.agent_loop.spec import RunContext
-from mindroom.approval.receipt import add_approval_receipt_reader
+from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
@@ -52,12 +53,13 @@ type ContinueRun[R: AnyRunRecord] = Callable[[R, ResumeDecisions, ResumeEvents |
 class ResumeDecisions:
     """What one resume answers: the approved calls, the denied calls with their notes, and the external results.
 
-    ``external_results`` holds, by call id, what an externally executed call (a delegation) returned.
+    ``external_results`` holds what an externally executed call (a delegation) returned, by the member whose run
+    waits for it, None for the run's own call, and the call id.
     """
 
     approved: tuple[ApprovalCall, ...] = ()
-    denied: Mapping[str, str | None] = field(default_factory=dict)
-    external_results: Mapping[str, str] = field(default_factory=dict)
+    denied: Mapping[str, str] = field(default_factory=dict)
+    external_results: Mapping[tuple[str | None, str], str] = field(default_factory=dict)
 
 
 def approval_decisions(
@@ -102,7 +104,10 @@ def resume_from_session(
         build_resume_request(paused=paused.messages, summary=summary, history=history),
         approved=decisions.approved,
         denied=decisions.denied,
-        external_results=decisions.external_results,
+        # An agent's run waits only for calls of its own; a result naming a member answers none of them.
+        external_results={
+            call_id: result for (member, call_id), result in decisions.external_results.items() if member is None
+        },
         ctx=RunContext(
             run_id=paused.run_id,
             session_id=session.session_id,
@@ -166,14 +171,16 @@ async def forward_resume[R: AnyRunRecord](
     return record
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True)
 class ResumeRunner:
     """Resumes one paused run of a rebuilt agent against its store, with the hooks an agent turn installs.
 
     A resume replays the history the configured policy selects from ``session`` now, not a turn's narrowed plan; the
     run's native history settings come from the paused request's last response. Every resume streams its requests,
     as Agno's continuation did. A resume that answers the run's own paused calls with an approval's decisions makes
-    the run a reader of that approval's receipt.
+    the run a reader of that approval's receipt. The run keeps one set of hooks for its whole life, so per-run hook
+    state, such as the output-limit count or a failed compaction's stop, carries across its delegation
+    continuations.
     """
 
     build: AgentBuild
@@ -186,14 +193,14 @@ class ResumeRunner:
     scope: HistoryScope
     user_id: str | None
 
-    def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
-        """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` as ``resume_agent``'s does."""
-        build = self.build
-        plan = configured_replay_plan(history_settings=build.history_settings, estimated_tokens=0)
-        native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
-        native_compaction = native.native_compaction if native is not None else None
-        hooks = agent_loop_hooks(
-            build,
+    @cached_property
+    def _replay_plan(self) -> ResolvedReplayPlan:
+        return configured_replay_plan(history_settings=self.build.history_settings, estimated_tokens=0)
+
+    @cached_property
+    def _hooks(self) -> LoopHooks:
+        return agent_loop_hooks(
+            self.build,
             HookTurn(
                 config=self.config,
                 runtime_paths=self.runtime_paths,
@@ -201,11 +208,17 @@ class ResumeRunner:
                 store=self.store,
                 session=self.session,
                 scope=self.scope,
-                replay_plan=plan,
+                replay_plan=self._replay_plan,
                 prompt_id=None,
             ),
             agent_name=self.agent_name,
         )
+
+    def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
+        """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` as ``resume_agent``'s does."""
+        build = self.build
+        native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
+        native_compaction = native.native_compaction if native is not None else None
         if decisions.approved or decisions.denied:
             add_approval_receipt_reader(paused.run_id)
         events = resume_from_session(
@@ -215,9 +228,9 @@ class ResumeRunner:
             session=self.session,
             scope=self.scope,
             settings=build.history_settings,
-            plan=plan,
+            plan=self._replay_plan,
             user_id=self.user_id,
-            hooks=hooks,
+            hooks=self._hooks,
             persist=persist_to(self.store, self.session),
             request_template=replace(
                 build.request_template,

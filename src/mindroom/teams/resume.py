@@ -16,10 +16,10 @@ from typing import TYPE_CHECKING, cast
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.ai import run_delegated_child_response
-from mindroom.approval.receipt import add_approval_receipt_reader
+from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, forward_resume, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
-from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
+from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history
@@ -28,7 +28,7 @@ from mindroom.history.request_messages import build_resume_request, replayed_his
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
-from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
@@ -54,7 +54,6 @@ from mindroom.teams.storage import (
     register_team_notice_storage,
     scope_storage,
     team_history_settings,
-    under_team_scope,
 )
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
@@ -73,7 +72,7 @@ if TYPE_CHECKING:
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import ResolvedHistorySettings, ResolvedReplayPlan
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.llm.events import RunEvent
+    from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord, RunRecord, RunRequirement
     from mindroom.response_turn import PausedAttempt
@@ -128,7 +127,7 @@ class _RoutedDecisions:
     """The resume's decisions routed to the calls the paused team waits for, by ``TeamCallKey``."""
 
     approved: dict[TeamCallKey, ApprovedCall]
-    denied: dict[TeamCallKey, str | None]
+    denied: dict[TeamCallKey, str]
     external_results: dict[TeamCallKey, str]
 
 
@@ -136,13 +135,14 @@ def _route_decisions(
     persisted: TeamRunRecord,
     decisions: ResumeDecisions,
     *,
-    toolkit_owners: Mapping[tuple[str, str], str | None],
+    toolkit_owners: Mapping[tuple[str, str], str],
 ) -> _RoutedDecisions:
     """Route each decision to the waiting member or leader call it names, checking an approved call's toolkit owner.
 
     An approved call is matched by the member the approval was shown for, and must still come from the toolkit the
-    approval recorded, so a removed or replaced tool cannot run under an old approval. A denial or a delegation's
-    result names its call by id alone; a call id two members share is refused rather than guessed at.
+    approval recorded, so a removed or replaced tool cannot run under an old approval. A denial names its call by id
+    alone, and a call id two members share is refused rather than guessed at; a delegation's result names its member
+    and call, which the resume checks against the calls the team waits for.
     """
     waiting: dict[str | None, list[RunRequirement]] = {}
     for requirement in persisted.requirements or ():
@@ -174,7 +174,7 @@ def _route_decisions(
     return _RoutedDecisions(
         approved=approved,
         denied={key_of(call_id): note for call_id, note in decisions.denied.items()},
-        external_results={key_of(call_id): result for call_id, result in decisions.external_results.items()},
+        external_results=dict(decisions.external_results),
     )
 
 
@@ -206,7 +206,7 @@ class TeamResume:
     settings: ResolvedHistorySettings
     plan: ResolvedReplayPlan | None
     user_id: str | None
-    toolkit_owners: Mapping[tuple[str, str], str | None]
+    toolkit_owners: Mapping[tuple[str, str], str]
 
     def events(self, paused: TeamRunRecord, decisions: ResumeDecisions) -> AsyncIterator[TeamRunEvent]:
         """Resume ``paused`` with ``decisions`` routed to the calls the team waits for; the stream ends with ``RunFinished``.
@@ -222,7 +222,7 @@ class TeamResume:
             if requirement.member_run_id is not None and key in decided:
                 add_approval_receipt_reader(requirement.member_run_id)
         session = self.storage.session
-        events = continue_team(
+        return continue_team(
             self.spec,
             paused,
             _resume_request(self.storage, paused, settings=self.settings, plan=self.plan),
@@ -235,12 +235,12 @@ class TeamResume:
                 user_id=self.user_id,
                 metadata=deepcopy(paused.metadata),
                 session_state=session.session_state,
+                history_scope=self.storage.scope,
             ),
             hooks=self.hooks,
             persist=persist_into(self.records, self.storage),
             request_template=self.request_template,
         )
-        return under_team_scope(events, self.storage.scope)
 
     async def __call__(
         self,
@@ -256,56 +256,17 @@ class TeamResume:
         return await forward_resume(events, on_event, record_type=TeamRunRecord)
 
 
-@dataclass(frozen=True, slots=True)
-class _MemberCall:
-    """The member whose run issued one delegation call, for the driver's events about that call."""
-
-    member_id: str
-    member_name: str
-    run_id: str
-
-
-def _delegation_owners(record: TeamRunRecord) -> dict[str, _MemberCall]:
-    """Return, by call id, the member whose paused run waits on each delegation call of a stored team pause."""
-    return {
-        requirement.tool_execution.tool_call_id: _MemberCall(
-            requirement.member_agent_id,
-            requirement.member_agent_name or requirement.member_agent_id,
-            requirement.member_run_id,
-        )
-        for requirement in record.requirements or ()
-        if requirement.needs_external_execution
-        and requirement.tool_execution.tool_name in DELEGATION_TOOL_NAMES
-        and requirement.tool_execution.tool_call_id is not None
-        and requirement.member_agent_id is not None
-        and requirement.member_run_id is not None
-    }
-
-
-async def _tag_member_delegation_events(
-    events: AsyncIterator[TeamRunEvent],
-    owners: dict[str, _MemberCall],
-) -> AsyncIterator[TeamRunEvent]:
-    """Route the driver's events about a member's delegation call into that member's slot.
+def _member_call_event(requirement: RunRequirement, event: ToolStarted | ToolCompleted) -> RunEvent:
+    """Put the driver's event about a member's delegation call in the slot of the member whose run made the call.
 
     The driver reports the delegation call it runs as the parent's own ``ToolStarted`` and ``ToolCompleted``. In a
-    team the call belongs to the member whose run paused on it, which announced the call first; ``owners`` seeds
-    the calls a stored pause already holds.
+    team the call belongs to the member whose run paused on it, which the requirement names, since members number
+    their calls independently.
     """
-    async with closing_async_stream(events):
-        async for event in events:
-            if isinstance(event, MemberEvent) and isinstance(event.event, ToolStarted):
-                tool = event.event.tool
-                if tool.tool_call_id is not None and tool.tool_name in DELEGATION_TOOL_NAMES:
-                    owners[tool.tool_call_id] = _MemberCall(event.member_id, event.member_name, event.run_id)
-                yield event
-            elif (
-                isinstance(event, ToolStarted | ToolCompleted)
-                and (owner := owners.get(event.tool.tool_call_id or "")) is not None
-            ):
-                yield MemberEvent(owner.member_id, owner.member_name, owner.run_id, event)
-            else:
-                yield event
+    if requirement.member_agent_id is None or requirement.member_run_id is None:
+        return event
+    member_name = requirement.member_agent_name or requirement.member_agent_id
+    return cast("RunEvent", MemberEvent(requirement.member_agent_id, member_name, requirement.member_run_id, event))
 
 
 def drive_team_delegations(
@@ -317,7 +278,6 @@ def drive_team_delegations(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    paused: TeamRunRecord | None = None,
     decisions: dict[str, bool] | None = None,
     denial_reasons: dict[str, str | None] | None = None,
     approval_calls: Sequence[ApprovalCall] = (),
@@ -325,8 +285,7 @@ def drive_team_delegations(
     """Pass the run's events through; when it ends paused on a member's delegation, run the children and continue it.
 
     The driver sees the team run as a parent, runs a member's delegations as that member, and ``resume`` continues
-    the run with the children's results. ``paused`` is the stored pause a saved approval resumes, whose members
-    already own the delegation calls it waits on; a turn's run announces its members' calls in ``events``.
+    the run with the children's results.
     """
     driven = drive_delegation_stream(
         cast("AsyncIterator[RunEvent]", events),
@@ -342,9 +301,9 @@ def drive_team_delegations(
         decisions=decisions,
         denial_reasons=denial_reasons,
         approval_calls=approval_calls,
+        tag_call_event=_member_call_event,
     )
-    owners = _delegation_owners(paused) if paused is not None else {}
-    return _tag_member_delegation_events(cast("AsyncIterator[TeamRunEvent]", driven), owners)
+    return cast("AsyncIterator[TeamRunEvent]", driven)
 
 
 def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str | None]:
@@ -588,7 +547,6 @@ async def continue_paused_team_run(
                 if delegated
                 else resume.events(persisted, approval_decisions(approval_calls, decisions, denial_reasons)),
                 resume,
-                paused=persisted,
                 team_name=entity_name,
                 config=config,
                 runtime_paths=runtime_paths,

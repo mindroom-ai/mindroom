@@ -25,7 +25,7 @@ from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolDescriptor, ToolKey, UnknownToolError, validate_tool_arguments
-from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
+from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits, first_of_each_name
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -166,28 +166,27 @@ class PreparedAgentToolCatalog:
     async def prepare(
         self,
         toolkits: Sequence[AdaptedToolkit],
-        owners: Mapping[str, str | None],
+        owners: Mapping[str, str],
         *,
         include: Callable[[ToolFunction], bool] | None = None,
     ) -> None:
         """Bind the run's functions under their authored toolkit; skip functions ``include`` rejects.
 
-        ``owners`` maps each function the run offers to its authored toolkit, None for one a configured toolkit
-        carries without that origin; a function it does not name was generated for the agent, such as the knowledge
-        search and the skill readers, and is reached as ``agent``. Only the first function of a name is bound,
-        because only that one is what the run offers.
+        ``owners`` maps each function the run offers to its authored toolkit; a function it does not name was
+        generated for the agent, such as the knowledge search and the skill readers, and is reached as ``agent``.
+        Only the functions ``first_of_each_name`` selects are bound, because only those are what the run offers.
         """
         async with self._lock:
             self._check_open()
-            names: set[str] = set()
+            offered = list(
+                first_of_each_name((toolkit, function) for toolkit in toolkits for function in toolkit.functions),
+            )
             for toolkit in toolkits:
-                functions = []
-                for function in toolkit.functions:
-                    if function.name in names:
-                        continue
-                    names.add(function.name)
-                    if include is None or include(function):
-                        functions.append(function)
+                functions = [
+                    function
+                    for owner, function in offered
+                    if owner is toolkit and (include is None or include(function))
+                ]
                 self._prepare(toolkit, functions, owners)
 
     async def connect(self, toolkits: Sequence[AdaptedToolkit]) -> None:
@@ -203,7 +202,7 @@ class PreparedAgentToolCatalog:
         self,
         toolkit: AdaptedToolkit,
         functions: Sequence[ToolFunction],
-        owners: Mapping[str, str | None] | None = None,
+        owners: Mapping[str, str] | None = None,
     ) -> None:
         """Bind ``functions`` of ``toolkit``, under their owner from ``owners``, or under the toolkit without one."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
@@ -247,6 +246,7 @@ class PreparedAgentToolCatalog:
             call_id=call_id,
             session_state=self.run.session_state,
             metadata=self.run.metadata or {},
+            history_scope=self.run.history_scope,
         )
 
     async def bind(

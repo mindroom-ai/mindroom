@@ -33,6 +33,7 @@ from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
+    from mindroom.history.types import HistoryScope
     from mindroom.tool_system.tool_function import ToolFunction
 
 # What the loop sends the model for a call that names no function it offered; the same text Agno used.
@@ -64,6 +65,7 @@ class ToolCallContext:
 
     ``session_state`` is shared with the tool, which may mutate it in place; the caller persists it afterwards.
     ``call_id`` is the provider's id of the tool call being run, when the call came from a model.
+    ``history_scope`` is the run's stored conversation when it is a team's, as ``RunContext`` names it.
     """
 
     run_id: str
@@ -72,6 +74,7 @@ class ToolCallContext:
     call_id: str | None = None
     session_state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    history_scope: HistoryScope | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -239,7 +242,7 @@ async def run_tool_call(
     *,
     middleware: Sequence[ToolMiddleware] = (),
 ) -> object:
-    """Run one tool call through ``middleware`` to its entrypoint and return what it returned, drained if it streamed.
+    """Run one tool call through ``middleware``, then the function's own, to its entrypoint; return what it returned.
 
     Runners outside the model loop that hand the tool's own value onward (background scripts, the MCP gateway,
     scheduled calls) use this; an exception the call raises propagates.
@@ -288,7 +291,7 @@ async def _run_chain(call: ToolCall, middleware: Sequence[ToolMiddleware]) -> ob
         return await _run_entrypoint(call.function, arguments, call.context)
 
     call_next: ToolNext = leaf
-    for step in reversed(middleware):
+    for step in reversed((*middleware, *call.function.middleware)):
         call_next = _link(step, call, call_next)
     return await call_next(call.arguments)
 

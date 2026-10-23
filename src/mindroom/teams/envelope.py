@@ -94,7 +94,6 @@ from mindroom.teams.storage import (
     register_team_notice_storage,
     scope_storage,
     team_history_settings,
-    under_team_scope,
 )
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -358,6 +357,7 @@ class _LeaderRun:
                 user_id=user_id,
                 metadata=metadata,
                 session_state=self.storage.session.session_state if self.storage is not None else {},
+                history_scope=self.storage.scope if self.storage is not None else None,
             ),
             hooks=self.hooks,
             persist=persist_into(records, self.storage),
@@ -669,7 +669,6 @@ class _TeamTurn:
                 metadata=prepared.run_metadata,
                 records=attempt.records,
             )
-        events = under_team_scope(events, storage.scope if storage is not None else None)
         if storage is not None:
             events = drive_team_delegations(
                 events,

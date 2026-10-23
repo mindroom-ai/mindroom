@@ -24,7 +24,7 @@ from mindroom import agents, ai, ai_runtime, loop_hooks, response_runner
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
-from mindroom.approval.receipt import approval_receipt_context
+from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig

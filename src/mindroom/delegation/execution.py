@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, ca
 from uuid import uuid4
 
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.approval.receipt import add_approval_receipt_reader
+from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
@@ -131,6 +131,16 @@ class _DelegationOptions(TypedDict):
     decisions: NotRequired[dict[str, bool] | None]
     denial_reasons: NotRequired[dict[str, str | None] | None]
     approval_calls: NotRequired[Sequence[ApprovalCall]]
+    tag_call_event: NotRequired[_CallEventTag]
+
+
+# How the driver's own event about the delegation call a requirement holds enters its stream; a team names the member
+# whose run made the call there, which only the requirement knows, since members number their calls independently.
+type _CallEventTag = Callable[[RunRequirement, ToolStarted | ToolCompleted], RunEvent]
+
+
+def _untagged(_requirement: RunRequirement, event: ToolStarted | ToolCompleted) -> RunEvent:
+    return event
 
 
 _RUNNING_CHILD_ID: ContextVar[str | None] = ContextVar("running_delegated_child", default=None)
@@ -141,7 +151,7 @@ class _ChildOutcome:
     """Retained outcome and executable ownership observed by its actual envelope."""
 
     response: RunRecord
-    toolkit_owners: dict[tuple[str, str], str | None]
+    toolkit_owners: Mapping[tuple[str, str], str | None]
 
 
 @dataclass(frozen=True)
@@ -157,14 +167,14 @@ class _DelegationTarget:
 
 
 # The delegate tools run outside the loop: the driver runs the child and continues the parent with its result.
-DELEGATION_TOOL_NAMES = frozenset({"run_subagent", "continue_subagent"})
+_DELEGATION_TOOL_NAMES = frozenset({"run_subagent", "continue_subagent"})
 
 
 def _external_requirements(response: AnyRunRecord) -> list[RunRequirement]:
     return [
         requirement
         for requirement in response.requirements or ()
-        if requirement.needs_external_execution and requirement.tool_execution.tool_name in DELEGATION_TOOL_NAMES
+        if requirement.needs_external_execution and requirement.tool_execution.tool_name in _DELEGATION_TOOL_NAMES
     ]
 
 
@@ -175,13 +185,17 @@ def has_delegation_state(response: AnyRunRecord) -> bool:
 
 def _delegation_call(requirement: RunRequirement) -> bool:
     tool = requirement.tool_execution
-    return tool.tool_name in DELEGATION_TOOL_NAMES and bool(tool.external_execution_required)
+    return tool.tool_name in _DELEGATION_TOOL_NAMES and bool(tool.external_execution_required)
 
 
-def answered_delegation_calls(response: AnyRunRecord) -> dict[str, str]:
-    """Return, by call id, the answer each delegation call of a paused run already holds."""
+def answered_delegation_calls(response: AnyRunRecord) -> dict[tuple[str | None, str], str]:
+    """Return the answer each delegation call of a paused run already holds, by its member and call id.
+
+    The member is the one whose run waits for the call, None for the run's own; a team's members number their calls
+    independently, so a call id alone does not name a call, as the driver's own keys say.
+    """
     return {
-        call_id: answer
+        (requirement.member_agent_id, call_id): answer
         for requirement in response.requirements or ()
         if _delegation_call(requirement)
         and (call_id := requirement.tool_execution.tool_call_id) is not None
@@ -626,7 +640,7 @@ def _finalize_delegation_output(result: str, request: ToolOutputFileRequest | No
 def _resolve_delegation_requirement(
     requirement: RunRequirement,
     result: str,
-    on_event: ResumeEvents | None,
+    emit_call: Callable[[ToolStarted | ToolCompleted], None],
     *,
     output_request: ToolOutputFileRequest | None = None,
 ) -> str:
@@ -637,8 +651,7 @@ def _resolve_delegation_requirement(
     """
     result = _finalize_delegation_output(result, output_request)
     requirement.set_external_execution_result(result)
-    if on_event is not None:
-        on_event(ToolCompleted(replace(requirement.tool_execution, external_execution_required=False)))
+    emit_call(ToolCompleted(replace(requirement.tool_execution, external_execution_required=False)))
     return result
 
 
@@ -674,7 +687,7 @@ async def _background_child_outcome(
     )
     # Settlement stays inside this claim, so recovery cannot take a child that failed before its terminal state.
     async with subagent_liveness(child, runtime_paths):
-        primary_error: Exception | None = None
+        primary_error: str | None = None
         try:
             outcome = await run(config=config, decisions=None, denial_reasons=None, approval_calls=(), fresh=True)
             while outcome.response.status == RunStatus.paused:
@@ -700,13 +713,14 @@ async def _background_child_outcome(
             await interrupt_stopped_child(child, config=config, runtime_paths=runtime_paths)
             raise
         except Exception as error:
-            primary_error = error
+            # What the failed child hands its caller, credentials redacted, however its cleanup ends.
+            primary_error = redact_sensitive_text(str(error))
             try:
                 await interrupt_child(
                     child,
                     config=config,
                     runtime_paths=runtime_paths,
-                    reason=redact_sensitive_text(str(error)),
+                    reason=primary_error,
                     status="failed",
                 )
             except Exception as cleanup_error:
@@ -718,7 +732,8 @@ async def _background_child_outcome(
                 )
                 return finished(
                     "failed",
-                    f"{error}\n\nDelegation cleanup did not complete; recovery may still be required: {cleanup_error}",
+                    f"{primary_error}\n\nDelegation cleanup did not complete; recovery may still be required: "
+                    f"{redact_sensitive_text(str(cleanup_error))}",
                 )
         try:
             receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
@@ -734,7 +749,8 @@ async def _background_child_outcome(
             return finished(
                 "failed",
                 f"{primary_error}\n\n"
-                f"Delegation settlement did not complete; recovery may still be required: {settlement_error}",
+                "Delegation settlement did not complete; recovery may still be required: "
+                f"{redact_sensitive_text(str(settlement_error))}",
             )
         status = child.status
         assert status != "running"
@@ -1023,12 +1039,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     approval_calls: Sequence[ApprovalCall] = (),
     on_event: ResumeEvents | None = None,
     background: ToolJobRuntime | None = None,
+    tag_call_event: _CallEventTag = _untagged,
 ) -> str | None:
     """Advance one existing child operation; return the parent call's result, or None while it waits for approval.
 
     The native driver owns parent continuation. Hidden callers supply a sink
     that saves the real parent without adding a provider requirement or message.
     A managed `background` runtime owns children this call starts or continues.
+    The call's own started and completed events reach `on_event` through `tag_call_event`.
     """
     if execution_identity.channel != "matrix":
         msg = "Native delegation requires a Matrix execution owner"
@@ -1042,20 +1060,26 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         msg = "Delegation requirement has no exact tool-call identity"
         raise RuntimeError(msg)
     requirement_key = delegation_card_id(requirement.member_agent_id, tool.tool_call_id)
-    if on_event is not None:
-        on_event(ToolStarted(deepcopy(tool)))
+
+    def emit_call(event: ToolStarted | ToolCompleted) -> None:
+        if on_event is not None:
+            on_event(tag_call_event(requirement, event))
+
+    emit_call(ToolStarted(deepcopy(tool)))
     # A team member's id is its config name on the owned loop, so its delegations run as that member.
     caller = agent_name if requirement.member_agent_id is None else requirement.member_agent_id
     caller_identity = replace(execution_identity, agent_name=caller)
-    resolve_result = partial(_resolve_delegation_requirement, requirement, on_event=on_event)
+    resolve_result = partial(_resolve_delegation_requirement, requirement, emit_call=emit_call)
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
+    # Whether this call waits on its retained child's own approval, the pause the presented decisions are about.
+    waits_on_retained = retained is not None and retained.delegation_id == pending_id
     # What the decisions answer for this call: its own card, or the calls of the child it waits on, which go to that
     # child under its own call ids.
     card_decision = None if decisions is None else decisions.get(requirement_key)
     child_decisions = None
     child_reasons = None
     child_calls: tuple[ApprovalCall, ...] = ()
-    if decisions is not None and retained is not None and retained.delegation_id == pending_id:
+    if decisions is not None and retained is not None and waits_on_retained:
         delegation_id = retained.delegation_id
         child_decisions = {child_call_id(delegation_id, key): value for key, value in decisions.items()}
         child_reasons = {child_call_id(delegation_id, key): value for key, value in (denial_reasons or {}).items()}
@@ -1134,7 +1158,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     runtime_paths=runtime_paths,
                     reason=authorization,
                 )
-            if pending_id == retained.delegation_id and on_event is not None:
+            if waits_on_retained and on_event is not None:
                 _settle_pending_child_tools(prior_pending_tools, on_event, reason=authorization)
         result = resolve_result(authorization)
         if requirement.id in state.hooks:
@@ -1408,6 +1432,7 @@ async def _drive_delegations[R: AnyRunRecord](
     denial_reasons: dict[str, str | None] | None = None,
     approval_calls: Sequence[ApprovalCall] = (),
     on_event: ResumeEvents | None = None,
+    tag_call_event: _CallEventTag = _untagged,
 ) -> R:
     """Advance one durable parent; sequential children preserve completed sibling results.
 
@@ -1473,6 +1498,7 @@ async def _drive_delegations[R: AnyRunRecord](
                 approval_calls=approval_calls,
                 on_event=on_event,
                 background=background,
+                tag_call_event=tag_call_event,
             )
             if result is None:
                 return response

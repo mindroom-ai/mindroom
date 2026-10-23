@@ -24,7 +24,7 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 
-    from mindroom.agent_loop.model_loop import AfterToolBatchHook, ResumeEntryHook
+    from mindroom.agent_loop.model_loop import AfterToolBatchHook
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.judgment.state import JudgmentMessage
     from mindroom.llm.runs import AnyRunRecord
@@ -207,13 +207,10 @@ def _strip_queued_notice_messages(
 def _append_queued_notice_if_needed(
     *,
     messages: list[Message],
-    function_call_results: Sequence[Message],
     notice_text: str,
     judged: bool = False,
 ) -> None:
     notice_context = _queued_message_notice_context.get()
-    if any(message.stop_after_tool_call for message in function_call_results):
-        return
     if notice_context is not None and notice_context.mid_turn_gate is not None and not judged:
         return
     if notice_context is not None:
@@ -241,13 +238,13 @@ def _append_queued_notice_if_needed(
         )
 
 
-def _completed_trailing_tool_results(
+def _ends_with_completed_tool_batch(
     messages: list[Message],
     response_turn_id: str,
     *,
     after_tool_batch: bool = False,
-) -> list[Message] | None:
-    """Find a complete resumed batch without crossing a real user or assistant message."""
+) -> bool:
+    """Return whether the messages end with a complete tool batch, found without crossing a real user message."""
     results: list[Message] = []
     for message in reversed(messages):
         if _is_queued_notice_message(message, response_turn_id=response_turn_id):
@@ -266,10 +263,9 @@ def _completed_trailing_tool_results(
         if message.role == "assistant" and message.tool_calls:
             call_ids = {call.get("id") for call in message.tool_calls}
             result_ids = {result.tool_call_id for result in results}
-            if None not in call_ids and call_ids <= result_ids:
-                return results
-        return None
-    return None
+            return None not in call_ids and call_ids <= result_ids
+        return False
+    return False
 
 
 def _append_queued_notice_after_resumed_tools(messages: list[Message], *, notice_text: str) -> None:
@@ -277,9 +273,8 @@ def _append_queued_notice_after_resumed_tools(messages: list[Message], *, notice
     context = _queued_message_notice_context.get()
     if context is None or context.state is None or not context.state.has_pending_human_messages():
         return
-    results = _completed_trailing_tool_results(messages, context.response_turn_id)
-    if results is not None:
-        _append_queued_notice_if_needed(messages=messages, function_call_results=results, notice_text=notice_text)
+    if _ends_with_completed_tool_batch(messages, context.response_turn_id):
+        _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
 
 
 async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> None:
@@ -295,19 +290,15 @@ async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> 
         current=lambda: not context.notice_fired and pending == state.pending_message_snapshot(),
     ):
         return
-    _append_queued_notice_if_needed(messages=messages, function_call_results=(), notice_text=notice_text, judged=True)
+    _append_queued_notice_if_needed(messages=messages, notice_text=notice_text, judged=True)
 
 
 async def _judge_resumed_tool_notice(messages: list[Message], *, notice_text: str) -> None:
     context = _queued_message_notice_context.get()
     if context is None or context.mid_turn_gate is None:
         return
-    results = _completed_trailing_tool_results(messages, context.response_turn_id)
-    if results is not None and not any(message.stop_after_tool_call for message in results):
-        await _judge_queued_notice(
-            messages,
-            notice_text=notice_text,
-        )
+    if _ends_with_completed_tool_batch(messages, context.response_turn_id):
+        await _judge_queued_notice(messages, notice_text=notice_text)
 
 
 def queued_notice_after_tool_batch(notice_text: str) -> AfterToolBatchHook:
@@ -318,22 +309,22 @@ def queued_notice_after_tool_batch(notice_text: str) -> AfterToolBatchHook:
     resumes it judges the completed batch, reusing this turn's decision for an unchanged queue.
     """
 
-    async def after_tool_batch(messages: list[Message], results: Sequence[Message]) -> None:
-        _append_queued_notice_if_needed(messages=messages, function_call_results=results, notice_text=notice_text)
+    async def after_tool_batch(messages: list[Message], _results: Sequence[Message]) -> None:
+        _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
         context = _queued_message_notice_context.get()
         if context is None or context.mid_turn_gate is None:
             return
-        if _completed_trailing_tool_results(messages, context.response_turn_id, after_tool_batch=True) is None:
+        if not _ends_with_completed_tool_batch(messages, context.response_turn_id, after_tool_batch=True):
             return
         await _judge_queued_notice(messages, notice_text=notice_text)
 
     return after_tool_batch
 
 
-def queued_notice_on_resume_entry(notice_text: str) -> ResumeEntryHook:
+def queued_notice_on_resume_entry(notice_text: str) -> AfterToolBatchHook:
     """Return the loop hook that notifies a resumed run of a queued message after its completed tool batch."""
 
-    async def on_resume_entry(messages: list[Message]) -> None:
+    async def on_resume_entry(messages: list[Message], _results: Sequence[Message]) -> None:
         _append_queued_notice_after_resumed_tools(messages, notice_text=notice_text)
         await _judge_resumed_tool_notice(messages, notice_text=notice_text)
 

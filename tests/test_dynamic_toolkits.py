@@ -34,6 +34,7 @@ from mindroom.desktop.credentials import (
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
     defer_toolkit,
@@ -935,6 +936,58 @@ def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
         assert "mcp_demo" in discovery_blocks[0]
 
 
+@pytest.mark.asyncio
+async def test_tool_search_lists_only_the_deferred_mcp_functions_the_run_offers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deferred MCP function a local function's name hides leaves the run and the search, not the MCP toolkit."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["sleep", {"mcp_demo": {"defer": True}}]  # type: ignore[index]
+    raw["mcp_servers"] = {
+        "demo": {
+            "transport": "streamable-http",
+            "url": "https://mcp.example.test/mcp",
+            "auth": {
+                "type": "oauth",
+                "discovery": "manual",
+                "authorization_url": "https://auth.example.test/authorize",
+                "token_url": "https://auth.example.test/token",
+            },
+        },
+    }
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _runtime_paths(tmp_path)
+    built: dict[str, Toolkit] = {}
+    build_agent_toolkit = agents_module.build_agent_toolkit
+
+    def fake_build_agent_toolkit(tool_name: str, **kwargs: object) -> Toolkit | None:
+        if tool_name == "mcp_demo":
+            built[tool_name] = MindRoomMCPToolkit(
+                server_id="demo",
+                manager=None,
+                catalog=None,
+                server_config=config.mcp_servers["demo"],
+                runtime_paths=runtime_paths,
+                credentials_manager=get_runtime_credentials_manager(runtime_paths),
+            )
+            return built[tool_name]
+        if tool_name == "sleep":
+            local = Toolkit(name="local", auto_register=False)
+            local.functions["demo_list_tools"] = Function(name="demo_list_tools", entrypoint=lambda: "local")
+            return local
+        return build_agent_toolkit(tool_name, **kwargs)
+
+    monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
+
+    agent = create_agent("code", config, runtime_paths, execution_identity=None)
+
+    assert _portable_deferred_names(agent) == frozenset({"demo_call_tool", "demo_connection_status"})
+    listed = (await _search(agent, ""))["functions"]
+    assert sorted(item["name"] for item in listed) == ["demo_call_tool", "demo_connection_status"]
+    assert "demo_list_tools" in built["mcp_demo"].async_functions
+
+
 def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1388,12 +1441,14 @@ class _WeatherTools(Toolkit):
         return city
 
 
-def _deferred(toolkit: Toolkit, description: str) -> DeferredToolkit:
-    return defer_toolkit(toolkit.name, description, toolkit)
+def _deferred(toolkit: Toolkit, description: str, domain_name: str | None = None) -> DeferredToolkit:
+    """Defer ``toolkit`` and adapt it, as agent construction does, offering every function of it."""
+    deferral = defer_toolkit(domain_name or toolkit.name, description, toolkit)
+    return DeferredToolkit(deferral, adapt_toolkit(toolkit).functions)
 
 
 def _search_toolkit(*deferred: DeferredToolkit) -> DynamicToolsToolkit:
-    return DynamicToolsToolkit(deferred_toolkits=deferred)
+    return DynamicToolsToolkit(deferred_toolkits=lambda: deferred)
 
 
 def test_tool_search_returns_definitions_and_toolkit_instructions() -> None:
@@ -1539,11 +1594,12 @@ def test_tool_search_without_matches_suggests_other_keywords() -> None:
     assert "tool_search() without a query" in payload["message"]
 
 
-def test_tool_search_skips_functions_removed_after_build() -> None:
-    """Functions hidden after the build, such as MCP collision losers, are not offered."""
-    crm = _CrmTools()
-    toolkit = _search_toolkit(_deferred(crm, "Customer records"))
-    del crm.functions["crm_lookup"]
+def test_tool_search_shows_the_deferred_functions_the_agent_offers_when_it_searches() -> None:
+    """Search reads the deferred toolkits when it runs, after the agent left out functions such as MCP collisions."""
+    full = _deferred(_CrmTools(), "Customer records")
+    offered = [full]
+    toolkit = DynamicToolsToolkit(deferred_toolkits=lambda: offered)
+    offered[0] = DeferredToolkit(full.deferral, tuple(f for f in full.functions if f.name != "crm_lookup"))
 
     payload = _tool_payload(toolkit.tool_search("crm"))
 
@@ -1766,7 +1822,7 @@ def test_tool_search_joins_instructions_of_toolkits_sharing_one_entry() -> None:
         instructions="Use beta.",
     )
     first.add_instructions = second.add_instructions = True
-    toolkit = _search_toolkit(defer_toolkit("shared", "Shared", first), defer_toolkit("shared", "Shared", second))
+    toolkit = _search_toolkit(_deferred(first, "Shared", "shared"), _deferred(second, "Shared", "shared"))
 
     payload = _tool_payload(toolkit.tool_search("shared"))
 

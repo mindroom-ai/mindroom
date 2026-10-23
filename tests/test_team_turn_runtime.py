@@ -23,7 +23,8 @@ from agno.tools import Toolkit
 from mindroom import ai_runtime, loop_hooks, response_runner, response_turn
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.approval.manager import get_approval_store, initialize_approval_store
-from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
+from mindroom.approval.receipt import build_approval_receipt
+from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
@@ -33,7 +34,6 @@ from mindroom.event_journal import ApprovalDecision
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.events import ContentDelta
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -45,17 +45,11 @@ from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApprov
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
 from mindroom.teams.spec import TeamMode
-from mindroom.teams.storage import under_team_scope
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import StructuredStreamChunk
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeModelBinding,
-    get_tool_runtime_context,
-    tool_runtime_context,
-)
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.bot_helpers import make_test_team_bot, unique_room_send_responses
@@ -92,9 +86,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import TeamBot
     from mindroom.event_journal import MatrixDelivery
-    from mindroom.history.types import HistoryScope
     from mindroom.session_storage.store import ConversationStore
-    from mindroom.teams.runtime import TeamRunEvent
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
 
@@ -565,37 +557,6 @@ async def test_a_member_s_call_that_runs_as_a_tool_job_keeps_the_member_s_claude
     _, [member] = team.stored_runs()
     assert member.tools is not None
     assert member.tools[0].result == f"No active Claude session for `writer:{SESSION_ID}`."
-
-
-@pytest.mark.asyncio
-async def test_the_team_scope_is_bound_only_while_the_run_produces_an_event(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The run's code sees the team scope and the attempt's model; the reply consuming its events never does."""
-    team = squad_turn(tmp_path, monkeypatch, leader=[])
-    produced: list[tuple[HistoryScope | None, str | None]] = []
-
-    def current_binding() -> tuple[HistoryScope | None, str | None]:
-        context = get_tool_runtime_context()
-        assert context is not None
-        return context.history_scope, context.active_model_name
-
-    async def run_events() -> AsyncIterator[TeamRunEvent]:
-        for text in ("one", "two"):
-            produced.append(current_binding())
-            yield ContentDelta(text)
-
-    with tool_runtime_context(replace(team.runtime, active_model_name="turn-model")):
-        # As the attempt does: the team scope around the run, the attempt's model around that.
-        events = ToolRuntimeModelBinding().stream_with_model(
-            under_team_scope(run_events(), TEAM_SCOPE),
-            active_model_name="attempt-model",
-        )
-        consumed = [current_binding() async for _event in events]
-
-    assert produced == [(TEAM_SCOPE, "attempt-model")] * 2
-    assert consumed == [(None, "turn-model")] * 2
 
 
 @pytest.mark.asyncio
@@ -1274,6 +1235,54 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
     assert team.models["default"].requests[-1].messages[-1].content == (
         "Member results after human-in-the-loop resolution:\n[Writer]: Writer: the helper found it."
     )
+
+
+@pytest.mark.asyncio
+async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_team_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Members number their calls independently, so two can delegate under one call id; each child runs once."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            calls(
+                tool_call("delegate_task_to_member", "call-w", member_id="writer", task="Dig A"),
+                tool_call("delegate_task_to_member", "call-c", member_id="checker", task="Dig B"),
+                metrics=usage(40, 4),
+            ),
+            answer("Consensus.", usage(50, 5)),
+        ],
+        writer=[_delegate_to_helper("A"), answer("Writer: done.")],
+        checker=[_delegate_to_helper("B"), answer("Checker: done.")],
+        helper=[answer("Helper one."), answer("Helper two.")],
+    )
+    team.config.agents["checker"].delegate_to = ["helper"]
+
+    chunks = await team.stream()
+
+    assert len(team.models["helper-model"].requests) == 2
+    # The driver's events about each member's call land in that member's slot, each call finished with its child.
+    assert [
+        (entry.type, entry.scope_key, (entry.result_preview or "").partition("\n")[0])
+        for entry in chunks[-1].tool_trace or []
+        if entry.tool_name == "run_subagent"
+    ] == [
+        ("tool_call_completed", "agent:writer", "Helper one."),
+        ("tool_call_completed", "agent:checker", "Helper two."),
+    ]
+    record, members = team.stored_runs()
+    assert (record.status, record.content) == (RunStatus.completed, "Consensus.")
+    assert sorted((member.agent_id or "", member.status) for member in members) == [
+        ("checker", RunStatus.completed),
+        ("writer", RunStatus.completed),
+    ]
+    state = DelegationState.from_metadata(record.metadata)
+    assert sorted((child.caller_agent_name, child.status) for child in state.children) == [
+        ("checker", "completed"),
+        ("writer", "completed"),
+    ]
 
 
 @pytest.mark.asyncio

@@ -59,9 +59,12 @@ async def _run(
     hooks: LoopHooks = NO_HOOKS,
     record: RunRecord | None = None,
     request_template: ModelRequest | None = None,
+    resumed: Sequence[RunRequirement] | None = None,
 ) -> tuple[list[LoopEvent], RunRecord]:
     record = record or _record()
     kwargs: dict[str, Any] = {} if request_template is None else {"request_template": request_template}
+    if resumed is not None:
+        kwargs["resumed"] = resumed
     events = [
         event
         async for event in run_model_loop(
@@ -409,15 +412,15 @@ async def test_a_tool_that_leaves_a_decision_on_the_record_pauses_the_loop_after
     )
 
 
-async def test_a_record_that_still_waits_for_a_decision_ends_paused_before_any_request() -> None:
-    """A resume entry may leave the run waiting again; the loop sends nothing while it waits."""
+async def test_a_resume_that_leaves_the_record_waiting_ends_paused_before_any_request() -> None:
+    """A team resume's paused member may leave the run waiting again; the loop sends nothing while it waits."""
     record = _record()
     execution = ToolExecution(tool_call_id="m1", tool_name="multiply")
     execution.requires_confirmation = True
     record.requirements = [RunRequirement(execution, member_agent_id="checker", member_run_id="member-run")]
     model = ScriptedModel([])
 
-    events, _ = await _run(spec(model), _prompt(), record=record)
+    events, _ = await _run(spec(model), _prompt(), record=record, resumed=())
 
     assert events == [LoopEnded(paused=True)]
     assert model.requests == []

@@ -9,15 +9,10 @@ import pytest
 
 from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.ai import stream_agent_response
-from mindroom.approval import receipt as approval_receipt
-from mindroom.approval.receipt import (
-    add_approval_receipt_reader,
-    approval_receipt_context,
-    approval_receipt_hook,
-    build_approval_receipt,
-    messages_with_approval_receipt,
-)
+from mindroom.approval.receipt import approval_receipt_hook, build_approval_receipt, messages_with_approval_receipt
+from mindroom.approval.receipt_readers import add_approval_receipt_reader, approval_receipt_context
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
@@ -223,7 +218,7 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
     model = ScriptedModel([calls(tool_call("echo", "call-1", text="x")), answer("first"), answer("second")])
     hook = approval_receipt_hook(Capabilities())
 
-    with approval_receipt.approval_receipt_context("trusted approval receipt", run_id="run-1"):
+    with approval_receipt_context("trusted approval receipt", run_id="run-1"):
         _, first = await collect(
             run_agent(
                 spec(model, toolkit(echo)),
@@ -547,6 +542,7 @@ def _state_stub() -> object:
 
     return LoopState(
         messages=[Message(role="system", content="rules")],
+        offered=PreparedTools(functions={}, instructions=()),
         tools=(),
         run=context(),
         record=RunRecord(run_id="run-1"),

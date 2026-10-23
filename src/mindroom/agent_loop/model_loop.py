@@ -4,9 +4,10 @@
 One iteration sends the live message list to the model, appends the assistant message it answers with, runs the
 tool calls it requested, and appends their results; the loop ends when the model answers without tool calls, when
 a tool stops it, when the run waits for a decision, when a pre-request hook ends it, or when the run's request cap
-is reached. A run waits for a decision when a call of its own paused, or when a tool left an unresolved requirement
-on the record, as a team leader's delegation does for a paused member. Every point MindRoom patched into Agno's
-loop is a ``LoopHooks`` field or a parameter here.
+is reached. A resume enters the loop with the paused batch's decided calls, which it answers as the rest of that
+batch before any request. A run waits for a decision when a call of its own paused, or when a tool left an
+unresolved requirement on the record, as a team leader's delegation does for a paused member. Every point MindRoom
+patched into Agno's loop is a ``LoopHooks`` field or a parameter here.
 """
 
 from __future__ import annotations
@@ -14,7 +15,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.agent_loop.tools import dispatch_tool_calls, media_follow_up, plan_tool_batch
+from mindroom.agent_loop.tools import (
+    PlannedCall,
+    dispatch_tool_calls,
+    media_follow_up,
+    plan_tool_batch,
+    tool_result_message,
+)
 from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.events import ContentDelta, RequestCompleted, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY, Message
@@ -27,9 +34,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.spec import RunContext
-    from mindroom.agent_loop.tools import PlannedCall, PreparedTools, ToolBatch
+    from mindroom.agent_loop.tools import PreparedTools, ToolBatch
     from mindroom.llm.provider import ModelIdentity, ModelProvider, StopReason, ToolSpec
-    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import MessageMetrics, RunMetrics
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.tool_function import ToolFunction
@@ -47,14 +54,17 @@ EMPTY_REQUEST = ModelRequest(messages=())
 class LoopState:
     """What a pre-request hook sees and may change before one model request.
 
-    ``messages`` is the live list the loop sends and appends to, so a hook rewrites it in place; ``tools`` are the
-    definitions this request offers; ``record`` is the running run, whose tool executions and requirements the loop
-    fills as it goes; ``loop_start_ids`` are the ids of the messages the loop started with; ``request_template``
-    carries the per-run request settings, which a hook may replace for the rest of the run (mid-turn compaction
-    turning the provider's compaction off after it compacted as text).
+    ``messages`` is the live list the loop sends and appends to, so a hook rewrites it in place; ``offered`` holds the
+    functions that answer the run's calls; ``tools`` are the definitions this request offers, which start as the
+    offered functions' own and which a hook may extend (the wait budget job admission accepts) or replace (a skill
+    review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions
+    and requirements the loop fills as it goes; ``loop_start_ids`` are the ids of the messages the loop started
+    with; ``request_template`` carries the per-run request settings, which a hook may replace for the rest of the run
+    (mid-turn compaction turning the provider's compaction off after it compacted as text).
     """
 
     messages: list[Message]
+    offered: PreparedTools
     tools: tuple[ToolSpec, ...]
     run: RunContext
     record: AnyRunRecord
@@ -81,7 +91,6 @@ type RewriteToolCalls = Callable[[list[dict[str, Any]], Mapping[str, ToolFunctio
 type AnswerToolCalls = Callable[[Message, StopReason | None], list[Message] | None]
 type BeforeDispatchHook = Callable[[LoopState, Sequence[PlannedCall]], Awaitable[None]]
 type AfterToolBatchHook = Callable[[list[Message], Sequence[Message]], Awaitable[None]]
-type ResumeEntryHook = Callable[[list[Message]], Awaitable[None]]
 type LoopEndHook = Callable[[LoopState, ModelRequest], None]
 
 
@@ -103,8 +112,8 @@ class LoopHooks:
     - ``after_tool_batch``: awaited in order with the live messages and the batch's result messages after the
       results and any media follow-up are appended, before the loop decides to pause or continue; a batch whose
       result stops the run runs none (queued-message and job notices).
-    - ``on_resume_entry``: awaited in order by a resume with the live messages after the decided calls' results are
-      appended and before the loop continues.
+    - ``on_resume_entry``: awaited in order by a resume with the live messages and the decided calls' results after
+      they are appended, before the loop continues; a resumed batch whose result stops the run runs none.
     - ``on_loop_end``: called once when the loop ends without an exception, with the final state and the last
       request as sent, when any was (the skill review's capture).
     """
@@ -115,7 +124,7 @@ class LoopHooks:
     before_dispatch: BeforeDispatchHook | None = None
     tool_middleware: tuple[ToolMiddleware, ...] = ()
     after_tool_batch: tuple[AfterToolBatchHook, ...] = ()
-    on_resume_entry: tuple[ResumeEntryHook, ...] = ()
+    on_resume_entry: tuple[AfterToolBatchHook, ...] = ()
     on_loop_end: LoopEndHook | None = None
 
 
@@ -153,6 +162,7 @@ async def run_model_loop(
     hooks: LoopHooks = NO_HOOKS,
     tool_call_limit: int | None = None,
     request_template: ModelRequest = EMPTY_REQUEST,
+    resumed: Sequence[RunRequirement] | None = None,
 ) -> AsyncIterator[LoopEvent]:
     """Request, run the requested tools, and repeat until the run completes or pauses; ``LoopEnded`` comes last.
 
@@ -160,6 +170,8 @@ async def run_model_loop(
     ``record`` collects the loop's text as ``content`` (the loop's requests concatenated, replacing what the record
     held), its tool executions, its pause requirements, and its usage, in the metrics the record must carry.
     ``request_template`` carries the per-run request settings; its messages and tools are replaced per request.
+    ``resumed`` makes the loop a resume's: the requirements the resume decided, which it answers first, in order, as
+    the rest of the paused batch; None for a fresh run.
     Provider errors, tool-call errors other than a tool's own exception, and cancellation propagate after the
     usage a cut-off request already reported is recorded on an assistant message, exactly once.
     """
@@ -168,6 +180,7 @@ async def run_model_loop(
     assert metrics is not None
     state = LoopState(
         messages=messages,
+        offered=tools,
         tools=tools.specs(),
         run=run,
         record=record,
@@ -177,8 +190,11 @@ async def run_model_loop(
     )
     max_requests = None if tool_call_limit is None else tool_call_limit + _EXTRA_MODEL_REQUESTS
     progress = _Progress()
-    while True:
-        outbound = await _before_request(hooks, state, progress, max_requests=max_requests)
+    if resumed is not None:
+        async for event in _answer_resumed(resumed, state, progress, hooks):
+            yield event
+    while not (progress.stopped or progress.paused):
+        outbound = await _before_request(hooks, state, max_requests=max_requests)
         if outbound is None:
             break
         request = replace(state.request_template, messages=tuple(outbound), tools=state.tools)
@@ -198,14 +214,8 @@ async def run_model_loop(
         yield RequestCompleted(model_id=identity.id, provider=identity.provider_name, usage=message.metrics)
         if not message.tool_calls:
             break
-        answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, turn.stop_reason)
-        if answers is not None:
-            await append_tool_results(state.messages, answers, hooks.after_tool_batch)
-            continue
-        async for event in _run_tool_batch(message, state, tools, progress, hooks, tool_call_limit):
+        async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, tool_call_limit):
             yield event
-        if progress.stopped or progress.paused:
-            break
     if hooks.on_loop_end is not None and progress.last_request is not None:
         hooks.on_loop_end(state, progress.last_request)
     yield LoopEnded(paused=progress.paused)
@@ -214,19 +224,10 @@ async def run_model_loop(
 async def _before_request(
     hooks: LoopHooks,
     state: LoopState,
-    progress: _Progress,
     *,
     max_requests: int | None,
 ) -> Sequence[Message] | None:
-    """Apply the pause rule and the request cap, then the pre-request hooks; return the messages to send, or None.
-
-    A record that still waits for a decision ends the loop paused before any request: a resume entry may leave it
-    waiting again (a team member that paused once more), and the loop never requests while it waits, as Agno's
-    paused check did.
-    """
-    if _waits_for_decision(state.record):
-        progress.paused = True
-        return None
+    """Apply the request cap, then the pre-request hooks; return the messages to send, or None to end the loop."""
     if max_requests is not None and state.request_index >= max_requests:
         record = state.record
         logger.warning(
@@ -270,19 +271,23 @@ def _accept_turn(
 
 async def _run_tool_batch(
     message: Message,
+    stop_reason: StopReason | None,
     state: LoopState,
-    tools: PreparedTools,
     progress: _Progress,
     hooks: LoopHooks,
     tool_call_limit: int | None,
 ) -> AsyncIterator[ToolStarted | ToolCompleted]:
-    """Plan, announce, run, and answer one assistant message's tool calls."""
+    """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan and run them."""
     assert message.tool_calls
+    answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, stop_reason)
+    if answers is not None:
+        progress.stopped = await _answer_batch(state.messages, answers, hooks.after_tool_batch)
+        return
     if hooks.rewrite_tool_calls is not None:
-        message.tool_calls = hooks.rewrite_tool_calls(message.tool_calls, tools.functions)
+        message.tool_calls = hooks.rewrite_tool_calls(message.tool_calls, state.offered.functions)
     batch = plan_tool_batch(
         message.tool_calls,
-        tools.functions,
+        state.offered.functions,
         state.messages,
         calls_so_far=progress.calls_so_far,
         tool_call_limit=tool_call_limit,
@@ -298,33 +303,115 @@ async def _run_tool_batch(
             yield ToolCompleted(call.execution)
     results = [*batch.refused, *executed]
     progress.calls_so_far += len(results)
-    progress.stopped = any(result.stop_after_tool_call for result in results)
-    # No later request reads what a hook would add after a batch that stops the run, so none runs, as in Agno's loop.
-    await append_tool_results(state.messages, results, () if progress.stopped else hooks.after_tool_batch)
+    progress.stopped = await _answer_batch(state.messages, results, hooks.after_tool_batch)
     # A call of this batch paused, or a tool left a decision on the record (a delegation whose member paused).
     progress.paused = batch.paused or _waits_for_decision(state.record)
+
+
+async def _answer_resumed(
+    decided: Sequence[RunRequirement],
+    state: LoopState,
+    progress: _Progress,
+    hooks: LoopHooks,
+) -> AsyncIterator[ToolStarted | ToolCompleted]:
+    """Answer the requirements a resume decided, in order, as the rest of the batch the run paused in.
+
+    Approved calls run from their stored arguments and announce themselves as tool events; denied calls answer with
+    their note; external results answer as they are. The run then stops, pauses, or continues as after any batch:
+    a member that paused once more leaves the record waiting, so the loop sends no request.
+    """
+    results: list[Message] = []
+    for requirement in decided:
+        execution = requirement.tool_execution
+        if requirement.confirmation is True:
+            assert execution.tool_name is not None
+            function = state.offered.functions[execution.tool_name]
+            async for event in _run_approved(function, execution, state.run, hooks, results):
+                yield event
+        elif requirement.confirmation is False:
+            execution.tool_call_error = True
+            execution.requires_confirmation = False
+            results.append(_rejection_message(execution))
+        if requirement.external_execution_result is not None:
+            results.append(tool_result_message(execution))
+            execution.external_execution_required = False
+    progress.stopped = await _answer_batch(state.messages, results, hooks.on_resume_entry)
+    progress.paused = _waits_for_decision(state.record)
+
+
+def _rejection_message(execution: ToolExecution) -> Message:
+    """Return the tool message that answers a denied call with the stored note, as Agno's ``reject_tool_call`` did."""
+    return Message(
+        role="tool",
+        content=execution.confirmation_note,
+        tool_call_id=execution.tool_call_id,
+        tool_name=execution.tool_name,
+        tool_args=execution.tool_args,
+        tool_call_error=True,
+        stop_after_tool_call=execution.stop_after_tool_call,
+    )
+
+
+async def _run_approved(
+    function: ToolFunction,
+    execution: ToolExecution,
+    run: RunContext,
+    hooks: LoopHooks,
+    results: list[Message],
+) -> AsyncIterator[ToolStarted | ToolCompleted]:
+    assert execution.tool_call_id is not None
+    # The decision has been taken: the entry no longer waits, so the dispatcher runs it.
+    execution.requires_confirmation = False
+    planned = PlannedCall(
+        call_id=execution.tool_call_id,
+        function=function,
+        arguments=execution.tool_args,
+        execution=execution,
+    )
+    yield ToolStarted(execution)
+    results.extend(await dispatch_tool_calls([planned], run=run, middleware=hooks.tool_middleware))
+    yield ToolCompleted(execution)
 
 
 def _waits_for_decision(record: AnyRunRecord) -> bool:
     return any(not requirement.is_resolved() for requirement in record.requirements or ())
 
 
-async def append_tool_results(
+async def _answer_batch(
     messages: list[Message],
     results: Sequence[Message],
-    after_tool_batch: Sequence[AfterToolBatchHook],
-) -> None:
-    """Append one batch's results, one canonical tool message each, then the media follow-up, then run the batch hooks.
+    hooks: Sequence[AfterToolBatchHook],
+) -> bool:
+    """Append one batch's results and return whether the batch stops the run, running ``hooks`` only when it does not.
 
-    Media leave the result messages first, so a wire that merges results never carries them, and reach the model on
-    one user message after the results.
+    Each result is one canonical tool message; media leave them first, so a wire that merges results never carries
+    them, and reach the model on one user message after the results. Every batch path answers here, so one rule
+    decides the stop: a batch stops the run when any of its results does, counting the results a resumed batch
+    answered before its pause, as Agno's loop decided for a fresh batch. No later request reads what a hook would
+    add after a batch that stops the run, so none runs.
     """
     follow_up = media_follow_up(results)
     messages.extend(results)
     if follow_up is not None:
         messages.append(follow_up)
-    for hook in after_tool_batch:
+    if _batch_stops_run(messages):
+        return True
+    for hook in hooks:
         await hook(messages, results)
+    return False
+
+
+def _batch_stops_run(messages: Sequence[Message]) -> bool:
+    """Return whether a result of the batch the live messages end with stops the run.
+
+    The batch's results are the tool messages after its assistant message, whichever entry answered them.
+    """
+    for message in reversed(messages):
+        if message.role == "assistant":
+            return False
+        if message.role == "tool" and message.stop_after_tool_call:
+            return True
+    return False
 
 
 async def _stream_turn(
@@ -417,9 +504,7 @@ __all__ = [
     "LoopHooks",
     "LoopState",
     "RequestDecision",
-    "ResumeEntryHook",
     "RewriteToolCalls",
     "SendRequest",
-    "append_tool_results",
     "run_model_loop",
 ]

@@ -23,7 +23,6 @@ from mindroom.agent_loop.run import (
     drive_run,
     plan_resume,
     prepare_resume_tools,
-    resume_entry,
     resume_planned,
     resumed_record,
     run_agent,
@@ -38,7 +37,7 @@ from mindroom.llm.provider import ReasoningDelta
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
-from mindroom.teams.delegate_tools import DELEGATE_TOOL_NAMES, delegate_functions, propagate_member_pause
+from mindroom.teams.delegate_tools import delegate_functions, propagate_member_pause, waited_on_member
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 
 if TYPE_CHECKING:
@@ -136,7 +135,7 @@ def continue_team(
     messages: list[Message],
     *,
     approved: Mapping[TeamCallKey, ApprovedCall] = {},
-    denied: Mapping[TeamCallKey, str | None] = {},
+    denied: Mapping[TeamCallKey, str] = {},
     external_results: Mapping[TeamCallKey, str] = {},
     ctx: RunContext,
     hooks: LoopHooks = NO_HOOKS,
@@ -177,7 +176,7 @@ def continue_team(
         leader = _leader_spec(spec, record, members.run, stream=stream)
         prepared = prepare_run_tools(leader)
 
-        async def entry() -> AsyncIterator[RunEvent]:
+        async def entry() -> None:
             results: list[str] = []
             for plan in plans:
                 resumed = await members.resume(plan.member, plan.paused, plan.plan)
@@ -187,9 +186,7 @@ def continue_team(
                     content = handover_content(resumed) or MEMBER_TASK_COMPLETED
                     results.append(MEMBER_RESULT_LINE.format(name=plan.member.spec.name, content=content))
             if plans and not any(not r.is_resolved() for r in record.requirements or ()):
-                _answer_delegations(record, messages, results)
-            async for event in resume_entry(messages, prepared, ctx, hooks, decided):
-                yield event
+                _answer_delegations(record, messages, [plan.member for plan in plans], results)
 
         await _forward(
             drive_run(
@@ -202,6 +199,7 @@ def continue_team(
                 persist=persist,
                 template=request_template,
                 entry=entry,
+                resumed=decided,
                 pause_content=team_paused_content,
             ),
             emit,
@@ -262,7 +260,7 @@ class _Decided:
     """The decisions that fall to one run of the team: the leader's own or one member's."""
 
     approved: tuple[ApprovedCall, ...]
-    denied: dict[str, str | None]
+    denied: dict[str, str]
     external_results: dict[str, str]
 
 
@@ -271,7 +269,7 @@ class _TeamDecisions:
     """The resume's decisions by ``TeamCallKey``, handed out run by run so a stray decision is caught."""
 
     approved: Mapping[TeamCallKey, ApprovedCall]
-    denied: Mapping[TeamCallKey, str | None]
+    denied: Mapping[TeamCallKey, str]
     external_results: Mapping[TeamCallKey, str]
     consumed: set[TeamCallKey] = field(default_factory=set)
 
@@ -356,18 +354,25 @@ def _plan_member_resumes(
     return plans
 
 
-def _answer_delegations(record: TeamRunRecord, messages: list[Message], results: Sequence[str]) -> None:
+def _answer_delegations(
+    record: TeamRunRecord,
+    messages: list[Message],
+    resumed: Sequence[TeamMember],
+    results: Sequence[str],
+) -> None:
     """Replace every delegation result that waited on a member with the members' results, as Agno's continuation did.
 
-    The replacement lands on the run's tool entries and on the leader's request, so the leader reads the members'
-    results where it read the pause notice. ``results`` holds only the members resumed in this call, so a collaborate
-    sibling's text that completed earlier, or a member completed in an earlier chained resume, no longer reaches the
-    leader; Agno 3.0.9 lost it the same way, and the request-body parity contract keeps that.
+    A result waited on one of the ``resumed`` members when it is the notice the delegation gave for that member's
+    pause (``waited_on_member``). The replacement lands on the run's tool entries and on the leader's request, so the
+    leader reads the members' results where it read the pause notice. ``results`` holds only the members resumed in
+    this call, so a collaborate sibling's text that completed earlier, or a member completed in an earlier chained
+    resume, no longer reaches the leader; Agno 3.0.9 lost it the same way, and the request-body parity contract keeps
+    that.
     """
     text = "\n".join([MEMBER_RESULTS_HEADING, *results])
     answered: set[str | None] = set()
     for tool in record.tools or ():
-        if tool.tool_name in DELEGATE_TOOL_NAMES and "requires human input" in (tool.result or "").lower():
+        if any(waited_on_member(tool, member) for member in resumed):
             tool.result = text
             answered.add(tool.tool_call_id)
     for index, message in enumerate(messages):
@@ -465,6 +470,7 @@ class _MemberRuns:
             parent_run_id=self.record.run_id,
             metadata=self.ctx.metadata,
             session_state=self.ctx.session_state,
+            history_scope=self.ctx.history_scope,
         )
 
     def _capture(self, ended: list[RunRecord]) -> Persist[RunRecord]:

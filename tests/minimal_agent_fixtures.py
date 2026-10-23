@@ -17,7 +17,7 @@ from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, LoopState
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import PlannedCall
+from mindroom.agent_loop.tools import PlannedCall, PreparedTools
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelRequest
@@ -151,6 +151,7 @@ async def capture_bash_batch(
     ]
     state = LoopState(
         messages=[*history, assistant],
+        offered=PreparedTools(functions={}, instructions=()),
         tools=(),
         run=catalog.run,
         record=record,

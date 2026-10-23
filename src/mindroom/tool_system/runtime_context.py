@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delegation.state import SubagentPersona
     from mindroom.event_journal import PrincipalStore
-    from mindroom.history.types import HistoryScope
     from mindroom.hooks import (
         HookMatrixAdmin,
         HookMessageSender,
@@ -127,9 +126,6 @@ class ToolRuntimeContext:
     runtime_paths: RuntimePaths
     conversation_reader: ConversationReader
     relations: RelationLookup
-    # The persisted-history scope the running entity stores to: an agent's own scope, or the team scope a member
-    # runs under. Tools that stored by the entity's id read this instead of the running agent object.
-    history_scope: HistoryScope | None = None
     agent_reply_memberships: AgentReplyMembershipIndex | None = None
     transport_agent_name: str | None = None
     active_model_name: str | None = None

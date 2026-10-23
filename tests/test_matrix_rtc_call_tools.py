@@ -1531,6 +1531,41 @@ async def test_realtime_call_tools_connect_their_toolkit_when_first_used_and_clo
 
 
 @pytest.mark.asyncio
+async def test_a_realtime_tool_whose_toolkit_fails_to_connect_answers_with_its_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed connect is the call's own failure, answered as any failed tool call is, and the next call retries."""
+    log: list[str] = []
+
+    async def lookup(value: str) -> str:
+        return f"found {value}"
+
+    build = _connected_build(log, server=("lookup", lookup))
+    [toolkit] = build.spec.toolkits
+    connect = toolkit.connect
+    assert connect is not None
+    attempts: list[str] = []
+
+    async def failing_once() -> Callable[[], Awaitable[None]] | None:
+        attempts.append("connect")
+        if len(attempts) == 1:
+            msg = "server unreachable"
+            raise ConnectionError(msg)
+        return await connect()
+
+    build = replace(build, spec=replace(build.spec, toolkits=(replace(toolkit, connect=failing_once),)))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    [tool] = tooling.tools
+
+    assert await tool({"value": "a"}) == "Tool lookup failed: server unreachable"
+    assert await tool({"value": "b"}) == "found b"
+    assert log == ["server connect"]
+    assert tooling.close is not None
+    await tooling.close()
+
+
+@pytest.mark.asyncio
 async def test_a_realtime_call_connects_the_toolkit_of_the_function_it_offers_under_a_shared_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

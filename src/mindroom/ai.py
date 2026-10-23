@@ -147,6 +147,7 @@ logger = get_logger(__name__)
 __all__ = [
     "AIStreamChunk",
     "ResponseTurnContext",
+    "agent_run_metadata_content",
     "ai_response",
     "build_matrix_run_metadata",
     "collect_streamed_response_content",
@@ -587,7 +588,8 @@ def _attach_blocking_pause_presentation(
             continue
         seen_ids.add(call_id)
         presentation.start_tool(tool)
-        if call_id not in pending_by_id and (not tool.is_paused or call_id in answered):
+        # An agent's own calls name no member.
+        if call_id not in pending_by_id and (not tool.is_paused or (None, call_id) in answered):
             presentation.complete_tool(tool)
 
     return replace(
@@ -627,6 +629,43 @@ def _reported_usage(usage: MessageMetrics | None, key: str) -> int | None:
         return None
     value = usage.to_dict().get(key)
     return value if isinstance(value, int) else None
+
+
+def agent_run_metadata_content(
+    config: Config,
+    record: AnyRunRecord | None,
+    *,
+    model_name: str,
+    run_id: str | None,
+    session_id: str | None,
+    status: RunStatus,
+    prepared_history: PreparedHistoryState | None,
+    last_request: MessageMetrics | None = None,
+) -> dict[str, Any]:
+    """Return the run metadata an agent reply or approval resume publishes for its run ``record``.
+
+    ``prepared_history`` is the history the run was prepared with, None for an approval resume, which prepares none.
+    A streamed reply also passes its last request's usage, whose counts describe the context. The tool calls counted
+    are the ones the record holds: a run that reported a tool call hands over its record however it ends.
+    """
+    metrics = record.metrics if record is not None else None
+    return build_ai_run_metadata_content(
+        config=config,
+        model_name=model_name,
+        run_id=run_id,
+        session_id=(record.session_id if record is not None else None) or session_id,
+        status=status,
+        model=record.model if record is not None else None,
+        model_provider=record.model_provider if record is not None else None,
+        metrics=metrics,
+        context_metrics=metrics,
+        context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
+        context_raw_input_tokens=_reported_usage(last_request, "input_tokens"),
+        context_cache_read_tokens=_reported_usage(last_request, "cache_read_tokens"),
+        context_cache_write_tokens=_reported_usage(last_request, "cache_write_tokens"),
+        tool_count=len(record.tools or ()) if record is not None else 0,
+        prepared_history=prepared_history,
+    )
 
 
 def _track_stream_tool_started(
@@ -853,7 +892,14 @@ async def _start_agent_run(
         events,
         store=storage.store,
         session=storage.session,
-        continue_parent=partial(_continue_turn_run, run_context, attempt, storage=storage, terminal=terminal),
+        continue_parent=partial(
+            _continue_turn_run,
+            run_context,
+            spec=spec,
+            hooks=hooks,
+            storage=storage,
+            terminal=terminal,
+        ),
         agent_name=run_context.agent_name,
         run_child=run_delegated_child_response,
         config=run_context.config,
@@ -871,22 +917,25 @@ async def _start_agent_run(
 
 async def _continue_turn_run(
     run_context: _AgentRunContext,
-    attempt: _AgentAttempt,
     paused: RunRecord,
     decisions: ResumeDecisions,
     on_event: ResumeEvents | None,
     *,
+    spec: AgentSpec,
+    hooks: LoopHooks,
     storage: _AttemptStorage,
     terminal: _TerminalRecord,
 ) -> RunRecord:
-    """Continue this attempt's paused run with its delegations' results, under the attempt's hooks and store.
+    """Continue this attempt's paused run with its delegations' results, as the spec and hooks it ran with.
 
-    The resume replays the scope's history as the attempt did and reuses the paused run's stored system message. It
-    streams its requests even when the turn does not, as Agno's delegation continuation did.
+    The run keeps its hooks for its whole life, so per-run hook state, such as the output-limit count or a failed
+    compaction's stop, carries across its continuations. The resume replays the scope's history as the attempt did
+    and reuses the paused run's stored system message. It streams its requests even when the turn does not, as
+    Agno's delegation continuation did.
     """
     prepared = run_context.prepared_run
     events = resume_from_session(
-        prepared.spec,
+        spec,
         paused,
         decisions,
         session=storage.session,
@@ -894,7 +943,7 @@ async def _continue_turn_run(
         settings=prepared.build.history_settings,
         plan=prepared.prepared_history.replay_plan,
         user_id=run_context.turn.requester_id,
-        hooks=_agent_loop_hooks(run_context, attempt, storage),
+        hooks=hooks,
         persist=_persist_into(terminal, storage),
         request_template=replace(run_context.request_template, stream=True),
     )
@@ -1678,19 +1727,13 @@ async def ai_response(  # noqa: C901
     ) -> dict[str, Any] | None:
         if run_metadata_collector is None:
             return None
-        metrics = record.metrics if record is not None else None
-        return build_ai_run_metadata_content(
-            config=config,
+        return agent_run_metadata_content(
+            config,
+            record,
             model_name=prepared_run.runtime_model_name,
             run_id=run_id,
-            session_id=(record.session_id if record is not None else None) or session_id,
+            session_id=session_id,
             status=status,
-            model=record.model if record is not None else None,
-            model_provider=record.model_provider if record is not None else None,
-            metrics=metrics,
-            context_metrics=metrics,
-            context_input_tokens=prepared_run.prepared_history.prepared_context_tokens,
-            tool_count=len(record.tools) if record is not None and record.tools is not None else 0,
             prepared_history=prepared_run.prepared_history,
         )
 
@@ -1758,9 +1801,6 @@ async def ai_response(  # noqa: C901
         record = attempt_result.record
         if attempt_result.user_error is not None:
             error = attempt_result.user_error
-            if isinstance(record, RunRecord):
-                # A failed run stored its record and raised; a delegated child's observer learns the failure from it.
-                observe_child_record(record)
             if skipped := skip_unapproved_attempt(
                 ctx.participation,
                 reason="run_failed_before_decision",
@@ -2107,7 +2147,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901, PLR0915
+    async def _run_streaming_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -2153,7 +2193,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             return
         prepared_run = run_context.prepared_run
         run.unseen_event_ids = prepared_run.unseen_event_ids
-        prepared_context_input_tokens = prepared_run.prepared_history.prepared_context_tokens
         run.run_metadata = run_context.metadata
 
         storage = _attempt_storage(run, prepared_run.build, session_id=session_id, agent_name=agent_name)
@@ -2174,29 +2213,15 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         ) -> dict[str, Any] | None:
             if run_metadata_collector is None:
                 return None
-            record = attempt_state.terminal.record
-            metrics = record.metrics if record is not None else None
-            usage = attempt_state.latest_request_usage
-            return build_ai_run_metadata_content(
-                config=config,
+            return agent_run_metadata_content(
+                config,
+                attempt_state.terminal.record,
                 model_name=prepared_run.runtime_model_name,
                 run_id=run_id,
                 session_id=event_session_id or session_id,
                 status=status,
-                model=record.model if record is not None else None,
-                model_provider=record.model_provider if record is not None else None,
-                metrics=metrics,
-                context_metrics=metrics,
-                context_input_tokens=prepared_context_input_tokens,
-                context_raw_input_tokens=_reported_usage(usage, "input_tokens"),
-                context_cache_read_tokens=_reported_usage(usage, "cache_read_tokens"),
-                context_cache_write_tokens=_reported_usage(usage, "cache_write_tokens"),
-                tool_count=(
-                    len(record.tools)
-                    if record is not None and record.tools is not None
-                    else attempt_state.observed_tool_calls
-                ),
                 prepared_history=prepared_run.prepared_history,
+                last_request=attempt_state.latest_request_usage,
             )
 
         state = _StreamingAttemptState()

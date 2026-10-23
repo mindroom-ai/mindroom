@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -22,6 +23,7 @@ from mindroom.custom_tools import computer_announcement
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -58,6 +60,7 @@ def _agent(
     *,
     backend: str = "docker",
     computer: bool = True,
+    deferred: bool = False,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -69,7 +72,7 @@ def _agent(
         agents={
             "researcher": AgentConfig(
                 display_name="Researcher",
-                tools=tools,
+                tools=[{tool: {"defer": True}} if deferred and tool in browsers else tool for tool in tools],
                 worker_tools=browsers,
                 worker_scope="user_agent",
             ),
@@ -340,14 +343,53 @@ def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
     tools: list[str],
     announces: bool,
 ) -> None:
-    """create_agent gives a chat_ui agent's worker browser the announcement as its innermost policy, and no other agent."""
+    """create_agent gives a chat_ui agent's worker browser functions the announcement as their own policy, and no other agent's."""
     config, runtime_paths = _agent(tmp_path, tools)
     config = bind_runtime_paths(config, runtime_paths)
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
 
     build = create_agent("researcher", config, runtime_paths, execution_identity=None)
 
-    names = [middleware.__name__ for middleware in build.tool_policy]
-    assert names[:2] == ["bind_live_functions", "middleware"]
-    assert (names[-1] == "announce_computer") is announces
-    assert names.count("announce_computer") == int(announces)
+    assert [middleware.__name__ for middleware in build.tool_policy] == ["bind_live_functions", "middleware"]
+    carried = {
+        function.name: [middleware.__name__ for middleware in function.middleware]
+        for toolkit in build.spec.toolkits
+        for function in toolkit.functions
+    }
+    assert carried["browser_control"] == (["announce_computer"] if announces else [])
+    assert sum(names.count("announce_computer") for names in carried.values()) == int(announces)
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_browser_a_minimal_turn_builds_later_announces_the_computer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    announce: AsyncMock,
+    events: list[str],
+) -> None:
+    """A minimal turn builds a deferred browser when the agent first calls it, after the agent's policy was built.
+
+    Its calls still announce the computer, through the agent's policy as the CLI catalog runs them.
+    """
+    config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"], deferred=True)
+    config = bind_runtime_paths(config, runtime_paths)
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    build = create_agent("researcher", config, runtime_paths, execution_identity=None, agent_mode="minimal")
+    [deferred] = build.surface.deferred
+    assert deferred.name == "browser"
+
+    [function] = (await deferred.materialize()).functions
+
+    async def body(**arguments: object) -> str:
+        events.append(f"{arguments['action']} on {arguments.get('target') or 'default'}")
+        return "browsed"
+
+    outcome = await execute_tool_call(
+        replace(function, entrypoint=body),
+        {"action": "open", "target": "host"},
+        ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
+        middleware=agent_tool_middleware(build),
+    )
+    assert not outcome.is_error, outcome.content
+    announce.assert_awaited_once_with()
+    assert events == ["announced", "open on host"]

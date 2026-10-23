@@ -31,10 +31,10 @@ from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState
 from mindroom.agent_loop.spec import RunContext
-from mindroom.agent_loop.tools import PlannedCall
+from mindroom.agent_loop.tools import PlannedCall, PreparedTools
 from mindroom.approval import execution as approval_execution
 from mindroom.approval import tool_owners as approval_tools
-from mindroom.approval.receipt import approval_receipt_context
+from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.types import HistoryScope
@@ -810,6 +810,7 @@ async def _checkpointed_batch(
     ]
     state = LoopState(
         messages=[assistant],
+        offered=PreparedTools(functions={}, instructions=()),
         tools=(),
         run=catalog.run,
         record=record,

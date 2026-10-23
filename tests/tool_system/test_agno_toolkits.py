@@ -13,6 +13,8 @@ from agno.tools.function import Function, FunctionCall
 from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameter_names
+from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
+from tests.agno_parity import regenerate_tool_goldens
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
 
@@ -52,6 +54,21 @@ def golden_runtime(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Conf
     with support.isolated_process(root):
         config, runtime_paths = support.golden_runtime(root)
     return root, config, runtime_paths
+
+
+def test_the_tool_goldens_cover_every_registered_tool(golden_runtime: tuple[Path, Config, RuntimePaths]) -> None:
+    """A registered tool without a golden fails here, as does a golden of a tool no longer registered.
+
+    Only the tools no offline build can produce are left out, the ones the regeneration module skips; a tool has an
+    all-enabled golden exactly when it has switches to turn on.
+    """
+    root, _config, _runtime_paths = golden_runtime
+    with support.isolated_process(root):
+        registered = set(BUILTIN_TOOL_METADATA)
+        switched = {tool_name for tool_name in SCHEMAS if support.all_enabled_overrides(tool_name)}
+
+    assert set(SCHEMAS) == registered - regenerate_tool_goldens.UNBUILDABLE
+    assert set(ALL_ENABLED_SCHEMAS) == switched
 
 
 @pytest.mark.parametrize("tool_name", sorted(SCHEMAS))
@@ -127,6 +144,71 @@ def test_every_field_of_agnos_function_is_named_by_one_row_of_the_adapter_table(
     named = [name for names in agno_toolkits._FUNCTION_FIELDS for name in names]
 
     assert sorted(named) == sorted(Function.model_fields)
+
+
+def _lookup_country(country: str) -> str:
+    return country
+
+
+# A value for each field of Agno's ``Function`` that a tool may set without being rejected, other than its default.
+_SET_FIELDS: dict[str, object] = {
+    "name": "find",
+    "description": "Find a city.",
+    "parameters": {"type": "object", "properties": {"town": {"type": "string"}}, "required": ["town"]},
+    "strict": True,
+    "entrypoint": _lookup_country,
+    "skip_entrypoint_processing": True,
+    "requires_confirmation": True,
+    "approval_type": "mindroom_policy",
+    "external_execution": True,
+    "external_execution_silent": True,
+    "stop_after_tool_call": True,
+    "user_input_fields": ["city"],
+    "show_result": True,
+    "cache_results": True,
+    "cache_dir": "tool-cache",
+    "cache_ttl": 60,
+    "title": "Lookup",
+    "annotations": {"readOnlyHint": True},
+    "has_side_effects": True,
+    "owning_toolkit": "atlas",
+    "source_toolkit": object(),
+}
+
+
+def _what_the_loop_reads(function: Function) -> tuple[object, ...]:
+    adapted = adapt_function(function)
+    return (
+        adapted.definition(),
+        adapted.stop_after_tool_call,
+        adapted.external_execution_silent,
+        adapted.entrypoint_processed,
+        adapted.injected_params,
+    )
+
+
+@pytest.mark.parametrize("field", sorted(_SET_FIELDS))
+def test_a_function_field_changes_the_adapted_function_exactly_when_the_table_maps_it(field: str) -> None:
+    """Setting a mapped field changes what the loop reads of the adapted function; setting an ignored one does not."""
+    [handling] = [handling for names, handling in agno_toolkits._FUNCTION_FIELDS.items() if field in names]
+    base: dict[str, Any] = {"name": "lookup", "entrypoint": _lookup}
+
+    changed = _what_the_loop_reads(Function(**{**base, field: _SET_FIELDS[field]}))
+
+    assert (changed != _what_the_loop_reads(Function(**base))) is (handling == "mapped")
+
+
+def test_every_mapped_or_ignored_field_has_a_value_to_set() -> None:
+    """The parametrized check above covers every field the table maps or ignores."""
+    covered = {
+        name
+        for names, handling in agno_toolkits._FUNCTION_FIELDS.items()
+        if isinstance(handling, str)
+        for name in names
+    }
+    # Agno reads these only for a function that requires user input, which the table rejects, so no other value
+    # of theirs can reach a run.
+    assert covered - set(_SET_FIELDS) == {"user_input_schema"}
 
 
 @pytest.mark.parametrize(

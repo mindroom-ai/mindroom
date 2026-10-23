@@ -462,7 +462,7 @@ class PausedAttempt:
     session_id: str
     run_id: str
     tools: tuple[ToolExecution, ...]
-    toolkit_owners: dict[tuple[str, str], str | None]
+    toolkit_owners: Mapping[tuple[str, str], str | None]
     requirements: tuple[RunRequirement, ...] = ()
     runtime_model_name: str | None = None
     team_member_model_names: tuple[tuple[str, str], ...] = ()
@@ -534,7 +534,7 @@ def paused_attempt_from_response(
     *,
     fallback_session_id: str | None,
     fallback_run_id: str | None,
-    toolkit_owners: dict[tuple[str, str], str | None],
+    toolkit_owners: Mapping[tuple[str, str], str | None],
 ) -> PausedAttempt | None:
     """Extract confirmation requirements from one paused run record."""
     if record.status is not RunStatus.paused:
@@ -576,7 +576,7 @@ def _paused_attempt_from_pause(
     *,
     tools: Sequence[ToolExecution],
     requirements: Sequence[RunRequirement],
-    toolkit_owners: dict[tuple[str, str], str | None],
+    toolkit_owners: Mapping[tuple[str, str], str | None],
     session_id: str | None,
     run_id: str | None,
 ) -> PausedAttempt | None:

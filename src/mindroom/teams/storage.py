@@ -1,12 +1,11 @@
 """Where a team's new runs and resumes store: the scope's store and session, and the records a run hands over.
 
-``under_team_scope`` binds the team scope as the scope the running entity's tools address while the run's events
-are pulled, and ``register_team_notice_storage`` hands the team's storage to the turn's queued-notice finalization.
+``register_team_notice_storage`` hands the team's storage to the turn's queued-notice finalization.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom import ai_runtime
@@ -14,13 +13,8 @@ from mindroom.history.storage import new_scope_session
 from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.session_storage.store import persist_to
-from mindroom.tool_system.context_bound_streams import context_bound_async_stream
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-    from contextlib import AbstractContextManager
-
     from mindroom.agent_loop.run import Persist
     from mindroom.config.main import Config
     from mindroom.history.session_context import ScopeSessionContext
@@ -128,26 +122,6 @@ def register_team_notice_storage(
     )
 
 
-def under_team_scope(
-    events: AsyncIterator[TeamRunEvent],
-    scope: HistoryScope | None,
-) -> AsyncIterator[TeamRunEvent]:
-    """Pull the run's events with the team scope bound as the scope the running entity stores to.
-
-    Tools that address history by scope, such as ``compact_context``, read it from the tool runtime context, so a
-    member compacts the team's history, not its own agent's. The binding holds only while an event is pulled, so
-    the consumer never runs under it, and it is read at each pull, so the bindings around it, such as the attempt
-    model's, reach the run.
-    """
-
-    def with_scope() -> AbstractContextManager[None]:
-        context = get_tool_runtime_context()
-        bound = replace(context, history_scope=scope) if context is not None and scope is not None else context
-        return tool_runtime_context(bound)
-
-    return context_bound_async_stream(context_factory=with_scope, stream_factory=lambda: events)
-
-
 __all__ = [
     "TeamRunRecords",
     "TeamStorage",
@@ -156,5 +130,4 @@ __all__ = [
     "register_team_notice_storage",
     "scope_storage",
     "team_history_settings",
-    "under_team_scope",
 ]

@@ -91,7 +91,7 @@ class _LiveTools:
     """
 
     functions: Mapping[str, ToolFunction]
-    owners: Mapping[str, str | None]
+    owners: Mapping[str, str]
     middleware: tuple[ToolMiddleware, ...]
     context: ToolCallContext
 
@@ -101,13 +101,13 @@ _LIVE_TOOLS: ContextVar[_LiveTools | None] = ContextVar("mindroom_scheduled_call
 
 def bind_live_tools(
     functions: Mapping[str, ToolFunction],
-    owners: Mapping[str, str | None],
+    owners: Mapping[str, str],
     middleware: Sequence[ToolMiddleware],
 ) -> tuple[ToolMiddleware, ...]:
     """Return ``middleware`` behind a first step that shows each call the run's functions, for scheduled calls.
 
-    ``functions`` are the ones the run offers, by name, and ``owners`` maps each to its authored toolkit, None for
-    a generated function, which no stored call can name; a stored call runs under the returned policy, this step
+    ``functions`` are the ones the run offers, by name, and ``owners`` maps each to its authored toolkit; a generated
+    function has none, so no stored call can name it; a stored call runs under the returned policy, this step
     included. A run that offers no scheduler function reading them gets ``middleware`` as it is.
     """
     if _LIVE_FUNCTION_READERS.isdisjoint(functions):
