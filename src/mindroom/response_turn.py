@@ -723,30 +723,15 @@ def _raise_missing_stream_resolution(entity_label: str) -> NoReturn:
     raise RuntimeError(msg)
 
 
-def _reset_turn_state_for_continuation(
-    *,
-    turn_recorder: TurnRecorder | None,
-    run_metadata: dict[str, Any] | None,
-    completed_tools_for_turn: list[ToolTraceEntry],
-) -> AITurnState:
-    turn_state = AITurnState(prior_completed_tools=completed_tools_for_turn)
-    turn_state.sync_partial(
-        turn_recorder,
-        run_metadata=run_metadata,
-        assistant_text="",
-        completed_tools=[],
-        interrupted_tools=[],
-    )
-    return turn_state
-
-
-def _fallback_matrix_run_metadata(
+def _interrupted_run_metadata(
     ctx: ResponseTurnContext,
+    sinks: TurnSinks,
     run: TurnRunState,
-    *,
-    extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Build run metadata for interruptions that fire before prepare finished."""
+    """Keep the best Matrix metadata available when an attempt is interrupted, rebuilt when prepare had not finished."""
+    if run.run_metadata is not None:
+        return run.run_metadata
+    recorded = sinks.turn_recorder.run_metadata if sinks.turn_recorder is not None else None
     return build_matrix_run_metadata(
         ctx.reply_to_event_id,
         run.unseen_event_ids,
@@ -754,25 +739,8 @@ def _fallback_matrix_run_metadata(
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
-        extra_metadata=deepcopy(ctx.matrix_run_metadata if extra_metadata is None else extra_metadata),
+        extra_metadata=deepcopy(ctx.matrix_run_metadata if recorded is None else recorded),
     )
-
-
-def _interrupted_run_metadata(
-    ctx: ResponseTurnContext,
-    sinks: TurnSinks,
-    run: TurnRunState,
-) -> dict[str, Any] | None:
-    """Keep the best Matrix metadata available when an attempt is interrupted."""
-    if run.run_metadata is not None:
-        return run.run_metadata
-    if sinks.turn_recorder is not None and sinks.turn_recorder.run_metadata is not None:
-        return _fallback_matrix_run_metadata(
-            ctx,
-            run,
-            extra_metadata=sinks.turn_recorder.run_metadata,
-        )
-    return _fallback_matrix_run_metadata(ctx, run)
 
 
 def _settle_excluded_attempt(
@@ -941,11 +909,15 @@ def _advance_turn_continuation(
         active_model_name=active_model_name,
         apply_model_to_team_members=apply_model_to_team_members,
     )
-    run.turn_state = _reset_turn_state_for_continuation(
-        turn_recorder=sinks.turn_recorder,
+    turn_state = AITurnState(prior_completed_tools=completed_tools_for_turn)
+    turn_state.sync_partial(
+        sinks.turn_recorder,
         run_metadata=run.run_metadata,
-        completed_tools_for_turn=completed_tools_for_turn,
+        assistant_text="",
+        completed_tools=[],
+        interrupted_tools=[],
     )
+    run.turn_state = turn_state
     return advanced
 
 

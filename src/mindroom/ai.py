@@ -444,7 +444,6 @@ class _NonStreamingAttemptResult:
     """Result of running one non-streaming agent attempt sequence."""
 
     record: AnyRunRecord | None
-    attempt: _AgentAttempt
     user_error: Exception | None = None
 
 
@@ -970,10 +969,10 @@ async def _run_non_streaming_agent_attempts(
                 run_id_callback=run_id_callback,
                 pipeline_timing=pipeline_timing,
             )
-        return _NonStreamingAttemptResult(record=record, attempt=attempt)
+        return _NonStreamingAttemptResult(record=record)
     except Exception as e:
         logger.exception("Error generating AI response", agent=run_context.agent_name)
-        return _NonStreamingAttemptResult(record=terminal.record, attempt=attempt, user_error=e)
+        return _NonStreamingAttemptResult(record=terminal.record, user_error=e)
     finally:
         ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=run_context.agent_name)
 
