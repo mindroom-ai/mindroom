@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from time import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from mindroom.llm.media import Audio, File, Image, Video
@@ -38,10 +38,18 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
 # readers do not take the sum for one request's size (``model_usage.py``, ``usage/storage.py``).
 AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
-# which ``model_provenance`` builds for every writer. Usage attribution reads it (``usage/storage.py``,
-# ``memory/_mem0_usage.py``), and it tells a run's own model messages from the replies its input carries
-# (``is_own_model_message``).
+# which ``model_provenance`` builds for every writer and ``read_model_provenance`` reads for usage attribution
+# (``usage/storage.py``, ``memory/_mem0_usage.py``). It also tells a run's own model messages from the replies its
+# input carries (``is_own_model_message``).
 MODEL_PROVENANCE_KEY = "mindroom_model"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelProvenance:
+    """The model that answered a message: its id and the metrics provider string usage rows and pricing key by."""
+
+    model_id: str
+    provider: str
 
 
 def model_provenance(model_id: str, provider: str) -> dict[str, Any]:
@@ -50,6 +58,21 @@ def model_provenance(model_id: str, provider: str) -> dict[str, Any]:
     ``provider`` is the metrics provider string (Agno's ``get_provider()``) that usage rows and pricing key by.
     """
     return {MODEL_PROVENANCE_KEY: {"id": model_id, "provider": provider}}
+
+
+def read_model_provenance(provider_data: Mapping[str, object] | None) -> ModelProvenance | None:
+    """Return the model ``provider_data`` records as having answered its message, as ``model_provenance`` wrote it.
+
+    None when it records no model, or records one in another shape, as a stored row changed by another writer can.
+    """
+    stamp = (provider_data or {}).get(MODEL_PROVENANCE_KEY)
+    if not isinstance(stamp, dict):
+        return None
+    recorded = cast("dict[str, object]", stamp)
+    model_id, provider = recorded.get("id"), recorded.get("provider")
+    if isinstance(model_id, str) and isinstance(provider, str):
+        return ModelProvenance(model_id=model_id, provider=provider)
+    return None
 
 
 def is_own_model_message(message: Message) -> bool:
@@ -212,7 +235,9 @@ __all__ = [
     "AGGREGATE_USAGE_KEY",
     "MODEL_PROVENANCE_KEY",
     "Message",
+    "ModelProvenance",
     "is_own_model_message",
     "model_provenance",
+    "read_model_provenance",
     "split_thinking",
 ]

@@ -254,6 +254,27 @@ def test_a_request_names_the_model_that_answered_it_and_a_retried_request_s_sum_
     ]
 
 
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        pytest.param("reply-model", id="not-a-mapping"),
+        pytest.param({"id": "reply-model"}, id="without-a-provider"),
+        pytest.param({"id": 1, "provider": "test-provider"}, id="id-not-a-string"),
+    ],
+)
+def test_a_request_whose_recorded_model_has_another_shape_has_invalid_attribution(recorded: object) -> None:
+    """A recorded model that is not the shape the loop writes marks both of the request's model fields invalid."""
+    message = Message(
+        role="assistant",
+        metrics=MessageMetrics(input_tokens=100, output_tokens=1),
+        provider_data={"mindroom_model": recorded},
+    )
+
+    [request] = project_requests([message.to_dict()]) or []
+
+    assert (request["model"], request["model_provider"]) == (False, False)
+
+
 def test_carried_request_usage_is_not_counted_again_while_its_message_is_saved() -> None:
     """A failed reply can keep the messages a compaction folded; their carried usage must not count twice."""
     folded = Message(role="assistant", content="step", metrics=MessageMetrics(input_tokens=100, output_tokens=1))
