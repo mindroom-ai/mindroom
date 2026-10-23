@@ -18,7 +18,14 @@ from mindroom.agent_loop.structured import select_response_format
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import (
+    AuthenticationFailed,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
 from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -498,7 +505,7 @@ async def test_attachments_deleted_since_their_turn_are_left_out(
         (400, {"error": {"message": "Unknown parameter: 'x'", "code": "unknown_parameter"}}, InvalidRequest, False),
         (429, {"error": {"message": "slow down"}}, RateLimited, True),
         (503, {"error": {"message": "overloaded"}}, ProviderUnavailable, True),
-        (401, {"error": {"message": "bad key"}}, ProviderError, False),
+        (401, {"error": {"message": "bad key"}}, AuthenticationFailed, False),
     ],
 )
 async def test_http_errors_map_to_typed_provider_errors(
@@ -678,10 +685,10 @@ async def test_a_missing_cli_login_fails_the_request_before_sending(
     logged_out.mkdir()
     built = _Built(tmp_path, {**model_config, "extra_kwargs": {home_key: str(logged_out)}}, reply)
 
-    with pytest.raises(ProviderError, match=message) as info:
+    with pytest.raises(AuthenticationFailed, match=message) as info:
         await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.status_code, info.value.retryable) == (401, False)
+    assert info.value.status_code == 401
     assert built.requests == []
 
 
@@ -706,14 +713,15 @@ async def test_a_codex_login_without_an_account_sends_no_account_header(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_responses_error_event_maps_code_to_status(tmp_path: Path) -> None:
+async def test_responses_error_event_is_classified_by_its_code(tmp_path: Path) -> None:
+    """The event's code names the failure; the event has no HTTP status of its own."""
     error = {"type": "error", "sequence_number": 1, "code": "server_error", "message": "boom", "param": None}
     built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(_text_events("")[0], error))
 
     with pytest.raises(ProviderUnavailable) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.status_code, info.value.code, str(info.value)) == (500, "server_error", "boom")
+    assert (info.value.status_code, info.value.code, str(info.value)) == (None, "server_error", "boom")
 
 
 @pytest.mark.asyncio
@@ -766,7 +774,7 @@ async def test_a_non_streamed_failed_response_raises_its_error(tmp_path: Path) -
     with pytest.raises(ProviderUnavailable, match="The server had an error") as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()], stream=False))
 
-    assert (info.value.status_code, info.value.code) == (500, "server_error")
+    assert (info.value.status_code, info.value.code) == (None, "server_error")
 
 
 @pytest.mark.asyncio

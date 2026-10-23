@@ -11,17 +11,14 @@ from typing import Any, cast
 
 import httpx
 
-from mindroom.llm.errors import ProviderError
-from mindroom.providers.errors import classify_provider_error, provider_failure, stream_event_error
+from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
+from mindroom.providers.errors import classify_provider_error, provider_failure
 
 __all__ = [
     "missing_api_key_error",
     "provider_error",
-    "responses_event_error",
     "sdk_failures",
 ]
-
-_RESPONSES_EVENT_STATUSES = {"server_error": 500, "rate_limit_exceeded": 429, "vector_store_timeout": 504}
 
 
 def sdk_failures() -> tuple[type[Exception], ...]:
@@ -57,22 +54,11 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
         return classify_provider_error(message, provider=provider, status_code=error.status_code, code=code)
     if isinstance(error, openai.APIError):
         message, code, error_type = _error_fields(error.body)
-        return stream_event_error(message or error.message, provider=provider, code=code, error_type=error_type)
+        return classify_provider_error(message or error.message, provider=provider, code=code, error_type=error_type)
     return ProviderError(str(error) or type(error).__name__, provider=provider)
 
 
-def responses_event_error(code: str | None, message: str | None, *, provider: str) -> ProviderError:
-    """Return the owned error for a Responses ``error`` or ``response.failed`` event."""
-    status_code = _RESPONSES_EVENT_STATUSES.get(code, 400) if code is not None else 400
-    return classify_provider_error(
-        message or "OpenAI Responses stream failed",
-        provider=provider,
-        status_code=status_code,
-        code=code,
-    )
-
-
-def missing_api_key_error(env_var: str, *, provider: str) -> ProviderError:
-    """Return the error for a route that has no API key, worded as the user-facing message mapping expects."""
+def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:
+    """Return the error for a route that has no API key, which the reply turns into how to connect one."""
     message = f"{env_var} not set. Please set the {env_var} environment variable."
-    return ProviderError(message, provider=provider, status_code=401, code="missing_api_key")
+    return AuthenticationFailed(message, provider=provider, status_code=401, code=MISSING_API_KEY)

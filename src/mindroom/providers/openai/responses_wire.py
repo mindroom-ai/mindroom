@@ -25,9 +25,9 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
+from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, with_sdk_options
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
-from mindroom.providers.openai.errors import responses_event_error
 from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
 from mindroom.providers.openai.prompt_cache import formatted_input_with_shared_system_prefix
@@ -470,9 +470,9 @@ class ResponsesStream:
 
     def _failure(self, event: Any) -> ProviderError:  # noqa: ANN401 - SDK error event
         if event.type == "error":
-            return responses_event_error(event.code, event.message, provider=self.wire.provider_name)
+            return _response_error(event.code, event.message, provider=self.wire.provider_name)
         failure = event.response.error
-        return responses_event_error(
+        return _response_error(
             failure.code if failure is not None else None,
             failure.message if failure is not None else None,
             provider=self.wire.provider_name,
@@ -549,6 +549,11 @@ class ResponsesStream:
         return self.parts
 
 
+def _response_error(code: str | None, message: str | None, *, provider: str) -> ProviderError:
+    """Return the error a failed response reports: its code names the failure, as an error type does elsewhere."""
+    return classify_provider_error(message or "OpenAI Responses stream failed", provider=provider, code=code)
+
+
 def usage_report(event: ResponseStreamEvent) -> UsageReported | None:
     """Return the usage a response's terminal event reports, as a partial report to publish when it arrives.
 
@@ -586,7 +591,7 @@ def parse_response(
     Agno did for a model config that authors ``reasoning``.
     """
     if response.error:
-        raise responses_event_error(response.error.code, response.error.message, provider=wire.provider_name)
+        raise _response_error(response.error.code, response.error.message, provider=wire.provider_name)
     parts = ResponsesTurnParts(
         provider_data={"response_id": response.id} if response.id else {},
         status=response.status,

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.llm.provider import Capabilities, MediaKind, ModelIdentity
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import (
@@ -264,7 +264,11 @@ def _cli_login_error(error: Exception, *, provider: str) -> ProviderError:
     A token refresh that failed on the network is the provider's transient failure; any other login failure, such
     as a missing login or a refresh token the CLI's server rejected, is final and tells the user to log in again.
     """
-    return provider_failure(error, provider=provider) or ProviderError(str(error), provider=provider, status_code=401)
+    return provider_failure(error, provider=provider) or AuthenticationFailed(
+        str(error),
+        provider=provider,
+        status_code=401,
+    )
 
 
 def _openai_client(
@@ -326,7 +330,7 @@ def _chat_client_factory(
                     "Azure OpenAI authentication not configured. Please provide one of: "
                     "AZURE_OPENAI_API_KEY environment variable, azure_ad_token, or azure_ad_token_provider"
                 )
-                raise ProviderError(msg, provider=route.provider_name, status_code=401, code="missing_api_key")
+                raise AuthenticationFailed(msg, provider=route.provider_name, status_code=401, code=MISSING_API_KEY)
             azure: dict[str, Any] = {
                 "api_key": key,
                 "api_version": settings.api_version or "2024-10-21",

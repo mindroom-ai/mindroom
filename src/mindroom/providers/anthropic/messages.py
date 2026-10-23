@@ -84,7 +84,7 @@ from mindroom.providers.anthropic.wire import (
 )
 from mindroom.providers.assistant_turn import stamp_finished_turn, whole_turn_deltas
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
-from mindroom.providers.errors import classify_provider_error, provider_failure, stream_event_error
+from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -534,7 +534,7 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
     if isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:
-        return stream_event_error(error.message, provider=provider, error_type=_event_error_type(error.body))
+        return classify_provider_error(error.message, provider=provider, error_type=_event_error_type(error.body))
     if isinstance(error, anthropic.APIStatusError):
         return classify_provider_error(error.message, provider=provider, status_code=error.status_code)
     if isinstance(error, anthropic.APIError):

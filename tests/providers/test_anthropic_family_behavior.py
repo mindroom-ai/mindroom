@@ -19,7 +19,14 @@ from pydantic import BaseModel
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import (
+    AuthenticationFailed,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
 from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -1139,7 +1146,7 @@ class _RefreshFailingCredentials(Credentials):
         ),
         (
             google.auth.exceptions.RefreshError("invalid_grant: Invalid JWT Signature."),
-            ProviderError,
+            AuthenticationFailed,
             401,
             "❌ Authentication failed",
         ),

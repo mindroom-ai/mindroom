@@ -23,6 +23,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
     INCOMPLETE_STREAM,
     MALFORMED_TOOL_CALL,
+    AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
     ProviderError,
@@ -463,7 +464,7 @@ _CLAUDE_CASES = [
     _Case(
         "http_401",
         _claude_status(401, "authentication_error", "invalid x-api-key"),
-        ProviderError,
+        AuthenticationFailed,
         AUTHENTICATION,
         1,
         1,
@@ -471,7 +472,7 @@ _CLAUDE_CASES = [
     _Case(
         "http_403",
         _claude_status(403, "permission_error", "Your API key does not have permission to use the specified resource."),
-        ProviderError,
+        AuthenticationFailed,
         AUTHENTICATION,
         1,
         1,
@@ -697,7 +698,7 @@ _OPENAI_HTTP_CASES = [
     _Case(
         "http_401",
         _openai_status(401, "Incorrect API key provided.", "invalid_request_error", "invalid_api_key"),
-        ProviderError,
+        AuthenticationFailed,
         AUTHENTICATION,
         1,
         1,
@@ -861,7 +862,7 @@ _RESPONSES_CASES = [
         CONTEXT_WINDOW,
         1,
     ),
-    _Case("event_invalid_prompt", _responses_stream(_response_error("invalid_prompt")), InvalidRequest, ERROR, 1),
+    _Case("event_invalid_prompt", _responses_stream(_response_error("invalid_prompt")), ProviderError, ERROR, 1),
     _Case("response_failed", _responses_stream(_RESPONSE_FAILED), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
     _Case(
         "end_before_completed",
@@ -995,7 +996,7 @@ _GEMINI_CASES = [
     _Case(
         "http_400_api_key",
         _gemini_status(400, "API key not valid. Please pass a valid API key.", "INVALID_ARGUMENT"),
-        InvalidRequest,
+        AuthenticationFailed,
         AUTHENTICATION,
         1,
         1,
@@ -1009,6 +1010,20 @@ _GEMINI_CASES = [
         1,
     ),
     _Case("http_404", _gemini_status(404, "models/gemini-x is not found.", "NOT_FOUND"), InvalidRequest, ERROR, 1, 1),
+    # Google's own wording: "generateContent" holds "rate", which no longer reads as a rate limit.
+    _Case(
+        "http_404_unsupported_method",
+        _gemini_status(
+            404,
+            "models/gemini-x is not found for API version v1beta, or is not supported for generateContent. "
+            "Call ListModels to see the list of available models and their supported methods.",
+            "NOT_FOUND",
+        ),
+        InvalidRequest,
+        ERROR,
+        1,
+        1,
+    ),
     _Case(
         "http_422",
         _gemini_status(422, "Unprocessable entity.", "INVALID_ARGUMENT"),
@@ -1230,8 +1245,15 @@ def _expire_cli_login(route: str, root: Path) -> None:
         ("kimi", True, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
         ("kimi", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, 1),
         # A refresh token the login server rejects is final and asks the user to log in again.
-        ("codex", True, httpx.Response(400, json={"error": "refresh_token_expired"}), ProviderError, AUTHENTICATION, 1),
-        ("kimi", True, httpx.Response(401, text="invalid_grant"), ProviderError, AUTHENTICATION, 1),
+        (
+            "codex",
+            True,
+            httpx.Response(400, json={"error": "refresh_token_expired"}),
+            AuthenticationFailed,
+            AUTHENTICATION,
+            1,
+        ),
+        ("kimi", True, httpx.Response(401, text="invalid_grant"), AuthenticationFailed, AUTHENTICATION, 1),
     ],
     ids=[
         "codex-streamed-refused",

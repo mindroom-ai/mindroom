@@ -1,10 +1,9 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Map provider HTTP statuses, error wording, and transport failures to the normalized provider errors.
+"""Map provider failures to the normalized provider errors, which alone decide retries and the user's reply.
 
-Every adapter classifies its SDK's failures through ``classify_provider_error``, and an error event inside an
-already committed stream through ``stream_event_error``, so the stream retry stage and the media fallback see one
-rule: rate limits and the transient statuses are retryable, a request that does not fit the context window is
-``ContextWindowExceeded``, and the invalid-request statuses are final.
+Every adapter hands a transport or sign-in failure to ``provider_failure`` and a failed response, an HTTP status
+or an error event inside a stream, to ``classify_provider_error``, so the retry stages, the media fallback, and the
+error reply see one rule with one precedence.
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ import httpx
 
 from mindroom.llm.errors import (
     TRANSPORT_TIMEOUT,
+    AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
     ProviderError,
@@ -29,23 +29,36 @@ __all__ = [
     "classify_provider_error",
     "is_context_window_error",
     "provider_failure",
-    "stream_event_error",
 ]
 
 _RATE_LIMIT_STATUS = 429
+_UNAUTHORIZED_STATUS = 401
 # Statuses after which an unchanged request can succeed: 409 is OpenAI's transient conflict, and 529 is
 # Anthropic's overloaded model, which the error message reports as temporary unavailability, not as a rate limit.
 _TRANSIENT_STATUSES = frozenset({408, 409, 500, 502, 503, 504, 529})
 _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
+_HTTP_CLIENT_ERROR_RANGE = range(400, 500)
+# The names providers give a throttled request: Anthropic's error type and the Responses code.
+_RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
 # Anthropic reports an overloaded model with this error type, with or without a 529 status.
 _OVERLOADED_ERROR_TYPE = "overloaded_error"
-# The error type of a stream's error event that reports throttling.
-_RATE_LIMIT_ERROR_TYPES = frozenset({"rate_limit_error"})
-# The error types of a stream's error event that report a transient provider failure: Anthropic's, where
-# ``timeout_error`` is a gateway timeout, and the ones OpenAI-compatible servers send.
-_TRANSIENT_ERROR_TYPES = frozenset(
-    {"overloaded", _OVERLOADED_ERROR_TYPE, "server_error", "internal_server_error", "api_error", "timeout_error"},
+# The names providers give a transient failure: Anthropic's error types, where ``timeout_error`` is a gateway
+# timeout, the types OpenAI-compatible servers send, and the Responses codes.
+_TRANSIENT_NAMES = frozenset(
+    {
+        "overloaded",
+        _OVERLOADED_ERROR_TYPE,
+        "server_error",
+        "internal_server_error",
+        "api_error",
+        "timeout_error",
+        "vector_store_timeout",
+    },
 )
+# Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid"
+# and Anthropic's 403 permission error that names the API key.
+_CREDENTIAL_MARKERS = ("auth", "api key", "api_key", "apikey")
+
 # Wording providers use when a request does not fit the model's context window (Agno's
 # ``ModelProviderError.CONTEXT_WINDOW_PATTERNS`` without its over-broad ``max_tokens``, plus the
 # payload-size wording OpenAI-compatible servers and Anthropic use).
@@ -65,7 +78,6 @@ _CONTEXT_WINDOW_MARKERS = (
     "prompt too long",
     "exceeds the model",
 )
-_HTTP_CLIENT_ERROR_RANGE = range(400, 500)
 # A timeout as the HTTP client raises it, or as aiohttp and the socket layer raise it.
 _TRANSPORT_TIMEOUTS = (httpx.TimeoutException, TimeoutError)
 
@@ -78,60 +90,54 @@ def is_context_window_error(message: str, *, code: str | None = None) -> bool:
     return any(marker in lowered for marker in _CONTEXT_WINDOW_MARKERS)
 
 
-def classify_provider_error(
+def classify_provider_error(  # noqa: PLR0911 - one return per rule
     message: str,
     *,
     provider: str,
-    status_code: int | None,
-    code: str | None = None,
-) -> ProviderError:
-    """Return the normalized error for a provider response that failed with ``status_code``.
-
-    A status outside the rate-limit, transient, and invalid-request sets, such as 401 or 403, is a final
-    ``ProviderError``; context-window wording only counts on a client error, because a 5xx that mentions
-    the context window is still the provider's failure to retry.
-    """
-    if status_code == _RATE_LIMIT_STATUS:
-        return RateLimited(message, provider=provider, status_code=status_code, code=code)
-    if _OVERLOADED_ERROR_TYPE in message.casefold():
-        return ProviderUnavailable(message, provider=provider, status_code=status_code, code=code)
-    if (status_code is None or status_code in _HTTP_CLIENT_ERROR_RANGE) and is_context_window_error(
-        message,
-        code=code,
-    ):
-        return ContextWindowExceeded(message, provider=provider, status_code=status_code, code=code)
-    if status_code in _TRANSIENT_STATUSES:
-        return ProviderUnavailable(message, provider=provider, status_code=status_code, code=code)
-    if status_code in _INVALID_REQUEST_STATUSES:
-        return InvalidRequest(message, provider=provider, status_code=status_code, code=code)
-    return ProviderError(message, provider=provider, status_code=status_code, code=code)
-
-
-def stream_event_error(
-    message: str,
-    *,
-    provider: str,
+    status_code: int | None = None,
     code: str | None = None,
     error_type: str | None = None,
 ) -> ProviderError:
-    """Return the normalized error for an error event inside a stream whose HTTP response already succeeded.
+    """Return the normalized error of one failed provider response; the first rule that matches decides.
 
-    Such an event carries no HTTP status of its own: OpenAI-compatible servers put a status in ``code``, which
-    counts as one, and Anthropic names the failure in ``error_type``. Throttling and transient failures, timeouts
-    included, are retryable; any other event, such as an invalid request, is final, as the same request would fail
-    again. Wording that names the context window outranks a transient error type, because a retry cannot make the
-    request fit.
+    ``status_code`` is the HTTP status. An error event inside a stream that already succeeded has none, and a
+    numeric ``code``, as OpenAI-compatible servers send in one, counts as its status. ``code`` and ``error_type``
+    name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``.
+
+    1. A 429 status or a rate-limit name is ``RateLimited``.
+    2. A transient status is ``ProviderUnavailable``.
+    3. A 401 status is ``AuthenticationFailed``.
+    4. Wording or a code that names the context window, on a client error or an event without a status, is
+       ``ContextWindowExceeded``: a retry cannot make the request fit. A 5xx that mentions it stays transient.
+    5. A transient name, or Anthropic's overloaded wording, is ``ProviderUnavailable``.
+    6. Wording that names the credentials, on a client error or an event without a status, is
+       ``AuthenticationFailed``.
+    7. An invalid-request status is ``InvalidRequest``.
+    8. Anything else, such as a 403 or an unknown status, is a final ``ProviderError``.
     """
-    status = int(code) if code is not None and code.isdecimal() else None
-    if status == _RATE_LIMIT_STATUS or error_type in _RATE_LIMIT_ERROR_TYPES:
-        return RateLimited(message, provider=provider, code=code)
+    status = status_code if status_code is not None else (int(code) if code is not None and code.isdecimal() else None)
+    names = {code, error_type}
+    lowered = message.casefold()
+    client_side = status is None or status in _HTTP_CLIENT_ERROR_RANGE
+
+    def typed(kind: type[ProviderError]) -> ProviderError:
+        return kind(message, provider=provider, status_code=status_code, code=code)
+
+    if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
+        return typed(RateLimited)
     if status in _TRANSIENT_STATUSES:
-        return ProviderUnavailable(message, provider=provider, code=code)
-    if is_context_window_error(message, code=code):
-        return ContextWindowExceeded(message, provider=provider, code=code)
-    if error_type in _TRANSIENT_ERROR_TYPES:
-        return ProviderUnavailable(message, provider=provider, code=code)
-    return ProviderError(message, provider=provider, code=code)
+        return typed(ProviderUnavailable)
+    if status == _UNAUTHORIZED_STATUS:
+        return typed(AuthenticationFailed)
+    if client_side and is_context_window_error(message, code=code):
+        return typed(ContextWindowExceeded)
+    if names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered:
+        return typed(ProviderUnavailable)
+    if client_side and any(marker in lowered for marker in _CREDENTIAL_MARKERS):
+        return typed(AuthenticationFailed)
+    if status in _INVALID_REQUEST_STATUSES:
+        return typed(InvalidRequest)
+    return typed(ProviderError)
 
 
 def provider_failure(error: BaseException, *, provider: str) -> ProviderError | None:
@@ -157,7 +163,7 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
         code = TRANSPORT_TIMEOUT if timed_out else "connection_error"
         return ProviderUnavailable(str(error) or type(error).__name__, provider=provider, code=code)
     if any(isinstance(cause, google_auth.RefreshError) for cause in chain):
-        return ProviderError(f"Google credentials were rejected: {error}", provider=provider, status_code=401)
+        return AuthenticationFailed(f"Google credentials were rejected: {error}", provider=provider, status_code=401)
     return None
 
 

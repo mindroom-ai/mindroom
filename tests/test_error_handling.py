@@ -16,7 +16,14 @@ from mindroom.error_handling import (
     is_model_safeguard_refusal,
     minimal_mode_failure_message,
 )
-from mindroom.llm.errors import InvalidRequest, ModelSafeguardRefusal, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import (
+    AuthenticationFailed,
+    InvalidRequest,
+    ModelSafeguardRefusal,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
 from mindroom.providers.openai.errors import missing_api_key_error
 
 _MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
@@ -102,16 +109,6 @@ def test_rate_limit_error() -> None:
     assert "Rate limited" in message
 
 
-def test_typed_rate_limit_error_uses_status_code() -> None:
-    """Typed 429 errors remain rate limits even when their message is generic."""
-    error = ProviderError("upstream unavailable", provider="OpenAI", status_code=429)
-
-    message = get_user_friendly_error_message(error)
-
-    assert "Rate limited" in message
-    assert "temporarily unavailable" not in message
-
-
 _PROVIDER_UNAVAILABLE_MESSAGE = (
     "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 )
@@ -146,23 +143,43 @@ _OAUTH_HOST_UNREACHABLE = (
             id="rate-limited-wording-holds-auth",
         ),
         pytest.param(
+            RateLimited("upstream unavailable", provider="OpenAI", status_code=429),
+            _RATE_LIMITED_MESSAGE,
+            id="rate-limited-generic-wording",
+        ),
+        pytest.param(
             ProviderError(
                 "Project proj_1 does not have access to model gpt-6-astra",
                 provider="OpenAI",
                 status_code=403,
             ),
             "⚠️ Error: Project proj_1 does not have access to model gpt-6-astra",
-            id="typed-403-keeps-keywords",
+            id="final",
         ),
         pytest.param(
-            ProviderError("Credentials were rejected", provider="VertexAI", status_code=401),
+            ProviderError("upstream unavailable", provider="OpenAI", status_code=503),
+            "⚠️ Error: upstream unavailable",
+            id="final-status-is-not-read-again",
+        ),
+        pytest.param(
+            AuthenticationFailed("Credentials were rejected", provider="VertexAI", status_code=401),
             "❌ Authentication failed (VertexAI): Credentials were rejected",
-            id="typed-401",
+            id="authentication-failed",
         ),
         pytest.param(
-            InvalidRequest("API key not valid. Please pass a valid API key.", provider="Gemini", status_code=400),
-            "❌ Authentication failed (Gemini): API key not valid. Please pass a valid API key.",
-            id="typed-400-keeps-keywords",
+            InvalidRequest(
+                "models/gemini-x is not supported for generateContent. Call ListModels to see the api_key methods.",
+                provider="Google",
+                status_code=404,
+            ),
+            "⚠️ Error: models/gemini-x is not supported for generateContent. "
+            "Call ListModels to see the api_key methods.",
+            id="invalid-request-wording-is-not-read-again",
+        ),
+        pytest.param(
+            ProviderError("Request timeout while the provider read the body", provider="Ollama"),
+            "⚠️ Error: Request timeout while the provider read the body",
+            id="final-timeout-wording",
         ),
         pytest.param(
             Exception("401 Unauthorized"),
@@ -171,8 +188,11 @@ _OAUTH_HOST_UNREACHABLE = (
         ),
     ],
 )
-def test_typed_provider_errors_are_decided_by_type_before_keywords(error: Exception, expected: str) -> None:
-    """A typed transient, rate-limit, or 401 error picks its message by type; other errors, a 403 included, match keywords."""
+def test_a_provider_error_is_reported_by_its_type_alone(error: Exception, expected: str) -> None:
+    """A provider error's message follows its type, which its classification already took from status and wording.
+
+    Only an error that is not a provider error is matched by the keywords in its text.
+    """
     assert get_user_friendly_error_message(error) == expected
 
 
@@ -213,15 +233,6 @@ def test_json_provider_error_is_case_insensitive() -> None:
 
     assert "Model provider temporarily unavailable after automatic retries" in message
     assert "req_secret" not in message
-
-
-def test_typed_model_provider_error_is_user_friendly() -> None:
-    """Typed provider errors use their status instead of message substrings."""
-    error = ProviderError("upstream unavailable", provider="OpenAI", status_code=503)
-
-    message = get_user_friendly_error_message(error)
-
-    assert "Model provider temporarily unavailable after automatic retries" in message
 
 
 def test_unstructured_overloaded_text_is_not_misclassified() -> None:

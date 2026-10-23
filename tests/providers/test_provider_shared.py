@@ -10,6 +10,7 @@ import pytest
 
 from mindroom.llm.errors import (
     TRANSPORT_TIMEOUT,
+    AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
     ProviderError,
@@ -35,8 +36,17 @@ from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
         (400, "Invalid JSON payload received.", None, InvalidRequest, False),
         (404, "model not found", None, InvalidRequest, False),
         (413, "payload", None, InvalidRequest, False),
-        (401, "invalid api key", None, ProviderError, False),
+        (401, "invalid api key", None, AuthenticationFailed, False),
         (403, "Permission denied", None, ProviderError, False),
+        (
+            403,
+            "Your API key does not have permission to use the specified resource.",
+            None,
+            AuthenticationFailed,
+            False,
+        ),
+        (400, "API key not valid. Please pass a valid API key.", None, AuthenticationFailed, False),
+        (503, "authentication service overloaded", None, ProviderUnavailable, True),
         (520, "origin error", None, ProviderError, False),
     ],
 )
@@ -53,6 +63,42 @@ def test_statuses_and_wording_classify_the_same_for_every_family(
     assert type(error) is expected
     assert (error.retryable, error.status_code, error.code, error.provider) == (retryable, status, code, "Test")
     assert str(error) == message
+
+
+@pytest.mark.parametrize(
+    ("message", "code", "error_type", "expected"),
+    [
+        ("Slow down", None, "rate_limit_error", RateLimited),
+        ("Slow down", "rate_limit_exceeded", None, RateLimited),
+        ("Rate limit exceeded: free-models-per-min", "429", None, RateLimited),
+        ("Slow down", "529", None, ProviderUnavailable),
+        ("An error occurred.", "server_error", None, ProviderUnavailable),
+        ("Unexpected upstream failure", None, "api_error", ProviderUnavailable),
+        ("Overloaded", None, "overloaded_error", ProviderUnavailable),
+        # A retry cannot make the request fit, so the context window outranks a transient name, not a status.
+        ("This model's maximum context length is 128000 tokens.", None, "api_error", ContextWindowExceeded),
+        ("This model's maximum context length is 128000 tokens.", "503", None, ProviderUnavailable),
+        (
+            "{'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}",
+            None,
+            "authentication_error",
+            AuthenticationFailed,
+        ),
+        ("Bad block", None, "invalid_request_error", ProviderError),
+        ("An error occurred.", "invalid_prompt", None, ProviderError),
+    ],
+)
+def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
+    message: str,
+    code: str | None,
+    error_type: str | None,
+    expected: type[ProviderError],
+) -> None:
+    """An event inside a stream that already succeeded follows the same precedence as an HTTP error."""
+    error = classify_provider_error(message, provider="Test", code=code, error_type=error_type)
+
+    assert type(error) is expected
+    assert (error.status_code, error.code) == (None, code)
 
 
 def test_context_window_detection_reads_the_code_and_the_wording() -> None:
