@@ -8,7 +8,6 @@ gateway run it as a ``ToolMiddleware`` (``build_tool_hook_middleware``).
 from __future__ import annotations
 
 import asyncio
-import inspect
 import threading
 import time
 from contextlib import contextmanager
@@ -44,7 +43,7 @@ from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure,
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from concurrent.futures import Executor
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
@@ -409,31 +408,18 @@ async def run_async_entrypoint_blocking_call(
 
 
 async def _call_tool(
-    func: Callable[..., Any],
+    func: Callable[..., Awaitable[_ToolHookResult]],
     args: dict[str, Any],
     *,
     tool_name: str,
     agent_name: str | None,
 ) -> _ToolHookResult:
-    async_entrypoint = inspect.iscoroutinefunction(func)
-    emit_timing_event(
-        "Tool hook dispatch timing",
-        phase="tool_entry",
-        tool_name=tool_name,
-        agent_name=agent_name,
-        async_entrypoint=async_entrypoint,
-    )
-    if async_entrypoint:
-        result = await func(**args)
-    else:
-        result = await run_sync_tool_entrypoint(func, args)
-    if inspect.isawaitable(result):
-        return await result
-    return result
+    emit_timing_event("Tool hook dispatch timing", phase="tool_entry", tool_name=tool_name, agent_name=agent_name)
+    return await func(**args)
 
 
 async def _call_recorded_tool(
-    func: Callable[..., Any],
+    func: Callable[..., Awaitable[_ToolHookResult]],
     args: dict[str, Any],
     *,
     tool_name: str,
@@ -681,7 +667,7 @@ async def _execute_bridge(
     *,
     hook_registry: HookRegistry,
     tool_name: str,
-    func: Callable[..., Any],
+    func: Callable[..., Awaitable[_ToolHookResult]],
     args: dict[str, Any],
     agent_name: str | None,
     dispatch_context: ToolDispatchContext | None,
@@ -968,11 +954,18 @@ def build_tool_hook_bridge(
     origin: BackgroundScriptToolOrigin | None = None,
     approval_gate: _ToolApprovalGate | None = None,
 ) -> Callable[..., Any]:
-    """Return the tool-call policy as one ``(name, func, args)`` hook around ``func``, which the middleware wraps."""
+    """Return the tool-call policy as one ``(name, func, args)`` hook around ``func``, which the middleware wraps.
+
+    ``func`` is the middleware's async continuation, which runs the rest of the call.
+    """
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
 
-    async def bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
+    async def bridge(
+        name: str,
+        func: Callable[..., Awaitable[_ToolHookResult]],
+        args: dict[str, Any],
+    ) -> _ToolHookResult:
         return await _execute_bridge(
             hook_registry=hook_registry,
             tool_name=name,

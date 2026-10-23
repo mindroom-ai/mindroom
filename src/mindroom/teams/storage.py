@@ -59,7 +59,10 @@ class TeamRunRecords:
         return False
 
     def keep(self, record: AnyRunRecord) -> None:
-        """Keep the team's terminal record; a member run's record reaches the team record's ``ended_member_runs``."""
+        """Keep the team's terminal record.
+
+        Member records reach that record's ``ended_member_runs`` through the team runtime's member persist instead.
+        """
         if isinstance(record, TeamRunRecord):
             self.record = record
 
@@ -82,7 +85,7 @@ def scope_storage(scope_context: ScopeSessionContext, *, session_id: str) -> Tea
 
 
 def persist_into(records: TeamRunRecords | None, storage: TeamStorage | None) -> Persist[AnyRunRecord]:
-    """Return the persist callback of one team run: store every record, and keep it in ``records`` when given.
+    """Return the persist callback of one team run: store every record, and keep the team's in ``records`` when given.
 
     Storing a record updates the session the run loaded, member rows included.
     """

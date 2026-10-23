@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import inspect
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, get_type_hints
 
 from agno.media import Audio as AgnoAudio
@@ -59,12 +59,16 @@ _UNBINDABLE_KINDS = frozenset(
 
 
 def adapt_toolkit(toolkit: Toolkit) -> AdaptedToolkit:
-    """Adapt every function of ``toolkit`` in the order Agno prepares them for an async run."""
+    """Adapt every function of ``toolkit`` in the order Agno prepares them for an async run.
+
+    The functions share one ``actor_state``, as the functions of one toolkit shared the Agno agent that ran them.
+    """
     functions = toolkit.get_async_functions()
     added = toolkit.add_instructions and toolkit.instructions is not None
+    actor_state: dict[str, Any] = {}
     return AdaptedToolkit(
         name=toolkit.name,
-        functions=tuple(adapt_function(function) for function in functions.values()),
+        functions=tuple(replace(adapt_function(function), actor_state=actor_state) for function in functions.values()),
         instructions=toolkit.instructions if added else None,
         guidance=toolkit.instructions or None,
     )
@@ -80,13 +84,7 @@ def adapt_function(function: Function) -> ToolFunction:
     if function.entrypoint is None:
         msg = f"Tool function {function.name!r} has no entrypoint"
         raise ValueError(msg)
-    if function.pre_hook is not None or function.post_hook is not None or function.tool_hooks:
-        # Rejected rather than dropped: such a hook may be a policy gate the tool's author relies on.
-        msg = (
-            f"Tool function {function.name!r} sets an Agno pre_hook, post_hook, or tool_hooks, which MindRoom does not"
-            " run; move that logic into the tool or a `tool:before_call` / `tool:after_call` hook"
-        )
-        raise ValueError(msg)
+    reject_agno_hooks(function)
     prepared = function.model_copy(deep=False)
     prepared.parameters = deepcopy(function.parameters)
     # An explicit strict setting on the function wins; MindRoom never asks Agno for strict schemas otherwise.
@@ -106,6 +104,19 @@ def adapt_function(function: Function) -> ToolFunction:
         injected_params=injected_parameter_names(function.entrypoint),
         entrypoint_processed=not function.skip_entrypoint_processing,
     )
+
+
+def reject_agno_hooks(function: Function) -> None:
+    """Raise when ``function`` sets an Agno ``pre_hook``, ``post_hook``, or ``tool_hooks``, which MindRoom does not run.
+
+    Rejected rather than dropped: such a hook may be a policy gate the tool's author relies on.
+    """
+    if function.pre_hook is not None or function.post_hook is not None or function.tool_hooks:
+        msg = (
+            f"Tool function {function.name!r} sets an Agno pre_hook, post_hook, or tool_hooks, which MindRoom does not"
+            " run; move that logic into the tool or a `tool:before_call` / `tool:after_call` hook"
+        )
+        raise ValueError(msg)
 
 
 def injected_parameter_names(entrypoint: Callable[..., Any]) -> frozenset[str]:
@@ -134,17 +145,19 @@ def injected_parameter_names(entrypoint: Callable[..., Any]) -> frozenset[str]:
 # Reason: Agno injects its Agent or Team object into entrypoint parameters named ``agent`` or ``team``, or annotated
 # with those types, and the owned loop has no Agno agent to inject. Of the toolkits MindRoom registers, only
 # DaytonaTools reads the parameter, and it reads and writes ``agent.session_state``, as Agno's AntigravityTools and
-# SuperserveTools also do. MindRoom's own tools read their caller from the tool runtime context.
+# SuperserveTools also do. That attribute is the Agno agent's own state, not the run's stored session state, and
+# MindRoom built one agent per reply, so the stand-in carries the adapted toolkit's ``actor_state``, which is never
+# stored. MindRoom's own tools read their caller from the tool runtime context.
 # Upstream issue: Tracking gap; Agno defines no contract for what a toolkit may read from the injected agent, so a
 # toolkit can depend on any Agent attribute.
 # Upstream PR: None identified.
 # Remove when: Agno toolkits read run state from ``run_context`` instead of the agent parameter, or MindRoom drops
 # every toolkit that reads the agent parameter; the injected ``run_context`` stays.
-# Coverage: tests/tool_system/test_tool_invocation.py::test_agent_and_team_parameters_receive_the_session_state_stand_in;
+# Coverage: tests/tool_system/test_tool_invocation.py::test_agent_and_team_parameters_share_the_toolkits_own_state_stand_in;
 # tests/tool_system/test_tool_invocation.py::test_identity_typed_parameters_are_injected_by_annotation.
 @dataclass(slots=True)
 class ToolCallActor:
-    """What an Agno toolkit may read from its injected ``agent`` or ``team``: the run's session state."""
+    """What an Agno toolkit may read from its injected ``agent`` or ``team``: the state its toolkit keeps there."""
 
     session_state: dict[str, Any] | None
 
@@ -160,7 +173,7 @@ def framework_arguments(function: ToolFunction, context: ToolCallContext) -> dic
         metadata=context.metadata,
         session_state=context.session_state,
     )
-    actor = ToolCallActor(session_state=context.session_state)
+    actor = ToolCallActor(session_state=function.actor_state)
     by_name: dict[str, Any] = {
         "agent": actor,
         "team": actor,
@@ -363,6 +376,7 @@ __all__ = [
     "framework_arguments",
     "injected_parameter_names",
     "model_arguments",
+    "reject_agno_hooks",
     "tool_value",
     "warm_agno_tool_imports",
 ]

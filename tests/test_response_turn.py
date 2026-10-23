@@ -189,7 +189,6 @@ class _AdapterLog:
 
     scope: Any = None
     released: int = 0
-    closed: int = 0
     finalized: int = 0
     discards: list[EmptyRunDiscard] = field(default_factory=list)
     persisted: list[StandaloneReplaySnapshot] = field(default_factory=list)
@@ -227,7 +226,6 @@ def _blocking_adapter(
         run_attempt=run_attempt,
         snapshot_partial=lambda: log.snapshot,
         release_attempt_entity=lambda _scope: _bump(log, "released"),
-        close_runtime_dbs=lambda _scope: _bump(log, "closed"),
         discard_empty_run=lambda _scope, discard: log.discards.append(discard),
         finalize_attempt=_finalize,
         unexpected_error_text=unexpected_error_text,
@@ -268,7 +266,6 @@ async def test_blocking_paused_attempt_escapes_without_recording_terminal_interr
 
     assert raised.value.paused.tools == (tool,)
     assert recorder.outcome == "suspended"
-    assert log.closed == 1
 
 
 def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -> None:
@@ -390,7 +387,6 @@ async def test_streaming_paused_attempt_escapes_without_recording_terminal_inter
 
     assert raised.value.paused.run_id == "run-stream"
     assert recorder.outcome == "suspended"
-    assert log.closed == 1
 
 
 def _streaming_adapter(
@@ -415,7 +411,6 @@ def _streaming_adapter(
         run_attempt=run_attempt,
         snapshot_partial=lambda: log.snapshot,
         release_attempt_entity=lambda _scope: _bump(log, "released"),
-        close_runtime_dbs=lambda _scope: _bump(log, "closed"),
         discard_empty_run=lambda _scope, discard: log.discards.append(discard),
         make_text_chunk=lambda text: f"notice:{text}",
         finalize_attempt=_finalize,
@@ -509,7 +504,6 @@ async def test_helper_usage_owner_stays_inside_attempt_across_task_handoff(finis
         assert observed_phases == (["first", "close"] if finish == "close" else ["first", "second", "close"])
     assert get_helper_usage_owner() is None
     assert log.finalized == 1
-    assert log.closed == 1
 
 
 @pytest.mark.asyncio
@@ -809,7 +803,6 @@ def test_blocking_completion_records_and_updates_collector() -> None:
         },
     ]
     assert log.finalized == 1
-    assert log.closed == 1
 
 
 @pytest.mark.parametrize(
@@ -987,7 +980,6 @@ def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
     assert snapshot.partial_text == "partial"
     assert snapshot.run_metadata == {"room_id": "!room"}
     assert log.finalized == 1
-    assert log.closed == 1
 
 
 def test_blocking_cancelled_attempt_with_recorder_records_twice() -> None:
@@ -1384,7 +1376,6 @@ def test_blocking_unexpected_error_reraises_without_shaper() -> None:
 
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(_run())
-    assert log.closed == 1
 
 
 def test_blocking_unexpected_error_uses_shaper_when_configured() -> None:
@@ -1509,7 +1500,6 @@ def test_streaming_cancelled_attempt_records_updates_collector_and_raises() -> N
     assert collector == {"io.mindroom.ai_run": {"status": "cancelled"}}
     assert len(log.persisted) == 1
     assert log.finalized == 1
-    assert log.closed == 1
 
 
 def test_streaming_cancelled_attempt_with_recorder_records_twice() -> None:
@@ -1927,7 +1917,6 @@ def test_streaming_finalize_runs_when_attempt_raises() -> None:
     with pytest.raises(RuntimeError, match="stream blew up"):
         asyncio.run(_run())
     assert log.finalized == 1
-    assert log.closed == 1
 
 
 def test_streaming_unexpected_error_yields_shaped_notice_chunk() -> None:
@@ -2085,7 +2074,6 @@ def test_streaming_attempt_without_sentinel_raises() -> None:
         asyncio.run(_run())
     assert recorder.completed_calls == []
     assert log.finalized == 1
-    assert log.closed == 1
 
 
 def test_streaming_aclose_runs_cleanup_without_recording() -> None:
@@ -2105,7 +2093,6 @@ def test_streaming_aclose_runs_cleanup_without_recording() -> None:
             yield AttemptResolved(CompletedAttempt(replayable_text="full", has_visible_content=True))
         finally:
             assert log.finalized == 0
-            assert log.closed == 0
             attempt_closed = True
 
     async def _run() -> None:
@@ -2121,7 +2108,6 @@ def test_streaming_aclose_runs_cleanup_without_recording() -> None:
 
     asyncio.run(_run())
 
-    assert log.closed == 1
     assert log.finalized == 1
     assert recorder.completed_calls == []
     assert recorder.interrupted_calls == []

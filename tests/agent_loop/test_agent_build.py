@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from agno.tools import Toolkit
 
-from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
+from mindroom.agent_loop.build import AgentBuild, AgentSurface, appended_context, prompt_for_turn
 from mindroom.agent_loop.prompt import CLAUDE_TOOLS_NOTE, render_system_message
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import _tool_owners, create_agent
@@ -209,6 +209,25 @@ def test_prompt_for_turn_appends_the_turns_context_blocks(tmp_path: Path) -> Non
     assert prompt_for_turn(build).content == render_system_message(build.prompt).content
     expected = replace(build.prompt, additional_context=f"{base.strip()}\n\nmemory\n\n<ctx>")
     assert prompt_for_turn(build, "memory\n", "", "<ctx>").content == render_system_message(expected).content
+
+
+@pytest.mark.parametrize(
+    ("existing", "block", "expected"),
+    [
+        ("context \n", "block", "context\n\nblock"),
+        ("context", "", "context"),
+        ("  ", "block", "block"),
+        (None, "block", "block"),
+        (None, "", None),
+    ],
+)
+def test_appended_context_puts_a_block_after_the_stripped_context(
+    existing: str | None,
+    block: str,
+    expected: str | None,
+) -> None:
+    """A block follows the context after one blank line; it stands alone after no context, and an empty one adds none."""
+    assert appended_context(existing, block) == expected
 
 
 @pytest.mark.parametrize("agent_mode", ["standard", "minimal"])

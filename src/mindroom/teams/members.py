@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.build import appended_context, prompt_for_turn
 from mindroom.agent_loop.prompt import model_note_for
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import prepare_run_tools
@@ -313,13 +313,6 @@ def materialized_team_label(display_names: Sequence[str]) -> str:
     return f"Team ({', '.join(display_names)})"
 
 
-def _appended_context(existing: str, block: str) -> str:
-    if not block:
-        return existing
-    stripped = existing.strip()
-    return f"{stripped}\n\n{block}" if stripped else block
-
-
 def _team_member(
     build: AgentBuild,
     system_enrichment: str,
@@ -467,7 +460,7 @@ def build_team_spec(
     prepared = prepare_run_tools(
         AgentSpec(id=team_id, name=team_display_name, model=model, system_message=None, toolkits=leader_toolkits),
     )
-    additional_context = _appended_context(
+    additional_context = appended_context(
         render_date_context(config.timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
         system_enrichment,
     )

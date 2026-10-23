@@ -5,7 +5,7 @@ They import no Agno module; ``agno_toolkits`` builds them from Agno's tool objec
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.provider import ToolSpec
@@ -32,6 +32,8 @@ class ToolFunction:
     ``entrypoint_processed`` marks a function whose entrypoint Agno would process again: one that does not set
     ``skip_entrypoint_processing``, as MCP tools and the ``@tool`` methods a toolkit registers do to keep the schema
     they were built with. Realtime calls repeat the second processing pass Agno ran on a marked function.
+    ``actor_state`` is what the function keeps on the agent or team Agno would inject into it: one dict per adapted
+    toolkit, shared by its functions and calls and never stored.
     """
 
     name: str
@@ -46,6 +48,7 @@ class ToolFunction:
     entrypoint: Callable[..., Any]
     injected_params: frozenset[str] = frozenset()
     entrypoint_processed: bool = False
+    actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     def definition(self) -> ToolSpec:
         """Return the model-facing definition a provider adapter formats: every field Agno serialized, None kept."""

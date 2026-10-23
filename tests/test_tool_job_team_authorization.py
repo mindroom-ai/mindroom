@@ -32,7 +32,7 @@ from mindroom.tool_jobs.runtime import (
     JobAccessError,
     register_background_runtime,
 )
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.agno_toolkits import Function, Toolkit, adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -347,9 +347,14 @@ async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Pat
         await runtime.shutdown()
 
 
+async def delegate_task_to_member(member_id: str, task: str) -> str:
+    """Stand in for the leader's delegation tool."""
+    return f"{member_id}: {task}"
+
+
 @pytest.mark.asyncio
-async def test_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path: Path) -> None:
-    """A team leader's job calls run through the tool-call policy the loop runs around every call, as others do."""
+async def test_only_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path: Path) -> None:
+    """A team leader's job calls run through the tool-call policy; its delegations skip it, as with jobs off."""
     config = managed_team_config(tmp_path)
     paths = team_coordinator(tmp_path, config).runtime_paths
     team = replace(completed_delegation_job().owner, agent_name="team", transport_agent_name="team")
@@ -366,13 +371,17 @@ async def test_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path: Path
         jobs = team_background_jobs(config, paths, team)
         assert jobs is not None
         [job] = jobs.controls.functions
+        delegation = adapt_function(Function.from_callable(delegate_task_to_member))
+        call_context = ToolCallContext(run_id="team-run", session_id=context.session_id)
         with tool_runtime_context(context), recording_tool_calls(recorder):
-            await execute_tool_call(
-                job,
-                {"action": "list"},
-                ToolCallContext(run_id="team-run", session_id=context.session_id),
+            await execute_tool_call(job, {"action": "list"}, call_context, middleware=jobs.middleware)
+            delegated = await execute_tool_call(
+                delegation,
+                {"member_id": "worker", "task": "Add"},
+                call_context,
                 middleware=jobs.middleware,
             )
+        assert delegated.content == "worker: Add"
         assert [(kind, name) for kind, name, _arguments, _result in recorder.records] == [
             ("started", "job"),
             ("finished", "job"),

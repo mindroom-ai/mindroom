@@ -93,7 +93,6 @@ def _blocking_adapter(
         run_attempt=run_attempt,
         snapshot_partial=TurnPartialSnapshot,
         release_attempt_entity=_noop,
-        close_runtime_dbs=_noop,
         discard_empty_run=_noop,
     )
 
@@ -109,7 +108,6 @@ def _streaming_adapter(
         run_attempt=run_attempt,
         snapshot_partial=TurnPartialSnapshot,
         release_attempt_entity=_noop,
-        close_runtime_dbs=_noop,
         discard_empty_run=_noop,
         make_text_chunk=lambda text: text,
     )
