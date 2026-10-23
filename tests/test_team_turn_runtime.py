@@ -1446,6 +1446,62 @@ async def test_a_member_s_delegation_card_adds_no_marker_and_the_approved_reply_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval_rule", "helper", "helper_flags"),
+    [
+        pytest.param(
+            "touch",
+            [calls(tool_call("touch", "call-helper", label="deep"), metrics=usage(5, 1)), answer("Dug deep.")],
+            [False, True],
+            id="child-call",
+        ),
+        pytest.param("run_subagent", [answer("Dug.")], [False], id="delegation-card"),
+    ],
+)
+async def test_a_member_continued_with_the_result_of_a_delegation_an_approval_decided_reads_the_receipt_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    approval_rule: str,
+    helper: list[list[ScriptStep]],
+    helper_flags: list[bool],
+) -> None:
+    """The member whose delegation the approval answers reads its receipt once, as the leader the card belongs to does.
+
+    The approval decides the helper's call the writer's delegation waits on, or the card of the writer's delegation
+    itself; the writer then continues with the helper's answer. A helper the approved card starts runs fresh and
+    never reads the receipt.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: dug.")],
+        helper=helper,
+        approval_rules=[ApprovalRuleConfig(match=approval_rule, action="require_approval")],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    paused = raised.value.paused
+    _, _, state = _delegation_state(team)
+    approvals = _saved_approval_calls(state)
+    receipt = build_approval_receipt(
+        tuple(replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True) for call in approvals),
+    )
+
+    with approval_receipt_context(receipt, run_id=paused.run_id):
+        result = await team.resume(paused, approved=True, approvals=approvals)
+
+    def carries(model: str) -> list[bool]:
+        return [any(receipt in str(m.content) for m in r.messages) for r in team.models[model].requests]
+
+    assert isinstance(result, CompletedApprovalRun)
+    # Each model's fresh request, then its first request after the approval.
+    assert carries("helper-model") == helper_flags
+    assert carries("writer-model") == [False, True]
+    assert carries("default") == [False, True]
+
+
+@pytest.mark.asyncio
 async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

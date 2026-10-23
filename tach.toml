@@ -1327,6 +1327,7 @@ depends_on = [
 visibility = [
     "mindroom.approval.execution",
     "mindroom.approval.resume",
+    "mindroom.delegation.execution",
     "mindroom.loop_hooks",
     "mindroom.response_runner",
     "mindroom.teams",
@@ -7604,6 +7605,7 @@ depends_on = [
     "mindroom.delegation.personas",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.approval.receipt",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.sessions",

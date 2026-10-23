@@ -252,27 +252,31 @@ def _leader_delegating_to_code(
     tmp_path: Path,
     *,
     report_writer: str = "leader",
+    helper: bool = False,
 ) -> tuple[Config, RuntimePaths, ToolExecutionIdentity]:
     """Return a ``leader`` that may delegate to ``code``, with its turn's identity.
 
-    ``report_writer`` is the agent offered the report tool, whose ``write_report`` needs approval.
+    ``report_writer`` is the agent offered the report tool, whose ``write_report`` needs approval. With ``helper``,
+    ``code`` may in turn delegate to a ``helper`` agent.
     """
     paths = _runtime_paths(tmp_path)
     requester = "@alice:example.org"
-    tools = {name: ["report"] if name == report_writer else [] for name in ("leader", "code")}
-    config = with_responder_access(
-        Config(
-            agents={
-                "leader": AgentConfig(display_name="Leader", tools=tools["leader"], delegate_to=["code"]),
-                "code": AgentConfig(display_name="Code", tools=tools["code"]),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            memory={"backend": "none"},
-            tool_approval={"rules": [{"match": "write_report", "action": "require_approval"}]},
-        ),
-        "code",
-        users=[requester],
+    names = ("leader", "code", "helper") if helper else ("leader", "code")
+    agents = {
+        name: AgentConfig(display_name=name.title(), tools=["report"] if name == report_writer else [])
+        for name in names
+    }
+    agents["leader"].delegate_to = ["code"]
+    if helper:
+        agents["code"].delegate_to = ["helper"]
+    config = Config(
+        agents=agents,
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+        tool_approval={"rules": [{"match": "write_report", "action": "require_approval"}]},
     )
+    for name in names[1:]:
+        with_responder_access(config, name, users=[requester])
     entity_ids(config, paths)
     identity = ToolExecutionIdentity(
         "matrix",
@@ -371,6 +375,56 @@ async def test_an_approved_child_and_the_parent_it_answers_each_read_the_receipt
 
     assert isinstance(result, CompletedApprovalRun)
     # Each model's fresh request, then its first request after the approval.
+    assert _receipt_flags(code) == [False, True]
+    assert _receipt_flags(leader) == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_every_run_between_the_card_and_a_nested_child_s_approved_call_reads_the_receipt_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each run that continues with the answer of an approved call below it reads the receipt, as the child does.
+
+    The leader delegates to ``code``, which delegates to ``helper``, whose gated call the approval decides: ``helper``
+    reads it when it resumes, and ``code`` and the leader each when they continue with their child's answer.
+    """
+    config, paths, identity = _leader_delegating_to_code(tmp_path, report_writer="helper", helper=True)
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-1", agent_name="code", task="Have the report written")),
+            answer("The report is written."),
+        ],
+    )
+    code = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-2", agent_name="helper", task="Write the report")),
+            answer("The helper wrote it."),
+        ],
+    )
+    helper = ScriptedModel([calls(tool_call("write_report", "call-1")), answer("Written.")])
+    ScriptedAgents({"leader": leader, "code": code, "helper": helper}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+
+    with registered_report_tool() as report:
+        paused = await respond("leader", "Have the report written", **options)
+        assert isinstance(paused, PausedAttempt)
+        approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
+        decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
+        with approval_receipt_context(build_approval_receipt(decided), run_id=paused.run_id):
+            result = await resume(
+                approval_executor(config, paths),
+                paused,
+                approvals,
+                agent_name="leader",
+                **options,
+                decisions={call.tool_call_id: True for call in approvals},
+            )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert len(report.written) == 1
+    # Each model's fresh request, then its first request after the approval.
+    assert _receipt_flags(helper) == [False, True]
     assert _receipt_flags(code) == [False, True]
     assert _receipt_flags(leader) == [False, True]
 

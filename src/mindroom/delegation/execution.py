@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, ca
 from uuid import uuid4
 
 from mindroom.agent_loop.build import tool_owners_by_agent
+from mindroom.approval.receipt import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
@@ -1048,6 +1049,12 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     caller_identity = replace(execution_identity, agent_name=caller)
     resolve_result = partial(_resolve_delegation_requirement, requirement, on_event=on_event)
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
+    if decisions is not None and (
+        requirement_key in decisions or (retained is not None and retained.delegation_id == pending_id)
+    ):
+        # The approval decided this call's card or the calls of the child it waits on, and the run that made the call
+        # continues with its result, so that run reads the approval's receipt.
+        add_approval_receipt_reader(requirement.member_run_id or response.run_id)
     excluded = toolkit_is_background_excluded("delegate", config, runtime_paths)
     # A child saved before a crash keeps its accepted owner when startup policy changes.
     if retained is not None:

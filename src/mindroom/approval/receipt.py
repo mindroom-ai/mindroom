@@ -80,9 +80,10 @@ def approval_receipt_context(receipt_text: str, *, run_id: str) -> Generator[Non
     """Bind one approval's trusted receipt around its continuation, for the paused run ``run_id`` it resumes.
 
     That run reads the receipt, and so does every run that ``add_approval_receipt_reader`` names: one whose own
-    paused calls the approval decided, or a recovered CLI call's follow-up. Each reads it once, in its first request
+    paused calls the approval decided, one that continues with the result of a delegation call whose card or
+    child's calls the approval decided, or a recovered CLI call's follow-up. Each reads it once, in its first request
     as a reader. No other run reads it, such as a run the continuation starts or a member it continues with the
-    result of that member's own delegation.
+    result of a delegation the approval did not decide.
     """
     token = _context.set(_ApprovalReceiptContext(receipt_text=receipt_text, readers={run_id}))
     try:
