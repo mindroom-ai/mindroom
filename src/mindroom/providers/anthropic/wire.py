@@ -79,7 +79,6 @@ _NON_STRUCTURED_OUTPUT_ALIASES = frozenset(
 )
 
 _TRAILING_USER_MESSAGE = "continue"
-_ROLE_MAP = {"system": "system", "developer": "system", "user": "user", "assistant": "assistant", "tool": "user"}
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 _IMAGE_MEDIA_TYPES = {
     "jpeg": "image/jpeg",
@@ -184,7 +183,7 @@ def format_claude_messages(
         else:
             msg = f"Claude requests cannot carry a message with role {message.role!r}"
             raise ValueError(msg)
-        turns.append({"role": _ROLE_MAP[message.role], "content": content})
+        turns.append({"role": "assistant" if message.role == "assistant" else "user", "content": content})
     merged = _merged_turns(turns)
     if append_trailing_user_message and merged and merged[-1]["role"] == "assistant":
         merged.append({"role": "user", "content": [{"type": "text", "text": _TRAILING_USER_MESSAGE}]})
@@ -368,8 +367,8 @@ def _serialized_content_blocks(blocks: Sequence[Any]) -> list[dict[str, Any]]:
     """Serialize response blocks or stored block dicts in order; an unknown spelling of redacted thinking is fixed."""
     serialized: list[dict[str, Any]] = []
     for block in blocks:
-        block_dict = as_dict(block) if isinstance(block, dict) else block.model_dump(exclude_none=True)
-        if block_dict is None or not block_dict.get("type"):
+        block_dict = block if isinstance(block, dict) else block.model_dump(exclude_none=True)
+        if not block_dict.get("type"):
             continue
         if block_dict.get("type") == "redacted_reasoning_content":
             block_dict = {**block_dict, "type": "redacted_thinking"}
@@ -611,6 +610,8 @@ def assistant_message_from_response(
 
 
 def _stored_reasoning(blocks: list[str], *, streamed: bool) -> str | None:
+    # TODO(simplify): A non-streamed reply stores only its last thinking and redacted-thinking block while a streamed
+    # one joins them all, as Agno did. Join them in both modes. Stored runs would notice.
     if not blocks:
         return None
     return "".join(blocks) if streamed else blocks[-1]
