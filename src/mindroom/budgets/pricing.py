@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import provider_reports_cache_tokens_outside_input
-from mindroom.providers.names import canonical_provider
 from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:
@@ -19,15 +18,6 @@ if TYPE_CHECKING:
     from mindroom.usage.stats import TokenTotals
 
 logger = get_logger(__name__)
-
-# Provider names that select the same model class and so record the same usage identity.
-_PROVIDER_ALIASES = {"gemini": "google", "openai_codex": "codex", "kimi_code": "kimi"}
-
-
-def provider_identity(provider: str) -> str:
-    """Return one name for every configured provider spelling that selects the same model class."""
-    canonical = canonical_provider(provider)
-    return _PROVIDER_ALIASES.get(canonical, canonical)
 
 
 @dataclass(frozen=True, slots=True)

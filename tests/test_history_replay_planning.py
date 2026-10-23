@@ -906,6 +906,9 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
                     id="claude-sonnet-5",
                     context_window=32_000,
                 ),
+                # ``openai_codex`` is an alias of ``codex``, so both select the same route.
+                "codex-summary": ModelConfig(provider="codex", id="gpt-6.1-sol", context_window=32_000),
+                "codex-summary-alias": ModelConfig(provider="openai_codex", id="gpt-6.1-sol", context_window=32_000),
             },
         ),
         _runtime_paths(tmp_path),
@@ -939,13 +942,21 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
         assert (
             _compaction_fallback_is_distinct(
                 config,
+                primary_model_name="codex-summary",
+                fallback_model_name="codex-summary-alias",
+            )
+            is False
+        )
+        assert (
+            _compaction_fallback_is_distinct(
+                config,
                 primary_model_name="summary-model",
                 fallback_model_name="fallback-model",
             )
             is True
         )
 
-    assert warning_mock.call_count == 3
+    assert warning_mock.call_count == 4
     assert all(
         call.args[0] == "Compaction fallback resolves to the primary serving model; continuing without a fallback"
         for call in warning_mock.call_args_list

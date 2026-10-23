@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_api_key_for_provider
-from mindroom.providers.names import canonical_provider
+from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -40,9 +40,8 @@ def uses_alternative_auth(model_config: ModelConfig) -> bool:
 
     Such a model never falls back to the provider's shared key; the provider adapters build it with this rule.
     """
-    provider = canonical_provider(model_config.provider)
     extra_kwargs = model_config.extra_kwargs or {}
-    alternative_kwargs = _ALTERNATIVE_AUTH_KWARGS.get("google" if provider == "gemini" else provider, ())
+    alternative_kwargs = _ALTERNATIVE_AUTH_KWARGS.get(provider_route(model_config.provider), ())
     return any(extra_kwargs.get(name) for name in alternative_kwargs)
 
 
@@ -72,9 +71,7 @@ def missing_model_api_key_provider(config: Config, runtime_paths: RuntimePaths, 
     model_config = config.models.get(model_name)
     if model_config is None:
         return None
-    provider = canonical_provider(model_config.provider)
-    if provider == "gemini":
-        provider = "google"
+    provider = provider_route(model_config.provider)
     if provider == "ollama" or provider not in PROVIDER_ENV_KEYS:
         return None
     if model_uses_own_credential(model_name, model_config, runtime_paths):

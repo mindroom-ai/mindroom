@@ -14,7 +14,7 @@ from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_E
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.gemini.adapter import build_provider as build_gemini_provider
 from mindroom.providers.model_loading import dashboard_api_key
-from mindroom.providers.names import canonical_provider
+from mindroom.providers.names import provider_route
 from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
 from mindroom.providers.openai.build import ENDPOINT_VARIABLES as OPENAI_ENDPOINT_VARIABLES
 from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
@@ -35,7 +35,6 @@ __all__ = ["build_model_provider", "model_capabilities", "stream_idle_timeout_se
 logger = get_logger(__name__)
 
 _CLAUDE_PROVIDERS = frozenset(get_args(ClaudeRouteKind.__value__))
-_GEMINI_PROVIDERS = frozenset({"google", "gemini"})
 # A hosted API that sends no stream event for this long has stalled.
 _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
 # Local servers can stay silent for minutes while a request queues or a model loads.
@@ -64,7 +63,7 @@ def _build_adapter(
     execution_identity: ToolExecutionIdentity | None,
 ) -> ModelProvider:
     """Return the bare adapter of the family that serves ``model_config.provider``."""
-    provider = canonical_provider(model_config.provider)
+    provider = provider_route(model_config.provider)
     if provider in OPENAI_FAMILY_PROVIDERS:
         runtime = ProviderRuntime(
             runtime_paths=runtime_paths,
@@ -78,7 +77,7 @@ def _build_adapter(
         )
 
         return build_claude_provider(model_config, runtime_paths)
-    if provider in _GEMINI_PROVIDERS:
+    if provider == "google":
         return build_gemini_provider(model_config, runtime_paths)
     if provider == "ollama":
         return build_ollama_provider(model_config, runtime_paths)
@@ -141,7 +140,7 @@ def stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: Runtim
     """
     if model_config.stream_idle_timeout_seconds is not None:
         return model_config.stream_idle_timeout_seconds or None
-    provider = canonical_provider(model_config.provider)
+    provider = provider_route(model_config.provider)
     if provider in _LOCAL_STREAM_PROVIDERS or _sets_base_url(model_config.extra_kwargs):
         return None
     if (variable := _ENDPOINT_VARIABLES.get(provider)) and runtime_paths.env_value(variable):

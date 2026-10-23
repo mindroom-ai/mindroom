@@ -31,7 +31,7 @@ from mindroom.providers.errors import CliLoginError, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.model_loading import uses_alternative_auth
-from mindroom.providers.names import canonical_provider
+from mindroom.providers.names import provider_route
 from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatDialect, ChatWire
@@ -185,11 +185,10 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url_variable="CEREBRAS_BASE_URL",
     ),
 }
-# The endpoint variable of every route that reads one, by ``provider`` value.
+# The endpoint variable of every route that reads one, by route.
 ENDPOINT_VARIABLES = {key: route.base_url_variable for key, route in _CHAT_ROUTES.items() if route.base_url_variable}
-_ROUTE_ALIASES = {"openai_codex": "codex", "kimi_code": "kimi"}
-# Every ``provider`` value this module builds, after canonicalization.
-OPENAI_FAMILY_PROVIDERS = frozenset(_CHAT_ROUTES) | {"codex", "openai_codex", "kimi_code"}
+# Every route this module builds, as ``provider_route`` names it.
+OPENAI_FAMILY_PROVIDERS = frozenset(_CHAT_ROUTES) | {"codex"}
 _ROUTE_KEY_VARIABLES = {"azure": AZURE_OPENAI_ENV_BY_KEY["api_key"], "zai": PROVIDER_ENV_KEYS["zai"]}
 # Providers whose models authenticate without the shared key.
 _NO_SHARED_KEY = frozenset({"llama_cpp", "kimi"})
@@ -580,8 +579,7 @@ def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatA
     model and endpoint support native tool search; otherwise Chat Completions.
     Raises ``ValueError`` for providers outside the family and for ``extra_kwargs`` the route does not accept.
     """
-    provider = canonical_provider(model_config.provider)
-    route_key = _ROUTE_ALIASES.get(provider, provider)
+    route_key = provider_route(model_config.provider)
     model_id = model_config.id
     if route_key == "codex":
         return _build_responses("codex", model_id, model_config, runtime)

@@ -7,7 +7,7 @@ from functools import cache
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.logging_config import get_logger
-from mindroom.providers.names import canonical_provider
+from mindroom.providers.names import provider_route
 from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 
 if TYPE_CHECKING:
@@ -159,18 +159,17 @@ def drop_retired_fields(value: object) -> object:
 
 @dataclass(frozen=True)
 class _RetiredModelSettings:
-    """Agno model fields that ``extra_kwargs`` passed through on ``providers``, or on every provider when unset."""
+    """Agno model fields that ``extra_kwargs`` passed through on the routes ``providers`` names, or on every route."""
 
     fields: frozenset[str]
     providers: frozenset[str] | None
     reason: str
 
 
-_OPENAI_CHAT_PROVIDERS = frozenset(
-    {"openai", "azure", "openrouter", "deepseek", "llama_cpp", "zai", "kimi", "kimi_code"},
-)
+# Routes, as ``provider_route`` names them, by the Agno model class main built for them.
+_OPENAI_CHAT_PROVIDERS = frozenset({"openai", "azure", "openrouter", "deepseek", "llama_cpp", "zai", "kimi"})
 _CLAUDE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", "bedrock_claude"})
-_GEMINI_PROVIDERS = frozenset({"google", "gemini"})
+_GEMINI_PROVIDERS = frozenset({"google"})
 
 # LEGACY_COMPAT: Agno model fields in models.<name>.extra_kwargs.
 # Legacy format: extra_kwargs went to the provider's Agno model class as keyword arguments, so every Agno model field
@@ -224,12 +223,12 @@ _RETIRED_MODEL_SETTINGS = (
     ),
     _RetiredModelSettings(
         fields=frozenset({"background", "background_poll_interval", "background_max_wait", "vector_store_name"}),
-        providers=frozenset({"openai", "codex", "openai_codex"}),
+        providers=frozenset({"openai", "codex"}),
         reason="Background polling and file-search uploads were retired with Agno's OpenAI Responses model",
     ),
     _RetiredModelSettings(
         fields=CODEX_REJECTED_FIELDS,
-        providers=frozenset({"codex", "openai_codex"}),
+        providers=frozenset({"codex"}),
         reason="The Codex endpoint rejects these fields, so Agno's Codex model never sent them",
     ),
     _RetiredModelSettings(
@@ -278,11 +277,11 @@ _RETIRED_MODEL_SETTINGS = (
 
 def drop_retired_model_settings(provider: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Drop the Agno model fields that a ``provider`` model's ``extra_kwargs`` still sets, warning once per field."""
-    canonical = canonical_provider(provider)
+    route = provider_route(provider)
     reasons = {
         field: retired.reason
         for retired in _RETIRED_MODEL_SETTINGS
-        if retired.providers is None or canonical in retired.providers
+        if retired.providers is None or route in retired.providers
         for field in retired.fields
     }
     return _drop_retired(extra_kwargs, reasons, "extra_kwargs.")

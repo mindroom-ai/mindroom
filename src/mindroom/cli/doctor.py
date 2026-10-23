@@ -46,6 +46,7 @@ from mindroom.model_defaults import (
 )
 from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.providers.model_loading import model_uses_own_credential
+from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -315,7 +316,7 @@ def _validate_provider_key(
     (None, reason) if inconclusive (e.g. connection error).
     """
     # Normalize aliases so we look up a single URL and auth style
-    canonical = "google" if provider == "gemini" else provider
+    canonical = provider_route(provider)
 
     if base_url:
         url = base_url.rstrip("/") + "/models"

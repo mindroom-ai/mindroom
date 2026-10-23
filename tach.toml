@@ -3760,7 +3760,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.constants"
-depends_on = ["mindroom.atomic_file"]
+depends_on = ["mindroom.atomic_file", "mindroom.providers.names"]
 
 [[modules]]
 path = "mindroom.matrix_identifiers"
@@ -4819,6 +4819,7 @@ depends_on = [
     "mindroom.matrix.state",
     "mindroom.providers.model_http_client",
     "mindroom.providers.model_loading",
+    "mindroom.providers.names",
     # Deferred import in the Vertex AI Claude connection check, so the anthropic SDK loads only when used.
     "mindroom.providers.anthropic.messages",
 ]
