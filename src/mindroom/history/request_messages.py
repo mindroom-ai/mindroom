@@ -199,7 +199,7 @@ def build_request(
     Pass ``summary=None`` when the run replays no stored history; a run that replays the summary but no runs passes
     it with empty ``history``.
     """
-    return _with_scope_summary([*system, *history, *turn.context, turn.prompt, *turn.transient], summary)
+    return _with_scope_summary([*system, *history, *turn.in_request_order()], summary)
 
 
 def build_resume_request(
