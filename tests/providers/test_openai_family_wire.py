@@ -984,47 +984,9 @@ async def test_request_overrides_reach_the_body(tmp_path: Path) -> None:
         _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
     )
 
-    await _turn(
-        built,
-        ModelRequest(messages=[_user()], overrides=RequestOverrides(temperature=0.2, max_output_tokens=64)),
-    )
+    await _turn(built, ModelRequest(messages=[_user()], overrides=RequestOverrides(temperature=0.2)))
 
-    body = built.body()
-    assert (body["temperature"], body["max_completion_tokens"]) == (0.2, 64)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("config", "configured", "sent"),
-    [
-        ({**_OPENAI_CHAT, "id": "gpt-4.1", "extra_kwargs": {"max_tokens": 10}}, "max_tokens", "max_completion_tokens"),
-        (
-            {
-                "provider": "openrouter",
-                "id": "z-ai/glm-5.3",
-                "api_key": "k",
-                "extra_kwargs": {"max_completion_tokens": 10},
-            },
-            "max_completion_tokens",
-            "max_tokens",
-        ),
-    ],
-    ids=["openai", "openrouter"],
-)
-async def test_output_limit_override_replaces_the_configured_limit_field(
-    tmp_path: Path,
-    config: dict[str, Any],
-    configured: str,
-    sent: str,
-) -> None:
-    """A request never carries both limit names: the override replaces whichever the config set."""
-    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
-
-    await _turn(built, ModelRequest(messages=[_user()], overrides=RequestOverrides(max_output_tokens=64)))
-
-    body = built.body()
-    assert body[sent] == 64
-    assert configured not in body
+    assert built.body()["temperature"] == 0.2
 
 
 @pytest.mark.asyncio

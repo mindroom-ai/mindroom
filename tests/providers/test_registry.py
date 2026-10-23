@@ -29,11 +29,11 @@ from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.gemini.adapter import GeminiProvider
-from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.ollama_adapter import OllamaProvider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
+from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.synthetic_adapter import SyntheticProvider
 from tests.providers.bare_adapter import bare_adapter

@@ -39,25 +39,9 @@ class SDKClients:
         return client
 
 
-# A request carries its output limit under one of these names; an override replaces whichever the config set.
-_OUTPUT_LIMIT_KEYS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
-
-
-def with_overrides(
-    kwargs: dict[str, Any],
-    overrides: RequestOverrides,
-    *,
-    temperature: bool,
-    output_limit_key: str | None,
-) -> dict[str, Any]:
-    """Apply a request's overrides to SDK call arguments; ``temperature=False`` leaves sampling to the provider."""
-    body = dict(kwargs.get("extra_body") or {})
-    if temperature and overrides.temperature is not None:
-        body["temperature"] = overrides.temperature
-    if output_limit_key is not None and overrides.max_output_tokens is not None:
-        for key in _OUTPUT_LIMIT_KEYS:
-            body.pop(key, None)
-        body[output_limit_key] = overrides.max_output_tokens
-    if body:
-        kwargs["extra_body"] = body
+def with_overrides(kwargs: dict[str, Any], overrides: RequestOverrides, *, temperature: bool) -> dict[str, Any]:
+    """Apply a request's temperature override to SDK call arguments; ``temperature=False`` leaves sampling to the provider."""
+    if not temperature or overrides.temperature is None:
+        return kwargs
+    kwargs["extra_body"] = {**(kwargs.get("extra_body") or {}), "temperature": overrides.temperature}
     return kwargs

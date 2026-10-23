@@ -120,13 +120,12 @@ class ResponsesAdapter:
             settings=self.settings,
             wire=self.wire,
         )
-        # Codex rejects both sampling and output-limit fields.
+        # Codex rejects sampling fields.
         codex = self.wire.route == "codex"
         return with_overrides(
             kwargs,
             request.overrides,
             temperature=not codex and not self.capabilities.provider_default_sampling,
-            output_limit_key=None if codex else "max_output_tokens",
         )
 
     async def _streamed(

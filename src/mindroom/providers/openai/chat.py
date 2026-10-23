@@ -38,9 +38,6 @@ if TYPE_CHECKING:
 
 __all__ = ["ChatAdapter"]
 
-# OpenAI's own endpoints take the newer output-limit name; OpenAI-compatible servers kept ``max_tokens``.
-_MAX_COMPLETION_TOKENS_ROUTES = frozenset({"openai", "azure"})
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChatAdapter:
@@ -71,14 +68,7 @@ class ChatAdapter:
             settings=self.settings,
             wire=self.wire,
         )
-        kwargs = with_overrides(
-            kwargs,
-            request.overrides,
-            temperature=not self.capabilities.provider_default_sampling,
-            output_limit_key="max_completion_tokens"
-            if self.wire.route in _MAX_COMPLETION_TOKENS_ROUTES
-            else "max_tokens",
-        )
+        kwargs = with_overrides(kwargs, request.overrides, temperature=not self.capabilities.provider_default_sampling)
         if self.wire.route != "openrouter":
             return kwargs
         # OpenRouter forwards Claude cache breakpoints to Anthropic upstreams; the ladder runs on the final body.

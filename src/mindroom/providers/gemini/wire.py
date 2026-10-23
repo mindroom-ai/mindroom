@@ -42,15 +42,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# The guidance Agno's retry loop sent once after a malformed function call; the owned loop sends the same text.
-MALFORMED_FUNCTION_CALL_GUIDANCE = """The previous function call was malformed. Please try again with a valid function call.
-
-Guidelines:
-- Generate the function call JSON directly, do not generate code
-- Use the function name exactly as defined (no namespace prefixes like 'default_api.')
-- Ensure all required parameters are provided with correct types
-"""
-
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
 # Gemini rejects requests above 20 MB, so larger local media goes through the Files API, which Vertex AI lacks.
 _INLINE_MEDIA_LIMIT_BYTES = 20 * 1024 * 1024
@@ -696,7 +687,6 @@ def stop_reason(reply: GeminiReply) -> StopReason | None:
 
 
 __all__ = [
-    "MALFORMED_FUNCTION_CALL_GUIDANCE",
     "GeminiReply",
     "MediaRoute",
     "convert_schema",

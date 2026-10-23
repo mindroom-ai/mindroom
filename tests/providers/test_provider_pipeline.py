@@ -45,12 +45,11 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.errors import classify_provider_error
-from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import stream_idle_timeout_seconds, wrap_provider
 from mindroom.providers.pipeline.deferred_tools import portable_tool_search_stream
-from mindroom.providers.pipeline.guidance_retry import guidance_retry_stream
+from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE, guidance_retry_stream
 from mindroom.providers.pipeline.media import FALLBACK_MARKER, media_fallback_stream
 from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
