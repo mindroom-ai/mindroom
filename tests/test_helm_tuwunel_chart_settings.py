@@ -181,15 +181,18 @@ def test_registration_option_is_free_without_a_registration_token() -> None:
     assert config["allow_registration"] is False
 
 
-def test_first_user_admin_grant_stays_settable() -> None:
-    """The chart's first-user admin default yields to an explicit setting instead of rendering the key twice."""
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [
+        ("tuwunel.settings.grant_admin_to_first_user=true", True),
+        ("tuwunel.settings.grant_admin_to_first_user=null", False),
+        ("tuwunel.settings=null", False),
+    ],
+)
+def test_first_user_admin_grant_stays_settable(setting: str, expected: bool) -> None:
+    """An explicit first-user admin setting replaces the chart's default; a null one or no settings keep it off."""
     config = _tuwunel_config(
-        _render_chart(
-            TUWUNEL_CHART,
-            "tuwunel.serverName=example.com",
-            "tuwunel.settings.grant_admin_to_first_user=true",
-            release_name="matrix",
-        ),
+        _render_chart(TUWUNEL_CHART, "tuwunel.serverName=example.com", setting, release_name="matrix"),
     )
 
-    assert config["grant_admin_to_first_user"] is True
+    assert config["grant_admin_to_first_user"] is expected

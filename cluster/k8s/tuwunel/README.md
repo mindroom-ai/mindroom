@@ -91,7 +91,7 @@ For multiple identity providers, use a fully custom config through `config.exist
 ## Server Admins
 
 The chart-rendered config turns off Tuwunel's `grant_admin_to_first_user`, so the first account to register or sign in does not become a server admin.
-To become admin by signing in first on a fresh install, set `tuwunel.settings.grant_admin_to_first_user: true` and remove it once you are admin; while it is on, the first account to register or sign in while the server has no other admin becomes admin.
+To make your own account admin on a fresh install, set `tuwunel.settings.grant_admin_to_first_user: true` before you first register or sign in, and remove it once you are admin; while it is on, the next account created while the server has no other admin becomes admin, and existing accounts are not promoted.
 Admins grant further admins with Tuwunel's `users make-user-admin` command.
 
 ## Structured Settings

@@ -179,7 +179,7 @@ address = {{ toJson .Values.tuwunel.listenAddresses }}
 port = {{ .Values.tuwunel.port }}
 database_path = {{ .Values.storage.mountPath | quote }}
 log = {{ .Values.tuwunel.logLevel | quote }}
-{{- if not (hasKey .Values.tuwunel.settings "grant_admin_to_first_user") }}
+{{- if kindIs "invalid" (index (.Values.tuwunel.settings | default dict) "grant_admin_to_first_user") }}
 grant_admin_to_first_user = false
 {{- end }}
 {{- if .Values.tuwunel.compactEdits }}
