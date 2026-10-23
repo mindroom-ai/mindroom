@@ -105,8 +105,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.messages import Message
-    from mindroom.llm.provider import NativeHistoryRoute, StopReason
+    from mindroom.llm.provider import NativeHistoryRoute
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
@@ -249,16 +248,11 @@ class ClaudeProvider:
                 response = await (
                     client.beta.messages.create(**kwargs) if prepared.beta else client.messages.create(**kwargs)
                 )
-                message, stop_reason = self._finish(
-                    response,
-                    request,
-                    prepared,
-                    started,
-                    first_output_at,
-                    streamed=False,
-                )
-                yield UsageReported(message.metrics)
-                yield TurnCompleted(message=message, stop_reason=stop_reason)
+                # TODO(simplify): A non-streaming reply leaves time_to_first_token unset. Stamp it when the whole
+                # reply arrives, as the other adapters do. Stored run metrics and operators would notice (#3075).
+                usage, completed = self._finished_turn(response, request, prepared, started, None, streamed=False)
+                yield usage
+                yield completed
                 return
             manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
             async with manager as events:
@@ -267,7 +261,7 @@ class ClaudeProvider:
                         # The SDK has already added the event's usage to its accumulated message.
                         yield UsageReported(parse_claude_usage(events.current_message_snapshot.usage), final=False)
                     elif isinstance(event, (ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
-                        message, stop_reason = self._finish(
+                        usage, completed = self._finished_turn(
                             event.message,
                             request,
                             prepared,
@@ -275,8 +269,8 @@ class ClaudeProvider:
                             first_output_at,
                             streamed=True,
                         )
-                        yield UsageReported(message.metrics)
-                        yield TurnCompleted(message=message, stop_reason=stop_reason)
+                        yield usage
+                        yield completed
                     elif (output := _output_event(event)) is not None:
                         first_output_at = first_output_at or time.monotonic()
                         yield output
@@ -287,7 +281,7 @@ class ClaudeProvider:
         except Exception as error:
             raise _provider_error(error, provider=self.identity.provider_name) from error
 
-    def _finish(
+    def _finished_turn(
         self,
         response: AnthropicMessage | BetaMessage,
         request: ModelRequest,
@@ -296,8 +290,8 @@ class ClaudeProvider:
         first_output_at: float | None,
         *,
         streamed: bool,
-    ) -> tuple[Message, StopReason | None]:
-        """Build the finished assistant message with MindRoom's provenance keys and timings."""
+    ) -> tuple[UsageReported, TurnCompleted]:
+        """Return the usage and completion of a finished response, its message stamped with provenance and timings."""
         message = assistant_message_from_response(
             response,
             record_context_management=self.settings.context_management is not None,
@@ -316,7 +310,7 @@ class ClaudeProvider:
             )
         elif stop_reason == "refusal":
             logger.warning("claude_safeguard_refusal", model_id=self.identity.id, stop_reason=raw_stop_reason)
-        return message, stop_reason
+        return UsageReported(message.metrics), TurnCompleted(message=message, stop_reason=stop_reason)
 
     def _output_format(self, response_format: type[BaseModel] | Mapping[str, Any] | None) -> dict[str, Any] | None:
         """Return the ``output_config.format`` value, or None when the route answers in JSON mode instead.
