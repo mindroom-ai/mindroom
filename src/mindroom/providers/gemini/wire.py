@@ -122,16 +122,12 @@ async def format_contents(
         parts = _message_parts(message, role)
         if role == "user" and message.tool_calls is None and not _is_tool_result(message):
             parts = await _with_media(message, parts, route)
-        if parts:
+        # Gemini rejects consecutive contents with the same role.
+        if parts and contents and contents[-1]["role"] == role:
+            contents[-1]["parts"].extend(parts)
+        elif parts:
             contents.append({"role": role, "parts": parts})
-    # Gemini rejects consecutive contents with the same role.
-    merged: list[dict[str, Any]] = []
-    for content in contents:
-        if merged and merged[-1]["role"] == content["role"]:
-            merged[-1]["parts"].extend(content["parts"])
-        else:
-            merged.append(content)
-    return merged, system_instruction
+    return contents, system_instruction
 
 
 def _is_tool_result(message: Message) -> bool:
