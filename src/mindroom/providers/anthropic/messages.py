@@ -62,7 +62,6 @@ from mindroom.providers.anthropic.native_compaction import (
     native_compaction_supported,
     native_replay_messages_for_route,
     record_native_checkpoint_on,
-    reject_paused_compaction,
     request_uses_native_checkpoint,
     uses_compaction_edit,
 )
@@ -382,12 +381,11 @@ class ClaudeProvider:
         """
         params = self._with_sampling_in_extra_body(self._authored_params(request))
         extra_body = params.get("extra_body") or {}
-        context_management = extra_body.get("context_management", params.get("context_management")) or {}
-        reject_paused_compaction(context_management)
+        compaction_edit = uses_compaction_edit(extra_body.get("context_management", params.get("context_management")))
         betas = list(self.settings.betas or [])
         if output_format is not None or (strict_tools and self.route == "anthropic"):
             betas.append(STRUCTURED_OUTPUTS_BETA)
-        if request.native_compaction is not None or uses_compaction_edit(context_management):
+        if request.native_compaction is not None or compaction_edit:
             betas.append(COMPACTION_BETA)
         if betas:
             params["betas"] = list(dict.fromkeys(betas))

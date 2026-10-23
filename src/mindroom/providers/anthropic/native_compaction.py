@@ -22,7 +22,7 @@ from mindroom.native_compaction import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import NativeCompactionReplay
@@ -40,7 +40,7 @@ _COMPACTION_INSTRUCTIONS = (
 )
 
 
-def _compact_edits(context_management: dict[str, Any] | Any) -> list[dict[str, Any]]:  # noqa: ANN401
+def _compact_edits(context_management: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     edits = context_management.get("edits", []) if isinstance(context_management, dict) else []
     return [edit for edit in edits if isinstance(edit, dict) and edit.get("type") == _COMPACTION_EDIT_TYPE]
 
@@ -81,16 +81,16 @@ def compaction_context_management(threshold: int) -> dict[str, Any]:
     }
 
 
-def reject_paused_compaction(context_management: dict[str, Any] | Any) -> None:  # noqa: ANN401
-    """Refuse an edit that pauses after compaction; MindRoom requires automatic continuation."""
-    if any(edit.get("pause_after_compaction") for edit in _compact_edits(context_management)):
+def uses_compaction_edit(context_management: Mapping[str, Any] | None) -> bool:
+    """Return whether the effective context management asks Claude to compact, so the request needs the beta.
+
+    An edit that pauses after compaction is refused, because MindRoom requires automatic continuation.
+    """
+    edits = _compact_edits(context_management)
+    if any(edit.get("pause_after_compaction") for edit in edits):
         msg = "pause_after_compaction=True is unsupported; MindRoom requires automatic continuation."
         raise ValueError(msg)
-
-
-def uses_compaction_edit(context_management: dict[str, Any] | Any) -> bool:  # noqa: ANN401
-    """Return whether the effective context management asks Claude to compact, so the request needs the beta."""
-    return bool(_compact_edits(context_management))
+    return bool(edits)
 
 
 def _is_unsigned_thinking(block: dict[str, Any]) -> bool:
@@ -195,7 +195,6 @@ __all__ = [
     "native_compaction_supported",
     "native_replay_messages_for_route",
     "record_native_checkpoint_on",
-    "reject_paused_compaction",
     "request_uses_native_checkpoint",
     "uses_compaction_edit",
 ]
