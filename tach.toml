@@ -5440,7 +5440,7 @@ depends_on = ["mindroom.llm"]
 
 [[modules]]
 path = "mindroom.agent_loop.structured"
-depends_on = []
+depends_on = ["mindroom.llm"]
 
 [[modules]]
 path = "mindroom.agent_loop.helper"

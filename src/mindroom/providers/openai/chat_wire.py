@@ -19,9 +19,9 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
+from mindroom.llm.messages import split_thinking
 from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics
-from mindroom.providers.assistant_turn import split_thinking
 from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.openai.errors import error_body_error
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part

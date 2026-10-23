@@ -26,6 +26,7 @@ from anthropic.types.beta import (
     BetaUsage,
 )
 
+from mindroom.llm.media import image_format
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
@@ -88,12 +89,6 @@ _IMAGE_MEDIA_TYPES = {
     "gif": "image/gif",
     "webp": "image/webp",
 }
-_IMAGE_SIGNATURES = (
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"GIF87a", "image/gif"),
-    (b"GIF89a", "image/gif"),
-)
 # Documents Claude reads as plain text; every other type is a base64 document, which the API accepts for PDF only.
 _TEXT_DOCUMENT_MEDIA_TYPES = frozenset(
     {
@@ -111,8 +106,6 @@ _TEXT_DOCUMENT_MEDIA_TYPES = frozenset(
         "application/x-python",
     },
 )
-# Claude stop reasons of a response the output limit cut off before it was complete.
-OUTPUT_LIMIT_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
 _STOP_REASONS: dict[str, StopReason] = {
     "end_turn": "end",
     "stop_sequence": "end",
@@ -242,13 +235,8 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
         return image.mime_type
     if image.format and (media_type := _IMAGE_MEDIA_TYPES.get(image.format.lower())) is not None:
         return media_type
-    if data is not None:
-        for signature, media_type in _IMAGE_SIGNATURES:
-            if data.startswith(signature):
-                return media_type
-        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-            return "image/webp"
-    return None
+    detected = None if data is None else image_format(data)
+    return None if detected is None else _IMAGE_MEDIA_TYPES.get(detected)
 
 
 def _url_document_stays_remote(file: File) -> bool:
@@ -642,7 +630,6 @@ def _stored_reasoning(blocks: list[str], *, streamed: bool) -> str | None:
 
 
 __all__ = [
-    "OUTPUT_LIMIT_STOP_REASONS",
     "TRAILING_USER_MESSAGE",
     "FormattedConversation",
     "assistant_message_from_response",

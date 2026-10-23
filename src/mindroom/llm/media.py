@@ -250,8 +250,8 @@ class Video:
         )
 
 
-def _image_format(data: bytes) -> str | None:
-    """Return the image format named by the file header's magic bytes."""
+def image_format(data: bytes) -> str | None:
+    """Return the image format named by the file header's magic bytes, or None when they name none."""
     if len(data) < IMAGE_HEADER_BYTES:
         return None
     if data[0:4] == b"GIF8" and data[5:6] == b"a":
@@ -272,7 +272,7 @@ def image_mime_type(image: Image, data: bytes) -> str:
         return f"image/{image.format.lower()}"
     if image.filepath and (guessed := mimetypes.guess_type(image.filepath)[0]):
         return guessed
-    detected = _image_format(data)
+    detected = image_format(data)
     return f"image/{detected}" if detected else "image/jpeg"
 
 
@@ -360,5 +360,6 @@ __all__ = [
     "File",
     "Image",
     "Video",
+    "image_format",
     "image_mime_type",
 ]

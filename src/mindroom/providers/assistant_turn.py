@@ -1,5 +1,4 @@
-# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""What every adapter does to finish a turn: record the answering model and timings, split ``<think>`` reasoning.
+"""What every adapter does to finish a turn: record the answering model and its timings.
 
 The ``mindroom_model`` provenance key is persisted with every assistant message and read by usage accounting,
 so each adapter stamps it through one function.
@@ -22,7 +21,6 @@ if TYPE_CHECKING:
 __all__ = [
     "finished_assistant_message",
     "output_started",
-    "split_thinking",
     "stamp_finished_turn",
 ]
 
@@ -77,19 +75,3 @@ def finished_assistant_message(
     if usage is not None:
         message.metrics = usage
     return stamp_finished_turn(message, identity, started=started, first_output_at=first_output_at)
-
-
-def split_thinking(content: str) -> tuple[str | None, str]:
-    """Split ``<think>`` reasoning from a reply that arrived whole, as Agno's ``extract_thinking_content`` callers did.
-
-    A missing opening tag means the reasoning starts the reply. Without a closing tag, or when the reasoning is
-    empty, the reply comes back unchanged with no reasoning, so an empty ``<think></think>`` block stays in the text.
-    """
-    end = content.find("</think>")
-    if end == -1:
-        return None, content
-    start = content.find("<think>")
-    reasoning = (content[:end] if start == -1 else content[start + len("<think>") : end]).strip()
-    if not reasoning:
-        return None, content
-    return reasoning, content[end + len("</think>") :].strip()

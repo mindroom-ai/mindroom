@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from mindroom.credentials.sync import get_ollama_host
 from mindroom.llm.errors import InvalidRequest, ProviderError
+from mindroom.llm.messages import split_thinking
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -33,7 +34,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import finished_assistant_message, output_started, split_thinking
+from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls

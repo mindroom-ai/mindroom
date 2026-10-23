@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
+from mindroom.llm.messages import split_thinking
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -98,8 +100,7 @@ def parse_structured[T: BaseModel](content: str, schema: type[T]) -> T | None:
     values cleaned up, then each top-level JSON object, merging several by the schema's fields.
     A leading ``<think>`` block is dropped first.
     """
-    if "</think>" in content:
-        content = _without_thinking(content)
+    _, content = split_thinking(content)
     parsed = _validated(content, schema)
     if parsed is not None:
         return parsed
@@ -127,14 +128,6 @@ def _validated_python[T: BaseModel](text: str, schema: type[T]) -> T | None:
         return schema.model_validate(json.loads(text))
     except (ValidationError, json.JSONDecodeError):
         return None
-
-
-def _without_thinking(content: str) -> str:
-    end = content.find("</think>")
-    start = content.find("<think>")
-    reasoning = content[:end] if start == -1 else content[start + len("<think>") : end]
-    # Agno keeps the text unchanged when the thinking block is empty.
-    return content[end + len("</think>") :].strip() if reasoning.strip() else content
 
 
 def _cleaned_json(content: str) -> str:
