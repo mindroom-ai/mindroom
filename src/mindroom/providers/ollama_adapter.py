@@ -288,8 +288,16 @@ def _read_whole_reply(reply: _OllamaReply, response: ChatResponse) -> None:
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
-    """Add one chunk to ``reply`` and return its events: its text, its tool calls, and the done chunk's usage."""
+    """Add one chunk to ``reply`` and return its events: the done chunk's usage first, then its text and tool calls.
+
+    The usage comes first, so a reply stopped while the done chunk's output is delivered still settles it.
+    """
     events: list[StreamEvent] = []
+    if chunk.done:
+        reply.done = True
+        reply.done_reason = chunk.done_reason
+        reply.usage = _usage(chunk)
+        events.append(UsageReported(reply.usage, final=False))
     message = chunk.message
     if message.content:
         reply.content += message.content
@@ -302,11 +310,6 @@ def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
         }
         reply.tool_calls.append(call)
         events.append(ToolCallReady(call))
-    if chunk.done:
-        reply.done = True
-        reply.done_reason = chunk.done_reason
-        reply.usage = _usage(chunk)
-        events.append(UsageReported(reply.usage, final=False))
     return events
 
 

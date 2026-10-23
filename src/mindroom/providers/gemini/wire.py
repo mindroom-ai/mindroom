@@ -573,10 +573,12 @@ def read_chunk(
 ) -> list[StreamEvent]:
     """Add one streamed chunk (or one ``whole_response`` from a non-streamed call) to ``reply`` and return its events.
 
-    Gemini repeats cumulative usage on every streamed chunk, so only usage on a finished candidate counts, and it is
-    returned as a partial report of the reply's usage so far. A whole response without candidates, such as a blocked
-    prompt, still counts its prompt usage, as Agno's non-streaming parser did; Agno's streaming parser dropped it, so
-    a streamed one does not. A candidate that ended in a malformed tool call reports its usage and nothing else;
+    Gemini repeats the reply's cumulative usage on every chunk, so each chunk that carries usage reports it first, as
+    a partial report that replaces the one before: a reply stopped, stalled, or failed after any chunk, or while a
+    chunk's output is delivered, still settles what was billed. Only a finished candidate's usage counts toward the
+    reply's own usage, as Agno counted it. A whole response without candidates, such as a blocked prompt, still
+    counts its prompt usage, as Agno's non-streaming parser did; Agno's streaming parser dropped it, so a streamed
+    one reports none. A candidate that ended in a malformed tool call reports its usage and nothing else;
     ``malformed_tool_call_error`` then ends the reply. A chunk that shows Google Search grounding or code execution
     at work reports that hosted tool's start.
     """
@@ -591,6 +593,14 @@ def read_chunk(
     candidate = chunk.candidates[0]
     events: list[StreamEvent] = []
     finish_reason = None if candidate.finish_reason is None else candidate.finish_reason.value
+    if finish_reason is not None:
+        reply.finish_reason = finish_reason
+    if chunk.usage_metadata is not None:
+        usage = _usage_metrics(chunk.usage_metadata)
+        so_far = usage if reply.usage is None else reply.usage + usage
+        if finish_reason is not None:
+            reply.usage = so_far
+        events.append(UsageReported(so_far, final=False))
     if finish_reason != _MALFORMED_FUNCTION_CALL:
         parts = candidate.content.parts if candidate.content is not None else None
         if candidate.grounding_metadata is not None:
@@ -598,12 +608,6 @@ def read_chunk(
         if any(part.executable_code is not None or part.code_execution_result is not None for part in parts or ()):
             events.append(hosted_tool_started("code_execution"))
         events.extend(event for part in parts or () for event in _read_part(reply, part))
-    if finish_reason is not None:
-        reply.finish_reason = finish_reason
-        if chunk.usage_metadata is not None:
-            usage = _usage_metrics(chunk.usage_metadata)
-            reply.usage = usage if reply.usage is None else reply.usage + usage
-            events.append(UsageReported(reply.usage, final=False))
     return events
 
 

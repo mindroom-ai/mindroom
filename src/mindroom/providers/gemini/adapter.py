@@ -111,8 +111,8 @@ class GeminiProvider:
         """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.
 
         Media uploads and downloads happen first, so their SDK and transport errors are normalized too. Usage is
-        reported as the reply's finished candidate carries it, so an attempt that fails or is cut off afterwards,
-        such as one that ended in a malformed tool call, still settles it.
+        reported as each chunk carries it, ahead of the chunk's output, so an attempt that fails or is cut off
+        afterwards, such as one that ended in a malformed tool call, still settles it.
         """
         started = time.monotonic()
         reply = GeminiReply()

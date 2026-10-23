@@ -618,8 +618,11 @@ class ChatStream:
     _calls: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     def add(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
-        """Fold one chunk and return the events it carried: its deltas, and a partial report of usage it carried."""
-        events: list[StreamEvent] = []
+        """Fold one chunk and return the events it carried: a partial report of usage it carried, then its deltas.
+
+        The usage comes first, so a reply stopped while the chunk's deltas are delivered still settles it.
+        """
+        events = self._add_usage(chunk)
         if chunk.choices:
             choice = chunk.choices[0]
             if choice.finish_reason is not None:
@@ -630,7 +633,6 @@ class ChatStream:
                     self._add_call_delta(call, position)
                 if self.wire.dialect == "openai":
                     events.extend(self._add_reasoning(_extra(delta)))
-        events.extend(self._add_usage(chunk))
         return events
 
     def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:

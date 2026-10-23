@@ -31,7 +31,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, ReportedUsage, complete
+from mindroom.llm.provider import ModelRequest, ReportedUsage, TextDelta, complete
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.retry import STREAM_STALLED
 from tests.providers.anthropic_family_support import ROUTE_CONFIGS, claude_message, provider_for
@@ -1399,8 +1399,11 @@ _USAGE_THEN_SILENCE: dict[str, Reply] = {
 }
 
 
-def _silent_after_usage(route: str) -> tuple[_OpenAfter, Callable[[httpx.Request], httpx.Response]]:
-    reply = _then_silent(_USAGE_THEN_SILENCE[route])()
+def _silent_after_usage(
+    route: str,
+    replies: dict[str, Reply] = _USAGE_THEN_SILENCE,
+) -> tuple[_OpenAfter, Callable[[httpx.Request], httpx.Response]]:
+    reply = _then_silent(replies[route])()
     assert isinstance(reply, httpx.Response)
     assert isinstance(reply.stream, _OpenAfter)
     body = reply.stream
@@ -1452,4 +1455,82 @@ async def test_usage_the_provider_reported_is_kept_when_the_stream_stalls_after_
         await consume()
 
     assert raised.value.code == STREAM_STALLED
+    assert _billed(usage) == (40, 9)
+
+
+# Gemini usage on a chunk before the finished one; Gemini repeats the reply's cumulative usage on every chunk.
+_GEMINI_RUNNING_USAGE = {"promptTokenCount": 40, "candidatesTokenCount": 1, "totalTokenCount": 41}
+# Each route's reply up to an event that reports usage before the reply ends, without the stream's end: Claude's
+# message start, a Chat server that reports usage on its content chunks, and an unfinished Gemini chunk.
+_RUNNING_USAGE_THEN_SILENCE: dict[str, Reply] = {
+    "anthropic": _claude_stream(*_claude_text(0, "ok")),
+    "openai_chat": _chat_stream(
+        {**_chat_chunk({"content": "ok"}), "usage": {"prompt_tokens": 40, "completion_tokens": 1, "total_tokens": 41}},
+    ),
+    "gemini": _gemini_stream({**_gemini_chunk({"text": "ok"}), "usageMetadata": _GEMINI_RUNNING_USAGE}),
+    "gemini_vertexai": _gemini_stream({**_gemini_chunk({"text": "ok"}), "usageMetadata": _GEMINI_RUNNING_USAGE}),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", _RUNNING_USAGE_THEN_SILENCE)
+async def test_usage_reported_before_the_reply_ends_is_kept_when_the_reply_is_cancelled_after_it(
+    route: str,
+    tmp_path: Path,
+) -> None:
+    """A reply cancelled after an intermediate chunk that reported usage settles that chunk's usage."""
+    body, respond = _silent_after_usage(route, _RUNNING_USAGE_THEN_SILENCE)
+    provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=None)
+    usage = ReportedUsage()
+
+    async def consume() -> None:
+        async for event in provider.stream(ModelRequest(messages=[Message(role="user", content="Hi")])):
+            usage.observe(event)
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(body.sent.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _billed(usage) == (40, 1)
+
+
+# Each route's reply whose usage arrives on the chunk that also carries output: Gemini's finished chunk, a Chat
+# server's content chunk, and Ollama's done chunk.
+_USAGE_WITH_OUTPUT: dict[str, Reply] = {
+    "openai_chat": _chat_stream({**_chat_chunk({"content": "ok"}), "usage": _CHAT_USAGE["usage"]}),
+    "gemini": _gemini_stream(_gemini_chunk({"text": "ok"}, finish="STOP")),
+    "gemini_vertexai": _gemini_stream(_gemini_chunk({"text": "ok"}, finish="STOP")),
+    "ollama": _ollama_stream(_ollama_chunk("ok", done=True)),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", _USAGE_WITH_OUTPUT)
+async def test_usage_is_kept_when_the_reply_is_cancelled_while_its_last_chunk_is_delivered(
+    route: str,
+    tmp_path: Path,
+) -> None:
+    """A reply cancelled while the chunk that carries its usage delivers its text still settles that usage."""
+    provider = pipeline_provider(
+        _adapter(route, tmp_path, lambda _request: _USAGE_WITH_OUTPUT[route]()),
+        idle_timeout_seconds=None,
+    )
+    usage = ReportedUsage()
+    delivered = asyncio.Event()
+
+    async def consume() -> None:
+        async for event in provider.stream(ModelRequest(messages=[Message(role="user", content="Hi")])):
+            usage.observe(event)
+            if isinstance(event, TextDelta):
+                delivered.set()
+                await asyncio.get_running_loop().create_future()
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(delivered.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
     assert _billed(usage) == (40, 9)

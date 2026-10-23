@@ -633,8 +633,8 @@ async def test_gemini_chunks_without_output_are_reported_as_progress(tmp_path: P
 
     assert [type(event).__name__ for event in events] == [
         "StreamProgress",
-        "TextDelta",
         "UsageReported",
+        "TextDelta",
         "UsageReported",
         "TurnCompleted",
     ]
