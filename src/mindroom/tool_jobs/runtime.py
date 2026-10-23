@@ -30,7 +30,7 @@ from mindroom.tool_jobs.control import (
 )
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_system.call_record import without_tool_call_recording
+from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.progress import cap_progress, tool_progress_reporter
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
@@ -577,7 +577,7 @@ class ToolJobRuntime:
                     without_approval_receipt(),
                     tool_progress_reporter(report_progress),
                     # The reply span that started the job may end first; the job owns its calls' outcome.
-                    without_tool_call_recording(),
+                    recording_tool_calls(None),
                     job_control_context(entry.control),
                     queued_message_signal_context(None) as notice,
                 ):

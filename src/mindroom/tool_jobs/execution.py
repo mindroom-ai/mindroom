@@ -261,7 +261,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
         check_current_execution_authority()
         if mode != "managed" or call.function.external_execution:
             # A native call keeps its arguments, so a stray wait budget fails instead of running silently.
-            arguments = call.arguments if mode == "native" else application_arguments(call.arguments) or {}
+            arguments = call.arguments if mode == "native" else application_arguments(call.arguments)
             return await _run_here(job_call, call_next, arguments)
     return await _run_managed_call(
         inner,
@@ -323,7 +323,7 @@ def _detached(call: JobCall) -> JobCall:
         session_state=session_state_snapshot(call.context.session_state),
         metadata=deepcopy(call.context.metadata),
     )
-    return replace(call, arguments=application_arguments(deepcopy(dict(call.arguments))) or {}, context=context)
+    return replace(call, arguments=application_arguments(deepcopy(dict(call.arguments))), context=context)
 
 
 # The approval a gated call asks for as the first phase of its job: whether it was approved, and why not.
