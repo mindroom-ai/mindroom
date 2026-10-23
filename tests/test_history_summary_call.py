@@ -21,7 +21,6 @@ from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
-from mindroom.history.runtime import _compaction_failure_status
 from mindroom.history.storage import (
     _with_scope_state,
     read_scope_state,
@@ -30,6 +29,7 @@ from mindroom.history.summary_call import (
     SummaryRetryPolicy,
     _CompactionSummaryTimeoutError,
     generate_compaction_summary,
+    is_summary_timeout,
 )
 from mindroom.history.summary_input import _compaction_replay_messages, build_summary_input
 from mindroom.history.types import (
@@ -714,20 +714,20 @@ def test_owned_timeout_classification_does_not_depend_on_message_text() -> None:
     """Renaming an engine deadline message cannot change retry or lifecycle decisions."""
     error = _CompactionSummaryTimeoutError("deadline expired")
     assert SummaryRetryPolicy().should_shrink(error)
-    assert _compaction_failure_status(error) == "timeout"
+    assert is_summary_timeout(error)
 
 
 def test_a_compaction_failure_is_a_timeout_by_its_type_or_a_providers_own_words() -> None:
     """A transport timeout counts by its code, a provider's own timeout by its text, and no other error by wording."""
     timed_out = provider_failure(httpx.PoolTimeout(""), provider="fake")
     assert timed_out is not None
-    assert _compaction_failure_status(timed_out) == "timeout"
+    assert is_summary_timeout(timed_out)
     provider_side = classify_provider_error("upstream request timed out", provider="fake", status_code=504)
-    assert _compaction_failure_status(provider_side) == "timeout"
+    assert is_summary_timeout(provider_side)
     refused = provider_failure(httpx.ConnectError("connection refused"), provider="fake")
     assert refused is not None
-    assert _compaction_failure_status(refused) == "failed"
-    assert _compaction_failure_status(RuntimeError("lock wait timed out")) == "failed"
+    assert not is_summary_timeout(refused)
+    assert not is_summary_timeout(RuntimeError("lock wait timed out"))
 
 
 def test_build_summary_input_oversized_run_keeps_the_call_its_result_answers() -> None:
