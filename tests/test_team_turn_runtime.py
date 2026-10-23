@@ -974,6 +974,68 @@ async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_stream
     assert result.response_text == HEADER + body
 
 
+_KEY = "api_key=unit-test-secret"
+
+
+async def _writer_leaks_its_key() -> None:
+    msg = f"Writer unavailable: {_KEY}"
+    raise ProviderError(msg, provider="Synthetic", status_code=503)
+
+
+async def _checker_leaks_its_key() -> None:
+    msg = f"Checker unavailable: {_KEY}"
+    raise ProviderError(msg, provider="Synthetic", status_code=503)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("leader", "checker", "writer", "body"),
+    [
+        pytest.param(
+            [delegate("call-write", "writer", "Write it up"), answer("Done.")],
+            [answer("Touched.")],
+            [[Await(_writer_leaks_its_key)]],
+            "**Writer**: Writer unavailable: api_key=***redacted***\n\n**Checker**: Touched.\n\n\n"
+            "**Team Consensus**:\n\nDone.",
+            id="started-in-the-resume",
+        ),
+        pytest.param(
+            [answer("Done.")],
+            [[Await(_checker_leaks_its_key)]],
+            [],
+            "**Checker**: Checker unavailable: api_key=***redacted***\n\n\n**Team Consensus**:\n\nDone.",
+            id="resumed-after-approval",
+        ),
+    ],
+)
+async def test_an_approved_resume_shows_a_failed_member_s_redacted_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leader: list[list[ScriptStep]],
+    checker: list[list[ScriptStep]],
+    writer: list[list[ScriptStep]],
+    body: str,
+) -> None:
+    """A member whose run fails in an approval resume shows why in the resumed reply, credentials redacted.
+
+    The writer the resumed leader hands a task fails before it writes anything. The approved checker fails after its
+    approved call ran, while its record still holds its paused notice, which the reply no longer shows instead.
+    """
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel(leader)
+    team.models["checker-model"] = ScriptedModel(checker)
+    team.models["writer-model"] = ScriptedModel(writer)
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert ProbeToolkit.calls == ["dangerous"]
+    assert result.response_text == HEADER + body
+
+
 @pytest.mark.asyncio
 async def test_an_approved_resume_shows_once_the_text_its_runs_wrote_before_the_pause(
     tmp_path: Path,
@@ -1106,6 +1168,25 @@ async def test_a_failed_blocking_team_turn_records_the_failed_run_s_records(
     assert (record.status, record.content) == (RunStatus.error, "provider connection lost")
     assert team.recorder.outcome == "interrupted"
     assert team.recorder.assistant_text == recorded
+
+
+async def _lose_the_provider_and_leak_its_key() -> None:
+    msg = f"provider connection lost: {_KEY}"
+    raise ProviderError(msg, provider="Synthetic")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_blocking_team_turn_records_its_leader_s_redacted_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The text a blocking turn records when its leader fails before writing is why it failed, credentials redacted."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[[Await(_lose_the_provider_and_leak_its_key)]])
+
+    await team.respond(show_tool_calls=False)
+
+    assert team.recorder.outcome == "interrupted"
+    assert team.recorder.assistant_text == "**Team Consensus**:\n\nprovider connection lost: api_key=***redacted***"
 
 
 @pytest.mark.asyncio

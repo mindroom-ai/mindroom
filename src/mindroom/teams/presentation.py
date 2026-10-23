@@ -139,15 +139,16 @@ def format_team_response(record: TeamRunRecord, members: Sequence[RunRecord]) ->
 
     ``members`` are the member runs that ended, in the order they ended; each contributes its ``finished_run_text``,
     so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
-    credentials redacted, even when it wrote text first. The leader's content is the consensus. A run in which nobody
-    wrote anything renders as empty text.
+    credentials redacted, even when it wrote text first. What the leader's run hands over (``handover_content``) is
+    the consensus, so a leader that failed shows that reason too. A run in which nobody wrote anything renders as
+    empty text.
     """
     contributions = [
         _format_member_contribution(member.agent_name or "Team Member", text)
         for member in members
         if (text := finished_run_text(member)).strip()
     ]
-    return "\n\n".join(_with_consensus(contributions, str(record.content or "")))
+    return "\n\n".join(_with_consensus(contributions, str(record.handover_content or "")))
 
 
 def team_response_text(record: TeamRunRecord, members: Sequence[RunRecord]) -> str:
