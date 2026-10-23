@@ -521,7 +521,11 @@ def build_provider_message_blobs_from_messages(
             break
 
     if is_claude_request(model_id):
-        chat_messages = format_claude_messages(prompt_messages, append_trailing_user_message=False).messages
+        chat_messages = format_claude_messages(
+            prompt_messages,
+            append_trailing_user_message=False,
+            citations=True,
+        ).messages
         if apply_cache_ladder:
             cache_control = ladder_cache_control(model_params)
             if cache_control is not None:

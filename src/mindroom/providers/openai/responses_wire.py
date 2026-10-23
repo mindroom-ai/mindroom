@@ -461,7 +461,7 @@ class ResponsesStream:
     store: bool | None
     portable_replay: bool
     native_compaction: NativeCompactionReplay | None
-    text_as_reasoning: bool = False
+    text_as_reasoning: bool
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
     completed: bool = False
     exposed: bool = False
@@ -579,7 +579,7 @@ def parse_response(
     store: bool | None,
     portable_replay: bool,
     native_compaction: NativeCompactionReplay | None,
-    text_as_reasoning: bool = False,
+    text_as_reasoning: bool,
 ) -> ResponsesTurnParts:
     """Read one non-streamed response into a finished turn.
 

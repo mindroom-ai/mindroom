@@ -163,7 +163,7 @@ def format_claude_messages(
     messages: Sequence[Message],
     *,
     append_trailing_user_message: bool,
-    citations: bool = True,
+    citations: bool,
 ) -> FormattedConversation:
     """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
 

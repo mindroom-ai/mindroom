@@ -102,6 +102,7 @@ def _parsed(adapter: ResponsesAdapter, output: list[dict[str, Any]], **message: 
         store=adapter.wire.store,
         portable_replay=False,
         native_compaction=adapter.native_compaction_settings(threshold=1024),
+        text_as_reasoning=False,
     )
     fields = {"content": parts.content, "tool_calls": parts.tool_calls or None, "provider_data": parts.provider_data}
     return Message(role="assistant", **{**fields, **message})
@@ -523,6 +524,7 @@ def test_only_a_completed_response_records_its_replay_policy(tmp_path: Path, *, 
         store=True,
         portable_replay=portable,
         native_compaction=None,
+        text_as_reasoning=False,
     )
 
     if status == "completed":
@@ -789,6 +791,7 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
             store=None,
             portable_replay=False,
             native_compaction=None,
+            text_as_reasoning=False,
         ).usage
 
     assert usage is not None
