@@ -1588,6 +1588,23 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
 
 
 @pytest.mark.asyncio
+async def test_a_forked_review_logs_only_the_requests_it_made(tmp_path: Path) -> None:
+    """A fork resends the reply's own answer, so the review's request count must leave that answer out."""
+    config, paths = _learning_agent_with_a_skill(tmp_path)
+    model = _model()
+    capture = SkillReviewCapture()
+    await _answer(model, capture, _agent_tools(config, paths, []))
+    model.script = [("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED})]
+    with structlog.testing.capture_logs() as logs:
+        await _review(config, paths, captured=capture.latest)
+    [finished] = [log for log in logs if log["event"] == "Skill review model run finished"]
+    assert finished["forked"] is True
+    # The reply's one request, then the review's two: the skill_manage call and its closing answer.
+    assert len(model.requests) == 3
+    assert finished["model_requests"] == 2
+
+
+@pytest.mark.asyncio
 async def test_the_fork_offers_the_run_s_own_definitions_without_the_wait_budget_of_its_jobs(tmp_path: Path) -> None:
     """A reply whose calls can become jobs offers their wait budget; the fork offers the definitions its run declares.
 

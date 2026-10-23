@@ -22,7 +22,7 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopEnded, L
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.llm.events import RunFinished
-from mindroom.llm.messages import MODEL_PROVENANCE_KEY
+from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
@@ -400,19 +400,11 @@ async def _persist_quietly[R: AnyRunRecord](persist: Persist[R], record: R) -> N
 
 
 def own_model_messages(record: AnyRunRecord) -> list[Message]:
-    """Return each message the run's own model requests answered, oldest first, tool-calling steps included.
+    """Return each message the run's own model requests answered (``is_own_model_message``), oldest first.
 
-    A run's input can carry the thread's earlier replies as assistant messages, which the run stores with its own;
-    only a message a model answered carries its provenance (``MODEL_PROVENANCE_KEY``), and a history copy is marked
-    ``from_history``, so neither is this run's.
+    Tool-calling steps count; the thread's earlier replies that the run's input carried, stored with the run, do not.
     """
-    return [
-        message
-        for message in record.messages
-        if message.role == "assistant"
-        and not message.from_history
-        and MODEL_PROVENANCE_KEY in (message.provider_data or {})
-    ]
+    return [message for message in record.messages if is_own_model_message(message)]
 
 
 def own_answers(record: AnyRunRecord) -> list[str]:

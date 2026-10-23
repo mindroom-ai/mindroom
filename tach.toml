@@ -2874,6 +2874,7 @@ depends_on = [
     "mindroom.history.summary_call",
     "mindroom.history.team_scope",
     "mindroom.history.types",
+    "mindroom.llm",
     "mindroom.model_usage",
 ]
 

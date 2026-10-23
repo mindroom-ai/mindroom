@@ -57,6 +57,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
 )
+from mindroom.llm.messages import is_own_model_message
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
 from mindroom.redaction import redact_sensitive_text
@@ -473,7 +474,10 @@ def _reported_history_tokens(
     ):
         return None
     messages = [message for message in latest_run.messages or [] if not message.from_history]
-    anchor = next((index for index in range(len(messages) - 1, -1, -1) if messages[index].role == "assistant"), None)
+    anchor = next(
+        (index for index in range(len(messages) - 1, -1, -1) if is_own_model_message(messages[index])),
+        None,
+    )
     # History replay drops or bounds media that request carried in full.
     if anchor is None or any(
         message.images or message.audio or message.videos or message.files for message in messages

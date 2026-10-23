@@ -39,8 +39,21 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
 AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
 # which usage attribution reads (``usage/storage.py``, ``memory/_mem0_usage.py``) and which tells a run's own model
-# messages from the replies its input carries (``agent_loop/run.py`` ``own_model_messages``).
+# messages from the replies its input carries (``is_own_model_message``).
 MODEL_PROVENANCE_KEY = "mindroom_model"
+
+
+def is_own_model_message(message: Message) -> bool:
+    """Return whether a model answered ``message`` in the run that holds it.
+
+    A run's input can carry the thread's earlier replies as assistant messages; only a message a model answered
+    carries its provenance (``MODEL_PROVENANCE_KEY``), and a history copy is marked ``from_history``.
+    """
+    return (
+        message.role == "assistant"
+        and not message.from_history
+        and MODEL_PROVENANCE_KEY in (message.provider_data or {})
+    )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -190,5 +203,6 @@ __all__ = [
     "AGGREGATE_USAGE_KEY",
     "MODEL_PROVENANCE_KEY",
     "Message",
+    "is_own_model_message",
     "split_thinking",
 ]
