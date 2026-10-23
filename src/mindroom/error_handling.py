@@ -32,9 +32,10 @@ _MISSING_PROVIDER_KEY_PATTERN = re.compile(
     r"|missing credentials\. please pass an `api_key`"  # Newer OpenAI SDK
     r"|could not resolve authentication method",  # Anthropic SDK
 )
-# Wording of text without a provider payload, read as whole words: a 401 status, and a throttled request's rate,
-# 429, or quota. Lowercased, an error's name is one word, so only a name that starts with ``ratelimit`` or
-# ``quotaexceeded`` (``RateLimitError``, ``QuotaExceededError``) holds those words; ``RateError``, ``QuotaError``, and
+# Wording of text without a provider payload, read as whole words: a 401 status, and a throttled request's ``429``,
+# ``rate``, ``quota``, ``quotas``, or any of ``ratelimit``, ``quotaexceeded``, and ``quotasexceeded`` followed by any
+# letters. Lowercased, an error's name is one word, so only a name that starts with one of those three holds the
+# wording (``RateLimitError``, ``QuotaExceededError``, ``QuotasExceededError``); ``RateError``, ``QuotaError``, and
 # ``OpenAIRateLimitError`` do not. Of the credential names, only the auth family's own (``AuthenticationError``,
 # ``AuthorizationError``, ``UnauthorizedError``) is read; ``AuthError``, ``GoogleAuthError``, and ``InvalidApiKeyError``
 # are not. Splitting CamelCase would also read a property name such as ``authToken`` as wording about the credentials.
