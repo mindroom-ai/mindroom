@@ -292,10 +292,11 @@ class ConversationStore:
         ``session_state_snapshot``, the session state commits in the same transaction (see ``save_run``). Once the
         transaction commits, ``session.runs`` holds each run as the store does (see ``_reconcile``), so a removed run
         leaves the session and a frozen one keeps the session's copy. Callers therefore edit a copy and hand the copy
-        here: a refused save must leave the session's copy as stored.
+        here: a refused save must leave the session's copy as stored. A call with neither runs nor ``state`` writes
+        nothing.
         """
         runs = list(runs)
-        if not runs:
+        if not runs and state is None:
             return
         loaded = {id(existing) for existing in session.runs}
         if any(id(run) in loaded for run in runs):

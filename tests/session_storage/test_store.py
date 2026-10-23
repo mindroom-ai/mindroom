@@ -1137,6 +1137,34 @@ async def test_persist_to_stores_a_record_and_its_state_together_or_neither(stor
     assert _loaded_ids(store) == ["r1", "r2"]
 
 
+@pytest.mark.parametrize("row_exists", [False, True], ids=["new-row", "stored-row"])
+def test_save_runs_with_a_state_and_no_runs_still_writes_the_state(
+    store: ConversationStore,
+    *,
+    row_exists: bool,
+) -> None:
+    """A state handed to a save is stored whether or not runs came with it, so the call never drops it silently."""
+    session = _session()
+    if row_exists:
+        store.ensure_session_row(session)
+    state = {"cwd": "/repo"}
+
+    store.save_runs(session, [], state=state)
+
+    fields = store.read_session_fields("s1")
+    assert fields is not None
+    assert fields.session_state == state
+    assert session.stored_session_state == state
+    assert _loaded_ids(store) == []
+
+
+def test_save_runs_with_no_runs_and_no_state_writes_nothing(store: ConversationStore) -> None:
+    """An empty rewrite is a no-op that does not even create the session's row."""
+    store.save_runs(_session(), [])
+
+    assert store.read_session_fields("s1") is None
+
+
 @pytest.mark.asyncio
 async def test_persist_to_compares_the_state_with_what_the_session_loaded_or_last_wrote(
     store: ConversationStore,
