@@ -313,6 +313,8 @@ class _CommittedDeliveryState:
     visible_body_state: Literal["placeholder_only", "visible_body"]
     interactive_metadata: interactive.InteractiveMetadata | None
     stream_status: str
+    # The stream's pending-character count when this state was captured.
+    chars_since_last_update: int
     # The text before the final transform reshaped it, when it did.
     untransformed_text: str | None = None
 
@@ -422,6 +424,7 @@ class _StreamingDeliverySnapshot:
     interactive_creator_agent: str | None
     interactive_source_event_id: str | None
     markdown_renderer: Callable[[str], str]
+    chars_since_last_update: int
     untransformed_text: str | None = None
 
 
@@ -515,6 +518,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
             ),
             interactive_metadata=response.interactive_metadata,
             stream_status=snapshot.stream_status,
+            chars_since_last_update=snapshot.chars_since_last_update,
             untransformed_text=snapshot.untransformed_text,
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
@@ -698,8 +702,8 @@ class StreamingResponse:
         self.last_delta_at = time.time()
 
     def _mark_nonadditive_text_mutation(self) -> None:
-        """Record a visible in-place text change that did not append characters."""
-        self.chars_since_last_update = max(1, self.chars_since_last_update)
+        """Count a visible in-place text change that did not append characters as one received character."""
+        self.chars_since_last_update += 1
         self.last_delta_at = time.time()
 
     def _ensure_hidden_tool_gap(self) -> None:
@@ -749,34 +753,36 @@ class StreamingResponse:
         now = time.time()
         if self.stream_started_at is None:
             self.stream_started_at = now
-        delivery_matches_live_state = (
-            _normalize_stream_accumulated_text(self.accumulated_text) == committed_state.accumulated_text
-            and _tool_traces_match(self.tool_trace, committed_state.tool_trace)
-            and self.presentation_state == committed_state.presentation_state
-        )
-        if delivery_matches_live_state:
-            self.last_update = now
+        self.last_update = now
+        if self._live_state_matches(committed_state):
             self.last_delta_at = now
             self.last_boundary_refresh_at = now if boundary_refresh else None
             self.chars_since_last_update = 0
             return
 
         # The outbound payload was captured before newer live state arrived.
-        # Keep pending-delta bookkeeping and boundary-refresh eligibility intact
-        # so the next request can surface the newer content immediately.
+        # What the stream received after the capture stays pending, and
+        # boundary-refresh eligibility stays intact, so a later request
+        # delivers it when the throttle allows. The single delivery owner
+        # captures and lands each edit, so the counter only grows in between.
+        # A tool-trace or presentation change alone adds nothing here, just as
+        # it adds nothing when it arrives between edits.
         self.last_boundary_refresh_at = None
-        self.chars_since_last_update = max(1, self.chars_since_last_update)
+        self.chars_since_last_update -= committed_state.chars_since_last_update
+
+    def _live_state_matches(self, captured: _CommittedDeliveryState) -> bool:
+        """Return whether the live text, tool trace, and presentation still equal one captured state."""
+        return (
+            _normalize_stream_accumulated_text(self.accumulated_text) == captured.accumulated_text
+            and _tool_traces_match(self.tool_trace, captured.tool_trace)
+            and self.presentation_state == captured.presentation_state
+        )
 
     def matching_inflight_nonterminal_capture(self) -> asyncio.Future[None] | None:
         """Return the current in-flight capture when it already froze the live state."""
         if self._inflight_nonterminal_capture is None or self._inflight_nonterminal_capture_state is None:
             return None
-        if (
-            _normalize_stream_accumulated_text(self.accumulated_text)
-            == self._inflight_nonterminal_capture_state.accumulated_text
-            and _tool_traces_match(self.tool_trace, self._inflight_nonterminal_capture_state.tool_trace)
-            and self.presentation_state == self._inflight_nonterminal_capture_state.presentation_state
-        ):
+        if self._live_state_matches(self._inflight_nonterminal_capture_state):
             return self._inflight_nonterminal_capture
         return None
 
@@ -1250,6 +1256,7 @@ class StreamingResponse:
             interactive_creator_agent=self.interactive_creator_agent,
             interactive_source_event_id=self.interactive_source_event_id,
             markdown_renderer=self._render_markdown,
+            chars_since_last_update=self.chars_since_last_update,
         )
 
     async def _prepare_delivery_async(
