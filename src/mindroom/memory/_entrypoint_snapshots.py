@@ -1,7 +1,8 @@
-"""Keep a conversation's inlined MEMORY.md unchanged while entries are added and its prompt cache can be reused.
+"""Keep a conversation's inlined MEMORY.md unchanged while its copy only gains lines and its prompt cache can be reused.
 
 The preamble is part of the system prompt, so a changed preamble makes the provider re-read the whole
-conversation after it. A conversation therefore keeps the preamble it last sent while the file only gains lines,
+conversation after it. A conversation therefore keeps the preamble it last sent while its inlined copy only gains
+lines (a file over a preload cap drops its oldest kept entry for each new one, so its copy loads again),
 until it idles past the cache lifetime, its history is compacted, or the process restarts; the conversation
 already shows the agent its own memory writes as tool calls.
 """
