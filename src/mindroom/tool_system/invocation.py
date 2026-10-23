@@ -16,7 +16,6 @@ its own call id reads it there instead of taking it as a parameter.
 from __future__ import annotations
 
 import ast
-import asyncio
 import inspect
 import json
 from collections.abc import AsyncIterator, Iterator
@@ -272,8 +271,6 @@ async def execute_tool_call(
     """
     try:
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
-    except asyncio.CancelledError:
-        raise
     except Exception as error:
         return ToolOutcome(content=str(error), stop_after_call=function.stop_after_tool_call, is_error=True)
     return ToolOutcome(
