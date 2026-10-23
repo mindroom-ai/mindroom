@@ -98,27 +98,7 @@ def run_team(
         team_name=spec.name,
     )
     messages = [spec.system_message, *run_input]
-
-    async def produce(emit: Emit) -> None:
-        stream = request_template.stream
-        members = _MemberRuns(spec, record, ctx, emit, persist, stream=stream)
-        leader = _leader_spec(spec, record, members.run, stream=stream)
-        await _forward(
-            drive_run(
-                leader,
-                record,
-                messages,
-                prepare_run_tools(leader),
-                ctx=ctx,
-                hooks=hooks,
-                persist=persist,
-                template=request_template,
-                pause_content=team_paused_content,
-            ),
-            emit,
-        )
-
-    return _team_stream(produce)
+    return _drive_team(spec, record, messages, ctx=ctx, hooks=hooks, persist=persist, template=request_template)
 
 
 def continue_team(
@@ -165,45 +145,31 @@ def continue_team(
     )
     prepare_resume_tools(_base_leader_spec(spec), leader.approved)
     decisions.require_consumed()
-    template = resume_request_template(request_template)
 
-    async def produce(emit: Emit) -> None:
-        stream = template.stream
-        members = _MemberRuns(spec, record, ctx, emit, persist, stream=stream)
-        leader = _leader_spec(spec, record, members.run, stream=stream)
-        prepared = prepare_run_tools(leader)
+    async def entry(members: _MemberRuns) -> None:
+        results: list[str] = []
+        for plan in plans:
+            resumed = await members.resume(plan.member, plan.paused, plan.plan)
+            if resumed.status is RunStatus.paused:
+                propagate_member_pause(record, plan.member, resumed)
+            else:
+                # TODO(simplify): A resumed member's result is its raw content, or ``Task completed`` without any,
+                # unlike a first run's (``member_result_text``). Use that rule for both. Models would notice.
+                results.append(f"[{plan.member.spec.name}]: {resumed.handover_content or 'Task completed'}")
+        if plans and all(r.is_resolved() for r in record.requirements or ()):
+            _answer_delegations(record, messages, [plan.member for plan in plans], results)
 
-        async def entry() -> None:
-            results: list[str] = []
-            for plan in plans:
-                resumed = await members.resume(plan.member, plan.paused, plan.plan)
-                if resumed.status is RunStatus.paused:
-                    propagate_member_pause(record, plan.member, resumed)
-                else:
-                    # TODO(simplify): A resumed member's result is its raw content, or ``Task completed`` without any,
-                    # unlike a first run's (``member_result_text``). Use that rule for both. Models would notice.
-                    results.append(f"[{plan.member.spec.name}]: {resumed.handover_content or 'Task completed'}")
-            if plans and all(r.is_resolved() for r in record.requirements or ()):
-                _answer_delegations(record, messages, [plan.member for plan in plans], results)
-
-        await _forward(
-            drive_run(
-                leader,
-                record,
-                messages,
-                prepared,
-                ctx=ctx,
-                hooks=hooks,
-                persist=persist,
-                template=template,
-                entry=entry,
-                resumed=decided,
-                pause_content=team_paused_content,
-            ),
-            emit,
-        )
-
-    return _team_stream(produce)
+    return _drive_team(
+        spec,
+        record,
+        messages,
+        ctx=ctx,
+        hooks=hooks,
+        persist=persist,
+        template=resume_request_template(request_template),
+        entry=entry,
+        resumed=decided,
+    )
 
 
 def team_paused_content(record: TeamRunRecord) -> str:
@@ -493,14 +459,43 @@ class _MemberRuns:
         return next(run for run in self.record.ended_member_runs if run.run_id == run_id)
 
 
-async def _forward(stream: AsyncIterator[RunEvent], emit: Emit) -> None:
-    async with closing_async_stream(stream):
-        async for event in stream:
-            emit(event)
+async def _drive_team(
+    spec: TeamSpec,
+    record: TeamRunRecord,
+    messages: list[Message],
+    *,
+    ctx: RunContext,
+    hooks: LoopHooks,
+    persist: Persist[AnyRunRecord] | None,
+    template: ModelRequest,
+    entry: Callable[[_MemberRuns], Awaitable[None]] | None = None,
+    resumed: Sequence[RunRequirement] | None = None,
+) -> AsyncIterator[TeamRunEvent]:
+    """Stream the leader's loop over ``messages`` and its members' runs, owning the team run's cancellation.
 
+    ``entry`` is the work the run does with its members before the loop, and ``resumed`` the leader's decided calls.
+    """
 
-async def _team_stream(produce: Callable[[Emit], Awaitable[None]]) -> AsyncIterator[TeamRunEvent]:
-    """Stream what ``produce`` emits while it runs the team, owning its cancellation."""
+    async def produce(emit: Emit) -> None:
+        members = _MemberRuns(spec, record, ctx, emit, persist, stream=template.stream)
+        leader = _leader_spec(spec, record, members.run, stream=template.stream)
+        stream = drive_run(
+            leader,
+            record,
+            messages,
+            prepare_run_tools(leader),
+            ctx=ctx,
+            hooks=hooks,
+            persist=persist,
+            template=template,
+            entry=None if entry is None else lambda: entry(members),
+            resumed=resumed,
+            pause_content=team_paused_content,
+        )
+        async with closing_async_stream(stream):
+            async for event in stream:
+                emit(event)
+
     stream = callback_event_stream(produce)
     async with closing_async_stream(stream):
         async for item in stream:
