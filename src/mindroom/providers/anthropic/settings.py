@@ -95,21 +95,22 @@ class ClaudeSettings:
     session: Session | None = field(default=None, metadata=SECRET)
 
     def effective_thinking(self) -> Mapping[str, Any] | None:
-        """Return the thinking setting after the raw request overrides, as the SDK merges the body."""
-        params = {"thinking": self.thinking, **(self.request_params or {})}
-        extra_body = params.get("extra_body") or {}
-        return extra_body.get("thinking", params.get("thinking"))
+        """Return the thinking setting after the raw request overrides."""
+        return self._after_request_params("thinking", self.thinking)
 
     def thinking_enabled(self) -> bool:
         """Return whether requests run with thinking on, so prefill is rejected and a trailing user turn is needed."""
         thinking = self.effective_thinking()
         return isinstance(thinking, dict) and thinking.get("type") != "disabled"
 
-    def effective_context_management(self) -> Mapping[str, Any]:
+    def effective_context_management(self) -> Mapping[str, Any] | None:
         """Return the context-management setting after the raw request overrides."""
-        params = {"context_management": self.context_management, **(self.request_params or {})}
-        extra_body = params.get("extra_body") or {}
-        return extra_body.get("context_management", params.get("context_management")) or {}
+        return self._after_request_params("context_management", self.context_management)
+
+    def _after_request_params(self, name: str, authored: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        """Return one body field as the SDK merges the body: ``extra_body`` over ``request_params`` over the field."""
+        request_params = self.request_params or {}
+        return (request_params.get("extra_body") or {}).get(name, request_params.get(name, authored))
 
 
 def parse_claude_settings(route: ClaudeRouteKind, extra_kwargs: Mapping[str, Any] | None) -> ClaudeSettings:
