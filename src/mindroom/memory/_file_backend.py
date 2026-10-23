@@ -874,6 +874,14 @@ def _entrypoint_lines_within_caps(lines: list[str], max_lines: int, max_tokens: 
     return [*head, *reversed(newest)]
 
 
+def entrypoint_withholds_lines(text: str, config: Config) -> bool:
+    """Return whether the MEMORY.md preload would leave out any line of ``text``."""
+    lines = text.splitlines()
+    file_config = config.memory.file
+    kept = _entrypoint_lines_within_caps(lines, file_config.max_entrypoint_lines, file_config.max_entrypoint_tokens)
+    return len(kept) < len(lines)
+
+
 @timed("system_prompt_assembly.memory_file_entrypoint_read")
 def _load_scope_entrypoint_context(
     scope_user_id: str,

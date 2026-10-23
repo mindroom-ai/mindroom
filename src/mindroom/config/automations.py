@@ -71,7 +71,7 @@ class PromptCurationAutomation(_ScheduledAutomation):
         ge=1,
         description=(
             "Post the prompt once MEMORY.md and the context files total more than this many estimated tokens; "
-            "MEMORY.md longer than memory.file.max_entrypoint_lines also posts it"
+            "a MEMORY.md the preload cannot show whole (memory.file.max_entrypoint_lines or max_entrypoint_tokens) also posts it"
         ),
     )
     min_reduction: float = Field(

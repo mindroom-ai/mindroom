@@ -107,6 +107,19 @@ def test_memory_past_the_preload_line_cap_asks_for_a_cut_under_the_token_trigger
     assert "If MEMORY.md is over 16 lines" in prompt
 
 
+def test_memory_past_the_preload_token_cap_asks_for_a_cut_under_the_token_trigger(tmp_path: Path) -> None:
+    """Whatever the preload withholds triggers a pass, including lines past memory.file.max_entrypoint_tokens."""
+    config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
+    config.memory.file.max_entrypoint_tokens = 2_000
+    assert _plan_curation(config, root, "mind", automation) is None
+    config.memory.file.max_entrypoint_tokens = 1_000
+
+    plan = _plan_curation(config, root, "mind", automation)
+
+    assert plan is not None
+    assert plan.measured_tokens == 1292
+
+
 def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:
     """The visible prompt names every file, the band, the per-file cap, committing first, and the re-check."""
     plan, config, _root = _plan(tmp_path)

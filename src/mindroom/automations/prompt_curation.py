@@ -20,7 +20,7 @@ from mindroom.automations.registry import automation
 from mindroom.automations.steps import Ask, AutomationContext, Done, workspace_context_files
 from mindroom.config.automations import MAX_FILE_SHRINK, PromptCurationAutomation
 from mindroom.logging_config import get_logger
-from mindroom.memory import read_scope_memory_files
+from mindroom.memory import entrypoint_withholds_lines, read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.token_budget import estimate_text_tokens
 
@@ -112,9 +112,10 @@ def _plan_curation(
     }
     curated = {path: _tokens(payload) for path, payload in curated_payloads.items()}
     measured = sum(curated.values())
-    memory_lines = len(curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8").splitlines())
-    # The preload withholds MEMORY.md lines beyond its line cap at any token count.
-    if measured <= settings.trigger_tokens and memory_lines <= config.memory.file.max_entrypoint_lines:
+    memory_text = curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8")
+    memory_lines = len(memory_text.splitlines())
+    # Lines the preload withholds never reach the prompt, at any token count.
+    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(memory_text, config):
         return None
     return _CurationPlan(
         agent_name=agent_name,
