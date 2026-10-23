@@ -64,7 +64,7 @@ def scope_history_messages(
     ``runs`` are the session's runs in stored order. The two limits are the request's own, which a replay plan may
     narrow from the configured policy. Each message is a copy marked ``from_history``, so a request never changes a
     stored run and is never stored again. Prompt roles, ``system_message_role`` included, never replay. Tool calls
-    are read in the shape current releases store before either limit counts them, and those beyond
+    are read in the shape current releases store before the message and tool-call limits count them, and those beyond
     ``max_tool_calls_from_history`` are left out, as is every media item except the newest viewed images.
     """
     selected = _selected_messages(
