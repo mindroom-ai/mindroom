@@ -792,10 +792,10 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
             kind="agent",
             session_id="session-1",
             owner_id="code",
-            user_id="@alice:example.test",
             runs=[
                 RunRecord(
                     run_id="mixed",
+                    user_id="@alice:example.test",
                     model_provider="provider-a",
                     model="model-a",
                     created_at=first_day,
@@ -803,6 +803,7 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
                 ),
                 RunRecord(
                     run_id="other-provider",
+                    user_id="@alice:example.test",
                     model_provider="other-provider",
                     model="model-a",
                     created_at=first_day,
@@ -816,6 +817,7 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
                 ),
                 RunRecord(
                     run_id="next-day",
+                    user_id="@alice:example.test",
                     model_provider="provider-a",
                     model="model-a",
                     created_at=first_day + 86400,
@@ -973,9 +975,10 @@ def test_unusable_model_details_preserve_daily_totals(tmp_path: Path, details: o
         session_table="code_sessions",
     )
     storage.save_run(
-        ConversationSession(kind="agent", session_id="session-1", owner_id="code", user_id="@alice:example.test"),
+        ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
         RunRecord(
             run_id="run-1",
+            user_id="@alice:example.test",
             model_provider="provider-a",
             model="model-a",
             created_at=1_700_000_000,

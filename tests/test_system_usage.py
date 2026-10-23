@@ -79,7 +79,6 @@ async def test_system_usage_is_content_free_idempotent_and_does_not_create_conve
             kind="agent",
             session_id="ordinary",
             owner_id="code",
-            user_id="@person:example.test",
             runs=[
                 RunRecord(
                     run_id="ordinary-run",

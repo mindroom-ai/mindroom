@@ -284,7 +284,6 @@ def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]
             kind="agent",
             session_id=session_id,
             owner_id=state_root.name,
-            user_id="@alice:example.com",
             runs=[
                 RunRecord(
                     run_id=run_id,

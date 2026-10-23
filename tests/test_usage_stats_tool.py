@@ -113,7 +113,6 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
             kind="agent",
             session_id="session-1",
             owner_id="usage",
-            user_id="@alice:example.test",
             runs=[
                 RunRecord(
                     run_id="run-1",

@@ -294,10 +294,10 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
             kind="agent",
             session_id="session-1",
             owner_id="code",
-            user_id=ALICE,
             runs=[
                 RunRecord(
                     run_id="run-1",
+                    user_id=ALICE,
                     model_provider=model.provider,
                     model=model.id,
                     created_at=int(datetime(2026, 10, 3, tzinfo=UTC).timestamp()),
@@ -343,6 +343,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
 
     run = RunRecord(
         run_id="run-1",
+        user_id=ALICE,
         model_provider=model.provider,
         model=model.id,
         created_at=started,
@@ -358,7 +359,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         clock.setattr("mindroom.session_storage.store.time", lambda: started)
         session = seed_session(
             storage,
-            ConversationSession(kind="agent", session_id="session-1", owner_id="code", user_id=ALICE, runs=[run]),
+            ConversationSession(kind="agent", session_id="session-1", owner_id="code", runs=[run]),
         )
         run.messages = [*run.messages, request(resumed)]
         run.metrics = metrics(2_000_000)

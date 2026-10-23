@@ -138,7 +138,6 @@ async def test_restart_cleanup_uses_latest_attempt_of_the_same_delegation(  # no
             kind="agent",
             session_id=turn.session_id,
             owner_id="child",
-            user_id=owner.requester_id,
         )
         for turn in (child, descendant)
     }

@@ -90,7 +90,6 @@ def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> Conve
         session_id=session_id,
         kind="team" if is_team else "agent",
         owner_id=scope_id,
-        metadata={},
         created_at=created_at,
         updated_at=created_at,
     )

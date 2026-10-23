@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import ConversationSession, SessionStateWrite
+    from mindroom.session_storage.types import ConversationSession
 
 _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _ORIGINAL_STATUS_KEY = "mindroom_original_status"
@@ -316,12 +316,13 @@ def persist_interrupted_replay_snapshot(
     run_id: str,
     snapshot: InterruptedReplaySnapshot,
     is_team: bool,
-    state: SessionStateWrite | None = None,
+    state: dict[str, Any] | None = None,
 ) -> None:
     """Persist one canonical interrupted replay snapshot into session history.
 
-    Calls the run's mid-turn folds already summarized stay out, whichever path built the snapshot. With ``state``,
-    the session state commits in the same transaction as the replay run.
+    Calls the run's mid-turn folds already summarized stay out, whichever path built the snapshot. The run is saved
+    through ``session`` when given, so it learns the replay run. With ``state``, a ``session_state_snapshot``, the
+    session state commits in the same transaction as the replay run.
     """
     folded = run_folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
     snapshot = replace(
@@ -329,11 +330,8 @@ def persist_interrupted_replay_snapshot(
         completed_tools=_unfolded(snapshot.completed_tools, folded),
         interrupted_tools=_unfolded(snapshot.interrupted_tools, folded),
     )
-    persisted_session = storage.load_session(session_id, "team" if is_team else "agent")
-    if persisted_session is None:
-        persisted_session = session
-    if persisted_session is None:
-        persisted_session = new_scope_session(session_id=session_id, scope_id=scope_id, is_team=is_team)
+    if session is None:
+        session = new_scope_session(session_id=session_id, scope_id=scope_id, is_team=is_team)
     persisted_run = _build_interrupted_replay_run(
         snapshot=snapshot,
         run_id=run_id,
@@ -341,7 +339,7 @@ def persist_interrupted_replay_snapshot(
         session_id=session_id,
         is_team=is_team,
     )
-    storage.save_runs(persisted_session, [persisted_run], state=state)
+    storage.save_runs(session, [persisted_run], state=state)
 
 
 def persist_interrupted_replay(

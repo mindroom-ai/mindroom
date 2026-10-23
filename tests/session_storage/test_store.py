@@ -53,7 +53,6 @@ def _session(session_id: str = "s1", *, kind: SessionKind = "agent", owner: str 
         session_id=session_id,
         kind=kind,
         owner_id=owner,
-        user_id="@alice:example.test",
         created_at=1_700_000_000,
     )
 
@@ -929,6 +928,48 @@ def test_session_field_writes_leave_the_other_field_and_the_totals_alone(store: 
     assert _totals(store)["input_tokens"] == 10
 
 
+@pytest.mark.parametrize(
+    "create",
+    ["ensure_session_row", "save_run", "save_runs", "save_session_state", "save_independent_usage"],
+)
+def test_every_writer_of_a_session_row_stores_absent_metadata_as_json_null(
+    store: ConversationStore,
+    create: str,
+) -> None:
+    """Agno's JSON column stored no metadata as the text ``null``; no writer stores SQL NULL or an empty object."""
+    session = ConversationSession(session_id="s1", kind="agent", owner_id="code")
+    writes = {
+        "ensure_session_row": lambda: store.ensure_session_row(session),
+        "save_run": lambda: store.save_run(session, _run("r1"), record_usage=True),
+        "save_runs": lambda: store.save_runs(session, [_run("r1")]),
+        "save_session_state": lambda: store.save_session_state(session, {}),
+        "save_independent_usage": lambda: store.save_independent_usage(
+            session_id="s1",
+            usage_id="u1",
+            kind="compaction_summary",
+            requester_id=None,
+            run={"model_provider": "P", "model": "m", "created_at": 1, "metrics": {}, "messages": []},
+            initial_session=session,
+        ),
+    }
+
+    writes[create]()
+
+    assert _query(store, "SELECT metadata, typeof(metadata) FROM code_sessions") == [("null", "text")]
+
+
+def test_clearing_metadata_stores_it_as_json_null(store: ConversationStore) -> None:
+    """A metadata update that removes every key, or the whole mapping, leaves the same text a row created without it holds."""
+    session = ConversationSession(session_id="s1", kind="agent", owner_id="code")
+    store.update_metadata(session, lambda _metadata: {"k": "v"})
+    assert _query(store, "SELECT metadata FROM code_sessions") == [('{"k": "v"}',)]
+
+    store.update_metadata(session, lambda _metadata: None)
+
+    assert _query(store, "SELECT metadata, typeof(metadata) FROM code_sessions") == [("null", "text")]
+    assert _loaded(store).metadata is None
+
+
 def test_ensure_session_row_creates_a_missing_row_from_the_session(store: ConversationStore) -> None:
     """A new conversation's row is created from the session."""
     session = _session()
@@ -937,17 +978,11 @@ def test_ensure_session_row_creates_a_missing_row_from_the_session(store: Conver
     store.ensure_session_row(session)
 
     loaded = _loaded(store)
-    assert (loaded.owner_id, loaded.user_id, loaded.session_state, loaded.created_at) == (
+    assert (loaded.owner_id, loaded.session_state, loaded.created_at) == (
         "code",
-        "@alice:example.test",
         {"key": "value"},
         1_700_000_000,
     )
-
-
-def _unnamed_session() -> ConversationSession:
-    """A session as a conversation's first turn builds it, before any run has named the requester."""
-    return ConversationSession(session_id="s1", kind="agent", owner_id="code", created_at=1_700_000_000)
 
 
 def _requested_run(run_id: str, requester_id: str | None) -> RunRecord:
@@ -967,7 +1002,7 @@ def test_a_saved_run_gives_a_session_row_created_without_a_requester_the_runs(
     save: str,
 ) -> None:
     """A conversation's row stores its first run's requester, as Agno's session did, whoever created the row."""
-    session = _unnamed_session()
+    session = _session()
     run = _requested_run("r1", "@alice:example.test")
 
     if save == "save_run":
@@ -976,7 +1011,6 @@ def test_a_saved_run_gives_a_session_row_created_without_a_requester_the_runs(
         store.save_runs(session, [run])
 
     assert _row_requester(store) == "@alice:example.test"
-    assert _loaded(store).user_id == "@alice:example.test"
 
 
 @pytest.mark.asyncio
@@ -984,7 +1018,7 @@ async def test_the_terminal_save_of_a_turn_stores_its_requester_on_the_row_a_fol
     store: ConversationStore,
 ) -> None:
     """The row a first turn's fold or usage write created has no requester; the turn's own save names it."""
-    session = _unnamed_session()
+    session = _session()
     store.ensure_session_row(session)
     assert _row_requester(store) is None
 
@@ -995,7 +1029,7 @@ async def test_the_terminal_save_of_a_turn_stores_its_requester_on_the_row_a_fol
 
 def test_a_session_row_keeps_the_first_requester_a_run_named(store: ConversationStore) -> None:
     """A later run of another requester, or of none, leaves the row's requester alone."""
-    session = _unnamed_session()
+    session = _session()
 
     store.save_run(session, _requested_run("r0", None), record_usage=True)
     assert _row_requester(store) is None
@@ -1008,14 +1042,13 @@ def test_a_session_row_keeps_the_first_requester_a_run_named(store: Conversation
 
 def test_a_frozen_or_removed_run_does_not_name_the_requester(store: ConversationStore) -> None:
     """Only a run the store wrote names the row's requester."""
-    _seed(store, [_run("r0"), _run("r1")], _unnamed_session())
+    _seed(store, [_run("r0"), _run("r1")], _session())
     _summary_after(store, "r1")
     _remove(store, "gone")
-    _execute(store, "UPDATE code_sessions SET user_id = NULL")
 
     outcomes = [
-        store.save_run(_unnamed_session(), _requested_run("r0", "@alice:example.test"), record_usage=True),
-        store.save_run(_unnamed_session(), _requested_run("gone", "@alice:example.test"), record_usage=True),
+        store.save_run(_session(), _requested_run("r0", "@alice:example.test"), record_usage=True),
+        store.save_run(_session(), _requested_run("gone", "@alice:example.test"), record_usage=True),
     ]
 
     assert outcomes == ["frozen", "removed"]
@@ -1102,6 +1135,34 @@ async def test_persist_to_stores_a_record_and_its_state_together_or_neither(stor
 
     assert _loaded(store).session_state == {"cwd": "/repo/sub"}
     assert _loaded_ids(store) == ["r1", "r2"]
+
+
+@pytest.mark.parametrize("row_exists", [False, True], ids=["new-row", "stored-row"])
+def test_save_runs_with_a_state_and_no_runs_still_writes_the_state(
+    store: ConversationStore,
+    *,
+    row_exists: bool,
+) -> None:
+    """A state handed to a save is stored whether or not runs came with it, so the call never drops it silently."""
+    session = _session()
+    if row_exists:
+        store.ensure_session_row(session)
+    state = {"cwd": "/repo"}
+
+    store.save_runs(session, [], state=state)
+
+    fields = store.read_session_fields("s1")
+    assert fields is not None
+    assert fields.session_state == state
+    assert session.stored_session_state == state
+    assert _loaded_ids(store) == []
+
+
+def test_save_runs_with_no_runs_and_no_state_writes_nothing(store: ConversationStore) -> None:
+    """An empty rewrite is a no-op that does not even create the session's row."""
+    store.save_runs(_session(), [])
+
+    assert store.read_session_fields("s1") is None
 
 
 @pytest.mark.asyncio

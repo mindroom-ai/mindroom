@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
@@ -85,7 +85,7 @@ from mindroom.response_runner import (
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
-from mindroom.session_storage.types import ConversationSession, SessionKind, SessionStateWrite
+from mindroom.session_storage.types import ConversationSession, SessionKind
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.access_schema_support import with_current_room_member_access
@@ -441,7 +441,7 @@ class _RecordingStore(ConversationStore):
         session: ConversationSession,
         runs: Iterable[AnyRunRecord],
         *,
-        state: SessionStateWrite | None = None,
+        state: dict[str, Any] | None = None,
     ) -> None:
         written = list(runs)
         self.saves.append([run.run_id for run in written])

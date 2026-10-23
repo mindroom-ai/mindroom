@@ -10,8 +10,10 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.history.storage import new_scope_session
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage.codec import run_from_row
+from mindroom.session_storage.schema import SESSION_COLUMNS
 from mindroom.session_storage.store import open_conversation_store
 from mindroom.session_storage.types import ConversationSession
 from tests.llm.agno_dict_helpers import expected_run_dict
@@ -35,6 +37,12 @@ _NOT_REPLAYABLE = {
 }
 _REPLAYABLE = [pair for pair, name in zip(_SESSIONS, _SESSION_IDS, strict=True) if name not in _NOT_REPLAYABLE]
 _REPLAYABLE_IDS = [name for name in _SESSION_IDS if name not in _NOT_REPLAYABLE]
+# Replayable sessions whose Agno row holds no scope metadata, which replaying their runs reproduces.
+_WITHOUT_METADATA = [
+    (pair, name)
+    for pair, name in zip(_REPLAYABLE, _REPLAYABLE_IDS, strict=True)
+    if agno_loaded_session(*pair)["metadata"] is None
+]
 _ROW_COLUMNS = ("run_id", "run_type", "agent_id", "team_id", "workflow_id", "user_id", "parent_run_id", "status")
 
 
@@ -71,7 +79,6 @@ def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id
     assert (
         session.session_id,
         session.owner_id,
-        session.user_id,
         session.metadata,
         session.session_state,
         session.created_at,
@@ -79,7 +86,6 @@ def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id
     ) == (
         agno["session_id"],
         agno["team_id"] if session.kind == "team" else agno["agent_id"],
-        agno["user_id"],
         agno["metadata"],
         agno["session_data"]["session_state"],
         agno["created_at"],
@@ -222,6 +228,34 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
     assert _sorted_details(json.loads(fresh_session_data)["session_metrics"]) == _sorted_details(
         json.loads(session_data)["session_metrics"],
     )
+
+
+@pytest.mark.parametrize(
+    ("store", "session_id"),
+    [pair for pair, _ in _WITHOUT_METADATA],
+    ids=[name for _, name in _WITHOUT_METADATA],
+)
+def test_a_first_turns_session_row_stores_no_metadata_as_agno_stored_it(
+    store: GoldenStore,
+    session_id: str,
+    tmp_path: Path,
+) -> None:
+    """The row of a session built as the runtime builds a first turn's holds the JSON text Agno's JSON column wrote."""
+    golden = store.restore(tmp_path / "golden")
+    rows = stored_rows(golden, store.names.runs, session_id)
+    golden_row = _session_row(golden, store.names.sessions, session_id)
+    kind, agent_id, team_id = (
+        golden_row[SESSION_COLUMNS.index(column)] for column in ("session_type", "agent_id", "team_id")
+    )
+    session = new_scope_session(session_id=session_id, scope_id=team_id or agent_id, is_team=kind == "team")
+    fresh = open_conversation_store(tmp_path / "fresh.db", store.names)
+
+    for run in _replayed(rows):
+        fresh.save_run(session, run, record_usage=True)
+
+    column = SESSION_COLUMNS.index("metadata")
+    assert golden_row[column] == "null"
+    assert _session_row(fresh.path, store.names.sessions, session_id)[column] == "null"
 
 
 def test_linking_a_delivered_reply_rewrites_only_that_run(tmp_path: Path) -> None:

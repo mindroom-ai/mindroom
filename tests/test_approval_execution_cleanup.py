@@ -62,7 +62,6 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
             session_id="session-1",
             kind="team",
             owner_id="research",
-            user_id=identity.requester_id,
             runs=[TeamRunRecord(run_id="run-1", session_id="session-1", status=RunStatus.paused)],
         ),
         session_id="session-1",

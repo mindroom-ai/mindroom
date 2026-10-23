@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 def _session() -> ConversationSession:
     """Return the conversation's row; each save gets its own, since a save updates the session it is given."""
-    return ConversationSession(kind="agent", session_id="session", owner_id="code", user_id="@alice:example.test")
+    return ConversationSession(kind="agent", session_id="session", owner_id="code")
 
 
 @pytest.fixture

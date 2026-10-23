@@ -114,7 +114,7 @@ def _stored_team(
         messages=[_request(10, _MIDNIGHT - 10)],
         member_responses=[member],
     )
-    session = ConversationSession(session_id="session", kind="team", owner_id=team_id, user_id=_BOB)
+    session = ConversationSession(session_id="session", kind="team", owner_id=team_id)
     storage = create_scope_session_storage(
         agent_name="code",
         scope=HistoryScope(kind="team", scope_id=team_id),

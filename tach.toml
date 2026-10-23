@@ -7610,7 +7610,7 @@ depends_on = ["mindroom.cli.api", "mindroom.cli.config", "mindroom.constants", "
 
 [[modules]]
 path = "mindroom.debug_report"
-depends_on = []
+depends_on = ["mindroom.session_storage.schema"]
 visibility = ["mindroom.cli.debug_report"]
 
 [[modules]]

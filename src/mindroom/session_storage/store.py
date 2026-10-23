@@ -29,7 +29,7 @@ from mindroom.session_storage.codec import run_from_row, run_type
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_runs, move_blob_runs_to_rows
 from mindroom.session_storage.schema import run_log_sql, schema_sql, table_names
-from mindroom.session_storage.types import ConversationSession, SessionFields, SessionStateWrite, session_state_snapshot
+from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
 from mindroom.usage.storage import TOKEN_FIELDS, project_usage, quote_identifier, usage_upsert_sql
 
 if TYPE_CHECKING:
@@ -160,13 +160,12 @@ class ConversationStore:
             loaded = self._read_load(connection, session_id, kind)
         if loaded is None:
             return None
-        _, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at = loaded.row
+        _, agent_id, team_id, _, session_data, metadata, created_at, updated_at = loaded.row
         state = _session_state(session_data)
         return ConversationSession(
             session_id=session_id,
             kind=kind,
             owner_id=(team_id if kind == "team" else agent_id) or "",
-            user_id=user_id,
             metadata=_decoded_mapping(metadata),
             session_state=state,
             stored_session_state=copy.deepcopy(state),
@@ -238,7 +237,7 @@ class ConversationStore:
         run: AnyRunRecord,
         *,
         record_usage: bool,
-        state: SessionStateWrite | None = None,
+        state: dict[str, Any] | None = None,
     ) -> SaveOutcome:
         """Save one run of ``session`` under the conversation log's insertion rules, creating the session row if needed.
 
@@ -247,11 +246,11 @@ class ConversationStore:
         visible over a stored paused, cancelled, or errored row, takes the next position after every run and
         summary row. With ``record_usage``, the run's usage replaces its earlier snapshot in the usage ledger,
         which outlives removed runs, and the session totals change by the difference, in the same transaction.
-        A frozen run's usage is final and changes neither. A run that names a requester gives a session row that has
-        none the requester, whoever created the row.
+        A frozen run's usage is final and changes neither. The first requester a written run names is stored on a
+        session row that has none; no other write of the store names a requester.
 
-        With ``state``, the run and the session state it ran with commit in one transaction, so a failure leaves
-        neither (see ``SessionStateWrite``).
+        With ``state``, a ``session_state_snapshot`` of the state the run ran with, the run and the state commit in
+        one transaction, so a failure leaves neither. The state is written only when the row does not already hold it.
 
         Once the save commits, ``session.runs`` holds the run as the store does (see ``_reconcile``).
         """
@@ -270,14 +269,13 @@ class ConversationStore:
         *,
         row_type: SessionKind,
         record_usage: bool,
-        state: SessionStateWrite | None,
+        state: dict[str, Any] | None,
     ) -> SaveOutcome:
         with self.transaction(write=True) as connection:
             created = _ensure_session_row(connection, self.names, session)
             saved = self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
-            written = self._write_state(connection, session, created, state)
-        _record_stored_state(session, created)
-        _record_written_state(state, written)
+            stored = self._write_state(connection, session, created, state)
+        _record_stored_state(session, stored)
         _reconcile(session, [saved])
         return saved.outcome
 
@@ -286,18 +284,19 @@ class ConversationStore:
         session: ConversationSession,
         runs: Iterable[AnyRunRecord],
         *,
-        state: SessionStateWrite | None = None,
+        state: dict[str, Any] | None = None,
     ) -> None:
         """Write conversation-only changes to runs of ``session`` in one transaction, then reconcile its copies.
 
-        Conversation rewrites leave the usage ledger and session totals untouched. With ``state``, the session state
-        commits in the same transaction (see ``SessionStateWrite``). Once the transaction commits,
-        ``session.runs`` holds each run as the store does (see ``_reconcile``), so a removed run leaves the session
-        and a frozen one keeps the session's copy. Callers therefore edit a copy and hand the copy here: a refused
-        save must leave the session's copy as stored.
+        Conversation rewrites leave the usage ledger and session totals untouched. With ``state``, a
+        ``session_state_snapshot``, the session state commits in the same transaction (see ``save_run``). Once the
+        transaction commits, ``session.runs`` holds each run as the store does (see ``_reconcile``), so a removed run
+        leaves the session and a frozen one keeps the session's copy. Callers therefore edit a copy and hand the copy
+        here: a refused save must leave the session's copy as stored. A call with neither runs nor ``state`` writes
+        nothing.
         """
         runs = list(runs)
-        if not runs:
+        if not runs and state is None:
             return
         loaded = {id(existing) for existing in session.runs}
         if any(id(run) in loaded for run in runs):
@@ -315,9 +314,8 @@ class ConversationStore:
                 )
                 for run in runs
             ]
-            written = self._write_state(connection, session, created, state)
-        _record_stored_state(session, created)
-        _record_written_state(state, written)
+            stored = self._write_state(connection, session, created, state)
+        _record_stored_state(session, stored)
         _reconcile(session, saved)
 
     def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
@@ -337,20 +335,21 @@ class ConversationStore:
         connection: sqlite3.Connection,
         session: ConversationSession,
         created: dict[str, Any] | None,
-        state: SessionStateWrite | None,
+        state: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         """Write ``state`` into ``session``'s row in the caller's write transaction unless the row already holds it.
 
-        The row holds ``created`` when this transaction created it, and otherwise what ``state.session`` last knew
-        it to hold, which every committed write of the field records. Returns the state written, or None.
+        The row holds ``created`` when this transaction created it, and otherwise what ``session`` last knew it to
+        hold, which every committed write of the field records. Returns the state this transaction left in the row,
+        for the caller to record once it commits, or None when it left the row's state alone.
         """
         if state is None:
-            return None
-        held = state.session.stored_session_state if created is None else created
-        if state.state == held:
-            return None
-        _write_session_state(connection, self.names, session.session_id, state.state)
-        return state.state
+            return created
+        held = session.stored_session_state if created is None else created
+        if state == held:
+            return created
+        _write_session_state(connection, self.names, session.session_id, state)
+        return state
 
     def update_metadata(
         self,
@@ -376,7 +375,7 @@ class ConversationStore:
                 created = _ensure_session_row(connection, self.names, session)
                 connection.execute(
                     f"UPDATE {sessions} SET metadata = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
-                    (_json_or_null(updated), int(time()), session.session_id),
+                    (json.dumps(updated), int(time()), session.session_id),
                 )
         _record_stored_state(session, created)
         session.metadata = updated
@@ -628,14 +627,14 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
 async def write_with_session_state[Result](
     store: ConversationStore,
     session: ConversationSession,
-    write: Callable[[ConversationStore, SessionStateWrite], Result],
+    write: Callable[[ConversationStore, dict[str, Any]], Result],
 ) -> Result:
     """Run ``write`` in ``store``'s lane with a copy of ``session``'s state taken now, on the caller's task.
 
     The run's tools change the live state in place while the lane is busy, so the copy is taken before the lane is
     awaited. ``write`` hands it to the run save it makes (``state=``), which commits it with the run.
     """
-    state = SessionStateWrite(session, session_state_snapshot(session.session_state))
+    state = session_state_snapshot(session.session_state)
     return await run_session_storage_operation(lambda: store, lambda opened: write(opened, state))
 
 
@@ -654,10 +653,6 @@ def _session_state(raw_session_data: object) -> dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
-def _json_or_null(value: object) -> str | None:
-    return None if value is None else json.dumps(value)
-
-
 def _ensure_session_row(
     connection: sqlite3.Connection,
     names: TableNames,
@@ -672,16 +667,16 @@ def _ensure_session_row(
     # One encode reads the live state, as ``session_state_snapshot`` does, and the created row's copy decodes from it.
     session_data = json.dumps({"session_state": session.session_state})
     cursor = connection.execute(
-        f"INSERT INTO {quote_identifier(names.sessions)} (session_id, session_type, {owner_column}, user_id, "  # noqa: S608
-        "session_data, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        f"INSERT INTO {quote_identifier(names.sessions)} (session_id, session_type, {owner_column}, "  # noqa: S608
+        "session_data, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(session_id) DO NOTHING",
         (
             session.session_id,
             session.kind,
             session.owner_id,
-            session.user_id,
             session_data,
-            _json_or_null(session.metadata),
+            # Agno's JSON column stored no metadata as the text ``null``, never as SQL NULL.
+            json.dumps(session.metadata),
             session.created_at,
             session.created_at,
         ),
@@ -695,10 +690,11 @@ def _adopt_requester(
     session_id: str,
     requester_id: str | None,
 ) -> None:
-    """Give a session row that has no requester yet the requester of a run saved into it.
+    """Give a session row that has no requester the requester of a run saved into it; no other write names one.
 
     A conversation's first run names its requester, but the row is often created before that run is saved, by a
-    write that knows no requester, such as a fold or a helper's usage. The first requester a run names stays.
+    write that knows no requester, such as a fold or a helper's usage, so a created row has none. The first requester
+    a run names stays.
     """
     if requester_id:
         connection.execute(
@@ -711,12 +707,6 @@ def _record_stored_state(session: ConversationSession, state: dict[str, Any] | N
     """Record ``state``, the session state a committed write left in the row, as ``session.stored_session_state``."""
     if state is not None:
         session.stored_session_state = state
-
-
-def _record_written_state(state: SessionStateWrite | None, written: dict[str, Any] | None) -> None:
-    """Record the state a committed save wrote beside its run on the session its snapshot was taken from."""
-    if state is not None:
-        _record_stored_state(state.session, written)
 
 
 def _write_session_state(
