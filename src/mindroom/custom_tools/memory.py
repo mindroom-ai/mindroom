@@ -7,7 +7,6 @@ memory extraction that happens after every response.
 
 from __future__ import annotations
 
-import textwrap
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -152,11 +151,10 @@ class MemoryTools(Toolkit):
             return f"Memorized: {content}"
         lines = [f"Memorized: {content}", "", "Similar existing memories:"]
         for i, mem in enumerate(similar, 1):
-            text = textwrap.shorten(mem.get("memory", ""), width=200, placeholder="...")
-            lines.append(f"{i}. [id={mem.get('id', '?')}] {text}")
+            lines.append(f"{i}. [id={mem.get('id', '?')}] {mem.get('memory', '')}")
         lines.append(
-            "If the new memory corrects or repeats one of these, update that entry with update_memory "
-            "and delete the duplicate with delete_memory.",
+            "If the new memory corrects one of these, rewrite that entry with update_memory, "
+            "keeping its other details, so no stored memory contradicts the correction.",
         )
         return "\n".join(lines)
 

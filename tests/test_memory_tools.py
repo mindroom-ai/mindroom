@@ -204,6 +204,8 @@ class TestMemoryTools:
         """A new memory should point at related existing entries so corrections update them instead of piling up.
 
         A healthy semantic index returns read-only locators, so the lookup must still find the editable entry.
+        The agent rewrites a listed entry whole with update_memory, so the reply shows each one in full, and it never
+        asks to delete an entry the reply does not show.
         """
         config.memory.backend = "file"
         config.memory.search.mode = search_mode
@@ -214,24 +216,28 @@ class TestMemoryTools:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        semantic_hit = {"id": "semantic:memory/notes.md:0", "memory": "The weekly standup is on Mondays"}
+        existing_text = (
+            "The weekly standup is on Mondays at 09:30 in room 4B, hosted by the platform team; agenda items go in the "
+            "shared doc by Friday, the demo slot is the last ten minutes, and remote attendees join the video room"
+        )
+        semantic_hit = {"id": "semantic:memory/notes.md:0", "memory": existing_text}
 
         with patch(
             "mindroom.memory._file_backend.search_semantic_file_memories",
             new_callable=AsyncMock,
             return_value=[semantic_hit],
         ):
-            await tools.add_memory("The weekly standup is on Mondays")
+            await tools.add_memory(existing_text)
             existing = (await tools.list_memories()).splitlines()[1]
             existing_id = existing.split("[id=", 1)[1].split("]", 1)[0]
 
             result = await tools.add_memory("The weekly standup moved to Tuesdays")
 
         assert result.startswith("Memorized: The weekly standup moved to Tuesdays\n")
-        assert f"[id={existing_id}] The weekly standup is on Mondays" in result
+        assert f"[id={existing_id}] {existing_text}" in result
         assert result.count("moved to Tuesdays") == 1
         assert "update_memory" in result
-        assert "delete_memory" in result
+        assert "delete_memory" not in result
 
     @pytest.mark.asyncio
     async def test_add_memory_reply_stays_plain_when_the_similar_lookup_fails(self, tools: MemoryTools) -> None:
