@@ -153,6 +153,8 @@ class ModelMetrics(_Counts):
 
 def _details_to_dict(details: Mapping[str, list[ModelMetrics]]) -> dict[str, list[dict[str, Any]]]:
     # Agno kept empty ``provider_metrics`` dicts inside details, unlike ``ModelMetrics.to_dict``.
+    # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
+    # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
     return {
         model_type: [
             {

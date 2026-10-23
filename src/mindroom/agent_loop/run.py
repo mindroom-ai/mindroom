@@ -202,6 +202,9 @@ def resume_request_template(template: ModelRequest) -> ModelRequest:
     continues did not, as every continuation of the Agno-backed runtime did. ``resume_planned`` and the team
     runtime's ``continue_team`` apply it, so every resume of an agent, a team, or a team member streams.
     """
+    # TODO(simplify): a resume streams even when the run it continues did not. Resume with the run's own template,
+    # which removes this function. Models and providers would notice: such a resume would send non-streaming
+    # requests and hand a team leader its members' results as a non-streaming run does.
     return replace(template, stream=True)
 
 
@@ -393,6 +396,9 @@ async def _store_interrupted[R: AnyRunRecord](
         record.error = redact_sensitive_text(str(error))
         if not record.content:
             record.content = str(error)
+    # TODO(simplify): a failed or cancelled approval resume stores its record over the paused run's row, as Agno did,
+    # so that approval can no longer be resumed. Keep the paused row when a resume ends this way.
+    # Users and stored data would notice: the approval could be retried. (#3075)
     if persist is not None:
         await run_coroutine_until_complete(_persist_quietly(persist, record))
 
