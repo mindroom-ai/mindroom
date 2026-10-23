@@ -54,6 +54,8 @@ from mindroom.delegation.state import (
     DelegationChild,
     DelegationPendingTool,
     DelegationState,
+    child_call_id,
+    child_card_id,
     delegation_card_id,
 )
 from mindroom.delegation.storage import freeze_delegation_storage
@@ -513,7 +515,7 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
     child_state = DelegationState.from_metadata(response.metadata)
     for tool in paused.tools:
         projected = deepcopy(tool)
-        projected.tool_call_id = f"{child.delegation_id}:{tool.tool_call_id}"
+        projected.tool_call_id = child_card_id(child.delegation_id, str(tool.tool_call_id))
         state.pending_tools.append(projected.to_dict())
         state.pending_tool_sources[projected.tool_call_id] = deepcopy(
             child_state.pending_tool_sources.get(str(tool.tool_call_id))
@@ -1218,11 +1220,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             child_reasons = None
             child_calls = ()
             if pending_id == child.delegation_id and decisions is not None:
-                prefix = f"{child.delegation_id}:"
-                child_decisions = {key.removeprefix(prefix): value for key, value in decisions.items()}
-                child_reasons = {key.removeprefix(prefix): value for key, value in (denial_reasons or {}).items()}
+                delegation_id = child.delegation_id
+                child_decisions = {child_call_id(delegation_id, key): value for key, value in decisions.items()}
+                child_reasons = {
+                    child_call_id(delegation_id, key): value for key, value in (denial_reasons or {}).items()
+                }
                 child_calls = tuple(
-                    replace(call, tool_call_id=call.tool_call_id.removeprefix(prefix)) for call in approval_calls
+                    replace(call, tool_call_id=child_call_id(delegation_id, call.tool_call_id))
+                    for call in approval_calls
                 )
             try:
                 # The reply records a background child's call before its job starts, as for any managed call: the

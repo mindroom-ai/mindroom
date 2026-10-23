@@ -22,7 +22,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
-from mindroom.delegation.state import member_delegation_card
+from mindroom.delegation.state import pending_call_slot
 from mindroom.delivery_gateway import DeliveryStage
 from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
@@ -167,10 +167,7 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
             msg = "Approval suspension requires an ordered presentation for every pending tool"
             raise RuntimeError(msg)
         requirement = requirements_by_call_id.get(call_id)
-        member_id = requirement.member_agent_id if requirement is not None else None
-        anchor_id = call_id
-        if requirement is not None and (card := member_delegation_card(requirement, member_names)):
-            member_id, anchor_id = card
+        member_id, anchor_id = (None, call_id) if requirement is None else pending_call_slot(requirement, member_names)
         matches = [
             entry
             for entry in paused.tool_trace
