@@ -376,6 +376,12 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     install_scripted_shell(monkeypatch, run_shell_command)
     ScriptedAgents({"leader": lead, "helper": child}).install(monkeypatch)
     turn = _leader_turn(identity, agent_mode="minimal")
+    continued: list[str] = []
+
+    async def continue_turn_run(*_args: object, **_kwargs: object) -> None:
+        continued.append("parent")
+
+    monkeypatch.setattr(ai, "_continue_turn_run", continue_turn_run)
 
     with tool_runtime_context(live):
         result = await ai.ai_response(
@@ -390,6 +396,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     assert len(child_listings) == 1
     assert [offered_tools(request) for request in child.requests] == [["bash"], ["bash"]]
     # The parent's delegation ran inside its Bash call, so its run never paused and kept its Bash-only surface.
+    assert continued == []
     assert [offered_tools(request) for request in lead.requests] == [["bash"], ["bash"]]
     assert "Child answer" in str(lead.requests[-1].messages)
 
