@@ -151,7 +151,7 @@ async def handle_auto_approve_command(
             return f"Auto-approve for all your tool calls is not on in {place}."
         await _publish_windows(client, runtime_paths, room.room_id, logger)
         return (
-            f"✅ Auto-approve for all your tool calls is off in {place}; they ask for approval again. "
+            f"✅ Auto-approve for all your tool calls is off in {place}; they follow the usual approval rules again. "
             "A tool you auto-approved from an approval card stays approved until you stop it on that card or its time ends."
         )
 

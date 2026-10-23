@@ -254,7 +254,7 @@ async def test_auto_approve_command_starts_shows_and_ends_the_thread_window(tmp_
 
     reply, _ = await _send(tmp_path, "!auto_approve off")
     assert reply.startswith(
-        "✅ Auto-approve for all your tool calls is off in this thread; they ask for approval again.",
+        "✅ Auto-approve for all your tool calls is off in this thread; they follow the usual approval rules again.",
     )
     assert "stays approved until you stop it on that card" in reply
     assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
@@ -318,7 +318,9 @@ async def test_auto_approve_command_names_the_whole_room_in_a_room_without_threa
         f"⚠️ Auto-approve for all your tool calls is on in this room until {local:%Y-%m-%d %H:%M %Z}: ",
     )
     reply, _ = await _send(tmp_path, "!auto_approve off", room_mode=True)
-    assert reply.startswith("✅ Auto-approve for all your tool calls is off in this room; they ask for approval again.")
+    assert reply.startswith(
+        "✅ Auto-approve for all your tool calls is off in this room; they follow the usual approval rules again.",
+    )
 
 
 @pytest.mark.asyncio
