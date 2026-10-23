@@ -254,29 +254,7 @@ class ConversationStore:
 
         Once the save commits, ``session.runs`` holds the run as the store does (see ``_reconcile``).
         """
-        return self._save_run_dict(
-            session,
-            run.to_dict(),
-            row_type=run_type(run),
-            record_usage=record_usage,
-            state=state,
-        )
-
-    def _save_run_dict(
-        self,
-        session: ConversationSession,
-        data: dict[str, Any],
-        *,
-        row_type: SessionKind,
-        record_usage: bool,
-        state: dict[str, Any] | None,
-    ) -> SaveOutcome:
-        with self.transaction(write=True) as connection:
-            created = _ensure_session_row(connection, self.names, session)
-            saved = self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
-            stored = self._write_state(connection, session, created, state)
-        _record_stored_state(session, stored)
-        _reconcile(session, [saved])
+        (saved,) = self._save_encoded(session, [_encoded(run)], record_usage=record_usage, state=state)
         return saved.outcome
 
     def save_runs(
@@ -302,21 +280,27 @@ class ConversationStore:
         if any(id(run) in loaded for run in runs):
             msg = "save_runs received a run object loaded from the session; edit a copy instead"
             raise ValueError(msg)
+        self._save_encoded(session, [_encoded(run) for run in runs], record_usage=False, state=state)
+
+    def _save_encoded(
+        self,
+        session: ConversationSession,
+        runs: list[tuple[dict[str, Any], SessionKind]],
+        *,
+        record_usage: bool,
+        state: dict[str, Any] | None,
+    ) -> list[_SavedRun]:
+        """Save ``runs``, each a stored dict and its row type, and ``state`` in one transaction, then reconcile."""
         with self.transaction(write=True) as connection:
             created = _ensure_session_row(connection, self.names, session)
             saved = [
-                self._save_run(
-                    connection,
-                    session.session_id,
-                    run.to_dict(),
-                    row_type=run_type(run),
-                    record_usage=False,
-                )
-                for run in runs
+                self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
+                for data, row_type in runs
             ]
             stored = self._write_state(connection, session, created, state)
         _record_stored_state(session, stored)
         _reconcile(session, saved)
+        return saved
 
     def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
         """Write ``state`` as the session's ``session_state``, creating the row if needed, and leave the rest alone.
@@ -519,6 +503,11 @@ class _Load:
         return runs
 
 
+def _encoded(run: AnyRunRecord) -> tuple[dict[str, Any], SessionKind]:
+    """Return ``run``'s stored dict and the ``run_type`` of its row."""
+    return run.to_dict(), run_type(run)
+
+
 def _adopt_log(session: ConversationSession, loaded: _Load | None) -> None:
     """Make ``session``'s runs and summary those of ``loaded``, or none when the session is no longer stored."""
     session.runs = loaded.runs() if loaded is not None else []
@@ -607,18 +596,11 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     """
 
     async def persist(record: AnyRunRecord) -> None:
-        data = record.to_dict()
-        row_type = run_type(record)
+        encoded = _encoded(record)
         await write_with_session_state(
             store,
             session,
-            lambda opened, state: opened._save_run_dict(
-                session,
-                data,
-                row_type=row_type,
-                record_usage=True,
-                state=state,
-            ),
+            lambda opened, state: opened._save_encoded(session, [encoded], record_usage=True, state=state),
         )
 
     return persist
