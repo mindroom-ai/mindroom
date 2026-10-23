@@ -339,9 +339,10 @@ def _add_tools(
     settings: ChatSettings,
     wire: ChatWire,
 ) -> None:
+    # TODO(simplify): Groq always receives the tool list, so a request without tools sends `tools: []`. Leave it out,
+    # as the other dialects do. Groq request bodies.
     if not tool_dicts and wire.dialect != "groq":
         return
-    # Groq always received the tool list, empty included.
     params["tools"] = tool_dicts
     if wire.dialect != "cerebras":
         if tool_choice is not None:
