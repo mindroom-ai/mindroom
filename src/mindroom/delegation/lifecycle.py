@@ -180,20 +180,21 @@ async def settle_child_response(
 ) -> None:
     """Derive operational state from one exact run, then publish its audit view.
 
-    A failed run's result is its ``handover_content``.
+    A finished run's result is what it hands over (``handover_content``), so a failed run's is why it failed.
     """
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
+    content = response.handover_content
     if response.status == RunStatus.completed:
         child.status = "completed"
-        child.result = str(response.content or "Agent completed the task but returned no content.")
+        child.result = str(content or "Agent completed the task but returned no content.")
     elif response.status == RunStatus.cancelled:
         child.status = "cancelled"
-        child.result = str(response.content or "Delegation cancelled.")
+        child.result = str(content or "Delegation cancelled.")
     elif response.status in {RunStatus.error, RunStatus.regenerated}:
         child.status = "failed"
-        child.result = str(response.handover_content or response.status)
+        child.result = str(content or response.status)
     else:
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None
