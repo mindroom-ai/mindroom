@@ -121,24 +121,22 @@ def _compaction_fallback_is_distinct(
     variants like ``vertexai-claude`` and ``vertexai_claude`` and aliases like
     ``openai_codex`` and ``codex`` count as the same serving model.
     """
-    if fallback_model_name == primary_model_name:
-        is_distinct = False
-    else:
+    if fallback_model_name != primary_model_name:
         primary_config = config.models.get(primary_model_name)
         fallback_config = config.models.get(fallback_model_name)
         if primary_config is None or fallback_config is None:
             return True
-        is_distinct = (provider_route(primary_config.provider), primary_config.id) != (
+        if (provider_route(primary_config.provider), primary_config.id) != (
             provider_route(fallback_config.provider),
             fallback_config.id,
-        )
-    if not is_distinct:
-        logger.warning(
-            "Compaction fallback resolves to the primary serving model; continuing without a fallback",
-            compaction_model=primary_model_name,
-            fallback_model=fallback_model_name,
-        )
-    return is_distinct
+        ):
+            return True
+    logger.warning(
+        "Compaction fallback resolves to the primary serving model; continuing without a fallback",
+        compaction_model=primary_model_name,
+        fallback_model=fallback_model_name,
+    )
+    return False
 
 
 def load_summarizer(
@@ -260,8 +258,8 @@ async def _emit_compaction_hook(
     messages: Sequence[Message],
     session_id: str,
     token_count_before: int,
-    token_count_after: int | None,
-    compaction_summary: str | None,
+    token_count_after: int | None = None,
+    compaction_summary: str | None = None,
 ) -> None:
     runtime_context = get_tool_runtime_context()
     if runtime_context is None or not runtime_context.hook_registry.has_hooks(event_name):
@@ -297,10 +295,9 @@ async def _emit_compaction_hook(
 
 def _should_collect_compaction_hook_messages() -> bool:
     runtime_context = get_tool_runtime_context()
-    if runtime_context is None:
-        return False
-    return runtime_context.hook_registry.has_hooks(EVENT_COMPACTION_BEFORE) or runtime_context.hook_registry.has_hooks(
-        EVENT_COMPACTION_AFTER,
+    return runtime_context is not None and any(
+        runtime_context.hook_registry.has_hooks(event_name)
+        for event_name in (EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER)
     )
 
 
@@ -350,8 +347,6 @@ async def compact_scope_history(
             messages=messages_for_runs(included_runs, history_settings) if collect_compaction_hook_messages else (),
             session_id=session.session_id,
             token_count_before=before_tokens,
-            token_count_after=None,
-            compaction_summary=None,
         )
 
     async def after_persist(chunk: _SummaryChunk, compacted_run_count: int, runs_remaining: int) -> None:
@@ -606,8 +601,6 @@ async def compact_running_turn(
         messages=messages,
         session_id=session.session_id,
         token_count_before=before_tokens,
-        token_count_after=None,
-        compaction_summary=None,
     )
     summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
 
@@ -685,7 +678,7 @@ def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], in
     return estimator, kind
 
 
-async def _summarize_chunk(  # noqa: C901, PLR0915
+async def _summarize_chunk(  # noqa: PLR0915
     summarizer: Summarizer,
     previous_summary: str | None,
     runs: Sequence[AnyRunRecord],
@@ -806,22 +799,21 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 minimum_progress_input_tokens=minimum_progress_input_tokens,
                 error=exc,
             )
-            if retry_decision is not None:
-                if retry_decision.kind == "same-budget-transient":
-                    await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
-                    attempt += 1
-                    continue
-                rebuilt_input, rebuilt_runs = await build(retry_decision.budget, token_estimator)
-                if rebuilt_runs:
-                    rebuilt_input_tokens = await asyncio.to_thread(token_estimator, rebuilt_input)
-                    if retry_decision.kind == "shrink" and rebuilt_input_tokens >= summary_input_estimate:
-                        raise
-                    summary_input = rebuilt_input
-                    included_runs = rebuilt_runs
-                    budget = retry_decision.budget
-                    attempt += 1
-                    continue
-            raise
+            if retry_decision is None:
+                raise
+            if retry_decision.kind == "same-budget-transient":
+                await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
+                attempt += 1
+                continue
+            rebuilt_input, rebuilt_runs = await build(retry_decision.budget, token_estimator)
+            # A shrink that does not rebuild a smaller input with some run in it cannot help.
+            if not rebuilt_runs or await asyncio.to_thread(token_estimator, rebuilt_input) >= summary_input_estimate:
+                raise
+            summary_input = rebuilt_input
+            included_runs = rebuilt_runs
+            budget = retry_decision.budget
+            attempt += 1
+            continue
         logger.info(
             "Compaction summary chunk completed",
             **attempt_fields,
@@ -841,7 +833,7 @@ def _runs_with_stable_ids(
     session_id: str,
     scope: HistoryScope,
 ) -> list[AnyRunRecord]:
-    stable_runs = [run for run in runs if _has_stable_run_id(run)]
+    stable_runs = [run for run in runs if run.run_id]
     if len(stable_runs) < len(runs):
         logger.warning(
             "Compaction skipped runs without stable run IDs",
@@ -850,10 +842,6 @@ def _runs_with_stable_ids(
             skipped_runs=len(runs) - len(stable_runs),
         )
     return stable_runs
-
-
-def _has_stable_run_id(run: AnyRunRecord) -> bool:
-    return bool(run.run_id)
 
 
 def _iso_utc_now() -> str:
