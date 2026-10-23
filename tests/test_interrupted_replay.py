@@ -23,7 +23,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.types import ConversationSession, SessionStateWrite, session_state_snapshot
+from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import seed_session
 from tests.history_helpers import store_fold
@@ -464,7 +464,7 @@ def test_an_interrupted_replay_and_the_session_state_it_carries_commit_together_
     session = storage.load_session("session-1", "agent")
     assert session is not None
     session.session_state["recovered"] = "value"
-    state = SessionStateWrite(session, session_state_snapshot(session.session_state))
+    state = session_state_snapshot(session.session_state)
     snapshot = build_interrupted_replay_snapshot(
         user_message="Please continue",
         user_message_is_structured=False,
@@ -505,8 +505,9 @@ def test_an_interrupted_replay_and_the_session_state_it_carries_commit_together_
     fields = storage.read_session_fields("session-1")
     assert fields is not None
     assert fields.session_state == {"recovered": "value"}
-    # The replay run is saved through a fresh load of the row; the session the state came from still records it.
+    # The replay run is saved through the session the state came from, which learns both.
     assert session.stored_session_state == {"recovered": "value"}
+    assert [run.run_id for run in session.runs] == ["old1", "cancelled-run"]
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == ["old1", "cancelled-run"]
