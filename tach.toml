@@ -6278,6 +6278,7 @@ expose = [
     "presentation.strip_team_display",
     "resume.continue_paused_team_run",
     "runtime.MemberEvent",
+    "runtime.team_usage_runs",
     "spec.TeamMode",
     "storage.TeamRunRecords",
 ]

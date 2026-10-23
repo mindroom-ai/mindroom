@@ -98,7 +98,7 @@ from mindroom.teams.members import (
     team_label,
 )
 from mindroom.teams.presentation import format_team_response
-from mindroom.teams.runtime import MemberEvent
+from mindroom.teams.runtime import MemberEvent, team_usage_runs
 from mindroom.teams.spec import TeamMode
 from mindroom.teams.storage import TeamRunRecords
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
@@ -287,16 +287,14 @@ def _usage_from_run_metadata(run_metadata: dict[str, Any]) -> _UsageInfo:
 
 
 def _usage_from_team_output(record: TeamRunRecord, members: Sequence[RunRecord]) -> _UsageInfo:
-    """Sum usage over the leader and every member run, normalizing each run for its own provider."""
+    """Sum usage over the runs of a team turn, normalizing each run for its own provider."""
     total = _UsageInfo()
-    for run in (record, *members):
-        if run.metrics is None:
-            continue
+    for run, metrics in team_usage_runs(record, members):
         usage = _usage_info(
-            input_tokens=run.metrics.input_tokens,
-            output_tokens=run.metrics.output_tokens,
-            cache_read_tokens=run.metrics.cache_read_tokens,
-            cache_write_tokens=run.metrics.cache_write_tokens,
+            input_tokens=metrics.input_tokens,
+            output_tokens=metrics.output_tokens,
+            cache_read_tokens=metrics.cache_read_tokens,
+            cache_write_tokens=metrics.cache_write_tokens,
             provider=run.model_provider,
             model_id=run.model,
         )

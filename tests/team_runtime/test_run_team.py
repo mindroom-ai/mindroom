@@ -19,10 +19,11 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
-from mindroom.llm.runs import RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.usage import RunMetrics
 from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
-from mindroom.teams.runtime import MemberEvent, run_team, team_paused_content, team_usage
+from mindroom.teams.runtime import MemberEvent, run_team, team_paused_content, team_usage, team_usage_runs
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
@@ -273,6 +274,43 @@ async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_te
         ("leader-model", 790),
         ("writer-model", 60),
     ]
+
+
+async def test_a_team_turns_usage_is_the_leader_and_every_reporting_member_counted_once() -> None:
+    """One selection of runs feeds the turn's metadata sum and the API's per-provider sum."""
+    leader = TeamRunRecord(
+        run_id="team",
+        team_id="squad",
+        metrics=RunMetrics(input_tokens=100, output_tokens=10, total_tokens=110, duration=5.0),
+    )
+    writer = RunRecord(
+        run_id="writer",
+        agent_id="writer",
+        metrics=RunMetrics(input_tokens=50, output_tokens=5, total_tokens=55, duration=3.0),
+    )
+    silent = RunRecord(run_id="silent", agent_id="silent")
+    checker = RunRecord(
+        run_id="checker",
+        agent_id="checker",
+        metrics=RunMetrics(input_tokens=20, output_tokens=2, total_tokens=22, duration=1.0),
+    )
+    members = [writer, silent, checker]
+
+    assert [(run.run_id, metrics.input_tokens) for run, metrics in team_usage_runs(leader, members)] == [
+        ("team", 100),
+        ("writer", 50),
+        ("checker", 20),
+    ]
+    total = team_usage(leader, members)
+    assert total is not None
+    assert (total.input_tokens, total.total_tokens, total.duration) == (170, 187, 5.0)
+    # The sum is a new object; the stored records keep their own counters.
+    assert (leader.metrics.input_tokens, writer.metrics.duration) == (100, 3.0)  # type: ignore[union-attr]
+
+    assert team_usage(leader, [silent]) is leader.metrics
+    leaderless = TeamRunRecord(run_id="team", team_id="squad")
+    assert team_usage(leaderless, [writer]) is writer.metrics
+    assert team_usage(leaderless, [silent]) is None
 
 
 async def test_an_unknown_member_id_answers_the_leader_with_agno_s_roster_notice() -> None:
