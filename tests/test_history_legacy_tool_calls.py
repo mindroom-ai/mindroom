@@ -1,4 +1,4 @@
-"""Stored tool calls in the shapes earlier releases wrote replay in the current shape, from history and paused runs."""
+"""Stored tool calls in the shapes earlier releases wrote read in the current shape, wherever stored runs are read."""
 # ruff: noqa: D103
 
 from __future__ import annotations
@@ -12,7 +12,8 @@ import pytest
 from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request, scope_history_messages
-from mindroom.history.types import HistoryScope
+from mindroom.history.summary_input import build_summary_input, messages_for_runs
+from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.codec import run_from_row
@@ -129,6 +130,44 @@ def test_a_message_left_with_content_but_no_calls_holds_none() -> None:
     _user, assistant = _history(run)
 
     assert (assistant.content, assistant.tool_calls) == ("Checking.", None)
+
+
+def _compacted_run() -> RunRecord:
+    return _stored_run(
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "tool_calls": [_BARE_CALL, _PLACEHOLDER, _CALL]},
+        {"role": "tool", "tool_call_id": "call-0", "content": "[]"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+        {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
+    )
+
+
+def test_compaction_reads_stored_calls_as_a_request_replays_them() -> None:
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=2)
+    run = _compacted_run()
+    stored = copy.deepcopy(run.messages)
+
+    calls, results = _calls_and_results(messages_for_runs([run], settings))
+
+    assert calls == [{**_BARE_CALL, "function": {"name": "list_rooms", "arguments": "{}"}}, _CALL]
+    assert results == ["call-0", "call_1"]
+    assert run.messages == stored
+
+
+def test_the_summary_input_leaves_out_placeholders_and_their_results() -> None:
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+
+    text, included = build_summary_input(
+        previous_summary=None,
+        compacted_runs=[_compacted_run()],
+        max_input_tokens=100_000,
+        history_settings=settings,
+    )
+
+    assert len(included) == 1
+    assert "sunny" in text
+    assert "orphan" not in text
+    assert "call_0" not in text
 
 
 def test_a_paused_run_resumes_without_its_placeholders() -> None:
