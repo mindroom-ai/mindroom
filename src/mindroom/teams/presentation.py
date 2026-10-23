@@ -119,6 +119,9 @@ def format_team_response(record: TeamRunRecord) -> str:
     the consensus, so a leader that failed shows that reason too. A run in which nobody wrote anything renders as
     empty text.
     """
+    # TODO(simplify): A blocking reply lists member runs in the order they ended, one entry per delegation, while a
+    # streamed reply shows one slot per member in configured order. Render both from the member slots in configured
+    # order. Users, API clients, and replayed history would notice.
     contributions = [
         _format_member_contribution(member.agent_name or "Team Member", text)
         for member in record.ended_member_runs

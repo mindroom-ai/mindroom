@@ -274,6 +274,8 @@ def decide_team_formation(
         member_statuses=member_statuses,
         config=config,
         reason_prefix="Team request",
+        # TODO(simplify): The provisional mode counts raw tags, so a thread team whose message tags two entities that
+        # cannot join coordinates. Coordinate exactly when the intent is EXPLICIT_MEMBERS. Models would notice.
         mode=TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE,
     )
 

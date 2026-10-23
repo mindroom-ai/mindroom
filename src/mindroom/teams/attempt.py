@@ -54,6 +54,9 @@ def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | dict[str, A
     return None if streamed and handover == run.content else handover
 
 
+# TODO(simplify): A second copy of each slot's text joins text around a hidden tool call directly, so a streamed reply
+# records "Looking.Four seats." where it showed two paragraphs: the streamed side of #3075's blocking-reply join.
+# Record the shown document's text without tool markers, one copy. Replayed history and models would notice.
 @dataclass
 class TeamReplyText:
     """The text of one team reply without tool markers: each member's text and the consensus, as the run's events build it.
