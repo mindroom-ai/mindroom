@@ -17,6 +17,7 @@ __all__ = [
     "CHAT_REQUEST_FIELDS",
     "CLIENT_FIELDS",
     "CODEX_FIELDS",
+    "CODEX_REJECTED_FIELDS",
     "GROQ_FIELDS",
     "RESPONSES_FIELDS",
     "ChatSettings",
@@ -117,7 +118,14 @@ RESPONSES_FIELDS = CLIENT_FIELDS | {
     "request_params",
     "cache_system_prompt",
 }
-CODEX_FIELDS = RESPONSES_FIELDS | {"codex_home", "prompt_cache_key", "session_id", "default_instructions"}
+# The Responses fields the Codex endpoint rejects; Agno's Codex model took them and dropped them from every request.
+CODEX_REJECTED_FIELDS = frozenset({"max_output_tokens", "temperature"})
+CODEX_FIELDS = RESPONSES_FIELDS - CODEX_REJECTED_FIELDS | {
+    "codex_home",
+    "prompt_cache_key",
+    "session_id",
+    "default_instructions",
+}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -32,7 +32,7 @@ from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.ollama_adapter import OllamaSettings
 from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
 from mindroom.providers.openai.build import build_provider as build_openai_provider
-from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
+from mindroom.providers.openai.settings import CODEX_FIELDS, ChatSettings, ResponsesSettings
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.redaction import REDACTED
@@ -892,6 +892,8 @@ async def test_a_retired_agno_field_loads_with_one_warning_and_the_model_answers
         ("groq", "cache_response"),
         ("kimi", "modalities"),
         ("openai", "background"),
+        ("codex", "temperature"),
+        ("openai_codex", "max_output_tokens"),
         ("anthropic", "skills"),
         ("vertexai_claude", "auth_token"),
         ("google", "url_context"),
@@ -948,6 +950,8 @@ def _accepted_keys(provider: str) -> frozenset[str]:
     """Return every ``extra_kwargs`` key some route of ``provider`` accepts, from the settings its adapter parses."""
     if provider in ACCEPTED_KEYS:
         return ACCEPTED_KEYS[provider]
+    if provider in {"codex", "openai_codex"}:
+        return CODEX_FIELDS
     settings_types = {
         "google": [GeminiSettings],
         "gemini": [GeminiSettings],

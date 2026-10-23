@@ -521,7 +521,8 @@ def _build_responses(
         ),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
         approval_receipt_after_response_id=True,
-        provider_default_sampling=_provider_default_sampling(model_id),
+        # Codex rejects a temperature (``CODEX_REJECTED_FIELDS``), so it keeps its own sampling on every model.
+        provider_default_sampling=route_key == "codex" or _provider_default_sampling(model_id),
         streams_only=route_key == "codex",
     )
     wire = ResponsesWire(

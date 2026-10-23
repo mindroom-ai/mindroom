@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.logging_config import get_logger
 from mindroom.providers.names import canonical_provider
+from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -225,6 +226,11 @@ _RETIRED_MODEL_SETTINGS = (
         fields=frozenset({"background", "background_poll_interval", "background_max_wait", "vector_store_name"}),
         providers=frozenset({"openai", "codex", "openai_codex"}),
         reason="Background polling and file-search uploads were retired with Agno's OpenAI Responses model",
+    ),
+    _RetiredModelSettings(
+        fields=CODEX_REJECTED_FIELDS,
+        providers=frozenset({"codex", "openai_codex"}),
+        reason="The Codex endpoint rejects these fields, so Agno's Codex model never sent them",
     ),
     _RetiredModelSettings(
         fields=frozenset(

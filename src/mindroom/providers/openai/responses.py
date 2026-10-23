@@ -120,13 +120,7 @@ class ResponsesAdapter:
             settings=self.settings,
             wire=self.wire,
         )
-        # Codex rejects sampling fields.
-        codex = self.wire.route == "codex"
-        return with_overrides(
-            kwargs,
-            request.overrides,
-            temperature=not codex and not self.capabilities.provider_default_sampling,
-        )
+        return with_overrides(kwargs, request.overrides, temperature=not self.capabilities.provider_default_sampling)
 
     async def _streamed(
         self,

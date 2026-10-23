@@ -853,8 +853,8 @@ def _codex(tmp_path: Path, **extra_kwargs: Any) -> ResponsesAdapter:  # noqa: AN
 
 
 def test_codex_requests_carry_instructions_and_drop_the_fields_codex_rejects(tmp_path: Path) -> None:
-    """Codex requires top-level instructions and rejects the output limit and temperature."""
-    adapter = _codex(tmp_path, max_output_tokens=40, temperature=0)
+    """Codex requires top-level instructions and rejects the output limit and temperature, raw request params too."""
+    adapter = _codex(tmp_path, request_params={"max_output_tokens": 40, "temperature": 0})
 
     request = _request(adapter, [Message(role="user", content="Hi")])
 

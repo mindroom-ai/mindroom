@@ -709,6 +709,21 @@ async def test_a_codex_login_without_an_account_sends_no_account_header(tmp_path
     assert "chatgpt-account-id" not in headers
 
 
+@pytest.mark.asyncio
+async def test_a_codex_request_sends_no_temperature_override_on_any_model(tmp_path: Path) -> None:
+    """Codex rejects a temperature, so even a model outside the default-sampling families sends none."""
+    codex_home = tmp_path / "login"
+    codex_home.mkdir()
+    tokens = {"access_token": unsigned_jwt({"exp": 4102444800}), "refresh_token": "refresh-value"}
+    (codex_home / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": tokens}), encoding="utf-8")
+    model_config = {"provider": "codex", "id": "o4-mini", "extra_kwargs": {"codex_home": str(codex_home)}}
+    built = _Built(tmp_path, model_config, _responses_reply(*_text_events("ok"), _completed()))
+
+    await _turn(built, ModelRequest(messages=[_user()], overrides=RequestOverrides(temperature=0.2)))
+
+    assert "temperature" not in built.body()
+
+
 # --- Responses lifecycle --------------------------------------------------------------------------------------
 
 
