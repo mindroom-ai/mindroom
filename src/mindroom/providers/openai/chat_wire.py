@@ -24,6 +24,7 @@ from mindroom.providers.openai.errors import error_body_error
 from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
+from mindroom.providers.openai.settings import CEREBRAS_CHAT_REQUEST, GROQ_CHAT_REQUEST, OPENAI_CHAT_REQUEST
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
 from mindroom.providers.tool_policy import disable_tool_selection, provider_tools_disabled
 
@@ -273,63 +274,17 @@ def _cerebras_response_format(response_format: Mapping[str, Any], *, strict: boo
     return prepared
 
 
-def _openai_params(settings: ChatSettings, response_format: object) -> dict[str, Any]:
-    return {
-        "store": settings.store,
-        "reasoning_effort": settings.reasoning_effort,
-        "verbosity": settings.verbosity,
-        "frequency_penalty": settings.frequency_penalty,
-        "logit_bias": settings.logit_bias,
-        "logprobs": settings.logprobs,
-        "top_logprobs": settings.top_logprobs,
-        "max_tokens": settings.max_tokens,
-        "max_completion_tokens": settings.max_completion_tokens,
-        "presence_penalty": settings.presence_penalty,
-        "seed": settings.seed,
-        "stop": settings.stop,
-        "temperature": settings.temperature,
-        "user": settings.user,
-        "top_p": settings.top_p,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-        "extra_body": settings.extra_body,
-        "metadata": settings.metadata,
-        "service_tier": settings.service_tier,
-        "response_format": response_format,
-    }
+# The request fields each dialect sends; the accepted ``extra_kwargs`` of its routes derive from the same tuple.
+_DIALECT_REQUESTS: dict[ChatDialect, tuple[str, ...]] = {
+    "openai": OPENAI_CHAT_REQUEST,
+    "groq": GROQ_CHAT_REQUEST,
+    "cerebras": CEREBRAS_CHAT_REQUEST,
+}
 
 
-def _groq_params(settings: ChatSettings, response_format: object) -> dict[str, Any]:
-    return {
-        "frequency_penalty": settings.frequency_penalty,
-        "logit_bias": settings.logit_bias,
-        "logprobs": settings.logprobs,
-        "max_tokens": settings.max_tokens,
-        "presence_penalty": settings.presence_penalty,
-        "response_format": response_format,
-        "seed": settings.seed,
-        "stop": settings.stop,
-        "temperature": settings.temperature,
-        "top_logprobs": settings.top_logprobs,
-        "top_p": settings.top_p,
-        "user": settings.user,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-    }
-
-
-def _cerebras_params(settings: ChatSettings, response_format: object) -> dict[str, Any]:
-    return {
-        "max_completion_tokens": settings.max_completion_tokens,
-        "repetition_penalty": settings.repetition_penalty,
-        "temperature": settings.temperature,
-        "top_p": settings.top_p,
-        "top_k": settings.top_k,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-        "extra_body": settings.extra_body,
-        "response_format": response_format,
-    }
+def _request_settings(settings: ChatSettings, request: tuple[str, ...], response_format: object) -> dict[str, Any]:
+    """Return the settings ``request`` names, in its order, with the prepared output format where it is marked."""
+    return {name: response_format if name == "response_format" else getattr(settings, name) for name in request}
 
 
 def _deepseek_thinking(params: dict[str, Any], settings: ChatSettings, model_id: str) -> None:
@@ -389,12 +344,7 @@ def _dialect_params(
         )
     else:
         prepared = _json_schema_format(response_format, strict=settings.strict_output)
-    if wire.dialect == "groq":
-        params = _groq_params(settings, prepared)
-    elif wire.dialect == "cerebras":
-        params = _cerebras_params(settings, prepared)
-    else:
-        params = _openai_params(settings, prepared)
+    params = _request_settings(settings, _DIALECT_REQUESTS[wire.dialect], prepared)
     return {key: value for key, value in params.items() if value is not None}
 
 

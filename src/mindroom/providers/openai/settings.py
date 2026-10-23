@@ -12,13 +12,16 @@ from typing import Any
 from mindroom.providers.extra_kwargs import SECRET
 
 __all__ = [
+    "CEREBRAS_CHAT_REQUEST",
     "CEREBRAS_FIELDS",
     "CHAT_FIELDS",
     "CHAT_REQUEST_FIELDS",
     "CLIENT_FIELDS",
     "CODEX_FIELDS",
     "CODEX_REJECTED_FIELDS",
+    "GROQ_CHAT_REQUEST",
     "GROQ_FIELDS",
+    "OPENAI_CHAT_REQUEST",
     "RESPONSES_FIELDS",
     "ChatSettings",
     "ResponsesSettings",
@@ -36,42 +39,39 @@ CLIENT_FIELDS = frozenset(
         "client_params",
     },
 )
-# Agno OpenAIChat request fields; ``modalities`` and ``audio`` (audio output) are retired.
-CHAT_REQUEST_FIELDS = frozenset(
-    {
-        "store",
-        "reasoning_effort",
-        "verbosity",
-        "metadata",
-        "frequency_penalty",
-        "logit_bias",
-        "logprobs",
-        "top_logprobs",
-        "max_tokens",
-        "max_completion_tokens",
-        "presence_penalty",
-        "seed",
-        "stop",
-        "temperature",
-        "user",
-        "top_p",
-        "service_tier",
-        "strict_output",
-        "extra_headers",
-        "extra_query",
-        "extra_body",
-        "request_params",
-        "role_map",
-    },
+# The settings each Chat Completions dialect sends as request fields, in the order Agno's model class sent them;
+# ``response_format`` marks where the request's prepared output format goes. Agno's OpenAIChat ``modalities`` and
+# ``audio`` (audio output) are retired; Groq had no ``organization`` or ``extra_body``.
+OPENAI_CHAT_REQUEST = (
+    "store",
+    "reasoning_effort",
+    "verbosity",
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
+    "max_tokens",
+    "max_completion_tokens",
+    "presence_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "user",
+    "top_p",
+    "extra_headers",
+    "extra_query",
+    "extra_body",
+    "metadata",
+    "service_tier",
+    "response_format",
 )
-CHAT_FIELDS = CHAT_REQUEST_FIELDS | CLIENT_FIELDS
-# Agno's Groq and Cerebras classes took their own field sets; Groq had no ``organization`` or ``extra_body``.
-GROQ_FIELDS = CLIENT_FIELDS - {"organization"} | {
+GROQ_CHAT_REQUEST = (
     "frequency_penalty",
     "logit_bias",
     "logprobs",
     "max_tokens",
     "presence_penalty",
+    "response_format",
     "seed",
     "stop",
     "temperature",
@@ -80,21 +80,34 @@ GROQ_FIELDS = CLIENT_FIELDS - {"organization"} | {
     "user",
     "extra_headers",
     "extra_query",
-    "request_params",
-}
-CEREBRAS_FIELDS = CLIENT_FIELDS - {"organization"} | {
-    "parallel_tool_calls",
+)
+CEREBRAS_CHAT_REQUEST = (
     "max_completion_tokens",
     "repetition_penalty",
     "temperature",
     "top_p",
     "top_k",
-    "strict_output",
     "extra_headers",
     "extra_query",
     "extra_body",
+    "response_format",
+)
+
+
+def _accepted(request: tuple[str, ...], *shaping: str) -> frozenset[str]:
+    """Return the settings a dialect accepts: those it sends, and the ``shaping`` ones it reads to build a request."""
+    return frozenset(request) - {"response_format"} | frozenset(shaping)
+
+
+CHAT_REQUEST_FIELDS = _accepted(OPENAI_CHAT_REQUEST, "strict_output", "request_params", "role_map")
+CHAT_FIELDS = CHAT_REQUEST_FIELDS | CLIENT_FIELDS
+GROQ_FIELDS = CLIENT_FIELDS - {"organization"} | _accepted(GROQ_CHAT_REQUEST, "request_params")
+CEREBRAS_FIELDS = CLIENT_FIELDS - {"organization"} | _accepted(
+    CEREBRAS_CHAT_REQUEST,
+    "parallel_tool_calls",
+    "strict_output",
     "request_params",
-}
+)
 RESPONSES_FIELDS = CLIENT_FIELDS | {
     "include",
     "max_output_tokens",

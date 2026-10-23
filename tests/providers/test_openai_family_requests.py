@@ -22,11 +22,12 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
-from mindroom.providers.openai.chat_wire import parse_chat_completion
+from mindroom.providers.openai.chat_wire import chat_request_kwargs, parse_chat_completion
 from mindroom.providers.openai.legacy_replay import repair_legacy_responses_span
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import parse_response, responses_input, responses_request_kwargs
 from mindroom.providers.openai.schema import strict_response_schema
+from mindroom.providers.openai.settings import CEREBRAS_CHAT_REQUEST, GROQ_CHAT_REQUEST, OPENAI_CHAT_REQUEST
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.system_prompt import render_session_context
 from tests.providers.openai_family_support import responses_adapter
@@ -833,6 +834,71 @@ def test_groq_and_cerebras_usage_keeps_cached_input_and_reasoning(tmp_path: Path
     assert usage is not None
     assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (5000, 300, 5300)
     assert (usage.cache_read_tokens, usage.reasoning_tokens) == (4608, 120)
+
+
+# A value for every Chat request setting that travels in the request body.
+_CHAT_BODY_VALUES: dict[str, Any] = {
+    "store": True,
+    "reasoning_effort": "low",
+    "verbosity": "low",
+    "frequency_penalty": 0.5,
+    "logit_bias": {"50256": -100},
+    "logprobs": True,
+    "top_logprobs": 2,
+    "max_tokens": 10,
+    "max_completion_tokens": 11,
+    "presence_penalty": 0.25,
+    "seed": 7,
+    "stop": ["END"],
+    "temperature": 0.3,
+    "user": "user-1",
+    "top_p": 0.9,
+    "metadata": {"team": "a"},
+    "service_tier": "auto",
+    "repetition_penalty": 1.1,
+    "top_k": 5,
+}
+# Request settings that are SDK options, a body to merge, or the request's own output format, not body fields.
+_CHAT_NON_BODY_FIELDS = frozenset({"extra_headers", "extra_query", "extra_body", "response_format"})
+
+
+@pytest.mark.parametrize(
+    ("provider", "request_fields"),
+    [("openai", OPENAI_CHAT_REQUEST), ("groq", GROQ_CHAT_REQUEST), ("cerebras", CEREBRAS_CHAT_REQUEST)],
+)
+def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
+    provider: str,
+    request_fields: tuple[str, ...],
+    tmp_path: Path,
+) -> None:
+    """A request setting the dialect's routes accept is sent in the body, so no accepted setting is dropped."""
+    body_fields = [name for name in request_fields if name not in _CHAT_NON_BODY_FIELDS]
+    authored = {name: _CHAT_BODY_VALUES[name] for name in body_fields}
+    adapter = build_provider(
+        ModelConfig(
+            provider=provider,
+            id="m",
+            api="chat_completions" if provider == "openai" else None,
+            api_key="test-key",
+            extra_kwargs=authored,
+        ),
+        ProviderRuntime(runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+    )
+    assert isinstance(adapter, ChatAdapter)
+
+    kwargs = chat_request_kwargs(
+        model_id="m",
+        messages=[Message(role="user", content="Hi")],
+        tools=(),
+        tool_choice=None,
+        response_format=None,
+        stream=True,
+        settings=adapter.settings,
+        wire=adapter.wire,
+    )
+
+    body = {**kwargs.pop("extra_body", {}), **kwargs}
+    assert {name: body.get(name) for name in body_fields} == authored
 
 
 # --- Codex ----------------------------------------------------------------------------------------------------
