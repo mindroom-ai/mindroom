@@ -152,22 +152,17 @@ def _normalized_hostname(url: str) -> str:
         return ""
 
 
-def _server_fetch_get(
-    url: str,
-    *,
-    timeout: int,
-    follow_redirects: bool,
-    proxy: str | None = None,
-) -> httpx.Response:
-    """Fetch a URL through the server-fetch transport when no proxy is configured.
+def _server_fetch_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    """Fetch a URL through the server-fetch transport.
 
     The body is requested uncompressed and read raw up to a limit, so no page is inflated or buffered whole.
     """
-    # With a configured proxy, URL and redirect validation happen before this handoff.
-    # The proxy owns target DNS resolution and egress policy from here.
-    route: dict[str, Any] = {"proxy": proxy} if proxy else {"transport": ServerFetchHTTPTransport()}
     with (
-        httpx.Client(follow_redirects=follow_redirects, headers={"Accept-Encoding": "identity"}, **route) as client,
+        httpx.Client(
+            follow_redirects=follow_redirects,
+            headers={"Accept-Encoding": "identity"},
+            transport=ServerFetchHTTPTransport(),
+        ) as client,
         client.stream("GET", url, timeout=timeout) as response,
     ):
         codings = {value.strip().lower() for value in response.headers.get_list("content-encoding", split_commas=True)}
@@ -200,7 +195,6 @@ class _MindRoomWebsiteReader:
     max_depth: int = 3
     max_links: int = 10
     timeout: int = 10
-    proxy: str | None = None
     chunking_strategy: FixedSizeChunking = field(default_factory=lambda: FixedSizeChunking(chunk_size=5000))
     _visited: set[str] = field(default_factory=set, init=False, repr=False)
     _urls_to_crawl: list[tuple[str, int]] = field(default_factory=list, init=False, repr=False)
@@ -257,14 +251,8 @@ class _MindRoomWebsiteReader:
     def _get_validated_response(self, current_url: str) -> tuple[httpx.Response, str]:
         """Fetch a URL while validating every redirect hop before following it."""
         request_url = validate_server_fetch_url(current_url)
-        fetch_kwargs = {"proxy": self.proxy} if self.proxy else {}
         for _redirect_count in range(_MAX_REDIRECTS + 1):
-            response = _server_fetch_get(
-                request_url,
-                timeout=self.timeout,
-                follow_redirects=False,
-                **fetch_kwargs,
-            )
+            response = _server_fetch_get(request_url, timeout=self.timeout, follow_redirects=False)
             if not response.is_redirect:
                 return response, request_url
             request_url = validate_server_fetch_redirect_url(request_url, response.headers.get("location"))
