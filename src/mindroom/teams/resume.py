@@ -54,7 +54,6 @@ from mindroom.teams.storage import (
     register_team_notice_storage,
     scope_storage,
     team_history_settings,
-    under_team_scope,
 )
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
@@ -222,7 +221,7 @@ class TeamResume:
             if requirement.member_run_id is not None and key in decided:
                 add_approval_receipt_reader(requirement.member_run_id)
         session = self.storage.session
-        events = continue_team(
+        return continue_team(
             self.spec,
             paused,
             _resume_request(self.storage, paused, settings=self.settings, plan=self.plan),
@@ -235,12 +234,12 @@ class TeamResume:
                 user_id=self.user_id,
                 metadata=deepcopy(paused.metadata),
                 session_state=session.session_state,
+                history_scope=self.storage.scope,
             ),
             hooks=self.hooks,
             persist=persist_into(self.records, self.storage),
             request_template=self.request_template,
         )
-        return under_team_scope(events, self.storage.scope)
 
     async def __call__(
         self,

@@ -104,6 +104,7 @@ class PlannedCall:
             call_id=self.call_id,
             session_state=run.session_state,
             metadata=run.metadata or {},
+            history_scope=run.history_scope,
         )
 
 

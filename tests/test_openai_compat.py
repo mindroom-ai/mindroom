@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.ai import ResponseTurnContext
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 import pytest
 from fastapi import FastAPI, Request
@@ -86,6 +87,8 @@ from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
+from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
+from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_calls import record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -3172,10 +3175,12 @@ def _scripted_team(
     mode: TeamMode = TeamMode.COORDINATE,
     leader_identity: ModelIdentity = SYNTHETIC,
     team_id: str = "test-team",
+    member_toolkits: tuple[AdaptedToolkit, ...] = (),
 ) -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
     """Return what ``_build_team`` builds: a leader on a scripted provider and ``(id, name, model)`` members.
 
-    ``team_id`` is the stored ``team_id`` of the team's runs, which a configured team's scope replays by.
+    ``team_id`` is the stored ``team_id`` of the team's runs, which a configured team's scope replays by; every
+    member offers ``member_toolkits``.
     """
     leader = ScriptedModel([list(turn) for turn in leader_turns], identity=leader_identity)
     spec = TeamSpec(
@@ -3191,7 +3196,7 @@ def _scripted_team(
                     name=name,
                     model=model,
                     system_message=Message(role="system", content=f"You are {name}."),
-                    toolkits=(),
+                    toolkits=member_toolkits,
                 ),
                 role=f"{name} role.",
             )
@@ -3464,6 +3469,44 @@ class TestTeamCompletion:
         assert run.request_template.stream is False
         assert run.ctx.metadata is not None
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 321
+
+    def test_a_team_member_s_tool_calls_belong_to_the_team_s_stored_conversation(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """A member's calls carry the team scope, so its compact_context compacts the team's history, not its own."""
+        scopes: list[HistoryScope | None] = []
+
+        async def which_scope() -> str:
+            """Report the stored conversation this call belongs to."""
+            call = current_tool_call()
+            assert call is not None
+            scopes.append(call.context.history_scope)
+            return "noted"
+
+        team = _scripted_team(
+            calls(tool_call("delegate_task_to_member", "call-team", member_id="general", task="Which scope?")),
+            answer("Done."),
+            members=[
+                ("general", "General", ScriptedModel([calls(tool_call("which_scope", "call-scope")), answer("Ok.")])),
+            ],
+            member_toolkits=(adapt_toolkit(Toolkit(name="probe", tools=[which_scope])),),
+        )
+
+        with (
+            patch("mindroom.api.openai_compat._build_team", return_value=team),
+            patch(
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                new=AsyncMock(return_value=_PREPARED_TEAM_TURN),
+            ),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={"model": "team/super_team", "messages": [{"role": "user", "content": "Which scope?"}]},
+            )
+
+        assert response.status_code == 200
+        assert scopes == [HistoryScope(kind="team", scope_id="super_team")]
 
     def test_team_non_streaming_is_the_blocking_team_document(self, team_app_client: TestClient) -> None:
         """The completion is the document a blocking Matrix reply delivers, rendered from the runs that ended.

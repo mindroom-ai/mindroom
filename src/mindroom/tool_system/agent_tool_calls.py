@@ -246,6 +246,7 @@ class PreparedAgentToolCatalog:
             call_id=call_id,
             session_state=self.run.session_state,
             metadata=self.run.metadata or {},
+            history_scope=self.run.history_scope,
         )
 
     async def bind(

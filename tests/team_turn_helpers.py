@@ -35,6 +35,7 @@ from mindroom.teams.envelope import team_response, team_response_stream
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import StructuredStreamChunk
+from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
@@ -105,8 +106,8 @@ class ProbeToolkit(Toolkit):
 
     async def scope(self) -> str:
         """Report the history scope the running member stores to."""
-        context = get_tool_runtime_context()
-        key = context.history_scope.key if context is not None and context.history_scope is not None else None
+        call = current_tool_call()
+        key = call.context.history_scope.key if call is not None and call.context.history_scope is not None else None
         type(self).scopes.append(key)
         return key or "no scope"
 

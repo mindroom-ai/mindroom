@@ -470,6 +470,7 @@ class _MemberRuns:
             parent_run_id=self.record.run_id,
             metadata=self.ctx.metadata,
             session_state=self.ctx.session_state,
+            history_scope=self.ctx.history_scope,
         )
 
     def _capture(self, ended: list[RunRecord]) -> Persist[RunRecord]:

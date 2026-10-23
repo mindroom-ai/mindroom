@@ -33,6 +33,7 @@ from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
+    from mindroom.history.types import HistoryScope
     from mindroom.tool_system.tool_function import ToolFunction
 
 # What the loop sends the model for a call that names no function it offered; the same text Agno used.
@@ -64,6 +65,7 @@ class ToolCallContext:
 
     ``session_state`` is shared with the tool, which may mutate it in place; the caller persists it afterwards.
     ``call_id`` is the provider's id of the tool call being run, when the call came from a model.
+    ``history_scope`` is the run's stored conversation when it is a team's, as ``RunContext`` names it.
     """
 
     run_id: str
@@ -72,6 +74,7 @@ class ToolCallContext:
     call_id: str | None = None
     session_state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    history_scope: HistoryScope | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

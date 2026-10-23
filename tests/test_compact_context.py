@@ -42,6 +42,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import (
@@ -142,14 +144,13 @@ def _execution_identity(session_id: str = "session-1", *, agent_name: str = "tes
 _AGENT_SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 
 
-def _team_runtime_context(
+def _member_runtime_context(
     config: Config,
     runtime_paths: RuntimePaths,
-    team_scope: HistoryScope,
     *,
     agent_name: str = "test_agent",
 ) -> ToolRuntimeContext:
-    """Return the tool context of a member running under ``team_scope``, as the team runtime sets it."""
+    """Return the tool context of a team member's turn; the team scope travels on each call's context instead."""
     return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget(
@@ -165,8 +166,14 @@ def _team_runtime_context(
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        history_scope=team_scope,
     )
+
+
+async def _compact_as_team_member(tool: CompactContextTools, team_scope: HistoryScope) -> object:
+    """Call ``compact_context`` as the team runtime runs a member's call: with the team scope on its context."""
+    [function] = adapt_toolkit(tool).functions
+    context = ToolCallContext(run_id="member-run", session_id="session-1", history_scope=team_scope)
+    return await run_tool_call(function, {}, context)
 
 
 @contextmanager
@@ -605,8 +612,8 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
     ) as team_context:
         assert team_context.session is not None
         seed_session(team_context.storage, team_context.session)
-    with tool_runtime_context(_team_runtime_context(config, runtime_paths, team_scope)):
-        await tool.compact_context()
+    with tool_runtime_context(_member_runtime_context(config, runtime_paths)):
+        await _compact_as_team_member(tool, team_scope)
 
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
@@ -880,8 +887,8 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
     )
     team_scope = HistoryScope(kind="team", scope_id="team-123")
 
-    with tool_runtime_context(_team_runtime_context(config, runtime_paths, team_scope, agent_name="beta")):
-        result = await tool.compact_context()
+    with tool_runtime_context(_member_runtime_context(config, runtime_paths, agent_name="beta")):
+        result = await _compact_as_team_member(tool, team_scope)
 
     with _open_scope_context(
         scope=team_scope,
@@ -956,11 +963,10 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         active_model_name="large",
-        history_scope=team_scope,
     )
 
     with tool_runtime_context(runtime_context):
-        result = await tool.compact_context()
+        result = await _compact_as_team_member(tool, team_scope)
 
     with _open_scope_context(
         scope=team_scope,
@@ -1042,11 +1048,10 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         active_model_name=None,
-        history_scope=team_scope,
     )
 
     with tool_runtime_context(runtime_context):
-        result = await tool.compact_context()
+        result = await _compact_as_team_member(tool, team_scope)
 
     with _open_scope_context(
         scope=team_scope,

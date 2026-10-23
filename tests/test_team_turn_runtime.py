@@ -33,7 +33,6 @@ from mindroom.event_journal import ApprovalDecision
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.events import ContentDelta
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -45,17 +44,11 @@ from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApprov
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
 from mindroom.teams.spec import TeamMode
-from mindroom.teams.storage import under_team_scope
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import StructuredStreamChunk
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeModelBinding,
-    get_tool_runtime_context,
-    tool_runtime_context,
-)
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.bot_helpers import make_test_team_bot, unique_room_send_responses
@@ -92,9 +85,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import TeamBot
     from mindroom.event_journal import MatrixDelivery
-    from mindroom.history.types import HistoryScope
     from mindroom.session_storage.store import ConversationStore
-    from mindroom.teams.runtime import TeamRunEvent
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
 
@@ -565,37 +556,6 @@ async def test_a_member_s_call_that_runs_as_a_tool_job_keeps_the_member_s_claude
     _, [member] = team.stored_runs()
     assert member.tools is not None
     assert member.tools[0].result == f"No active Claude session for `writer:{SESSION_ID}`."
-
-
-@pytest.mark.asyncio
-async def test_the_team_scope_is_bound_only_while_the_run_produces_an_event(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The run's code sees the team scope and the attempt's model; the reply consuming its events never does."""
-    team = squad_turn(tmp_path, monkeypatch, leader=[])
-    produced: list[tuple[HistoryScope | None, str | None]] = []
-
-    def current_binding() -> tuple[HistoryScope | None, str | None]:
-        context = get_tool_runtime_context()
-        assert context is not None
-        return context.history_scope, context.active_model_name
-
-    async def run_events() -> AsyncIterator[TeamRunEvent]:
-        for text in ("one", "two"):
-            produced.append(current_binding())
-            yield ContentDelta(text)
-
-    with tool_runtime_context(replace(team.runtime, active_model_name="turn-model")):
-        # As the attempt does: the team scope around the run, the attempt's model around that.
-        events = ToolRuntimeModelBinding().stream_with_model(
-            under_team_scope(run_events(), TEAM_SCOPE),
-            active_model_name="attempt-model",
-        )
-        consumed = [current_binding() async for _event in events]
-
-    assert produced == [(TEAM_SCOPE, "attempt-model")] * 2
-    assert consumed == [(None, "turn-model")] * 2
 
 
 @pytest.mark.asyncio
