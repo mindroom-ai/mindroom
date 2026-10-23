@@ -36,7 +36,7 @@ class HelperResult[T: BaseModel]:
     """One helper call's answer and the run record its usage is saved from.
 
     ``content`` is the answer read into the requested schema, or its text when no schema was requested or the text
-    does not validate, so callers check ``isinstance`` as they did with Agno.
+    does not validate, so callers check ``isinstance``.
     """
 
     content: T | str

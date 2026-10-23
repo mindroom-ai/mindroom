@@ -6,8 +6,7 @@ tool calls it requested, and appends their results; the loop ends when the model
 a tool stops it, when the run waits for a decision, when a pre-request hook ends it, or when the run's request cap
 is reached. A resume enters the loop with the paused batch's decided calls, which it answers as the rest of that
 batch before any request. A run waits for a decision when a call of its own paused, or when a tool left an
-unresolved requirement on the record, as a team leader's delegation does for a paused member. Every point MindRoom
-patched into Agno's loop is a ``LoopHooks`` field or a parameter here.
+unresolved requirement on the record, as a team leader's delegation does for a paused member.
 """
 
 from __future__ import annotations
