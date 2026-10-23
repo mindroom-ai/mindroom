@@ -16,7 +16,7 @@ from html import escape
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
@@ -38,86 +38,51 @@ SSE_DONE = "data: [DONE]\n\n"
 # ---------------------------------------------------------------------------
 
 
-async def _run_openai_response_backgrounds(
-    *,
-    completed: bool,
-    response_error: BaseException | None,
-    completion_background: BackgroundTask | None,
-    always_background: BackgroundTask | None,
-) -> None:
-    """Run completion-scoped and always-run OpenAI response backgrounds."""
-    finalizer_error: BaseException | None = None
-    if always_background is not None:
-        try:
-            await always_background()
-        except BaseException as error:
-            finalizer_error = error
+class _FinalizedResponse(Response):
+    """A response whose own background runs only after a completed send, and whose ``always_background`` always runs.
 
-    background_error: BaseException | None = None
-    if completed and completion_background is not None:
-        try:
-            await completion_background()
-        except BaseException as error:
-            background_error = error
-
-    if response_error is not None:
-        raise response_error
-    if background_error is not None:
-        raise background_error
-    if finalizer_error is not None:
-        raise finalizer_error
-
-
-class OpenAIJSONResponse(JSONResponse):
-    """JSON response with separate completion-scoped and always-run finalizers."""
-
-    always_background: BackgroundTask | None = None
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Send the response, then run completion-scoped and always-run finalizers."""
-        completion_background = self.background
-        self.background = None
-        completed = False
-        response_error: BaseException | None = None
-        try:
-            await super().__call__(scope, receive, send)
-        except BaseException as error:
-            response_error = error
-        else:
-            completed = True
-        await _run_openai_response_backgrounds(
-            completed=completed,
-            response_error=response_error,
-            completion_background=completion_background,
-            always_background=self.always_background,
-        )
-
-
-class OpenAIStreamingResponse(StreamingResponse):
-    """Streaming response with completion-aware compaction and always-run finalizers."""
+    ``completion_predicate``, when set, decides whether the send completed, since a stream can end early either way.
+    """
 
     always_background: BackgroundTask | None = None
     completion_predicate: Callable[[], bool] | None = None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Stream the response, then run completion-scoped and always-run finalizers."""
+        """Send the response, then run the always-run finalizer and, after a completed send, the completion one."""
         completion_background = self.background
         self.background = None
-        completed = False
         response_error: BaseException | None = None
         try:
             await super().__call__(scope, receive, send)
         except BaseException as error:
             response_error = error
-            completed = self.completion_predicate() if self.completion_predicate is not None else False
-        else:
-            completed = self.completion_predicate() if self.completion_predicate is not None else True
-        await _run_openai_response_backgrounds(
-            completed=completed,
-            response_error=response_error,
-            completion_background=completion_background,
-            always_background=self.always_background,
-        )
+        completed = self.completion_predicate() if self.completion_predicate is not None else response_error is None
+        finalizer_error: BaseException | None = None
+        if self.always_background is not None:
+            try:
+                await self.always_background()
+            except BaseException as error:
+                finalizer_error = error
+        background_error: BaseException | None = None
+        if completed and completion_background is not None:
+            try:
+                await completion_background()
+            except BaseException as error:
+                background_error = error
+        if response_error is not None:
+            raise response_error
+        if background_error is not None:
+            raise background_error
+        if finalizer_error is not None:
+            raise finalizer_error
+
+
+class OpenAIJSONResponse(_FinalizedResponse, JSONResponse):
+    """JSON response with separate completion-scoped and always-run finalizers."""
+
+
+class OpenAIStreamingResponse(_FinalizedResponse, StreamingResponse):
+    """Streaming response with completion-aware compaction and always-run finalizers."""
 
 
 # ---------------------------------------------------------------------------
