@@ -418,6 +418,27 @@ async def disconnect(request: Request, agent_name: str | None = None) -> dict[st
         return {"status": "disconnected"}
 
 
+def _connected_instance(
+    request: Request,
+    agent_name: str | None,
+) -> tuple[RequestCredentialsTarget, dict[str, Any], str, bool]:
+    """Return the request's stored connection, its validated fetch URL, and whether it allows private URLs."""
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
+    config = _get_stored_config(target)
+    if not config:
+        raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
+    instance_url = config.get("instance_url")
+    token = config.get("access_token") or config.get("long_lived_token")
+    if not instance_url or not token:
+        raise HTTPException(status_code=401, detail="Missing credentials")
+    allow_private_url = _private_url_allowed(config)
+    fetch_url = _validate_homeassistant_instance_url(
+        _normalize_instance_url(instance_url),
+        allow_private_url=allow_private_url,
+    )
+    return target, config, fetch_url, allow_private_url
+
+
 @router.get("/entities")
 async def get_entities(
     request: Request,
@@ -425,19 +446,7 @@ async def get_entities(
     agent_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Get Home Assistant entities."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-    config = _get_stored_config(target)
-    if not config:
-        raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
-
-    instance_url = config.get("instance_url")
-    token = config.get("access_token") or config.get("long_lived_token")
-
-    if not instance_url or not token:
-        raise HTTPException(status_code=401, detail="Missing credentials")
-    instance_url = _normalize_instance_url(instance_url)
-    allow_private_url = _private_url_allowed(config)
-    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
+    target, config, fetch_url, allow_private_url = _connected_instance(request, agent_name)
 
     try:
         async with _homeassistant_http_client(allow_private_url=allow_private_url) as client:
@@ -489,19 +498,7 @@ async def call_service(
     agent_name: str | None = None,
 ) -> dict[str, Any]:
     """Call a Home Assistant service."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-    config = _get_stored_config(target)
-    if not config:
-        raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
-
-    instance_url = config.get("instance_url")
-    token = config.get("access_token") or config.get("long_lived_token")
-
-    if not instance_url or not token:
-        raise HTTPException(status_code=401, detail="Missing credentials")
-    instance_url = _normalize_instance_url(instance_url)
-    allow_private_url = _private_url_allowed(config)
-    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
+    target, config, fetch_url, allow_private_url = _connected_instance(request, agent_name)
 
     # Build service data
     service_data = data or {}
