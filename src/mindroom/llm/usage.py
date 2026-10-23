@@ -49,7 +49,8 @@ def _compact(values: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _known(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
+def known_fields(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the entries of a stored dict that name a field of the dataclass ``cls``."""
     names = {item.name for item in fields(cls)}
     return {key: value for key, value in data.items() if key in names}
 
@@ -90,7 +91,7 @@ class MessageMetrics(_TokenCounts):
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> MessageMetrics:
         """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(**_known(cls, data))
+        return cls(**known_fields(cls, data))
 
     def __add__(self, other: MessageMetrics) -> MessageMetrics:
         """Sum counters, cost, and duration; keep the first time to first token."""
@@ -143,7 +144,7 @@ class ModelMetrics(_TokenCounts):
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ModelMetrics:
         """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(**_known(cls, data))
+        return cls(**known_fields(cls, data))
 
 
 def _details_to_dict(details: Mapping[str, list[ModelMetrics]]) -> dict[str, list[dict[str, Any]]]:
@@ -214,7 +215,7 @@ class RunMetrics(_TokenCounts):
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> RunMetrics:
         """Rebuild from a stored dict, ignoring keys this type does not model."""
-        values = _known(cls, data)
+        values = known_fields(cls, data)
         if values.get("details") is not None:
             values["details"] = _details_from_dict(values["details"])
         return cls(**values)
@@ -286,7 +287,7 @@ class SessionMetrics(_TokenCounts):
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> SessionMetrics:
         """Rebuild from a stored dict, ignoring keys this type does not model and a ``details`` that is not a mapping."""
-        values = _known(cls, data)
+        values = known_fields(cls, data)
         details = values.pop("details", None)
         if isinstance(details, dict):
             values["details"] = _details_from_dict(
@@ -340,7 +341,7 @@ class ToolCallMetrics:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolCallMetrics:
         """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(**_known(cls, data))
+        return cls(**known_fields(cls, data))
 
 
 __all__ = [
@@ -350,4 +351,5 @@ __all__ = [
     "SessionMetrics",
     "ToolCallMetrics",
     "add_usage",
+    "known_fields",
 ]
