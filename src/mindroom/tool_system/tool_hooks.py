@@ -15,7 +15,7 @@ from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.hooks import (
@@ -79,17 +79,8 @@ class BackgroundToolApprovalDenied:
     reason: str
 
 
-class _ToolApprovalGate(Protocol):
-    """Approval callback inserted between before-call hooks and the tool body."""
-
-    async def __call__(
-        self,
-        origin: BackgroundScriptToolOrigin,
-        tool_name: str,
-        arguments: dict[str, Any],
-    ) -> ToolApprovalDecision:
-        """Return the terminal decision for one typed automation origin."""
-        ...
+# The approval callback between before-call hooks and the tool body: the terminal decision for one automation origin.
+type _ToolApprovalGate = Callable[[BackgroundScriptToolOrigin, str, dict[str, Any]], Awaitable[ToolApprovalDecision]]
 
 
 logger = get_logger(__name__)
