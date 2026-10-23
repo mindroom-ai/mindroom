@@ -1251,7 +1251,7 @@ def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
     assert len(trusted) == 8
     assert not [path for path in trusted if path.relative_to(paths.storage_root).parts[0] in runner_subpaths]
     assert len(recovery_locks) == 2
-    monkeypatch.setattr(agent_storage, "_BUSY_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(agent_storage, "BUSY_TIMEOUT_SECONDS", 0.2)
     for lock in recovery_locks:
         with lock.open("a") as holder:
             fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
