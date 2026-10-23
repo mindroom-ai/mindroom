@@ -35,7 +35,7 @@ from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import Capabilities, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -1315,6 +1315,45 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
     assert "Helper found it." in str(team.models["writer-model"].requests[-1].messages[-1].content)
     assert team.models["default"].requests[-1].messages[-1].content == (
         "Member results after human-in-the-loop resolution:\n[Writer]: Writer: the helper found it."
+    )
+
+
+def _cut_off(call_id: str) -> list[ScriptStep]:
+    """Return a response the output limit cut off while it requested ``touch``."""
+    *steps, completed = calls(tool_call("touch", call_id, label="cut off"))
+    assert isinstance(completed, TurnCompleted)
+    return [*steps, replace(completed, stop_reason="output_limit")]
+
+
+@pytest.mark.asyncio
+async def test_a_member_keeps_its_hooks_across_its_delegation_continuation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member run's hook state lasts the whole run: its third cut-off ends it, though a delegation came between.
+
+    The writer is cut off twice, delegates to the helper, and is cut off once more when the team continues it, so
+    the output-limit policy stops its run and the leader reads why.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.")],
+        helper=[answer("Helper found it.")],
+    )
+    team.models["writer-model"] = ScriptedModel(
+        [_cut_off("cut-1"), _cut_off("cut-2"), _delegate_to_helper("Dig"), _cut_off("cut-3"), answer("Rebuilt.")],
+        capabilities=Capabilities(claude_family=True),
+    )
+
+    await team.stream()
+
+    assert ProbeToolkit.calls == []
+    assert len(team.models["writer-model"].requests) == 4
+    _, member, _ = _delegation_state(team)
+    assert member.status is RunStatus.error
+    assert "The output limit cut off 3 of this model's responses" in str(
+        team.models["default"].requests[-1].messages[-1].content,
     )
 
 
