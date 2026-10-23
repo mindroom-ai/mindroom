@@ -196,14 +196,10 @@ def _append_queued_notice_if_needed(
     judged: bool = False,
 ) -> None:
     notice_context = _queued_message_notice_context.get()
-    if notice_context is not None and notice_context.mid_turn_gate is not None and not judged:
+    if notice_context is None or (notice_context.mid_turn_gate is not None and not judged):
         return
-    if notice_context is not None:
-        _strip_queued_notice_messages(
-            messages,
-            response_turn_id=notice_context.response_turn_id,
-        )
-    if notice_context is None or notice_context.state is None or not notice_context.state.has_pending_human_messages():
+    _strip_queued_notice_messages(messages, response_turn_id=notice_context.response_turn_id)
+    if notice_context.state is None or not notice_context.state.has_pending_human_messages():
         return
     messages.append(
         Message(
