@@ -375,7 +375,7 @@ class ApprovalMatrixTransport:
             reply_to_event_id=approval_event_id,
             extra_content={"msgtype": "m.notice"},
         )
-        # The send refuses an encrypted room it cannot protect, as the notice must.
+        # send_room_event_result refuses an encrypted room it cannot protect.
         response = await send_room_event_result(
             bot.client,
             room_id,

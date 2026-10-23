@@ -555,10 +555,7 @@ async def _complete_approved_child_tools(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> None:
-    """Publish each resumed tool's retained result in the parent's live trace, under the call id the parent shows.
-
-    Each result is read from the exact approved attempt, even after the child starts another run.
-    """
+    """Publish each resumed tool's result, read from its exact approved attempt, in the parent's live trace."""
     for pending_tool in pending_tools:
         call_id = str(pending_tool["tool_call_id"])
         source = tool_sources[call_id]
