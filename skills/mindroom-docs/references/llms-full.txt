@@ -2425,7 +2425,8 @@ Each decision logs `Cold cache model selected` with a `reason`: `no_earlier_repl
 
 A provider sometimes accepts a streamed request and then sends nothing more, which would leave the agent busy and queue every follow-up message behind it.
 MindRoom ends a streamed request when the provider sends no event for `stream_idle_timeout_seconds`.
-If nothing was streamed yet, MindRoom sends the request once more; a second silent attempt, or a stall after text already appeared, ends the turn with "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
+If nothing was streamed yet and no provider-hosted tool such as web search or code execution had started, MindRoom sends the request once more, since resending would run that tool again.
+A second silent attempt, or a stall after text appeared or such a tool started, ends the turn with "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 The limit measures the gap between provider events, so long replies and slow tool calls are unaffected.
 It applies only to streamed responses (`defaults.enable_streaming: true`, the default).
 
