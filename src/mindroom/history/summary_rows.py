@@ -376,8 +376,7 @@ def legacy_event_ids(storage: ConversationStore, *, session_id: str, scope_key: 
     with _read_transaction(storage) as (connection, tables):
         if connection is None:
             return None
-        rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
-    in_force = [row for row in _after_latest_barrier(rows) if row.legacy and row.summary is not None]
+        in_force = _legacy_in_force(_rows(connection, tables, session_id=session_id, scope_key=scope_key))
     return frozenset().union(*(row.event_ids for row in in_force)) if in_force else None
 
 
@@ -394,8 +393,7 @@ def cut_at_legacy_row(
     """
     with _write_transaction(storage, session_id, session) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
-        legacy = [row for row in _after_latest_barrier(rows) if row.legacy and row.summary is not None]
-        if legacy:
+        if legacy := _legacy_in_force(rows):
             _cut(connection, tables, session_id, scope_key, rows, (legacy[0].after_run_index, legacy[0].id))
 
 
@@ -589,9 +587,10 @@ def _rows(
     return rows[::-1]
 
 
-def _after_latest_barrier(rows: Sequence[_SummaryRow]) -> list[_SummaryRow]:
+def _legacy_in_force(rows: Sequence[_SummaryRow]) -> list[_SummaryRow]:
+    """Return the legacy summary rows with text after the scope's latest barrier."""
     barrier = max((row.id for row in rows if row.summary is None), default=0)
-    return [row for row in rows if row.id > barrier]
+    return [row for row in rows if row.id > barrier and row.legacy and row.summary is not None]
 
 
 @contextmanager
