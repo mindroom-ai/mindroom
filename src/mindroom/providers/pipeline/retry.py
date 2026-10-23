@@ -107,10 +107,11 @@ def retrying_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, reissuing it after a retryable failure that came before the attempt committed.
 
-    Non-streaming requests pass through unchanged, since their callers own deadlines and retry policy, except on a
-    route that only streams: it streams every request, so each one gets the stream's retries and idle limit.
+    A request whose caller retries it itself passes through unchanged. So does a non-streaming request, which the
+    SDK's HTTP retries cover, except on a route that only streams: it streams every request, so each one gets the
+    stream's retries and idle limit.
     """
-    if not request.stream and not inner.capabilities.streams_only:
+    if request.overrides.caller_retries or (not request.stream and not inner.capabilities.streams_only):
         return inner.stream(request)
     budget = _RetryBudget()
     model_id = inner.identity.id

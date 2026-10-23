@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from mindroom.api import config_lifecycle
 from mindroom.api.credentials import save_dashboard_api_key
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import OPENROUTER_BASE_URL_DEFAULT
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, OPENAI_BASE_URL_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.providers.model_loading import missing_model_api_key_provider
 
 if TYPE_CHECKING:
@@ -52,13 +52,13 @@ _PROVIDER_KEY_CHECKS: dict[_ConnectableProvider, _ProviderKeyCheck] = {
     ),
     "anthropic": _ProviderKeyCheck(
         label="Anthropic",
-        url="https://api.anthropic.com/v1/models",
+        url=f"{ANTHROPIC_BASE_URL_DEFAULT}/v1/models",
         header_name="x-api-key",
         extra_headers=(("anthropic-version", "2023-06-01"),),
     ),
     "openai": _ProviderKeyCheck(
         label="OpenAI",
-        url="https://api.openai.com/v1/models",
+        url=f"{OPENAI_BASE_URL_DEFAULT}/models",
         header_name="Authorization",
         header_prefix="Bearer ",
     ),

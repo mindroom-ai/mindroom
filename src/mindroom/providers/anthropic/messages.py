@@ -52,7 +52,7 @@ from mindroom.llm.provider import (
     hosted_tool_started,
 )
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.anthropic.native_compaction import (
     COMPACTION_BETA,
@@ -67,7 +67,12 @@ from mindroom.providers.anthropic.native_compaction import (
     uses_compaction_edit,
 )
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
-from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings, parse_claude_settings
+from mindroom.providers.anthropic.settings import (
+    ENDPOINT_VARIABLES,
+    ClaudeRouteKind,
+    ClaudeSettings,
+    parse_claude_settings,
+)
 from mindroom.providers.anthropic.wire import (
     assistant_message_from_response,
     build_system_blocks,
@@ -115,7 +120,6 @@ PROVIDER_NAMES: dict[ClaudeRouteKind, str] = {
     "bedrock_claude": "AwsBedrock",
 }
 STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
-_DEFAULT_ANTHROPIC_ENDPOINT = "https://api.anthropic.com"
 _VERTEX_ENDPOINTS = {
     "global": "https://aiplatform.googleapis.com/v1",
     "us": "https://aiplatform.us.rep.googleapis.com/v1",
@@ -132,7 +136,7 @@ def native_compaction_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings)
     """
     client_params = settings.client_params or {}
     if route == "anthropic":
-        base_url = client_params.get("base_url") or os.environ.get("ANTHROPIC_BASE_URL") or _DEFAULT_ANTHROPIC_ENDPOINT
+        base_url = client_params.get("base_url") or os.environ.get("ANTHROPIC_BASE_URL") or ANTHROPIC_BASE_URL_DEFAULT
         return str(base_url).rstrip("/")
     if route == "vertexai_claude":
         region = settings.region or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])
@@ -140,7 +144,7 @@ def native_compaction_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings)
         base_url = (
             settings.base_url
             or client_params.get("base_url")
-            or os.environ.get("ANTHROPIC_VERTEX_BASE_URL")
+            or os.environ.get(ENDPOINT_VARIABLES["vertexai_claude"])
             or _VERTEX_ENDPOINTS.get(region or "", f"https://{region}-aiplatform.googleapis.com/v1")
         )
         return f"{str(base_url).rstrip('/')}|{project}|{region}"
@@ -436,19 +440,19 @@ class ClaudeProvider:
             cache_system_prompt=cache_system_prompt,
         )
         return _PreparedRequest(
-            client=self._client(overrides.sdk_max_retries),
+            client=self._client(caller_retries=overrides.caller_retries),
             kwargs=body,
             # A strict tool goes through the beta endpoint even on Bedrock, which gets no beta header for it.
             beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
             checkpoint_prefix=request_uses_native_checkpoint(projected, route),
         )
 
-    def _client(self, max_retries: int | None) -> _AsyncClaudeClient:
+    def _client(self, *, caller_retries: bool) -> _AsyncClaudeClient:
         """Build this request's SDK client over the shared HTTP client.
 
         The route's own credentials and endpoint come first and ``client_params`` may override any of them;
-        ``default_headers`` and the shared HTTP client then win over ``client_params``, and a caller's
-        retry budget wins over everything the model authored.
+        ``default_headers`` and the shared HTTP client then win over ``client_params``, and a caller that retries
+        the request itself turns the SDK's retries off over everything the model authored.
         """
         settings = self.settings
         kwargs = self._route_client_kwargs()
@@ -458,8 +462,8 @@ class ClaudeProvider:
         if settings.default_headers is not None:
             kwargs["default_headers"] = dict(settings.default_headers)
         kwargs["http_client"] = self.http_client
-        if max_retries is not None:
-            kwargs["max_retries"] = max_retries
+        if caller_retries:
+            kwargs["max_retries"] = 0
         if self.route == "anthropic":
             return AsyncAnthropic(**kwargs)
         if self.route == "vertexai_claude":
@@ -635,7 +639,7 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
         kwargs["project_id"] = project_id
     if "region" not in kwargs and (region := runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])):
         kwargs["region"] = region
-    if "base_url" not in kwargs and (base_url := runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")):
+    if "base_url" not in kwargs and (base_url := runtime_paths.env_value(ENDPOINT_VARIABLES["vertexai_claude"])):
         kwargs["base_url"] = base_url
     client_params = dict(kwargs.get("client_params") or {})
     if "credentials" not in client_params and (

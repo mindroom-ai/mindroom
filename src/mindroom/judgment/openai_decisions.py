@@ -15,12 +15,12 @@ from mindroom.judgment.client import (
     probability,
     token_usage,
 )
-from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
+from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT, OPENAI_DECISIONS_MODEL
 
 if TYPE_CHECKING:
     from mindroom.judgment.answers import TokenUsage
 
-_ENDPOINT = "https://api.openai.com/v1/decisions"
+_ENDPOINT = f"{OPENAI_BASE_URL_DEFAULT}/decisions"
 # The alias may resolve to a dated snapshot of the same model.
 _MODEL_ID = re.compile(rf"{re.escape(OPENAI_DECISIONS_MODEL)}(?:-\d{{4}}-\d{{2}}-\d{{2}})?")
 

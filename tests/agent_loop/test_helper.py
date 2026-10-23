@@ -12,7 +12,7 @@ from structlog.testing import capture_logs
 from mindroom.agent_loop.helper import complete_once, complete_prompt
 from mindroom.agent_loop.prompt import PromptSpec, render_system_message
 from mindroom.agent_loop.structured import select_response_format
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     Capabilities,
@@ -178,7 +178,7 @@ async def test_an_unreadable_structured_answer_stays_text() -> None:
 async def test_a_request_carries_the_callers_overrides_and_no_tools() -> None:
     """Per-call overrides reach the request, and a helper request offers no tools."""
     provider = _RecordingProvider(answer="ok")
-    overrides = RequestOverrides(temperature=0.2, sdk_max_retries=0)
+    overrides = RequestOverrides(temperature=0.2, caller_retries=True)
 
     await complete_once(provider, _messages(PromptSpec(role="Summarize."), "Thread: ..."), overrides=overrides)
 
@@ -196,7 +196,5 @@ async def test_a_stream_that_never_finishes_its_turn_raises() -> None:
     """A provider stream that ends without a finished turn is a provider error, not an empty answer."""
     provider = _RecordingProvider(answer="partial", finish=False)
 
-    with pytest.raises(ProviderError) as raised:
+    with pytest.raises(ProviderUnavailable, match="without completing the turn"):
         await complete_once(provider, _messages(PromptSpec(role="Summarize."), "Thread: ..."))
-
-    assert raised.value.code == "incomplete_stream"

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import google.auth
 import httpx
 import pytest
 import typer
-from google.auth.exceptions import DefaultCredentialsError, TransportError
+from google.auth.exceptions import DefaultCredentialsError, RefreshError
+from google.oauth2.credentials import Credentials
 
 from mindroom.cli.doctor import (
     _check_matrix_homeserver,
@@ -24,7 +26,7 @@ from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.credentials.sync import get_embedder_api_key
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.providers.anthropic import messages as claude_messages
 
 if TYPE_CHECKING:
@@ -100,7 +102,7 @@ def test_other_status_codes_stay_compact() -> None:
     "error",
     [
         DefaultCredentialsError("no ADC"),
-        TransportError("token service unreachable"),
+        ProviderUnavailable("token service unreachable", provider="VertexAI", code="connection_error"),
         ProviderError("connection refused", provider="VertexAI"),
     ],
     ids=["missing-credentials", "token-service-unreachable", "endpoint-unreachable"],
@@ -111,6 +113,37 @@ def test_unverifiable_checks_stay_inconclusive(error: Exception) -> None:
 
     assert valid is None
     assert detail == str(error)
+
+
+class _RejectedCredentials(Credentials):
+    """Google credentials whose token endpoint rejects every refresh, as for a deleted service-account key."""
+
+    def __init__(self) -> None:
+        super().__init__(token=None)
+
+    def refresh(self, request: object) -> None:  # noqa: ARG002 - google-auth passes its transport
+        msg = "invalid_grant: Invalid JWT Signature."
+        raise RefreshError(msg)
+
+
+def test_rejected_vertex_credentials_fail_with_the_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credentials the token endpoint rejects fail the check with the token endpoint's reason, not a bare status."""
+    monkeypatch.setattr(google.auth, "default", lambda scopes: (_RejectedCredentials(), "adc-project"))  # noqa: ARG005
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    model = ModelConfig(
+        provider="vertexai_claude",
+        id="claude-sonnet-5-5",
+        extra_kwargs={"project_id": "test-project", "region": "us-east5"},
+    )
+
+    valid, detail = _validate_vertexai_claude_connection(model, runtime_paths)
+
+    assert valid is False
+    assert detail == "Google credentials were rejected: invalid_grant: Invalid JWT Signature."
 
 
 def _openai_embedder_config(host: str | None = None) -> Config:

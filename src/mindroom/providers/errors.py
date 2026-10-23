@@ -8,6 +8,7 @@ error reply see one rule with one precedence.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import httpx
@@ -26,8 +27,10 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 __all__ = [
+    "CliLoginError",
     "classify_provider_error",
     "is_context_window_error",
+    "is_credential_error",
     "provider_failure",
 ]
 
@@ -40,6 +43,8 @@ _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 _HTTP_CLIENT_ERROR_RANGE = range(400, 500)
 # The names providers give a throttled request: Anthropic's error type and the Responses code.
 _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
+# The name Anthropic gives rejected credentials, with or without its 401 status.
+_AUTHENTICATION_ERROR_TYPE = "authentication_error"
 # Anthropic reports an overloaded model with this error type, with or without a 529 status.
 _OVERLOADED_ERROR_TYPE = "overloaded_error"
 # The names providers give a transient failure: Anthropic's error types, where ``timeout_error`` is a gateway
@@ -55,14 +60,15 @@ _TRANSIENT_NAMES = frozenset(
         "vector_store_timeout",
     },
 )
-# Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid"
-# and Anthropic's 403 permission error that names the API key.
-_CREDENTIAL_MARKERS = ("auth", "api key", "api_key", "apikey")
+# Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid",
+# Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, or a whole word of
+# the auth family, so text that names an ``author`` property, an ``authority``, or ``oauth`` is not one.
+_CREDENTIAL_WORDING = re.compile(r"\b(?:un)?auth(?:enticat\w*|oriz\w*)?\b|api[ _]?key")
 
 # Wording providers use when a request does not fit the model's context window (Agno's
 # ``ModelProviderError.CONTEXT_WINDOW_PATTERNS`` without its over-broad ``max_tokens``, plus the
-# payload-size wording OpenAI-compatible servers and Anthropic use, and older Claude models' "input length and
-# `max_tokens` exceed context limit").
+# payload-size wording OpenAI-compatible servers and Anthropic use, older Claude models' "input length and
+# `max_tokens` exceed context limit", and llama.cpp's "exceeds the available context size").
 _CONTEXT_WINDOW_MARKERS = (
     "context_length_exceeded",
     "context window",
@@ -79,9 +85,26 @@ _CONTEXT_WINDOW_MARKERS = (
     "prompt is too long",
     "prompt too long",
     "exceeds the model",
+    "context size",
 )
 # A timeout as the HTTP client raises it, or as aiohttp and the socket layer raise it.
 _TRANSPORT_TIMEOUTS = (httpx.TimeoutException, TimeoutError)
+
+
+class CliLoginError(ValueError):
+    """A CLI's saved OAuth login, such as Codex's or Kimi Code's, could not lend a usable token.
+
+    ``status_code`` is the HTTP status of a token refresh the login server answered with an error.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def is_credential_error(message: str) -> bool:
+    """Return whether an error's wording names the credentials: an API key, or a whole word of the auth family."""
+    return _CREDENTIAL_WORDING.search(message.casefold()) is not None
 
 
 def is_context_window_error(message: str, *, code: str | None = None) -> bool:
@@ -108,7 +131,7 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
 
     1. A 429 status or a rate-limit name is ``RateLimited``.
     2. A transient status is ``ProviderUnavailable``.
-    3. A 401 status is ``AuthenticationFailed``.
+    3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
     4. Wording or a code that names the context window, on a client error or an event without a status, is
        ``ContextWindowExceeded``: a retry cannot make the request fit. A 5xx that mentions it stays transient.
     5. A transient name, or Anthropic's overloaded wording, is ``ProviderUnavailable``.
@@ -129,13 +152,13 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
         return typed(RateLimited)
     if status in _TRANSIENT_STATUSES:
         return typed(ProviderUnavailable)
-    if status == _UNAUTHORIZED_STATUS:
+    if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:
         return typed(AuthenticationFailed)
     if client_side and is_context_window_error(message, code=code):
         return typed(ContextWindowExceeded)
     if names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered:
         return typed(ProviderUnavailable)
-    if client_side and any(marker in lowered for marker in _CREDENTIAL_MARKERS):
+    if client_side and is_credential_error(message):
         return typed(AuthenticationFailed)
     if status in _INVALID_REQUEST_STATUSES:
         return typed(InvalidRequest)
@@ -143,14 +166,15 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
 
 
 def provider_failure(error: BaseException, *, provider: str) -> ProviderError | None:
-    """Return the normalized error a transport or Google sign-in failure is, or None for the adapter's own mapping.
+    """Return the normalized error a transport or sign-in failure is, or None for the adapter's own mapping.
 
     The error and every cause it shows count, so a network failure that an SDK, the Google auth library, or a CLI
     login refresh wrapped in an error of its own is still the retryable failure it is: a refused or reset
     connection, a timeout, an HTTP client or aiohttp transport error, or a Google token endpoint that could not be
-    reached or answered with a retryable error. Google credentials the token endpoint rejected, such as a deleted
-    service-account key, are an authentication failure; credentials that cannot be found or loaded stay a
-    configuration error.
+    reached or answered with a retryable error. A CLI login server that answered its token refresh with a status
+    ``classify_provider_error`` calls retryable, such as a 503 or a 429, is that failure. Google credentials the
+    token endpoint rejected, such as a deleted service-account key, are an authentication failure; credentials that
+    cannot be found or loaded stay a configuration error, and any other CLI login failure is the adapter's to map.
     """
     import aiohttp  # noqa: PLC0415 - google-genai's transport, loaded only once a request fails
     from google.auth import exceptions as google_auth  # noqa: PLC0415 - loaded only once a request fails
@@ -166,6 +190,10 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
         return ProviderUnavailable(str(error) or type(error).__name__, provider=provider, code=code)
     if any(isinstance(cause, google_auth.RefreshError) for cause in chain):
         return AuthenticationFailed(f"Google credentials were rejected: {error}", provider=provider, status_code=401)
+    for cause in chain:
+        if isinstance(cause, CliLoginError) and cause.status_code is not None:
+            failure = classify_provider_error(str(cause), provider=provider, status_code=cause.status_code)
+            return failure if failure.retryable else None
     return None
 
 

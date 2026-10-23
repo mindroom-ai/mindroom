@@ -7,7 +7,8 @@ from functools import cache
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.logging_config import get_logger
-from mindroom.providers.names import canonical_provider
+from mindroom.providers.names import provider_route
+from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -158,18 +159,17 @@ def drop_retired_fields(value: object) -> object:
 
 @dataclass(frozen=True)
 class _RetiredModelSettings:
-    """Agno model fields that ``extra_kwargs`` passed through on ``providers``, or on every provider when unset."""
+    """Agno model fields that ``extra_kwargs`` passed through on the routes ``providers`` names, or on every route."""
 
     fields: frozenset[str]
     providers: frozenset[str] | None
     reason: str
 
 
-_OPENAI_CHAT_PROVIDERS = frozenset(
-    {"openai", "azure", "openrouter", "deepseek", "llama_cpp", "zai", "kimi", "kimi_code"},
-)
+# Routes, as ``provider_route`` names them, by the Agno model class main built for them.
+_OPENAI_CHAT_PROVIDERS = frozenset({"openai", "azure", "openrouter", "deepseek", "llama_cpp", "zai", "kimi"})
 _CLAUDE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", "bedrock_claude"})
-_GEMINI_PROVIDERS = frozenset({"google", "gemini"})
+_GEMINI_PROVIDERS = frozenset({"google"})
 
 # LEGACY_COMPAT: Agno model fields in models.<name>.extra_kwargs.
 # Legacy format: extra_kwargs went to the provider's Agno model class as keyword arguments, so every Agno model field
@@ -223,8 +223,13 @@ _RETIRED_MODEL_SETTINGS = (
     ),
     _RetiredModelSettings(
         fields=frozenset({"background", "background_poll_interval", "background_max_wait", "vector_store_name"}),
-        providers=frozenset({"openai", "codex", "openai_codex"}),
+        providers=frozenset({"openai", "codex"}),
         reason="Background polling and file-search uploads were retired with Agno's OpenAI Responses model",
+    ),
+    _RetiredModelSettings(
+        fields=CODEX_REJECTED_FIELDS,
+        providers=frozenset({"codex"}),
+        reason="The Codex endpoint rejects these fields, so Agno's Codex model never sent them",
     ),
     _RetiredModelSettings(
         fields=frozenset(
@@ -277,14 +282,27 @@ _RETIRED_MODEL_SETTINGS = (
 
 def drop_retired_model_settings(provider: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Drop the Agno model fields that a ``provider`` model's ``extra_kwargs`` still sets, warning once per field."""
-    canonical = canonical_provider(provider)
+    route = provider_route(provider)
     reasons = {
         field: retired.reason
         for retired in _RETIRED_MODEL_SETTINGS
-        if retired.providers is None or canonical in retired.providers
+        if retired.providers is None or route in retired.providers
         for field in retired.fields
     }
     return _drop_retired(extra_kwargs, reasons, "extra_kwargs.")
+
+
+@dataclass(frozen=True)
+class _RetiredToolOverride:
+    """An authored tool override field that was removed, on ``tools`` or on every tool when unset.
+
+    A ``rejected`` field fails its entry with ``reason`` as the replacement guidance; any other is dropped with a
+    warning that gives ``reason``.
+    """
+
+    tools: frozenset[str] | None
+    reason: str
+    rejected: bool = False
 
 
 # LEGACY_COMPAT: Retired website tool knowledge option.
@@ -293,11 +311,44 @@ def drop_retired_model_settings(provider: str, extra_kwargs: dict[str, Any]) -> 
 # Last legacy release: v2026.10.478; replacement: unreleased.
 # Handling: Warn once and drop the override, so the tool offers read_url; the tool layer itself rejects the field.
 # Coverage: tests/test_website_tool.py::test_a_retired_knowledge_option_loads_with_one_warning_and_reads_urls.
-_RETIRED_TOOL_OVERRIDE_REASONS = {
-    "website": {"knowledge": "The website tool no longer adds pages to a knowledge base; it always offers read_url"},
+
+# LEGACY_COMPAT: Retired per-tool restrict_to_base_dir override.
+# Legacy format: file, coding, and python tool entries accepted an authored boolean restrict_to_base_dir.
+# Last legacy release: v2026.9.279; replacement: v2026.9.280 removed the field for the agents.<name>.file_access and
+#   defaults.file_access settings.
+# Handling: Reject it on every tool with guidance to the agent or defaults file_access setting.
+# Coverage: tests/test_tools_metadata.py::test_restrict_to_base_dir_is_rejected_with_file_access_hint.
+_RETIRED_TOOL_OVERRIDES = {
+    "knowledge": _RetiredToolOverride(
+        tools=frozenset({"website"}),
+        reason="The website tool no longer adds pages to a knowledge base; it always offers read_url",
+    ),
+    "restrict_to_base_dir": _RetiredToolOverride(
+        tools=None,
+        reason="use agents.<name>.file_access or defaults.file_access",
+        rejected=True,
+    ),
 }
+
+
+def _retired_tool_overrides(tool_name: str, overrides: Mapping[str, object], *, rejected: bool) -> dict[str, str]:
+    """Return the retired fields ``overrides`` authors for ``tool_name`` with one handling, and their reasons."""
+    return {
+        field: retired.reason
+        for field, retired in _RETIRED_TOOL_OVERRIDES.items()
+        if field in overrides and retired.rejected is rejected and (retired.tools is None or tool_name in retired.tools)
+    }
 
 
 def drop_retired_tool_overrides(tool_name: str, overrides: dict[str, object]) -> dict[str, object]:
     """Drop retired overrides that an older entry for ``tool_name`` still sets, warning once per field."""
-    return _drop_retired(overrides, _RETIRED_TOOL_OVERRIDE_REASONS.get(tool_name, {}), f"tools.{tool_name}.")
+    return _drop_retired(
+        overrides,
+        _retired_tool_overrides(tool_name, overrides, rejected=False),
+        f"tools.{tool_name}.",
+    )
+
+
+def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first rejected retired field an entry for ``tool_name`` authors, and its replacement guidance."""
+    return next(iter(_retired_tool_overrides(tool_name, overrides, rejected=True).items()), None)

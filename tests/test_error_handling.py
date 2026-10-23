@@ -225,28 +225,46 @@ def test_internal_provider_error_is_user_friendly() -> None:
 
 
 @pytest.mark.parametrize(
-    ("error_type", "message", "transient"),
+    ("error_type", "message", "expected"),
     [
-        ("api_error", "Unexpected upstream failure", True),
-        ("server_error", "The server had an error.", True),
-        ("timeout_error", "Request timed out", True),
-        ("invalid_request_error", "messages: bad block", False),
+        ("api_error", "Unexpected upstream failure", _PROVIDER_UNAVAILABLE_MESSAGE),
+        ("server_error", "The server had an error.", _PROVIDER_UNAVAILABLE_MESSAGE),
+        ("timeout_error", "Request timed out", _PROVIDER_UNAVAILABLE_MESSAGE),
+        ("rate_limit_error", "Number of request tokens has exceeded your limit", _RATE_LIMITED_MESSAGE),
+        ("authentication_error", "invalid x-api-key", "❌ Authentication failed: "),
+        ("invalid_request_error", "prompt is too long: 210000 tokens > 200000 maximum", "⚠️ The conversation no"),
+        # Wording a keyword list would misread: "generate" holds "rate", and the payload names no credentials.
+        ("invalid_request_error", "Failed to generate a response for this model", "⚠️ Error: "),
+        ("invalid_request_error", "messages: bad block", "⚠️ Error: "),
     ],
 )
-def test_an_untyped_provider_payload_is_unavailable_exactly_when_the_classifier_says_transient(
-    error_type: str,
-    message: str,
-    *,
-    transient: bool,
-) -> None:
-    """An untyped error's provider payload reads as temporary unavailability exactly when its typed twin would."""
+def test_an_untyped_provider_payload_reads_as_its_typed_twin(error_type: str, message: str, expected: str) -> None:
+    """An untyped error that holds a provider payload gets the reply of the typed error its payload classifies as."""
     payload = {"type": "error", "error": {"type": error_type, "message": message}, "request_id": "req_secret"}
-    typed = classify_provider_error(message, provider="anthropic", error_type=error_type)
+    untyped = Exception(repr(payload))
+    kind = type(classify_provider_error(message, provider="", error_type=error_type))
 
-    reply = get_user_friendly_error_message(Exception(repr(payload)))
+    reply = get_user_friendly_error_message(untyped)
 
-    assert isinstance(typed, ProviderUnavailable) is transient
-    assert reply.startswith("⚠️ Model provider temporarily unavailable" if transient else "⚠️ Error: ")
+    assert reply == get_user_friendly_error_message(kind(str(untyped), provider=""))
+    assert reply.startswith(expected)
+
+
+@pytest.mark.parametrize(
+    ("text", "authentication"),
+    [
+        ("Invalid API key", True),
+        ("Error code: 401 - Unauthorized", True),
+        ("Not authorized to invoke the model", True),
+        (f"{_OAUTH_HOST_UNREACHABLE} (Caused by NewConnectionError)", False),
+        ("Workspace author is unknown", False),
+    ],
+)
+def test_untyped_text_names_the_credentials_as_the_provider_classifier_does(text: str, *, authentication: bool) -> None:
+    """Text without a provider payload reads as an authentication failure only for wording the classifier reads so."""
+    reply = get_user_friendly_error_message(Exception(text))
+
+    assert reply.startswith("❌ Authentication failed") is authentication
 
 
 def test_json_provider_error_is_case_insensitive() -> None:

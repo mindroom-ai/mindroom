@@ -38,7 +38,7 @@ from mindroom.history.types import (
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
-from mindroom.providers.names import canonical_provider
+from mindroom.providers.names import provider_route
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import runs_without
@@ -117,9 +117,9 @@ def _compaction_fallback_is_distinct(
     A fallback that names the primary alias, or a different alias resolving to
     the same ``(provider, id)``, would resend the refused request to the same
     model, so it is not loaded at all. Providers are compared through
-    ``canonical_provider``, the normalization model dispatch uses, so spelling
-    variants like ``vertexai-claude`` and ``vertexai_claude`` count as the same
-    serving model.
+    ``provider_route``, the normalization model dispatch uses, so spelling
+    variants like ``vertexai-claude`` and ``vertexai_claude`` and aliases like
+    ``openai_codex`` and ``codex`` count as the same serving model.
     """
     if fallback_model_name == primary_model_name:
         is_distinct = False
@@ -128,8 +128,8 @@ def _compaction_fallback_is_distinct(
         fallback_config = config.models.get(fallback_model_name)
         if primary_config is None or fallback_config is None:
             return True
-        is_distinct = (canonical_provider(primary_config.provider), primary_config.id) != (
-            canonical_provider(fallback_config.provider),
+        is_distinct = (provider_route(primary_config.provider), primary_config.id) != (
+            provider_route(fallback_config.provider),
             fallback_config.id,
         )
     if not is_distinct:

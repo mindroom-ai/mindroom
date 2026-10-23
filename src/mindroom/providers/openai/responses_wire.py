@@ -36,6 +36,7 @@ from mindroom.providers.openai.response_replay import (
     formatted_input_with_provider_items,
 )
 from mindroom.providers.openai.schema import strict_response_schema
+from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
 from mindroom.providers.openai.tool_search import request_params_with_deferred_tool_search
 from mindroom.providers.tool_policy import disable_tool_selection
@@ -272,7 +273,8 @@ def _codex_params(params: dict[str, Any], settings: ResponsesSettings, wire: Res
         elif existing is None:
             extra_body["client_metadata"] = client_metadata
         params["extra_body"] = extra_body
-    for name in ("max_output_tokens", "temperature"):
+    # A request's temperature override and raw ``request_params`` reach here; config load retires the authored settings.
+    for name in CODEX_REJECTED_FIELDS:
         params.pop(name, None)
 
 

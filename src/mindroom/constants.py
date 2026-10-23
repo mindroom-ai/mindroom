@@ -17,6 +17,7 @@ from dotenv import dotenv_values
 
 from mindroom import runtime_env_policy
 from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.providers.names import provider_route
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
@@ -1206,13 +1207,8 @@ _CHROMADB_PY314_PATCHED = False
 
 
 def env_key_for_provider(provider: str) -> str | None:
-    """Get the environment variable name for a provider's API key.
-
-    Handles the gemini→google alias so callers don't need to.
-    """
-    if provider == "gemini":
-        return PROVIDER_ENV_KEYS.get("google")
-    return PROVIDER_ENV_KEYS.get(provider)
+    """Get the environment variable name for a provider's API key, resolving provider aliases such as ``gemini``."""
+    return PROVIDER_ENV_KEYS.get(provider_route(provider))
 
 
 def patch_chromadb_for_python314() -> None:

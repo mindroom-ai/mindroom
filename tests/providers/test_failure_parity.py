@@ -20,8 +20,8 @@ import httpx
 import pytest
 
 from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
-    INCOMPLETE_STREAM,
     MALFORMED_TOOL_CALL,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -404,8 +404,8 @@ _STALLED = 2
 def _early_ends(before_output: Reply, after_output: Reply) -> list[_Case]:
     """Return the early end before any output and the early end after visible output of one route's wire."""
     return [
-        _Case("end_before_output", before_output, ProviderUnavailable, UNAVAILABLE, _PIPELINE, code=INCOMPLETE_STREAM),
-        _Case("end_after_visible_output", after_output, ProviderUnavailable, UNAVAILABLE, 1, code=INCOMPLETE_STREAM),
+        _Case("end_before_output", before_output, ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        _Case("end_after_visible_output", after_output, ProviderUnavailable, UNAVAILABLE, 1),
     ]
 
 
@@ -707,6 +707,15 @@ _OPENAI_HTTP_CASES = [
         ),
         ContextWindowExceeded,
         CONTEXT_WINDOW,
+        1,
+        1,
+    ),
+    # Text that names an ``author`` property is not wording about the credentials.
+    _Case(
+        "http_400_author_property",
+        _openai_status(400, "Invalid schema for function 'save_note': 'author' is not of type 'string'.", "invalid"),
+        InvalidRequest,
+        ERROR,
         1,
         1,
     ),
@@ -1212,8 +1221,32 @@ _OLLAMA_CASES = [
     *_early_ends(_ollama_stream(_ollama_chunk()), _ollama_stream(_ollama_chunk(_PARTIAL))),
 ]
 
+# llama.cpp's own wording for a request larger than the context size the server was started with.
+_LLAMA_CPP_CASES = [
+    _Case(
+        "http_400_context_size",
+        _json(
+            400,
+            {
+                "error": {
+                    "code": 400,
+                    "message": "the request exceeds the available context size, try increasing it",
+                    "type": "exceed_context_size_error",
+                    "n_prompt_tokens": 9000,
+                    "n_ctx": 8192,
+                },
+            },
+        ),
+        ContextWindowExceeded,
+        CONTEXT_WINDOW,
+        1,
+        1,
+    ),
+]
+
 # Vertex AI Claude, Bedrock Claude, and Vertex AI Gemini failed exactly as their family's direct route did on the
-# Agno-backed runtime, so they run every row of that family; the other OpenAI-compatible Chat routes run three.
+# Agno-backed runtime, so they run every row of that family; the other OpenAI-compatible Chat routes run the shared
+# Chat rows, and llama.cpp its own context-size wording too.
 ROWS = [
     *_rows("anthropic", _CLAUDE_CASES),
     *_rows("vertexai_claude", _CLAUDE_CASES),
@@ -1224,6 +1257,7 @@ ROWS = [
         for route in ("openrouter", "azure", "deepseek", "zai", "llama_cpp", "kimi", "groq", "cerebras")
         for row in _rows(route, _CHAT_SHARED)
     ),
+    *_rows("llama_cpp", _LLAMA_CPP_CASES),
     *_rows("openai_responses", _RESPONSES_CASES),
     *_rows("codex", _RESPONSES_CASES, streams_only=True),
     *_rows("gemini", _GEMINI_CASES),
@@ -1321,6 +1355,38 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
     assert (turn.content, turn.stop_reason, turn.usage.output_tokens, len(sent)) == (_PARTIAL, stop_reason, 9, 1)
 
 
+# Each route's answer to a request its server failed, which the SDK and the stream retry would both reissue.
+_SERVER_FAILURES = {row.route: row.reply for row in ROWS if row.failure in {"http_500", "http_503"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", sorted(_SERVER_FAILURES))
+async def test_a_compaction_summary_attempt_sends_one_request_on_every_route(route: str, tmp_path: Path) -> None:
+    """Compaction retries a failed summary itself, so neither the SDK nor the stream retry reissues an attempt.
+
+    Codex streams every request, and its summaries once took the stream's four retries on top of compaction's.
+    """
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        answer = _SERVER_FAILURES[route]()
+        assert isinstance(answer, httpx.Response)
+        return answer
+
+    provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+
+    with pytest.raises(ProviderUnavailable):
+        await generate_compaction_summary(
+            model=provider,
+            summary_input="Conversation",
+            summary_prompt="Summarize",
+            timeout_seconds=10,
+        )
+
+    assert len(sent) == 1
+
+
 # --- CLI login refresh --------------------------------------------------------------------------------------------
 
 
@@ -1345,6 +1411,12 @@ def _expire_cli_login(route: str, root: Path) -> None:
         ("codex", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
         ("kimi", True, _connect_error(), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
         ("kimi", False, _connect_error(), ProviderUnavailable, UNAVAILABLE, 1),
+        # A login server that is down or throttling answers with its status, which the shared classifier reads as for
+        # any provider response, as the Agno-backed runtime reported and retried it.
+        ("codex", True, httpx.Response(503, text="upstream down"), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("codex", False, httpx.Response(502, text="bad gateway"), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        ("kimi", True, httpx.Response(429, text="slow down"), RateLimited, RATE_LIMITED, _PIPELINE),
+        ("kimi", False, httpx.Response(500, text="server error"), ProviderUnavailable, UNAVAILABLE, 1),
         # A refresh token the login server rejects is final and asks the user to log in again.
         (
             "codex",
@@ -1354,6 +1426,7 @@ def _expire_cli_login(route: str, root: Path) -> None:
             AUTHENTICATION,
             1,
         ),
+        ("codex", True, httpx.Response(403, text="forbidden"), AuthenticationFailed, AUTHENTICATION, 1),
         ("kimi", True, httpx.Response(401, text="invalid_grant"), AuthenticationFailed, AUTHENTICATION, 1),
     ],
     ids=[
@@ -1361,11 +1434,16 @@ def _expire_cli_login(route: str, root: Path) -> None:
         "codex-blocking-refused",
         "kimi-streamed-refused",
         "kimi-blocking-refused",
+        "codex-streamed-unavailable",
+        "codex-blocking-bad-gateway",
+        "kimi-streamed-throttled",
+        "kimi-blocking-server-error",
         "codex-rejected",
+        "codex-forbidden",
         "kimi-rejected",
     ],
 )
-async def test_a_cli_login_refresh_failure_is_retried_only_when_the_network_failed(
+async def test_a_cli_login_refresh_failure_is_retried_only_when_it_is_transient(
     route: str,
     stream: bool,
     refresh_reply: httpx.Response | Exception,
@@ -1375,7 +1453,7 @@ async def test_a_cli_login_refresh_failure_is_retried_only_when_the_network_fail
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An expired CLI login refreshes inside the request; only a network failure there is worth retrying."""
+    """An expired CLI login refreshes inside the request; a network failure or a transient status there is retried."""
     attempts: list[str] = []
 
     def refresh(url: str, **_kwargs: object) -> httpx.Response:

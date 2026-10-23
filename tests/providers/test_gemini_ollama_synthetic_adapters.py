@@ -156,6 +156,32 @@ def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_gemini_retries_as_authored_except_for_a_caller_that_retries_itself(tmp_path: Path) -> None:
+    """The SDK retries only as ``http_options.retry_options`` authors it, and a summary's request gets one attempt."""
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(503, json={"error": {"code": 503, "message": "Overloaded", "status": "UNAVAILABLE"}})
+
+    http_options = {
+        "httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        "retry_options": {"attempts": 3, "initial_delay": 0.01, "max_delay": 0.01},
+    }
+    config = ModelConfig(**_config(GEMINI, client_params={"http_options": http_options}))
+    adapter = gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
+
+    attempts = []
+    for overrides in (RequestOverrides(), RequestOverrides(caller_retries=True)):
+        sent.clear()
+        with pytest.raises(ProviderUnavailable):
+            await anext(adapter.stream(_request(stream=False, overrides=overrides)))
+        attempts.append(len(sent))
+
+    assert attempts == [3, 1]
+
+
+@pytest.mark.asyncio
 async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_path: Path) -> None:
     """Authored settings reach the request; overrides replace them, and disabling thinking keeps the authored config.
 
@@ -1363,7 +1389,10 @@ def test_ollama_host_and_key_resolution(tmp_path: Path, monkeypatch: pytest.Monk
 
 @pytest.mark.asyncio
 async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> None:
-    """Options, keep_alive, format, and request_params pass through; overrides land in options."""
+    """Options, keep_alive, format, and request_params pass through; a temperature override changes no option.
+
+    Agno's Ollama model had no temperature field, so its options were always the authored ones.
+    """
     config = _config(
         OLLAMA,
         options={"num_ctx": 8192},
@@ -1380,7 +1409,7 @@ async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> 
     )
 
     body = request["body"]
-    assert body["options"] == {"num_ctx": 8192, "temperature": 0.1}
+    assert body["options"] == {"num_ctx": 8192}
     assert body["keep_alive"] == "5m"
     assert body["format"] == "json"
     assert body["think"] is False

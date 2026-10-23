@@ -84,8 +84,14 @@ def test_statuses_and_wording_classify_the_same_for_every_family(
             "authentication_error",
             AuthenticationFailed,
         ),
+        ("invalid x-api-key", None, "authentication_error", AuthenticationFailed),
         ("Bad block", None, "invalid_request_error", ProviderError),
         ("An error occurred.", "invalid_prompt", None, ProviderError),
+        # Only whole words of the auth family name the credentials.
+        ("Not authorized to invoke this model", None, "invalid_request_error", AuthenticationFailed),
+        ("'author' is not of type 'string'", None, "invalid_request_error", ProviderError),
+        ("The oauth2 scope list is empty", None, "invalid_request_error", ProviderError),
+        ("The token authority is unknown", None, "invalid_request_error", ProviderError),
     ],
 )
 def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
@@ -107,6 +113,7 @@ def test_context_window_detection_reads_the_code_and_the_wording() -> None:
     assert is_context_window_error("Request too large for gpt-6-astra")
     assert is_context_window_error("This request would exceed the context window")
     assert is_context_window_error("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000")
+    assert is_context_window_error("the request exceeds the available context size, try increasing it")
     assert not is_context_window_error("max_tokens must be positive")
 
 

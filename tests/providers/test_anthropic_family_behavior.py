@@ -371,14 +371,14 @@ async def test_sdk_status_errors_map_to_the_shared_provider_errors(
     """Each SDK failure becomes the shared error class whose retryable flag the loop decides from."""
     wire = Wire(httpx.Response(status, json={"type": "error", "error": body}))
     provider = route_provider("anthropic", tmp_path, wire)
-    request = ModelRequest(messages=_user(), overrides=RequestOverrides(sdk_max_retries=0))
+    request = ModelRequest(messages=_user(), overrides=RequestOverrides(caller_retries=True))
     with pytest.raises(expected) as raised:
         await claude_turn(provider, request)
     assert raised.value.retryable is retryable
     assert raised.value.status_code == status
     assert raised.value.provider == "Anthropic"
     assert body["message"] in str(raised.value)
-    assert len(wire.requests) == 1, "sdk_max_retries=0 must stop the SDK's own retries"
+    assert len(wire.requests) == 1, "a caller that retries itself must stop the SDK's own retries"
 
 
 def _stream_failing_with(error_type: str) -> httpx.Response:
@@ -441,7 +441,7 @@ async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: P
 
     provider = route_provider("anthropic", tmp_path, Wire(fail))
     with pytest.raises(ProviderUnavailable) as raised:
-        await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(sdk_max_retries=0)))
+        await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(caller_retries=True)))
     assert raised.value.retryable is True
     assert raised.value.status_code is None
 

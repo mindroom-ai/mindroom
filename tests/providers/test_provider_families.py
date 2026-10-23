@@ -20,7 +20,7 @@ from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
 from mindroom.llm.media import Audio, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, RequestOverrides, ToolSpec, complete
+from mindroom.llm.provider import ModelRequest, ToolSpec, complete
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import wrap_provider
@@ -219,6 +219,17 @@ async def test_every_family_replays_the_tool_calls_any_provider_stored(family: s
 # --- The composed pipeline --------------------------------------------------------------------------------------
 
 
+def _without_sdk_retries(spec: Family) -> Family:
+    """Return ``spec`` with the SDK's own HTTP retries authored off, so the pipeline alone reissues a request.
+
+    The Gemini and Ollama SDKs retry only when a config authors it.
+    """
+    if spec.config["provider"] in {"google", "ollama"}:
+        return spec
+    extra_kwargs = {**spec.config.get("extra_kwargs", {}), "client_params": {"max_retries": 0}}
+    return replace(spec, config={**spec.config, "extra_kwargs": extra_kwargs})
+
+
 def _error_reply(family: str) -> httpx.Response:
     gemini = {"error": {"code": 503, "message": _OVERLOADED, "status": "UNAVAILABLE"}}
     bodies = {
@@ -249,7 +260,7 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
     the tool list and the request is reissued after the transient failure, with the request log recording every
     attempt.
     """
-    spec = FAMILIES[family]
+    spec = _without_sdk_retries(FAMILIES[family])
     wire = Wire(_error_reply(family), spec.reply())
     log_dir = tmp_path / "logs"
     provider = _pipeline(spec.adapter(tmp_path, wire), log_dir=log_dir)
@@ -257,7 +268,6 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
         messages=[Message(role="system", content="Be brief."), _media_message(spec, tmp_path)],
         tools=[_tool("call_tool"), _tool("lookup_order"), _tool("tool_search")],
         deferred_tool_names=frozenset({"lookup_order"}),
-        overrides=RequestOverrides(sdk_max_retries=0),
     )
 
     turn = await complete(provider, request)
@@ -446,7 +456,7 @@ async def test_failure_after_a_server_tool_started_is_final(
     spec = FAMILIES[family]
     wire = Wire(lambda _request: reply())
     provider = _pipeline(spec.adapter(tmp_path, wire))
-    request = ModelRequest(messages=[Message(role="user", content="Hi")], overrides=RequestOverrides(sdk_max_retries=0))
+    request = ModelRequest(messages=[Message(role="user", content="Hi")])
 
     with pytest.raises(ProviderUnavailable) as raised:
         await complete(provider, request)

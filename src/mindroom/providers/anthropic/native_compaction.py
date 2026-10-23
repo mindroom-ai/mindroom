@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.model_defaults import CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES
 from mindroom.native_compaction import (
     checkpoint_items,
     native_replay_messages,
@@ -63,7 +63,7 @@ def native_compaction_supported(*, provider: str, model_id: str, settings: Claud
         and settings.context_management is None
         and "context_management" not in request_params
         and "context_management" not in (request_params.get("extra_body") or {})
-        and (provider == "VertexAI" or endpoint == "https://api.anthropic.com")
+        and (provider == "VertexAI" or endpoint == ANTHROPIC_BASE_URL_DEFAULT)
     )
 
 

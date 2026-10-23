@@ -20,7 +20,7 @@ from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentia
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import AuthenticationFailed, ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.matrix.health import (
@@ -35,9 +35,18 @@ from mindroom.matrix.provisioning_env import (
     provisioning_url_from_env,
     registration_token_from_env,
 )
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
+from mindroom.model_defaults import (
+    ANTHROPIC_BASE_URL_DEFAULT,
+    CEREBRAS_HOST_DEFAULT,
+    DEEPSEEK_BASE_URL_DEFAULT,
+    GROQ_HOST_DEFAULT,
+    OLLAMA_HOST_DEFAULT,
+    OPENAI_BASE_URL_DEFAULT,
+    OPENROUTER_BASE_URL_DEFAULT,
+)
 from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.providers.model_loading import model_uses_own_credential
+from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -46,7 +55,7 @@ from .config import activate_cli_runtime, console, load_config_quiet
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError, TransportError
+    from google.auth.exceptions import DefaultCredentialsError
 
     from mindroom.config.models import ModelConfig
 
@@ -206,13 +215,13 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
 
 
 _PROVIDER_VALIDATE_URLS: dict[str, str] = {
-    "anthropic": "https://api.anthropic.com/v1/models",
-    "openai": "https://api.openai.com/v1/models",
+    "anthropic": f"{ANTHROPIC_BASE_URL_DEFAULT}/v1/models",
+    "openai": f"{OPENAI_BASE_URL_DEFAULT}/models",
     "google": "https://generativelanguage.googleapis.com/v1beta/models",
     "openrouter": f"{OPENROUTER_BASE_URL_DEFAULT}/models",
-    "deepseek": "https://api.deepseek.com/v1/models",
-    "cerebras": "https://api.cerebras.ai/v1/models",
-    "groq": "https://api.groq.com/openai/v1/models",
+    "deepseek": f"{DEEPSEEK_BASE_URL_DEFAULT}/v1/models",
+    "cerebras": f"{CEREBRAS_HOST_DEFAULT}/v1/models",
+    "groq": f"{GROQ_HOST_DEFAULT}/openai/v1/models",
     # No "zai" entry: Z.ai's paas/v4 OpenAPI spec exposes no GET /models
     # listing endpoint, so a URL probe would misreport valid keys as broken.
 }
@@ -307,7 +316,7 @@ def _validate_provider_key(
     (None, reason) if inconclusive (e.g. connection error).
     """
     # Normalize aliases so we look up a single URL and auth style
-    canonical = "google" if provider == "gemini" else provider
+    canonical = provider_route(provider)
 
     if base_url:
         url = base_url.rstrip("/") + "/models"
@@ -328,23 +337,18 @@ def _validate_provider_key(
 
 
 def _classify_vertexai_claude_error(
-    exc: ProviderError
-    | DefaultCredentialsError
-    | RefreshError
-    | TransportError
-    | RuntimeError
-    | TypeError
-    | ValueError,
+    exc: ProviderError | DefaultCredentialsError | RuntimeError | TypeError | ValueError,
 ) -> tuple[bool | None, str]:
-    """Classify one Vertex AI Claude validation failure for doctor output."""
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError  # noqa: PLC0415
+    """Classify one Vertex AI Claude validation failure for doctor output.
 
+    The Claude adapter types every failure of a request, rejected Google credentials included, so rejected
+    credentials fail with the reason their error carries and another rejected request with its status. Credentials
+    that cannot be found and a service that cannot be reached leave the check inconclusive.
+    """
+    if isinstance(exc, AuthenticationFailed):
+        return False, str(exc)
     if isinstance(exc, ProviderError) and exc.status_code is not None:
         return False, _vertexai_claude_api_error_detail(exc.status_code, str(exc))
-    if isinstance(exc, DefaultCredentialsError):
-        return None, str(exc)
-    if isinstance(exc, RefreshError):
-        return False, str(exc)
     return None, str(exc)
 
 
@@ -391,7 +395,7 @@ def _validate_vertexai_claude_connection(
     if missing:
         return None, f"missing {', '.join(missing)}"
 
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError, TransportError  # noqa: PLC0415
+    from google.auth.exceptions import DefaultCredentialsError  # noqa: PLC0415
 
     # The anthropic SDK loads only when a Vertex Claude model is checked.
     from mindroom.providers.anthropic.messages import build_provider  # noqa: PLC0415
@@ -407,15 +411,7 @@ def _validate_vertexai_claude_connection(
         asyncio.run(closing_model_connections(complete(provider, request)))
     except PermanentStartupError as exc:
         return False, str(exc)
-    except (
-        ProviderError,
-        DefaultCredentialsError,
-        RefreshError,
-        TransportError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-    ) as exc:
+    except (ProviderError, DefaultCredentialsError, RuntimeError, TypeError, ValueError) as exc:
         return _classify_vertexai_claude_error(exc)
 
     return True, ""

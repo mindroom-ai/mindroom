@@ -338,7 +338,7 @@ async def test_complete_raises_when_the_stream_never_completes_the_turn() -> Non
     with pytest.raises(ProviderUnavailable, match="without completing the turn") as info:
         await complete(provider, ModelRequest(messages=[]))
 
-    assert (info.value.provider, info.value.code, info.value.retryable) == ("Synthetic", "incomplete_stream", True)
+    assert (info.value.provider, info.value.retryable) == ("Synthetic", True)
 
 
 def test_model_request_defaults_are_immutable_and_empty() -> None:

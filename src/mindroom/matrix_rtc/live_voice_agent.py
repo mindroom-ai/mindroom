@@ -17,6 +17,7 @@ from mindroom.matrix_rtc.voice_agent import (
     LiveVoiceUsage,
     RealtimeVoiceBridge,
 )
+from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
@@ -338,7 +339,7 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
         model = GPTLiveModel(
             model=options.model,
             api_key=options.api_key,
-            base_url="https://api.openai.com/v1",
+            base_url=OPENAI_BASE_URL_DEFAULT,
             voice=options.voice,
             delegation="client",
             # CallManager retries with a fresh provider queue and the same

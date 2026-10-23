@@ -516,8 +516,8 @@ async def test_http_errors_map_to_typed_provider_errors(
     retryable: bool,
 ) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _json_reply(body, status=status))
-    # A non-streaming request skips the stream retry stage, so the adapter's own error reaches the caller.
-    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(sdk_max_retries=0))
+    # A caller that retries the request itself turns the SDK's retries off, so the adapter's own error arrives at once.
+    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(caller_retries=True))
 
     with pytest.raises(ProviderError) as info:
         await _turn(built, request)
@@ -613,7 +613,7 @@ async def test_a_context_window_error_inside_a_stream_is_typed(tmp_path: Path) -
 async def test_an_error_body_without_a_message_reports_the_response_text(tmp_path: Path) -> None:
     """Servers that answer outside the OpenAI error shape still surface what they said."""
     built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply({"detail": "Not Found"}, status=404))
-    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(sdk_max_retries=0))
+    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(caller_retries=True))
 
     with pytest.raises(InvalidRequest) as info:
         await _turn(built, request)
@@ -709,6 +709,21 @@ async def test_a_codex_login_without_an_account_sends_no_account_header(tmp_path
     assert "chatgpt-account-id" not in headers
 
 
+@pytest.mark.asyncio
+async def test_a_codex_request_sends_no_temperature_override_on_any_model(tmp_path: Path) -> None:
+    """Codex rejects a temperature, so even a model outside the default-sampling families sends none."""
+    codex_home = tmp_path / "login"
+    codex_home.mkdir()
+    tokens = {"access_token": unsigned_jwt({"exp": 4102444800}), "refresh_token": "refresh-value"}
+    (codex_home / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": tokens}), encoding="utf-8")
+    model_config = {"provider": "codex", "id": "o4-mini", "extra_kwargs": {"codex_home": str(codex_home)}}
+    built = _Built(tmp_path, model_config, _responses_reply(*_text_events("ok"), _completed()))
+
+    await _turn(built, ModelRequest(messages=[_user()], overrides=RequestOverrides(temperature=0.2)))
+
+    assert "temperature" not in built.body()
+
+
 # --- Responses lifecycle --------------------------------------------------------------------------------------
 
 
@@ -789,10 +804,10 @@ async def test_responses_stream_without_completion_fails(
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, _responses_reply(*events))
 
-    with pytest.raises(ProviderUnavailable, match="without completing the turn") as info:
+    with pytest.raises(ProviderUnavailable, match="without completing the turn"):
         await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.code, len(built.requests)) == ("incomplete_stream", requests)
+    assert len(built.requests) == requests
 
 
 _SEARCH_CALL = {"id": "ws_1", "type": "web_search_call", "status": "in_progress", "action": {"type": "search"}}
