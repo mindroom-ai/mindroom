@@ -191,7 +191,12 @@ def hosted_tool_started(name: str) -> StreamProgress:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TurnCompleted:
-    """The last stream event: the finished assistant message with its metrics and provider data."""
+    """The last stream event: the finished assistant message with its metrics and provider data.
+
+    The adapter that finished the turn records the model that answered it in the message's provider data
+    (``llm/messages.py`` ``model_provenance``), which usage attribution and a run's own model messages
+    (``is_own_model_message``) read; a stage that wraps another provider passes that record on unchanged.
+    """
 
     message: Message
     stop_reason: StopReason | None = None

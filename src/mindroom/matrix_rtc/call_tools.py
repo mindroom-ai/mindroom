@@ -42,7 +42,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
-from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message
+from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
 from mindroom.logging_config import get_logger
@@ -243,7 +243,7 @@ async def record_call_token_usage(
                 role="assistant",
                 created_at=int(response.created_at),
                 metrics=response_metrics,
-                provider_data={MODEL_PROVENANCE_KEY: {"id": usage.model, "provider": "OpenAI"}},
+                provider_data=model_provenance(usage.model, "OpenAI"),
             ),
         )
     await _save_call_usage(

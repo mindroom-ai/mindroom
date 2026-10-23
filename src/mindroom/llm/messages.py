@@ -38,9 +38,18 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
 # readers do not take the sum for one request's size (``model_usage.py``, ``usage/storage.py``).
 AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
-# which usage attribution reads (``usage/storage.py``, ``memory/_mem0_usage.py``) and which tells a run's own model
-# messages from the replies its input carries (``is_own_model_message``).
+# which ``model_provenance`` builds for every writer. Usage attribution reads it (``usage/storage.py``,
+# ``memory/_mem0_usage.py``), and it tells a run's own model messages from the replies its input carries
+# (``is_own_model_message``).
 MODEL_PROVENANCE_KEY = "mindroom_model"
+
+
+def model_provenance(model_id: str, provider: str) -> dict[str, Any]:
+    """Return the provider data recording that ``model_id`` answered a message, under ``MODEL_PROVENANCE_KEY``.
+
+    ``provider`` is the metrics provider string (Agno's ``get_provider()``) that usage rows and pricing key by.
+    """
+    return {MODEL_PROVENANCE_KEY: {"id": model_id, "provider": provider}}
 
 
 def is_own_model_message(message: Message) -> bool:
@@ -204,5 +213,6 @@ __all__ = [
     "MODEL_PROVENANCE_KEY",
     "Message",
     "is_own_model_message",
+    "model_provenance",
     "split_thinking",
 ]

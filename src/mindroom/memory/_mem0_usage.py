@@ -11,7 +11,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message, model_provenance
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 
@@ -73,14 +73,15 @@ def _ollama_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an Ollama 
 
 def install_mem0_usage_capture(llm: Any, provider: str) -> None:  # noqa: ANN401 - a Mem0 LLM of the configured provider
     """Read token usage off the client a newly built Mem0 LLM of the MindRoom ``provider`` calls."""
-    model = {"id": str(llm.config.model), "provider": _PROVIDER_LABELS.get(provider, provider)}
+    model_id, label = str(llm.config.model), _PROVIDER_LABELS.get(provider, provider)
 
     def counted(call: Callable[..., Any], read: Callable[[Any], MessageMetrics]) -> Callable[..., Any]:
         def counted_call(*args: object, **kwargs: object) -> object:
             response = call(*args, **kwargs)
             calls = _calls.get()
             if calls is not None and (metrics := read(response)).total_tokens:
-                calls.append(Message(role="assistant", metrics=metrics, provider_data={MODEL_PROVENANCE_KEY: model}))
+                provenance = model_provenance(model_id, label)
+                calls.append(Message(role="assistant", metrics=metrics, provider_data=provenance))
             return response
 
         return counted_call

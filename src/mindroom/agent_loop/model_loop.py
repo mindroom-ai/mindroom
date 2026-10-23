@@ -24,11 +24,10 @@ from mindroom.agent_loop.tools import (
 )
 from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.events import ContentDelta, RequestCompleted, ToolCompleted, ToolStarted
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
 from mindroom.logging_config import get_logger
-from mindroom.providers.assistant_turn import stamp_model
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -456,12 +455,11 @@ async def _stream_turn(
             # plus a partial none replaced.
             billed = turn.message.metrics if turn is not None else reported.received
             if billed is not None and billed.to_dict():
-                cut_off = Message(role="assistant", metrics=billed)
+                provider_data = model_provenance(identity.id, identity.provider_name)
                 if turn is not None and (turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True:
                     # The turn's usage sums retried attempts, which must not read as one request's.
-                    cut_off.provider_data = {AGGREGATE_USAGE_KEY: True}
-                stamp_model(cut_off, identity)
-                messages.append(cut_off)
+                    provider_data = {AGGREGATE_USAGE_KEY: True, **provider_data}
+                messages.append(Message(role="assistant", metrics=billed, provider_data=provider_data))
                 _count_request(metrics, billed, identity)
 
 
