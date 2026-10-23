@@ -220,8 +220,8 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
     An image that cannot be read raises ``InvalidRequest``, so the media fallback replaces it with its note.
     """
     formatted: dict[str, Any] = {"role": message.role, "content": message.content}
-    if message.role == "assistant" and message.tool_calls is not None:
-        tool_calls = [
+    if message.role == "assistant" and message.tool_calls:
+        formatted["tool_calls"] = [
             {
                 "id": call.get("id"),
                 "type": "function",
@@ -229,8 +229,6 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
             }
             for call in message.tool_calls
         ]
-        if tool_calls:
-            formatted["tool_calls"] = tool_calls
     if message.role == "user":
         images = [data for image in message.images or () if (data := await _image_bytes(image, provider))]
         if images:
