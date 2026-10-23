@@ -4,19 +4,24 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 from agno.tools import Toolkit
+from agno.tools.function import Function
+from structlog.testing import capture_logs
 
+import mindroom.agents as agents_module
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, appended_context, prompt_for_turn
 from mindroom.agent_loop.prompt import CLAUDE_TOOLS_NOTE, render_system_message
 from mindroom.agent_loop.tools import prepare_run_tools
-from mindroom.agents import _tool_owners, create_agent
+from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.llm.provider import ModelRequest
+from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
@@ -249,25 +254,79 @@ def test_deferred_toolkits_fill_the_request_template_and_the_surface(tmp_path: P
         assert build.surface.mode == "minimal"
 
 
-def test_tool_owners_keep_the_first_function_of_a_name_even_without_an_authored_toolkit() -> None:
-    """The run offers the first function of a repeated name, so it owns the name; a later one never fills it in."""
+def ping(text: str) -> str:
+    """Echo the text.
 
-    def add(a: int, b: int) -> str:
-        """Add two integers.
+    Args:
+        text: What to echo.
 
-        Args:
-            a: First number.
-            b: Second number.
+    """
+    return text
 
-        """
-        return str(a + b)
 
-    generated = Toolkit(name="generated", tools=[add])
-    authored = Toolkit(name="calculator", tools=[add])
-    authored.functions["add"].owning_toolkit = "calculator"
+def test_the_toolkit_whose_function_a_run_offers_owns_its_name_for_approvals_and_jobs(tmp_path: Path) -> None:
+    """Two toolkits share a function name: the run offers the first one's, so approvals and tool jobs name it."""
+    config, runtime_paths = _config(tmp_path, tools=["calculator", "wikipedia"])
+    config.background_tool_jobs.enabled = True
+    built: dict[str, Toolkit] = {}
 
-    assert _tool_owners([generated, authored]) == {"add": None}
-    assert _tool_owners([authored, generated]) == {"add": "calculator"}
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        built[tool_name] = Toolkit(name=tool_name, tools=[ping])
+        return built[tool_name]
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit):
+        build = _build(config, runtime_paths, persist_runtime_state=False)
+
+    calculator, wikipedia = build.spec.toolkits[:2]
+    assert (calculator.name, wikipedia.name) == ("calculator", "wikipedia")
+    [offered] = calculator.functions
+    assert _offered(build)["ping"] is offered
+    assert build.tool_owners == {"ping": "calculator"}
+    assert build.tool_jobs is not None
+    job_tool = build.tool_jobs.tools["ping"]
+    assert (job_tool.function, job_tool.toolkit_name, job_tool.toolkit) == (offered, "calculator", built["calculator"])
+
+
+def test_a_function_hidden_across_toolkits_leaves_the_run_and_its_owners(tmp_path: Path) -> None:
+    """An MCP function that collides with a later local one is hidden, so the run offers and owns the local one."""
+    config, runtime_paths = _config(tmp_path, tools=["wikipedia", "calculator"])
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        if tool_name == "calculator":
+            return Toolkit(name="calculator", tools=[ping])
+        server = MindRoomMCPToolkit(server_id="demo", manager=None, catalog=None)
+        server.async_functions["ping"] = Function(name="ping", entrypoint=ping)
+        return server
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit):
+        build = _build(config, runtime_paths, persist_runtime_state=False)
+
+    server, calculator = build.spec.toolkits[:2]
+    assert (server.name, server.functions) == ("demo", ())
+    assert _offered(build)["ping"] is calculator.functions[0]
+    assert build.tool_owners == {"ping": "calculator"}
+
+
+def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp_path: Path) -> None:
+    """A function adaptation refuses costs its own toolkit, deferred or not, and never the agent."""
+    config, runtime_paths = _config(tmp_path, tools=["calculator", {"name": "wikipedia", "defer": True}])
+    build_agent_toolkit = agents_module.build_agent_toolkit
+
+    def build_toolkit(tool_name: str, **kwargs: object) -> Toolkit | None:
+        if tool_name != "wikipedia":
+            return build_agent_toolkit(tool_name, **kwargs)
+        toolkit = Toolkit(name="wikipedia", tools=[ping])
+        toolkit.functions["search_wikipedia"] = Function(name="search_wikipedia")
+        return toolkit
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
+        build = _build(config, runtime_paths, persist_runtime_state=False)
+
+    assert [toolkit.name for toolkit in build.spec.toolkits] == ["calculator", "skills"]
+    assert build.request_template.deferred_tool_names == frozenset()
+    assert not any("Deferred Tool Discovery" in instruction for instruction in build.prompt.instructions)
+    [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
+    assert (warning["tool"], warning["error"]) == ("wikipedia", "Tool function 'search_wikipedia' has no entrypoint")
 
 
 def test_a_persona_build_offers_only_its_tools_and_speaks_with_its_prompt(tmp_path: Path) -> None:

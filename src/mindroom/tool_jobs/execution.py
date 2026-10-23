@@ -99,23 +99,23 @@ class _JobCallError(Exception):
 
 def assembled_job_tools(
     functions: Mapping[str, ToolFunction],
-    owners: Mapping[str, str | None],
-    toolkits: Mapping[str, Toolkit],
+    sources: Mapping[str, tuple[str, Toolkit]],
     snapshot: Mapping[str, Any],
 ) -> dict[str, JobTool]:
-    """Describe each offered function whose authored toolkit ``owners`` names, built as ``toolkits`` holds it.
+    """Describe each offered function a MindRoom-assembled toolkit built, by name.
 
-    ``snapshot`` is the actor's execution scope and file access, empty for a team; generated functions have no owner.
+    ``functions`` holds every function the actor offers; ``sources`` holds, for each one an assembled toolkit built,
+    its authored toolkit and the concrete toolkit built for the actor, so a generated function has none.
+    ``snapshot`` is the actor's execution scope and file access, empty for a team.
     """
     return {
         name: JobTool(
-            function=function,
+            function=functions[name],
             toolkit_name=owner,
-            toolkit=toolkits[name],
-            authority=toolkit_authority(snapshot, toolkits[name]),
+            toolkit=toolkit,
+            authority=toolkit_authority(snapshot, toolkit),
         )
-        for name, function in functions.items()
-        if (owner := owners.get(name)) is not None
+        for name, (owner, toolkit) in sources.items()
     }
 
 

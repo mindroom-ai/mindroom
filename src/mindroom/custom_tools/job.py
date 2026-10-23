@@ -120,7 +120,6 @@ class JobTools(Toolkit):
                 "You can access the jobs you started; when you answer as a team, also the jobs your members started for it."
             ),
         )
-        self.async_functions["job"].owning_toolkit = "job"
 
     @staticmethod
     def build(
