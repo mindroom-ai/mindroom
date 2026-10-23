@@ -63,6 +63,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
+from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import quote_identifier
@@ -653,7 +654,10 @@ class ToolLoopRequest:
 
 
 class ToolLoopModel:
-    """Call ``probe`` for ``tool_rounds`` requests, then answer; record every request."""
+    """Call ``probe`` for ``tool_rounds`` requests, then answer; record every request.
+
+    Each finished turn is stamped with the model's identity, as every adapter stamps the turns it finishes.
+    """
 
     def __init__(
         self,
@@ -708,6 +712,7 @@ class ToolLoopModel:
         for call in message.tool_calls or []:
             yield ToolCallReady(call)
         yield UsageReported(message.metrics)
+        stamp_model(message, self.identity)
         yield TurnCompleted(message=message, stop_reason="tool_use" if message.tool_calls else "end")
 
 
