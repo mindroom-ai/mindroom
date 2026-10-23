@@ -15,8 +15,8 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True, kw_only=True)
-class _TokenCounts:
-    """The token counters every usage record carries, first in its stored dict."""
+class _Counts:
+    """The token counters and cost every usage record carries, first in its stored dict."""
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -27,15 +27,23 @@ class _TokenCounts:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
+    cost: float | None = None
 
 
-_TOKEN_FIELDS = tuple(item.name for item in fields(_TokenCounts))
+_TOKEN_FIELDS = tuple(item.name for item in fields(_Counts) if item.name != "cost")
 
 
-def _add_token_counts(target: _TokenCounts, source: _TokenCounts, *, sign: int = 1) -> None:
+def _add_token_counts(target: _Counts, source: _Counts, *, sign: int = 1) -> None:
     """Add every token counter of ``source``, times ``sign``, into ``target`` in place."""
     for name in _TOKEN_FIELDS:
         setattr(target, name, getattr(target, name) + sign * getattr(source, name))
+
+
+def _add_counts(target: _Counts, source: _Counts, *, sign: int = 1) -> None:
+    """Add the token counters and any cost of ``source``, times ``sign``, into ``target`` in place."""
+    _add_token_counts(target, source, sign=sign)
+    if source.cost is not None:
+        target.cost = (target.cost or 0) + sign * source.cost
 
 
 def _compact(values: Mapping[str, Any]) -> dict[str, Any]:
@@ -76,10 +84,9 @@ def _merge_numeric(target: dict[str, Any], source: Mapping[str, Any] | None) -> 
 
 
 @dataclass(slots=True, kw_only=True)
-class MessageMetrics(_TokenCounts):
+class MessageMetrics(_Counts):
     """Usage one provider request reported; stored on the assistant message."""
 
-    cost: float | None = None
     duration: float | None = None
     time_to_first_token: float | None = None
     provider_metrics: dict[str, Any] | None = None
@@ -119,19 +126,16 @@ def add_usage(total: MessageMetrics | None, usage: MessageMetrics | None) -> Mes
 
 
 @dataclass(slots=True, kw_only=True)
-class ModelMetrics(_TokenCounts):
+class ModelMetrics(_Counts):
     """Usage one model accumulated inside a run; an entry of ``RunMetrics.details``."""
 
-    cost: float | None = None
     id: str = ""
     provider: str = ""
     provider_metrics: dict[str, Any] | None = None
 
     def accumulate(self, other: ModelMetrics | MessageMetrics) -> None:
         """Add another report for the same model into this entry."""
-        _add_token_counts(self, other)
-        if other.cost is not None:
-            self.cost = (self.cost or 0) + other.cost
+        _add_counts(self, other)
         if other.provider_metrics is not None:
             if self.provider_metrics is None:
                 self.provider_metrics = {}
@@ -170,10 +174,9 @@ def _details_from_dict(details: Mapping[str, list[Any]]) -> dict[str, list[Model
 
 
 @dataclass(slots=True, kw_only=True)
-class RunMetrics(_TokenCounts):
+class RunMetrics(_Counts):
     """Usage one run accumulated over all its requests, with a per-model breakdown in ``details``."""
 
-    cost: float | None = None
     time_to_first_token: float | None = None
     duration: float | None = None
     details: dict[str, list[ModelMetrics]] | None = None
@@ -201,9 +204,7 @@ class RunMetrics(_TokenCounts):
                 break
         else:
             entries.append(entry)
-        _add_token_counts(self, usage)
-        if usage.cost is not None:
-            self.cost = (self.cost or 0) + usage.cost
+        _add_counts(self, usage)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict shape, which is also the ``io.mindroom.ai_run`` usage payload."""
@@ -246,10 +247,9 @@ class RunMetrics(_TokenCounts):
 
 
 @dataclass(slots=True, kw_only=True)
-class SessionMetrics(_TokenCounts):
+class SessionMetrics(_Counts):
     """Usage every run of a conversation added up; stored as ``session_data["session_metrics"]`` on the session row."""
 
-    cost: float | None = None
     details: dict[str, list[ModelMetrics]] | None = None
     additional_metrics: dict[str, Any] | None = None
 
@@ -263,9 +263,7 @@ class SessionMetrics(_TokenCounts):
         self._accumulate(metrics, sign=1)
 
     def _accumulate(self, metrics: RunMetrics, *, sign: int) -> None:
-        _add_token_counts(self, metrics, sign=sign)
-        if metrics.cost is not None:
-            self.cost = (self.cost or 0) + sign * metrics.cost
+        _add_counts(self, metrics, sign=sign)
         if metrics.additional_metrics is not None:
             if self.additional_metrics is None:
                 self.additional_metrics = {}
