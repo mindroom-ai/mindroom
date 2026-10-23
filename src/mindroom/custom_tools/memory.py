@@ -171,12 +171,12 @@ class MemoryTools(Toolkit):
                 self._runtime_paths,
                 limit=_SIMILAR_MEMORY_LIMIT,
                 execution_identity=self._execution_identity,
+                editable=True,
             )
         except Exception as e:
             _memory_tool_failure(e, action="find similar", agent=self._agent_name)
             return []
-        # semantic:* IDs are read-only locators that update_memory and delete_memory reject.
-        return [mem for mem in outcome.results if not str(mem.get("id", "")).startswith("semantic:")]
+        return outcome.results
 
     async def search_memories(self, query: str, limit: int = 5) -> str:
         """Search your memories for information relevant to a query.

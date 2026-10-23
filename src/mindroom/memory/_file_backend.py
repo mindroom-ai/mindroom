@@ -1176,6 +1176,7 @@ class FileMemoryBackend:
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
+        editable: bool = False,
     ) -> MemorySearchOutcome:
         """Search file-backed memories visible to an agent.
 
@@ -1207,7 +1208,8 @@ class FileMemoryBackend:
 
         degraded_reason: str | None = None
         search_config = config.resolve_entity(agent_name).memory_search
-        if search_config.mode == "semantic":
+        # Semantic matches are read-only locators, so an editable search matches by keyword.
+        if search_config.mode == "semantic" and not editable:
             scope_user_id = agent_scope_user_id(agent_name)
             try:
                 results = await search_semantic_file_memories(

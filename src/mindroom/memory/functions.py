@@ -91,8 +91,9 @@ async def search_agent_memories(
     runtime_paths: RuntimePaths,
     limit: int = 3,
     execution_identity: ToolExecutionIdentity | None = None,
+    editable: bool = False,
 ) -> MemorySearchOutcome:
-    """Search agent memories including team memories."""
+    """Search agent memories including team memories; ``editable`` keeps only IDs update and delete accept."""
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return MemorySearchOutcome(results=[])
     return await backend.search(
@@ -102,6 +103,7 @@ async def search_agent_memories(
         config,
         limit=limit,
         execution_identity=execution_identity,
+        editable=editable,
     )
 
 

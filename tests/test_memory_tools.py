@@ -194,9 +194,19 @@ class TestMemoryTools:
         assert (agent_workspace_root_path(storage_path, "general") / "MEMORY.md").exists()
 
     @pytest.mark.asyncio
-    async def test_add_memory_lists_similar_existing_memories(self, storage_path: Path, config: Config) -> None:
-        """A new memory should point at related existing entries so corrections update them instead of piling up."""
+    @pytest.mark.parametrize("search_mode", ["keyword", "semantic"])
+    async def test_add_memory_lists_similar_existing_memories(
+        self,
+        storage_path: Path,
+        config: Config,
+        search_mode: str,
+    ) -> None:
+        """A new memory should point at related existing entries so corrections update them instead of piling up.
+
+        A healthy semantic index returns read-only locators, so the lookup must still find the editable entry.
+        """
         config.memory.backend = "file"
+        config.memory.search.mode = search_mode
         config.agents["general"].memory_backend = "file"
         tools = MemoryTools(
             agent_name="general",
@@ -204,12 +214,18 @@ class TestMemoryTools:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        semantic_hit = {"id": "semantic:memory/notes.md:0", "memory": "The weekly standup is on Mondays"}
 
-        await tools.add_memory("The weekly standup is on Mondays")
-        existing = (await tools.list_memories()).splitlines()[1]
-        existing_id = existing.split("[id=", 1)[1].split("]", 1)[0]
+        with patch(
+            "mindroom.memory._file_backend.search_semantic_file_memories",
+            new_callable=AsyncMock,
+            return_value=[semantic_hit],
+        ):
+            await tools.add_memory("The weekly standup is on Mondays")
+            existing = (await tools.list_memories()).splitlines()[1]
+            existing_id = existing.split("[id=", 1)[1].split("]", 1)[0]
 
-        result = await tools.add_memory("The weekly standup moved to Tuesdays")
+            result = await tools.add_memory("The weekly standup moved to Tuesdays")
 
         assert result.startswith("Memorized: The weekly standup moved to Tuesdays\n")
         assert f"[id={existing_id}] The weekly standup is on Mondays" in result
@@ -218,25 +234,15 @@ class TestMemoryTools:
         assert "delete_memory" in result
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "lookup",
-        [
-            AsyncMock(side_effect=RuntimeError("index down")),
-            AsyncMock(
-                return_value=MemorySearchOutcome(results=[{"id": "semantic:memory/notes.md:1", "memory": "a chunk"}]),
-            ),
-        ],
-        ids=["lookup-fails", "read-only-matches"],
-    )
-    async def test_add_memory_reply_stays_plain_without_usable_similar_memories(
-        self,
-        tools: MemoryTools,
-        lookup: AsyncMock,
-    ) -> None:
-        """A failed lookup never fails the add, and read-only semantic locators are not offered for updates."""
+    async def test_add_memory_reply_stays_plain_when_the_similar_lookup_fails(self, tools: MemoryTools) -> None:
+        """A failed similar-memory lookup never fails the add."""
         with (
             patch("mindroom.custom_tools.memory.add_agent_memory", new_callable=AsyncMock),
-            patch("mindroom.custom_tools.memory.search_agent_memories", lookup),
+            patch(
+                "mindroom.custom_tools.memory.search_agent_memories",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("index down"),
+            ),
         ):
             result = await tools.add_memory("The user prefers dark mode")
 
