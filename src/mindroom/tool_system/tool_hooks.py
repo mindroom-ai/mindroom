@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
@@ -154,25 +155,26 @@ def track_sync_tool_completion(tracker: SyncToolCompletionTracker | None) -> Ite
         _SYNC_TOOL_COMPLETION_TRACKER.reset(token)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class _ResolvedToolContext:
     agent_name: str
-    room_id: str | None
-    thread_id: str | None
+    room_id: str | None = None
+    thread_id: str | None = None
     reply_to_event_id: str | None
-    requester_id: str | None
-    session_id: str | None
-    channel: str | None
+    requester_id: str | None = None
+    session_id: str | None = None
+    channel: str | None = None
+    execution_identity: ToolExecutionIdentity | None = None
     config: Config | None
     runtime_paths: RuntimePaths | None
     correlation_id: str
-    message_sender: HookMessageSender | None
-    matrix_admin: HookMatrixAdmin | None
-    room_state_querier: HookRoomStateQuerier | None
-    room_state_putter: HookRoomStatePutter | None
-    message_received_depth: int
-    hook_registry_state: HookRegistryState | None
     origin: BackgroundScriptToolOrigin | None
+    message_sender: HookMessageSender | None = None
+    matrix_admin: HookMatrixAdmin | None = None
+    room_state_querier: HookRoomStateQuerier | None = None
+    room_state_putter: HookRoomStatePutter | None = None
+    message_received_depth: int = 0
+    hook_registry_state: HookRegistryState | None = None
 
     def hook_context_kwargs(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -193,16 +195,19 @@ class _ResolvedToolContext:
             "_hook_registry_state": self.hook_registry_state,
         }
 
-
-@dataclass(frozen=True, slots=True)
-class _ToolHookBridgeContext:
-    """Static hook-bridge inputs that remain valid across live and detached calls."""
-
-    agent_name: str | None
-    config: Config | None
-    runtime_paths: RuntimePaths | None
-    dispatch_context: ToolDispatchContext | None
-    origin: BackgroundScriptToolOrigin | None
+    def record_kwargs(self) -> dict[str, Any]:
+        return {
+            "agent_name": self.agent_name or None,
+            "room_id": self.room_id,
+            "thread_id": self.thread_id,
+            "reply_to_event_id": self.reply_to_event_id,
+            "requester_id": self.requester_id,
+            "session_id": self.session_id,
+            "correlation_id": self.correlation_id,
+            "execution_identity": self.execution_identity,
+            "runtime_paths": self.runtime_paths,
+            "origin": self.origin,
+        }
 
 
 def _correlation_id_for_runtime_context(
@@ -247,116 +252,65 @@ def _explicit_bridge_dispatch_context(
 
 
 def _resolve_tool_context(
+    dispatch_context: ToolDispatchContext | None,
     *,
-    bridge_context: _ToolHookBridgeContext,
+    agent_name: str | None,
+    config: Config | None,
+    runtime_paths: RuntimePaths | None,
+    origin: BackgroundScriptToolOrigin | None,
 ) -> _ResolvedToolContext:
-    dispatch_context = bridge_context.dispatch_context
     if isinstance(dispatch_context, LiveToolDispatchContext):
         runtime_context = dispatch_context.runtime_context
-        resolved_runtime_paths = runtime_context.runtime_paths
+        identity = dispatch_context.execution_identity
         bindings = resolve_tool_runtime_hook_bindings(runtime_context)
         return _ResolvedToolContext(
-            agent_name=bridge_context.agent_name or dispatch_context.execution_identity.agent_name,
-            room_id=dispatch_context.execution_identity.room_id,
-            thread_id=dispatch_context.execution_identity.resolved_thread_id
-            or dispatch_context.execution_identity.thread_id,
+            agent_name=agent_name or identity.agent_name,
+            room_id=identity.room_id,
+            thread_id=identity.resolved_thread_id or identity.thread_id,
             reply_to_event_id=runtime_context.reply_to_event_id,
-            requester_id=dispatch_context.execution_identity.requester_id,
-            session_id=dispatch_context.execution_identity.session_id,
-            channel=dispatch_context.execution_identity.channel,
+            requester_id=identity.requester_id,
+            session_id=identity.session_id,
+            channel=identity.channel,
+            execution_identity=identity,
             config=runtime_context.config,
-            runtime_paths=resolved_runtime_paths,
-            correlation_id=_correlation_id_for_runtime_context(runtime_context, bridge_context.origin),
+            runtime_paths=runtime_context.runtime_paths,
+            correlation_id=_correlation_id_for_runtime_context(runtime_context, origin),
+            origin=origin,
             message_sender=bindings.message_sender,
             matrix_admin=bindings.matrix_admin,
             room_state_querier=bindings.room_state_querier,
             room_state_putter=bindings.room_state_putter,
             message_received_depth=bindings.message_received_depth,
             hook_registry_state=runtime_context.hook_registry_state,
-            origin=bridge_context.origin,
         )
 
-    if dispatch_context is not None:
-        resolved_runtime_paths = bridge_context.runtime_paths
-        request_context = current_llm_request_log_context()
-        reply_to_event_id = request_context.get("reply_to_event_id")
+    reply_to_event_id = current_llm_request_log_context().get("reply_to_event_id")
+    if not isinstance(reply_to_event_id, str):
+        reply_to_event_id = None
+    correlation_id = _correlation_id_for_runtime_context(None, origin)
+    if dispatch_context is None:
         return _ResolvedToolContext(
-            agent_name=bridge_context.agent_name or dispatch_context.execution_identity.agent_name,
-            room_id=dispatch_context.execution_identity.room_id,
-            thread_id=dispatch_context.execution_identity.resolved_thread_id
-            or dispatch_context.execution_identity.thread_id,
-            reply_to_event_id=reply_to_event_id if isinstance(reply_to_event_id, str) else None,
-            requester_id=dispatch_context.execution_identity.requester_id,
-            session_id=dispatch_context.execution_identity.session_id,
-            channel=dispatch_context.execution_identity.channel,
-            config=bridge_context.config,
-            runtime_paths=resolved_runtime_paths,
-            correlation_id=_correlation_id_for_runtime_context(None, bridge_context.origin),
-            message_sender=None,
-            matrix_admin=None,
-            room_state_querier=None,
-            room_state_putter=None,
-            message_received_depth=0,
-            hook_registry_state=None,
-            origin=bridge_context.origin,
+            agent_name=agent_name or "",
+            reply_to_event_id=reply_to_event_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            correlation_id=correlation_id,
+            origin=origin,
         )
-
-    request_context = current_llm_request_log_context()
-    reply_to_event_id = request_context.get("reply_to_event_id")
+    identity = dispatch_context.execution_identity
     return _ResolvedToolContext(
-        agent_name=bridge_context.agent_name or "",
-        room_id=None,
-        thread_id=None,
-        reply_to_event_id=reply_to_event_id if isinstance(reply_to_event_id, str) else None,
-        requester_id=None,
-        session_id=None,
-        channel=None,
-        config=bridge_context.config,
-        runtime_paths=bridge_context.runtime_paths,
-        correlation_id=_correlation_id_for_runtime_context(None, bridge_context.origin),
-        message_sender=None,
-        matrix_admin=None,
-        room_state_querier=None,
-        room_state_putter=None,
-        message_received_depth=0,
-        hook_registry_state=None,
-        origin=bridge_context.origin,
-    )
-
-
-def _should_record_successful_tool_call(resolved_context: _ResolvedToolContext) -> bool:
-    """Return whether successful tool calls should be durably logged."""
-    return bool(resolved_context.config and resolved_context.config.debug.log_llm_requests)
-
-
-def _record_debug_tool_success(
-    *,
-    tool_name: str,
-    arguments: dict[str, object],
-    result: object,
-    duration_ms: float,
-    timing: ToolCallTiming | None,
-    resolved_context: _ResolvedToolContext,
-    dispatch_context: ToolDispatchContext | None,
-) -> None:
-    if not _should_record_successful_tool_call(resolved_context):
-        return
-    record_tool_success(
-        tool_name=tool_name,
-        arguments=arguments,
-        result=result,
-        duration_ms=duration_ms,
-        timing=timing,
-        agent_name=resolved_context.agent_name or None,
-        room_id=resolved_context.room_id,
-        thread_id=resolved_context.thread_id,
-        reply_to_event_id=resolved_context.reply_to_event_id,
-        requester_id=resolved_context.requester_id,
-        session_id=resolved_context.session_id,
-        correlation_id=resolved_context.correlation_id,
-        execution_identity=dispatch_context.execution_identity if dispatch_context is not None else None,
-        runtime_paths=resolved_context.runtime_paths,
-        origin=resolved_context.origin,
+        agent_name=agent_name or identity.agent_name,
+        room_id=identity.room_id,
+        thread_id=identity.resolved_thread_id or identity.thread_id,
+        reply_to_event_id=reply_to_event_id,
+        requester_id=identity.requester_id,
+        session_id=identity.session_id,
+        channel=identity.channel,
+        execution_identity=identity,
+        config=config,
+        runtime_paths=runtime_paths,
+        correlation_id=correlation_id,
+        origin=origin,
     )
 
 
@@ -405,17 +359,6 @@ async def run_async_entrypoint_blocking_call(
     return await run_sync_tool_entrypoint(call)
 
 
-async def _call_tool(
-    func: Callable[..., Awaitable[_ToolHookResult]],
-    args: dict[str, Any],
-    *,
-    tool_name: str,
-    agent_name: str | None,
-) -> _ToolHookResult:
-    emit_timing_event("Tool hook dispatch timing", phase="tool_entry", tool_name=tool_name, agent_name=agent_name)
-    return await func(**args)
-
-
 async def _call_recorded_tool(
     func: Callable[..., Awaitable[_ToolHookResult]],
     args: dict[str, Any],
@@ -426,10 +369,11 @@ async def _call_recorded_tool(
     """Run the tool, first recording the call where the work that makes it keeps its durable state."""
     recorder = tool_call_recorder()
     call_id = None if recorder is None else await recorder.started(tool_name, args)
+    emit_timing_event("Tool hook dispatch timing", phase="tool_entry", tool_name=tool_name, agent_name=agent_name)
     if recorder is None or call_id is None:
-        return await _call_tool(func, args, tool_name=tool_name, agent_name=agent_name)
+        return await func(**args)
     try:
-        result = await _call_tool(func, args, tool_name=tool_name, agent_name=agent_name)
+        result = await func(**args)
     except Exception as exc:
         # It ran and failed. A cancelled call stays started, since it may have taken effect.
         await recorder.finished(call_id, tool_name, args, exc)
@@ -461,18 +405,15 @@ async def _emit_after_call(
     await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
 
 
-async def _maybe_block_for_before_hooks(
+async def _run_before_hooks(
     *,
     hook_registry: HookRegistry,
     resolved_context: _ResolvedToolContext,
     hook_arguments: dict[str, Any] | None,
     args: dict[str, Any],
     tool_name: str,
-    has_before_hooks: bool,
 ) -> str | None:
-    if not has_before_hooks:
-        return None
-
+    """Run the before-call hooks; return the declined result when one of them declines the call."""
     before_context = ToolBeforeCallContext(
         **resolved_context.hook_context_kwargs(hook_arguments if hook_arguments is not None else deepcopy(args)),
         tool_name=tool_name,
@@ -495,42 +436,7 @@ async def _maybe_block_for_before_hooks(
     )
     if not before_context.declined:
         return None
-
     return _format_declined_result(tool_name, before_context.decline_reason)
-
-
-async def _finish_blocked_tool_call(
-    *,
-    timing: _ToolBridgeTiming,
-    hook_registry: HookRegistry,
-    resolved_context: _ResolvedToolContext,
-    hook_arguments: dict[str, Any] | None,
-    args: dict[str, Any],
-    tool_name: str,
-    blocked_result: str,
-    has_after_hooks: bool,
-    outcome: str,
-) -> str:
-    duration_ms = timing.mark_result_ready()
-    await _maybe_emit_after_call_timed(
-        has_after_hooks=has_after_hooks,
-        timing=timing,
-        hook_registry=hook_registry,
-        resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
-        args=args,
-        tool_name=tool_name,
-        result=blocked_result,
-        error=None,
-        blocked=True,
-        duration_ms=duration_ms,
-    )
-    timing.emit_finish(
-        tool_name=tool_name,
-        agent_name=resolved_context.agent_name or None,
-        outcome=outcome,
-    )
-    return blocked_result
 
 
 @dataclass(slots=True)
@@ -569,104 +475,70 @@ class _ToolBridgeTiming:
         )
 
 
-async def _emit_after_call_timed(
-    *,
-    hook_registry: HookRegistry,
-    resolved_context: _ResolvedToolContext,
-    hook_arguments: dict[str, Any] | None,
-    args: dict[str, Any],
+def _record_success(
     tool_name: str,
+    args: dict[str, Any],
     result: _ToolHookResult,
-    error: BaseException | None,
-    blocked: bool,
     duration_ms: float,
-) -> float:
-    started_at = time.perf_counter()
-    await _emit_after_call(
-        hook_registry=hook_registry,
-        resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
-        args=args,
-        tool_name=tool_name,
-        result=result,
-        error=error,
-        blocked=blocked,
-        duration_ms=duration_ms,
-    )
-    return elapsed_ms_since(started_at, clock=time.perf_counter, ndigits=2)
-
-
-async def _maybe_emit_after_call_timed(
-    *,
-    has_after_hooks: bool,
     timing: _ToolBridgeTiming,
-    hook_registry: HookRegistry,
     resolved_context: _ResolvedToolContext,
-    hook_arguments: dict[str, Any] | None,
-    args: dict[str, Any],
-    tool_name: str,
-    result: _ToolHookResult,
-    error: BaseException | None,
-    blocked: bool,
-    duration_ms: float,
 ) -> None:
-    if not has_after_hooks:
+    """Record a successful call durably when the config logs LLM requests."""
+    if not (resolved_context.config and resolved_context.config.debug.log_llm_requests):
         return
-    timing.after_hooks_ms = await _emit_after_call_timed(
-        hook_registry=hook_registry,
-        resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
-        args=args,
+    record_tool_success(
         tool_name=tool_name,
+        arguments=args,
         result=result,
-        error=error,
-        blocked=blocked,
         duration_ms=duration_ms,
+        timing=timing.record_timing(),
+        **resolved_context.record_kwargs(),
     )
 
 
-async def _check_before_body(
-    *,
-    timing: _ToolBridgeTiming,
-    hook_registry: HookRegistry,
-    resolved_context: _ResolvedToolContext,
-    hook_arguments: dict[str, Any] | None,
-    args: dict[str, Any],
+def _record_failure(
     tool_name: str,
-    has_after_hooks: bool,
+    args: dict[str, Any],
+    error: BaseException,
+    duration_ms: float,
+    timing: _ToolBridgeTiming,
+    resolved_context: _ResolvedToolContext,
 ) -> None:
-    """Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran."""
+    """Record and log a failed call; a record that cannot be written never masks the tool's own error."""
     try:
-        job_checkpoint()
-        check_current_execution_authority(arguments=args)
-    except BaseException as stopped:
-        await _maybe_emit_after_call_timed(
-            has_after_hooks=has_after_hooks,
-            timing=timing,
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
+        failure_record = record_tool_failure(
             tool_name=tool_name,
-            result=None,
-            error=stopped,
-            blocked=True,
-            duration_ms=timing.mark_result_ready(),
+            arguments=args,
+            error=error,
+            duration_ms=duration_ms,
+            timing=timing.record_timing(),
+            **resolved_context.record_kwargs(),
         )
-        timing.emit_finish(
+    except Exception:
+        logger.exception(
+            "Failed to record tool failure",
             tool_name=tool_name,
-            agent_name=resolved_context.agent_name or None,
-            outcome="blocked_before_body",
+            correlation_id=resolved_context.correlation_id,
         )
-        raise
+        return
+    logger.warning(
+        "Tool call failed",
+        tool_name=tool_name,
+        agent_name=resolved_context.agent_name or None,
+        error_type=failure_record.error_type,
+        error_message=failure_record.error_message,
+        duration_ms=failure_record.duration_ms,
+        correlation_id=resolved_context.correlation_id,
+        channel=resolved_context.channel,
+    )
 
 
-async def _execute_bridge(
-    *,
-    hook_registry: HookRegistry,
+async def _execute_bridge(  # noqa: C901
     tool_name: str,
     func: Callable[..., Awaitable[_ToolHookResult]],
     args: dict[str, Any],
+    *,
+    hook_registry: HookRegistry,
     agent_name: str | None,
     dispatch_context: ToolDispatchContext | None,
     config: Config | None,
@@ -676,215 +548,102 @@ async def _execute_bridge(
     origin: BackgroundScriptToolOrigin | None,
     approval_gate: _ToolApprovalGate | None,
 ) -> _ToolHookResult:
-    started_at = time.perf_counter()
+    timing = _ToolBridgeTiming(started_at=time.perf_counter())
     job_checkpoint()
-    timing = _ToolBridgeTiming(started_at=started_at)
-    effective_dispatch_context = _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context()
-    bridge_context = _ToolHookBridgeContext(
+    resolved_context = _resolve_tool_context(
+        _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context(),
         agent_name=agent_name,
         config=config,
         runtime_paths=runtime_paths,
-        dispatch_context=effective_dispatch_context,
         origin=origin,
     )
-    resolved_context = _resolve_tool_context(
-        bridge_context=bridge_context,
-    )
+    resolved_agent_name = resolved_context.agent_name or None
     emit_timing_event(
         "Tool hook dispatch timing",
         phase="bridge_entry",
         tool_name=tool_name,
-        agent_name=resolved_context.agent_name or None,
+        agent_name=resolved_agent_name,
         has_before_hooks=has_before_hooks,
         has_after_hooks=has_after_hooks,
     )
     hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else None
-    before_hooks_started_at = time.perf_counter()
-    blocked_result = await _maybe_block_for_before_hooks(
-        hook_registry=hook_registry,
-        resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
-        args=args,
-        tool_name=tool_name,
-        has_before_hooks=has_before_hooks,
-    )
-    if has_before_hooks:
-        timing.before_hooks_ms = elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2)
-    if blocked_result is not None:
-        return await _finish_blocked_tool_call(
-            timing=timing,
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
-            tool_name=tool_name,
-            blocked_result=blocked_result,
-            has_after_hooks=has_after_hooks,
-            outcome="blocked_before_hooks",
-        )
 
-    if origin is not None and approval_gate is not None:
-        decision = await approval_gate(origin, tool_name, deepcopy(args))
-        if not decision.approved:
-            reason = denial_note_for(decision.reason)
-            await _finish_blocked_tool_call(
-                timing=timing,
+    async def finish(
+        outcome: str,
+        *,
+        duration_ms: float,
+        result: _ToolHookResult = None,
+        error: BaseException | None = None,
+        blocked: bool = False,
+    ) -> None:
+        if has_after_hooks:
+            after_hooks_started_at = time.perf_counter()
+            await _emit_after_call(
                 hook_registry=hook_registry,
                 resolved_context=resolved_context,
                 hook_arguments=hook_arguments,
                 args=args,
                 tool_name=tool_name,
-                blocked_result=_format_declined_result(
-                    tool_name,
-                    reason,
-                ),
-                has_after_hooks=has_after_hooks,
-                outcome="blocked_approval",
+                result=result,
+                error=error,
+                blocked=blocked,
+                duration_ms=duration_ms,
             )
+            timing.after_hooks_ms = elapsed_ms_since(after_hooks_started_at, clock=time.perf_counter, ndigits=2)
+        timing.emit_finish(tool_name=tool_name, agent_name=resolved_agent_name, outcome=outcome)
+
+    async def succeed(result: _ToolHookResult, outcome: str) -> _ToolHookResult:
+        duration_ms = timing.mark_result_ready()
+        _record_success(tool_name, args, result, duration_ms, timing, resolved_context)
+        await finish(outcome, duration_ms=duration_ms, result=result)
+        return result
+
+    if has_before_hooks:
+        before_hooks_started_at = time.perf_counter()
+        declined_result = await _run_before_hooks(
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            hook_arguments=hook_arguments,
+            args=args,
+            tool_name=tool_name,
+        )
+        timing.before_hooks_ms = elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2)
+        if declined_result is not None:
+            duration_ms = timing.mark_result_ready()
+            await finish("blocked_before_hooks", duration_ms=duration_ms, result=declined_result, blocked=True)
+            return declined_result
+
+    if origin is not None and approval_gate is not None:
+        decision = await approval_gate(origin, tool_name, deepcopy(args))
+        if not decision.approved:
+            reason = denial_note_for(decision.reason)
+            declined_result = _format_declined_result(tool_name, reason)
+            duration_ms = timing.mark_result_ready()
+            await finish("blocked_approval", duration_ms=duration_ms, result=declined_result, blocked=True)
             return BackgroundToolApprovalDenied(reason=reason)
 
-    await _check_before_body(
-        timing=timing,
-        hook_registry=hook_registry,
-        resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
-        args=args,
-        tool_name=tool_name,
-        has_after_hooks=has_after_hooks,
-    )
-    result: _ToolHookResult = None
-    error: BaseException | None = None
-    tool_body_started_at = time.perf_counter()
+    # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
     try:
-        result = await _call_recorded_tool(
-            func,
-            args,
-            tool_name=tool_name,
-            agent_name=resolved_context.agent_name or None,
-        )
-        timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
-    except OAuthConnectionRequired as exc:
-        timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
-        result = oauth_connection_required_payload(exc)
-        duration_ms = timing.mark_result_ready()
-        _record_debug_tool_success(
-            tool_name=tool_name,
-            arguments=args,
-            result=result,
-            duration_ms=duration_ms,
-            timing=timing.record_timing(),
-            resolved_context=resolved_context,
-            dispatch_context=effective_dispatch_context,
-        )
-        await _maybe_emit_after_call_timed(
-            has_after_hooks=has_after_hooks,
-            timing=timing,
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
-            tool_name=tool_name,
-            result=result,
-            error=None,
-            blocked=False,
-            duration_ms=duration_ms,
-        )
-        timing.emit_finish(
-            tool_name=tool_name,
-            agent_name=resolved_context.agent_name or None,
-            outcome="oauth_connection_required",
-        )
-        return result
-    except BaseException as exc:
-        error = exc
-        timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
-        duration_ms = timing.mark_result_ready()
-        try:
-            failure_record = record_tool_failure(
-                tool_name=tool_name,
-                arguments=args,
-                error=error,
-                duration_ms=duration_ms,
-                timing=timing.record_timing(),
-                agent_name=resolved_context.agent_name or None,
-                room_id=resolved_context.room_id,
-                thread_id=resolved_context.thread_id,
-                reply_to_event_id=resolved_context.reply_to_event_id,
-                requester_id=resolved_context.requester_id,
-                session_id=resolved_context.session_id,
-                correlation_id=resolved_context.correlation_id,
-                execution_identity=(
-                    effective_dispatch_context.execution_identity if effective_dispatch_context is not None else None
-                ),
-                runtime_paths=resolved_context.runtime_paths,
-                origin=resolved_context.origin,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to record tool failure",
-                tool_name=tool_name,
-                correlation_id=resolved_context.correlation_id,
-            )
-        else:
-            logger.warning(
-                "Tool call failed",
-                tool_name=tool_name,
-                agent_name=resolved_context.agent_name or None,
-                error_type=failure_record.error_type,
-                error_message=failure_record.error_message,
-                duration_ms=failure_record.duration_ms,
-                correlation_id=resolved_context.correlation_id,
-                channel=resolved_context.channel,
-            )
-        await _maybe_emit_after_call_timed(
-            has_after_hooks=has_after_hooks,
-            timing=timing,
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
-            tool_name=tool_name,
-            result=None,
-            error=error,
-            blocked=False,
-            duration_ms=duration_ms,
-        )
-        timing.emit_finish(
-            tool_name=tool_name,
-            agent_name=resolved_context.agent_name or None,
-            outcome="error",
-        )
+        job_checkpoint()
+        check_current_execution_authority(arguments=args)
+    except BaseException as stopped:
+        await finish("blocked_before_body", duration_ms=timing.mark_result_ready(), error=stopped, blocked=True)
         raise
 
-    duration_ms = timing.mark_result_ready()
-    _record_debug_tool_success(
-        tool_name=tool_name,
-        arguments=args,
-        result=result,
-        duration_ms=duration_ms,
-        timing=timing.record_timing(),
-        resolved_context=resolved_context,
-        dispatch_context=effective_dispatch_context,
-    )
-    await _maybe_emit_after_call_timed(
-        has_after_hooks=has_after_hooks,
-        timing=timing,
-        hook_registry=hook_registry,
-        resolved_context=resolved_context,
-        hook_arguments=hook_arguments,
-        args=args,
-        tool_name=tool_name,
-        result=result,
-        error=error,
-        blocked=False,
-        duration_ms=duration_ms,
-    )
-    timing.emit_finish(
-        tool_name=tool_name,
-        agent_name=resolved_context.agent_name or None,
-        outcome="success",
-    )
-    return result
+    tool_body_started_at = time.perf_counter()
+    try:
+        result = await _call_recorded_tool(func, args, tool_name=tool_name, agent_name=resolved_agent_name)
+    except OAuthConnectionRequired as exc:
+        timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
+        return await succeed(oauth_connection_required_payload(exc), "oauth_connection_required")
+    except BaseException as error:
+        timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
+        duration_ms = timing.mark_result_ready()
+        _record_failure(tool_name, args, error, duration_ms, timing, resolved_context)
+        await finish("error", duration_ms=duration_ms, error=error)
+        raise
+    timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
+    return await succeed(result, "success")
 
 
 async def dispatch_external_tool_hooks(
@@ -902,7 +661,7 @@ async def dispatch_external_tool_hooks(
     duration_ms: float = 0,
 ) -> str | None:
     """Dispatch one phase of a durable external tool through the ordinary hook policy."""
-    dispatch = _explicit_bridge_dispatch_context(ToolDispatchContext(execution_identity=execution_identity))
+    dispatch = ToolDispatchContext(execution_identity=execution_identity)
     runtime_context = get_tool_runtime_context()
     if runtime_context is not None and execution_identity_matches_tool_runtime_context(
         replace(execution_identity, agent_name=runtime_context.agent_name),
@@ -911,22 +670,21 @@ async def dispatch_external_tool_hooks(
         # Team members share the live turn's bindings but retain their own hook identity.
         dispatch = LiveToolDispatchContext.from_runtime_context(runtime_context)
     resolved = _resolve_tool_context(
-        bridge_context=_ToolHookBridgeContext(
-            agent_name=execution_identity.agent_name,
-            config=config,
-            runtime_paths=runtime_paths,
-            dispatch_context=dispatch,
-            origin=None,
-        ),
+        dispatch,
+        agent_name=execution_identity.agent_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        origin=None,
     )
     if before:
-        return await _maybe_block_for_before_hooks(
+        if not hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
+            return None
+        return await _run_before_hooks(
             hook_registry=hook_registry,
             resolved_context=resolved,
             hook_arguments=None,
             args=arguments,
             tool_name=tool_name,
-            has_before_hooks=hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL),
         )
     if hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL):
         await _emit_after_call(
@@ -956,30 +714,18 @@ def build_tool_hook_bridge(
 
     ``func`` is the middleware's async continuation, which runs the rest of the call.
     """
-    has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
-    has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
-
-    async def bridge(
-        name: str,
-        func: Callable[..., Awaitable[_ToolHookResult]],
-        args: dict[str, Any],
-    ) -> _ToolHookResult:
-        return await _execute_bridge(
-            hook_registry=hook_registry,
-            tool_name=name,
-            func=func,
-            args=args,
-            agent_name=agent_name,
-            dispatch_context=dispatch_context,
-            config=config,
-            runtime_paths=runtime_paths,
-            has_before_hooks=has_before_hooks,
-            has_after_hooks=has_after_hooks,
-            origin=origin,
-            approval_gate=approval_gate,
-        )
-
-    return bridge
+    return partial(
+        _execute_bridge,
+        hook_registry=hook_registry,
+        agent_name=agent_name,
+        dispatch_context=dispatch_context,
+        config=config,
+        runtime_paths=runtime_paths,
+        has_before_hooks=hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL),
+        has_after_hooks=hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL),
+        origin=origin,
+        approval_gate=approval_gate,
+    )
 
 
 def build_tool_hook_middleware(
