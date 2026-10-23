@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.history.compaction import (
     ConversationChangedError,
+    clear_manual_compaction_request,
     compact_running_turn,
     compact_scope_history,
     load_summarizer,
@@ -110,34 +111,6 @@ def note_prepared_history_timing(
         prepared_context_tokens=prepared_history.prepared_context_tokens,
         fitted_replay_tokens=(
             prepared_history.replay_plan.estimated_tokens if prepared_history.replay_plan is not None else None
-        ),
-    )
-
-
-async def _clear_forced_compaction_after_failure(
-    *,
-    storage: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-) -> None:
-    """Clear a consumed manual force marker after a compaction failure.
-
-    Clears against the freshest row unconditionally so a failing manual
-    compaction cannot retry-loop on every reply. This deliberately differs
-    from the no-candidates path (_persist_cleared_force_state_if_needed in
-    compaction.py), which refuses to clear when a concurrent write moved the
-    durable row, so a fresh manual request placed mid-run survives.
-    """
-    if not state.force_compact_before_next_run:
-        return
-    await run_session_storage_operation(
-        lambda: storage,
-        partial(
-            update_scope_state_on_latest,
-            session=session,
-            scope=scope,
-            update=lambda latest: replace(latest, force_compact_before_next_run=False),
         ),
     )
 
@@ -594,7 +567,13 @@ async def _compact_before_reply(
         raise
     except Exception:
         # A failing manual compaction must not retry on every reply.
-        await _clear_forced_compaction_after_failure(storage=storage, session=session, scope=scope, state=state)
+        await clear_manual_compaction_request(
+            storage=storage,
+            session=session,
+            scope=scope,
+            state=state,
+            keep_concurrent_request=False,
+        )
         raise
 
 

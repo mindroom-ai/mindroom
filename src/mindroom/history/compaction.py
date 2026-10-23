@@ -229,25 +229,31 @@ class _CompactionRewriteResult:
     served_by: SummaryModel
 
 
-async def _persist_cleared_force_state_if_needed(
+async def clear_manual_compaction_request(
     *,
     storage: ConversationStore,
     session: ConversationSession,
     scope: HistoryScope,
     state: HistoryScopeState,
+    keep_concurrent_request: bool = True,
 ) -> None:
+    """Clear the manual compaction request this run read in ``state``, if it read one.
+
+    By default the request clears only while the durable row still matches ``state``, so a concurrent write, such as a
+    fresh manual request, wins. A failed compaction clears it regardless, so a failing manual compaction cannot retry
+    on every reply.
+    """
     if not state.force_compact_before_next_run:
         return
+
+    def update(latest: HistoryScopeState) -> HistoryScopeState:
+        if keep_concurrent_request and latest != state:
+            return latest
+        return replace(latest, force_compact_before_next_run=False)
+
     await run_session_storage_operation(
         lambda: storage,
-        partial(
-            update_scope_state_on_latest,
-            session=session,
-            scope=scope,
-            # Only clear when the durable row still matches the state this run read;
-            # a concurrent write (for example a fresh manual request) wins otherwise.
-            update=lambda latest: replace(latest, force_compact_before_next_run=False) if latest == state else latest,
-        ),
+        partial(update_scope_state_on_latest, session=session, scope=scope, update=update),
     )
 
 
@@ -331,7 +337,7 @@ async def compact_scope_history(
         else []
     )
     if not runs:
-        await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
+        await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
         return None
 
     mode = "manual" if state.force_compact_before_next_run else "auto"
@@ -393,7 +399,7 @@ async def compact_scope_history(
         await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
     if rewrite_result is None:
-        await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
+        await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
         return None
 
     compacted_at = _iso_utc_now()
@@ -401,7 +407,7 @@ async def compact_scope_history(
         lambda: storage,
         partial(save_working_run_changes, session=session, loaded_runs=loaded_runs, working_session=working_session),
     )
-    await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
+    await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
     logger.info(
         "Compaction summary generated",
         session_id=session.session_id,
@@ -852,6 +858,7 @@ __all__ = [
     "ConversationChangedError",
     "Summarizer",
     "SummaryModel",
+    "clear_manual_compaction_request",
     "compact_running_turn",
     "compact_scope_history",
     "load_summarizer",
