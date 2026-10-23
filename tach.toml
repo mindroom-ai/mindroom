@@ -1221,7 +1221,6 @@ path = "mindroom.approval.events"
 depends_on = [
     "mindroom.approval.legacy_approval_payloads",
     "mindroom.matrix.event_info",
-    "mindroom.matrix.visible_body",
 ]
 visibility = ["mindroom.approval.manager"]
 

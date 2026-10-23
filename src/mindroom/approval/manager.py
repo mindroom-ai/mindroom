@@ -1250,7 +1250,7 @@ class ApprovalManager:
             return None
         if pending.card_event_id != expected_card_event_id or pending.card_sender_id != transport_sender:
             return None
-        return pending if pending.latest_status(None) == "pending" else None
+        return pending if pending.initial_status == "pending" else None
 
     @staticmethod
     def _pending_event_content(
