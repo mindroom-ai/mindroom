@@ -20,6 +20,7 @@ from mindroom.providers.openai.responses import ResponsesAdapter
 from tests.providers.golden_support import Replay, encoded_response, pipeline_provider, replay_through_pipeline
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.llm.provider import ModelProvider
@@ -93,6 +94,29 @@ class GoldenProvider:
     requests: list[httpx.Request]
 
 
+def openai_family_adapter(
+    model_config: dict[str, Any],
+    root: Path,
+    respond: Callable[[httpx.Request], httpx.Response],
+) -> ModelProvider:
+    """Build the owned adapter of a model config under ``root``, with its HTTP traffic answered by ``respond``.
+
+    The CLI-login placeholders in ``extra_kwargs`` resolve to credential files written under ``root``.
+    """
+    placeholders = write_cli_logins(root)
+    config = json.loads(json.dumps(model_config))
+    for key, value in list((config.get("extra_kwargs") or {}).items()):
+        if isinstance(value, str) and value in placeholders:
+            config["extra_kwargs"][key] = placeholders[value]
+    config_path = root / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime = ProviderRuntime(
+        runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    return build_provider(ModelConfig(**config), runtime)
+
+
 def golden_provider(
     golden: dict[str, Any],
     root: Path,
@@ -101,11 +125,6 @@ def golden_provider(
     idle_timeout_seconds: float | None = None,
 ) -> GoldenProvider:
     """Build the owned adapter and pipeline for a golden's model config under ``root``."""
-    placeholders = write_cli_logins(root)
-    config = json.loads(json.dumps(golden["input"]["model_config"]))
-    for key, value in list((config.get("extra_kwargs") or {}).items()):
-        if isinstance(value, str) and value in placeholders:
-            config["extra_kwargs"][key] = placeholders[value]
     reply = response_raw if response_raw is not None else golden["response_raw"]
     recorded: list[httpx.Request] = []
 
@@ -113,13 +132,7 @@ def golden_provider(
         recorded.append(request)
         return encoded_response(reply)
 
-    config_path = root / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    runtime = ProviderRuntime(
-        runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
-    )
-    adapter = build_provider(ModelConfig(**config), runtime)
+    adapter = openai_family_adapter(golden["input"]["model_config"], root, respond)
     return GoldenProvider(
         provider=pipeline_provider(adapter, idle_timeout_seconds=idle_timeout_seconds),
         adapter=adapter,

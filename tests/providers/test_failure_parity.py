@@ -11,15 +11,12 @@ unavailability, and a request that no longer fits the context window says so.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 
-from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
     INCOMPLETE_STREAM,
@@ -32,14 +29,13 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
-from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.retry import STREAM_STALLED
 from tests.providers.anthropic_family_support import ROUTE_CONFIGS, provider_for
 from tests.providers.family_support import scrub_provider_env
 from tests.providers.gemini_ollama_support import build_adapter
 from tests.providers.golden_support import ndjson_response, pipeline_provider, sse_response
-from tests.providers.openai_family_support import write_cli_logins
+from tests.providers.openai_family_support import openai_family_adapter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -108,18 +104,7 @@ def _adapter(route: str, root: Path, respond: Callable[[httpx.Request], httpx.Re
         return provider_for(ROUTE_CONFIGS[route], root, httpx.AsyncClient(transport=httpx.MockTransport(respond)))
     if route in _GEMINI_OLLAMA_ROUTES:
         return build_adapter(_GEMINI_OLLAMA_ROUTES[route], root, respond)
-    root.mkdir(parents=True, exist_ok=True)
-    homes = write_cli_logins(root)
-    config = json.loads(json.dumps(_OPENAI_ROUTES[route]))
-    for key, value in (config.get("extra_kwargs") or {}).items():
-        config["extra_kwargs"][key] = homes.get(value, value)
-    config_path = root / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    runtime = ProviderRuntime(
-        runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
-    )
-    return build_provider(ModelConfig(**config), runtime)
+    return openai_family_adapter(_OPENAI_ROUTES[route], root, respond)
 
 
 # --- Wire answers -------------------------------------------------------------------------------------------------
