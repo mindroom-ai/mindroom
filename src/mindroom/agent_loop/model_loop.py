@@ -331,7 +331,7 @@ async def _answer_resumed(
         elif requirement.confirmation is False:
             execution.tool_call_error = True
             execution.requires_confirmation = False
-            results.append(_rejection_message(execution))
+            results.append(_rejection_message(requirement))
         if requirement.external_execution_result is not None:
             results.append(tool_result_message(execution))
             execution.external_execution_required = False
@@ -339,11 +339,12 @@ async def _answer_resumed(
     progress.paused = _waits_for_decision(state.record)
 
 
-def _rejection_message(execution: ToolExecution) -> Message:
-    """Return the tool message that answers a denied call with the stored note, as Agno's ``reject_tool_call`` did."""
+def _rejection_message(requirement: RunRequirement) -> Message:
+    """Return the tool message that answers a denied call with its denial note, as Agno's ``reject_tool_call`` did."""
+    execution = requirement.tool_execution
     return Message(
         role="tool",
-        content=execution.confirmation_note,
+        content=requirement.denial_note,
         tool_call_id=execution.tool_call_id,
         tool_name=execution.tool_name,
         tool_args=execution.tool_args,
