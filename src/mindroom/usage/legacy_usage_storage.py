@@ -51,7 +51,7 @@ def migrate_usage_database(path: Path, names: TableNames, *, timeout: float = BU
     migrate_database(
         path,
         needed=lambda connection: _needs_migration(connection, names),
-        apply=lambda connection: _create_usage(connection, names),
+        apply=lambda connection: _seed_usage(connection, names),
         timeout=timeout,
     )
 
@@ -61,12 +61,8 @@ def _needs_migration(connection: sqlite3.Connection, names: TableNames) -> bool:
     return names.sessions in tables and names.usage not in tables
 
 
-def _create_usage(connection: sqlite3.Connection, names: TableNames) -> None:
-    connection.execute(usage_table_sql(names.sessions))
-    _seed_usage(connection, names)
-
-
 def _seed_usage(connection: sqlite3.Connection, names: TableNames) -> None:
+    connection.execute(usage_table_sql(names.sessions))
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(names.sessions)})")}
     legacy_column = "runs" if "runs" in columns else "NULL"
     runs_table = names.runs
