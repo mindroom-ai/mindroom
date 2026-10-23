@@ -118,6 +118,7 @@ def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # One write per record: a record larger than the file buffer is flushed before a separate newline write,
     # so a concurrent model call's record could land between them on the same line.
+    # One write is enough because each record gets its own O_APPEND handle, so no buffer is shared across calls.
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(redact_sensitive_data(payload)) + "\n")
 
