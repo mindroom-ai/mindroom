@@ -226,6 +226,8 @@ def parse_tool_arguments(
             decoded = ast.literal_eval(raw_arguments)
     except Exception as error:
         return ToolArgumentError(_DECODE_ERROR_TEXT.format(error=error))
+    # TODO(simplify): ``[]`` decodes to None while an empty string decodes to ``{}``, two forms of "no arguments".
+    # Both could decode to ``{}``. Stored data would notice: such a call's ``tool_args`` is stored as ``{}``, not null.
     if isinstance(decoded, list) and not decoded:
         return None
     if not isinstance(decoded, dict):

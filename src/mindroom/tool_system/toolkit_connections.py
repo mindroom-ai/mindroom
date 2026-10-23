@@ -70,6 +70,9 @@ def register_mcp_functions(toolkit: Toolkit) -> None:
     mcp = _mcp_toolkit(toolkit)
     if mcp is None or mcp.initialized:
         return
+    # TODO(simplify): Listing starts the MCP server and closes it, and each run starts it again, also for team
+    # members built but never delegated to. The functions could be listed on the run's own connection or kept from
+    # one listing. Operators would notice fewer MCP server starts per turn (#3075).
     if _on_event_loop():
         msg = f"MCP toolkit {toolkit.name!r} must be built off the event loop, since it lists on a loop of its own"
         raise RuntimeError(msg)
