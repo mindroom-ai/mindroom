@@ -688,8 +688,6 @@ def finalize_history_preparation(
         active_context_window=resolved_inputs.active_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
-    # hard_replay_budget_tokens and replay_budget_tokens are resolved together,
-    # so no further fallback is needed when the hard budget is unset.
     history_budget = (
         execution_plan.hard_replay_budget_tokens
         if execution_plan.authored_compaction_enabled
@@ -703,12 +701,9 @@ def finalize_history_preparation(
         )
 
     history_settings = resolved_inputs.history_settings
-    session, scope, native_history, replay_estimator = (
-        prepared_scope_history.session,
-        prepared_scope_history.scope,
-        prepared_scope_history.native_history,
-        prepared_scope_history.replay_estimator,
-    )
+    session, scope = prepared_scope_history.session, prepared_scope_history.scope
+    native_history = prepared_scope_history.native_history
+    replay_estimator = prepared_scope_history.replay_estimator
     if scope is None or session is None:
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
         replays_persisted_history = False
@@ -921,11 +916,10 @@ def _prepare_scope_state_for_run(
             scope=scope,
             update=lambda latest: replace(latest, force_compact_before_next_run=False),
         )
-        description = describe_compaction_unavailability(execution_plan)
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",
             session_id=session.session_id,
             scope=scope.key,
-            reason=description,
+            reason=describe_compaction_unavailability(execution_plan),
         )
     return state
