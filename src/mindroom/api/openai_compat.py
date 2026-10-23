@@ -1202,7 +1202,7 @@ async def _non_stream_team_completion(
         # The member and consensus document of the blocking Matrix reply, as Agno's blocking team reply rendered it on
         # both surfaces; API clients replay this text as history. A run in which nobody wrote anything gives empty
         # text, as it did with Agno, where the Matrix reply falls back to the leader's own messages.
-        response_text = format_team_response(record, record.ended_member_runs)
+        response_text = format_team_response(record)
 
         if _is_error_response(response_text):
             logger.warning("Team response returned error", team=team_name, error=response_text)

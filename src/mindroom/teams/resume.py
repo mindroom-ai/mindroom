@@ -565,7 +565,7 @@ async def continue_paused_team_run(
                 tool_trace_collector.extend(presentation.tool_trace)
             # A resume whose document stays empty, every run's text blank, renders its finished runs, as Agno's did.
             response_text = presentation.render_body() or (
-                format_team_header(members.display_names) + team_response_text(continued, continued.ended_member_runs)
+                format_team_header(members.display_names) + team_response_text(continued)
             )
             return CompletedApprovalRun(
                 response_text=response_text,

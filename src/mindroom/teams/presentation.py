@@ -33,7 +33,7 @@ from mindroom.tool_system.events import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.llm.runs import AnyRunRecord, RunRecord, TeamRunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord, TeamRunRecord, ToolExecution
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamRunEvent
 
@@ -129,10 +129,10 @@ def finished_run_text(record: AnyRunRecord) -> str:
     return "\n\n".join(own_answers(record))
 
 
-def format_team_response(record: TeamRunRecord, members: Sequence[RunRecord]) -> str:
+def format_team_response(record: TeamRunRecord) -> str:
     """Return a finished team run's text as Agno's blocking team reply rendered it, without the header.
 
-    ``members`` are the member runs that ended, in the order they ended; each contributes its ``finished_run_text``,
+    Each member run that ended (``ended_member_runs``, in the order they ended) contributes its ``finished_run_text``,
     so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
     credentials redacted, even when it wrote text first. What the leader's run hands over (``handover_content``) is
     the consensus, so a leader that failed shows that reason too. A run in which nobody wrote anything renders as
@@ -140,15 +140,15 @@ def format_team_response(record: TeamRunRecord, members: Sequence[RunRecord]) ->
     """
     contributions = [
         _format_member_contribution(member.agent_name or "Team Member", text)
-        for member in members
+        for member in record.ended_member_runs
         if (text := finished_run_text(member)).strip()
     ]
     return "\n\n".join(_with_consensus(contributions, str(record.handover_content or "")))
 
 
-def team_response_text(record: TeamRunRecord, members: Sequence[RunRecord]) -> str:
+def team_response_text(record: TeamRunRecord) -> str:
     """Return a finished team run's reply without the header: its runs' text, else the leader's, else the no-reply note."""
-    return format_team_response(record, members) or finished_run_text(record) or NO_TEAM_RESPONSE
+    return format_team_response(record) or finished_run_text(record) or NO_TEAM_RESPONSE
 
 
 def _restore_hidden_team_separators(

@@ -25,25 +25,23 @@ from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import StructuredStreamChunk, append_stream_text
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from mindroom.config.main import Config
     from mindroom.history.types import PreparedHistoryState
-    from mindroom.llm.runs import AnyRunRecord, RunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.teams.members import ResolvedExactTeamMembers
     from mindroom.teams.presentation import TeamStreamPresentation
     from mindroom.teams.runtime import TeamRunEvent
     from mindroom.tool_system.events import StreamingToolTracker
 
 
-def team_tool_executions(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[ToolExecution]:
-    """Return the leader's and every member's tool executions.
+def team_tool_executions(record: TeamRunRecord) -> list[ToolExecution]:
+    """Return the leader's and every ended member run's tool executions.
 
     Any member's completed model-switch call surfaces here and drives a whole-fan continuation, even when the team
     already produced visible output, as it does for an agent: gating on visible output would disable continuation
     in coordinate mode, where the leader almost always synthesizes text around a member's truncated tool call.
     """
-    return [*(record.tools or ()), *(tool for member in members for tool in member.tools or ())]
+    return [*(record.tools or ()), *(tool for member in record.ended_member_runs for tool in member.tools or ())]
 
 
 def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | dict[str, Any] | None:
@@ -147,7 +145,7 @@ class TeamAttempt:
         if self.stream:
             return self.reply.canonical_text()
         record = self.records.record
-        return format_team_response(record, record.ended_member_runs).strip() if record is not None else ""
+        return format_team_response(record).strip() if record is not None else ""
 
     def apply(self, event: TeamRunEvent) -> bool:
         """Fold one run event into the attempt; return whether the document changed."""
@@ -242,7 +240,7 @@ class TeamAttempt:
             metrics=team_usage(record, record.ended_member_runs) if record is not None else None,
             context_metrics=record.metrics if record is not None else None,
             context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
-            tool_count=len(team_tool_executions(record, record.ended_member_runs)) if record is not None else 0,
+            tool_count=len(team_tool_executions(record)) if record is not None else 0,
             prepared_history=prepared_history,
         )
 

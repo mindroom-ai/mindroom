@@ -841,8 +841,7 @@ class _TeamTurn:
                 scope_context=run.scope_context,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
-        members = record.ended_member_runs
-        tool_executions = team_tool_executions(record, members)
+        tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
         # its trace through its chunks. A blocking reply renders the finished runs, as Agno's did; a streamed one
@@ -850,12 +849,12 @@ class _TeamTurn:
         # The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
             leader_text = finished_run_text(record)
-            has_visible_output = bool(format_team_response(record, members)) or bool(leader_text.strip())
-            rendered = header + team_response_text(record, members)
+            has_visible_output = bool(format_team_response(record)) or bool(leader_text.strip())
+            rendered = header + team_response_text(record)
             silent = (
                 self.ctx.allow_no_report_response
                 and is_silent_schedule_no_report_response(leader_text)
-                and not any(finished_run_text(member).strip() for member in members)
+                and not any(finished_run_text(member).strip() for member in record.ended_member_runs)
             )
             # A quiet scheduled reply delivers and records the bare token, not the team document.
             response_text = leader_text.strip() if silent else rendered
