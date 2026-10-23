@@ -18,6 +18,7 @@ from mindroom.cli.doctor import (
     _check_pairing,
     _check_single_provider,
     _classify_vertexai_claude_error,
+    _validate_provider_key,
     _validate_vertexai_claude_connection,
     doctor,
 )
@@ -181,6 +182,43 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
     assert result == (0, 0, 1)
     assert validated == []
     assert "openai: OPENAI_API_KEY not set" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("provider", "base_url", "url", "headers"),
+    [
+        # The request the dashboard's provider setup sends for the same key.
+        ("openrouter", None, "https://openrouter.ai/api/v1/key", {"Authorization": "Bearer k"}),
+        (
+            "anthropic",
+            None,
+            "https://api.anthropic.com/v1/models",
+            {"x-api-key": "k", "anthropic-version": "2023-06-01"},
+        ),
+        ("openai", None, "https://api.openai.com/v1/models", {"Authorization": "Bearer k"}),
+        ("gemini", None, "https://generativelanguage.googleapis.com/v1beta/models?key=k", {}),
+        ("groq", None, "https://api.groq.com/openai/v1/models", {"Authorization": "Bearer k"}),
+        ("openai", "https://proxy.example/v1/", "https://proxy.example/v1/models", {"Authorization": "Bearer k"}),
+    ],
+)
+def test_a_provider_key_is_checked_with_the_request_that_proves_it_valid(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    base_url: str | None,
+    url: str,
+    headers: dict[str, str],
+) -> None:
+    """Doctor sends the dashboard's key check, so an OpenRouter key is read back from its key endpoint."""
+    sent: list[tuple[str, dict[str, str]]] = []
+
+    def get(url: str, *, headers: dict[str, str], **_kwargs: object) -> httpx.Response:
+        sent.append((url, headers))
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+
+    assert _validate_provider_key(provider, "k", base_url) == (True, "")
+    assert sent == [(url, headers)]
 
 
 def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

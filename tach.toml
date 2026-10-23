@@ -1170,6 +1170,12 @@ visibility = [
 path = "mindroom.providers.names"
 depends_on = []
 
+# The request that proves a provider key valid, for doctor and the dashboard's provider setup.
+[[modules]]
+path = "mindroom.providers.key_checks"
+depends_on = []
+visibility = ["mindroom.cli.doctor", "mindroom.api.provider_setup"]
+
 [[modules]]
 path = "mindroom.metadata_merge"
 depends_on = []
@@ -1991,7 +1997,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.logging_config",
-    "mindroom.model_defaults",
+    "mindroom.providers.key_checks",
     "mindroom.providers.model_loading",
 ]
 
@@ -4853,6 +4859,7 @@ depends_on = [
     "mindroom.matrix.health",
     "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
+    "mindroom.providers.key_checks",
     "mindroom.providers.model_http_client",
     "mindroom.providers.model_loading",
     "mindroom.providers.names",

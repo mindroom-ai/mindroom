@@ -35,15 +35,8 @@ from mindroom.matrix.provisioning_env import (
     provisioning_url_from_env,
     registration_token_from_env,
 )
-from mindroom.model_defaults import (
-    ANTHROPIC_BASE_URL_DEFAULT,
-    CEREBRAS_HOST_DEFAULT,
-    DEEPSEEK_BASE_URL_DEFAULT,
-    GROQ_HOST_DEFAULT,
-    OLLAMA_HOST_DEFAULT,
-    OPENAI_BASE_URL_DEFAULT,
-    OPENROUTER_BASE_URL_DEFAULT,
-)
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
 from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.providers.model_loading import model_uses_own_credential
 from mindroom.providers.names import provider_route
@@ -214,19 +207,6 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
     return config, 1, 0, 0
 
 
-_PROVIDER_VALIDATE_URLS: dict[str, str] = {
-    "anthropic": f"{ANTHROPIC_BASE_URL_DEFAULT}/v1/models",
-    "openai": f"{OPENAI_BASE_URL_DEFAULT}/models",
-    "google": "https://generativelanguage.googleapis.com/v1beta/models",
-    "openrouter": f"{OPENROUTER_BASE_URL_DEFAULT}/models",
-    "deepseek": f"{DEEPSEEK_BASE_URL_DEFAULT}/v1/models",
-    "cerebras": f"{CEREBRAS_HOST_DEFAULT}/v1/models",
-    "groq": f"{GROQ_HOST_DEFAULT}/openai/v1/models",
-    # No "zai" entry: Z.ai's paas/v4 OpenAPI spec exposes no GET /models
-    # listing endpoint, so a URL probe would misreport valid keys as broken.
-}
-
-
 def _models_using_shared_key(config: Config, env_key: str, runtime_paths: RuntimePaths) -> list[ModelConfig] | None:
     """Return the models the runtime sends the shared ``env_key`` to, or None when the credential store is unreadable."""
     try:
@@ -310,29 +290,15 @@ def _validate_provider_key(
     api_key: str,
     base_url: str | None = None,
 ) -> tuple[bool | None, str]:
-    """Validate an API key with a lightweight models-list request.
+    """Validate an API key with the provider's key check, sent to a custom endpoint's model list when one is set.
 
     Returns (True, "") if valid, (False, reason) if invalid,
     (None, reason) if inconclusive (e.g. connection error).
     """
-    # Normalize aliases so we look up a single URL and auth style
-    canonical = provider_route(provider)
-
-    if base_url:
-        url = base_url.rstrip("/") + "/models"
-    elif canonical in _PROVIDER_VALIDATE_URLS:
-        url = _PROVIDER_VALIDATE_URLS[canonical]
-    else:
+    check = PROVIDER_KEY_CHECKS.get(provider_route(provider))
+    if check is None:
         return None, "unknown provider"
-
-    headers: dict[str, str] = {}
-    if canonical == "anthropic":
-        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
-    elif canonical == "google":
-        url = f"{url}?key={api_key}"
-    else:
-        headers = {"Authorization": f"Bearer {api_key}"}
-
+    url, headers = check.request(api_key, url=base_url.rstrip("/") + "/models" if base_url else None)
     return _http_check(url, headers)
 
 
