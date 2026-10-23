@@ -1845,7 +1845,12 @@ def team_background_jobs(
         runtime_paths=runtime_paths,
     )
     entry = _job_controls_entry(controls)
-    control_names = frozenset(function.name for function in entry.adapted.functions)
+    # The job tools come from the selection a run of the controls makes: one function and one source per name.
+    functions = {
+        function.name: function
+        for _entry, function in first_of_each_name((entry, function) for function in entry.adapted.functions)
+    }
+    control_names = frozenset(functions)
 
     async def control_hooks(call: ToolCall, call_next: ToolNext) -> object:
         # The leader's delegations run without the tool-call policy, as they do with jobs off.
@@ -1858,11 +1863,7 @@ def team_background_jobs(
         team=True,
         depth=0,
         # A team has no execution scope of its own, so its calls run under the grants of the work around them.
-        tools=assembled_job_tools(
-            {function.name: function for function in entry.adapted.functions},
-            _job_sources(_offered_entries(((entry, entry.adapted),))),
-            {},
-        ),
+        tools=assembled_job_tools(functions, _job_sources(dict.fromkeys(functions, entry)), {}),
     )
     return LeaderJobs(controls=entry.adapted, middleware=with_job_admission(actor, (control_hooks,)), actor=actor)
 
@@ -2154,7 +2155,8 @@ def create_agent(
         offered_skills,
         partial(_generated_function_visible, config, tool_function_filter),
     )
-    # Owners and job sources come from the same selection over the same toolkits as the functions a run offers.
+    # Owners and job sources come from the selection a run makes over these toolkits. The run walks them after the CLI
+    # shell window, which only swaps one function's entrypoint, so it offers the same names from the same owners.
     offered = _offered_entries(offered_toolkits)
     _log_toolkits_without_offered_functions(tool_assembly.entries, offered, agent_name=agent_name)
     tool_owners = {name: entry.owner for name, entry in offered.items()}

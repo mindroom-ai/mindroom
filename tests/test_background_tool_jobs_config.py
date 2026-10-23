@@ -253,8 +253,14 @@ async def test_a_team_leader_gets_job_controls_only_when_enabled(tmp_path: Path,
         jobs = team_background_jobs(config, paths, job_owner())
         assert (jobs is not None) is enabled
         if jobs is not None:
-            assert "job" in {function.name for function in jobs.controls.functions}
+            offered = {function.name: function for function in jobs.controls.functions}
+            assert "job" in offered
             assert jobs.actor.team
+            # The team describes each control it offers, by that function and the job toolkit, and nothing else.
+            assert set(jobs.actor.tools) == set(offered)
+            assert all(
+                tool.function is offered[name] and tool.toolkit_name == "job" for name, tool in jobs.actor.tools.items()
+            )
         # A team without a Matrix owner has no jobs to collect.
         assert team_background_jobs(config, paths, None) is None
     finally:
