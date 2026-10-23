@@ -39,7 +39,7 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
 AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
 # which usage attribution reads (``usage/storage.py``, ``memory/_mem0_usage.py``) and which tells a run's own answers
-# from the replies its input replays (``teams/presentation.py``).
+# from the replies its input carries (``agent_loop/run.py`` ``own_answers``).
 MODEL_PROVENANCE_KEY = "mindroom_model"
 
 

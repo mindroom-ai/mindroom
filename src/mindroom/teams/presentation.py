@@ -15,9 +15,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
+from mindroom.agent_loop.run import own_answers
 from mindroom.delegation.state import member_slot_id
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
-from mindroom.llm.messages import MODEL_PROVENANCE_KEY
 from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
@@ -118,20 +118,15 @@ def render_team_member_slots(
 
 
 def finished_run_text(record: AnyRunRecord) -> str:
-    """Return a finished run's text: what it shows (``handover_content``), or else the text its own requests wrote.
+    """Return a finished run's text: what it shows (``handover_content``), or else its own answers (``own_answers``).
 
-    A failed run shows why it failed, credentials redacted. A run's input can carry the entity's earlier replies in
-    the thread as assistant messages; only the messages a model answered carry its provenance, so a run without
-    content never shows an earlier turn's answer.
+    A failed run shows why it failed, credentials redacted, and a run without content never shows an earlier reply
+    of the thread that its input carried.
     """
     content = record.handover_content
     if content:
         return str(content)
-    return "\n\n".join(
-        str(message.content)
-        for message in record.messages
-        if message.role == "assistant" and message.content and MODEL_PROVENANCE_KEY in (message.provider_data or {})
-    )
+    return "\n\n".join(own_answers(record))
 
 
 def format_team_response(record: TeamRunRecord, members: Sequence[RunRecord]) -> str:

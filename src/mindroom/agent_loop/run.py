@@ -22,6 +22,7 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopEnded, L
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.llm.events import RunFinished
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
@@ -398,6 +399,23 @@ async def _persist_quietly[R: AnyRunRecord](persist: Persist[R], record: R) -> N
         logger.exception("terminal_run_persist_failed", run_id=record.run_id, status=record.status.value)
 
 
+def own_answers(record: AnyRunRecord) -> list[str]:
+    """Return the text of each answer the run's own model requests wrote, oldest first.
+
+    A run's input can carry the thread's earlier replies as assistant messages, which the run stores with its own;
+    only a message a model answered carries its provenance (``MODEL_PROVENANCE_KEY``), and a history copy is marked
+    ``from_history``, so neither reads as this run's answer.
+    """
+    return [
+        message.get_content_string()
+        for message in record.messages
+        if message.role == "assistant"
+        and message.content
+        and not message.from_history
+        and MODEL_PROVENANCE_KEY in (message.provider_data or {})
+    ]
+
+
 def paused_content(tools: Sequence[ToolExecution]) -> str:
     """Return the text of a paused run that produced none of its own: Agno's text while a call waits for confirmation.
 
@@ -415,6 +433,7 @@ __all__ = [
     "ResumePlan",
     "decide_requirements",
     "drive_run",
+    "own_answers",
     "paused_content",
     "plan_resume",
     "prepare_resume_tools",
