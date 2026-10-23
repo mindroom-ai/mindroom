@@ -174,7 +174,7 @@ async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_pat
     authored, _ = await run_adapter(config, _request(), tmp_path, response)
     overridden, _ = await run_adapter(
         config,
-        _request(overrides=RequestOverrides(temperature=0.7, max_output_tokens=50, disable_thinking=True)),
+        _request(overrides=RequestOverrides(temperature=0.7, disable_thinking=True)),
         tmp_path,
         gemini_sse(_gemini_chunk({"text": "ok"})),
     )
@@ -188,7 +188,7 @@ async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_pat
     assert overridden["body"]["generationConfig"] == {
         "candidateCount": 1,
         "temperature": 0.7,
-        "maxOutputTokens": 50,
+        "maxOutputTokens": 100,
         "thinkingConfig": {"thinking_budget": 0, "include_thoughts": False},
     }
 
@@ -1327,13 +1327,13 @@ async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> 
 
     request, _ = await run_adapter(
         config,
-        _request(overrides=RequestOverrides(temperature=0.1, max_output_tokens=64)),
+        _request(overrides=RequestOverrides(temperature=0.1)),
         tmp_path,
         ollama_ndjson(_ollama_done()),
     )
 
     body = request["body"]
-    assert body["options"] == {"num_ctx": 8192, "temperature": 0.1, "num_predict": 64}
+    assert body["options"] == {"num_ctx": 8192, "temperature": 0.1}
     assert body["keep_alive"] == "5m"
     assert body["format"] == "json"
     assert body["think"] is False

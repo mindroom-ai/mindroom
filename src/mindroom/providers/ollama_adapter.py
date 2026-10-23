@@ -165,8 +165,6 @@ class OllamaProvider:
         options = dict(settings.options or {})
         if overrides.temperature is not None:
             options["temperature"] = overrides.temperature
-        if overrides.max_output_tokens is not None:
-            options["num_predict"] = overrides.max_output_tokens
         kwargs: dict[str, Any] = {
             key: value
             for key, value in (

@@ -80,7 +80,10 @@ class ToolSpec:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestOverrides:
-    """Per-request knobs that override the adapter's configured defaults; None leaves a default untouched."""
+    """Per-request knobs that override the adapter's configured defaults; None leaves a default untouched.
+
+    Only the Claude routes honor ``max_output_tokens``; its one caller is the ``mindroom doctor`` Vertex Claude probe.
+    """
 
     temperature: float | None = None
     max_output_tokens: int | None = None

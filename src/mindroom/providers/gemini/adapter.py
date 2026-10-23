@@ -215,9 +215,7 @@ class GeminiProvider:
             "temperature": settings.temperature if overrides.temperature is None else overrides.temperature,
             "top_p": settings.top_p,
             "top_k": settings.top_k,
-            "max_output_tokens": (
-                settings.max_output_tokens if overrides.max_output_tokens is None else overrides.max_output_tokens
-            ),
+            "max_output_tokens": settings.max_output_tokens,
             "stop_sequences": settings.stop_sequences,
             "logprobs": settings.logprobs,
             "presence_penalty": settings.presence_penalty,
