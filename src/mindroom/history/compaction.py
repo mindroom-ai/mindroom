@@ -635,6 +635,9 @@ async def compact_running_turn(
             summary=summary,
             summary_model=summarizer.model.name,
             before_tokens=before_tokens,
+            # TODO(simplify): this notice compares the whole request before the fold with the summary text alone
+            # after it. Report both sides in the same units, such as the rewritten request's size. Users would see
+            # different "after" numbers in mid-turn compaction notices.
             after_tokens=estimate_text_tokens(summary),
             window_tokens=replay_window_tokens or 0,
             threshold_tokens=threshold_tokens or 0,
