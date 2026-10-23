@@ -105,7 +105,6 @@ class TeamAttempt:
     run_id: str
     members: ResolvedExactTeamMembers
     presentation: TeamStreamPresentation
-    show_tool_calls: bool
     # Whether the document streams as it grows; a blocking turn renders its reply from the run's records instead.
     stream: bool
     team_name: str
@@ -211,7 +210,7 @@ class TeamAttempt:
             agent_name=agent_name,
             tool_name=event.tool.tool_name,
             tool_call_id=event.tool.tool_call_id,
-            show_tool_calls=self.show_tool_calls,
+            show_tool_calls=self.presentation.show_tool_calls,
         )
 
     def chunk(self) -> StructuredStreamChunk | None:

@@ -619,7 +619,6 @@ class _TeamTurn:
             run_id=continuation_state.active_run_id or str(uuid4()),
             members=members,
             presentation=presentation,
-            show_tool_calls=self.show_tool_calls,
             stream=stream,
             team_name=self.entity_name,
             runtime_model_name=prepared.runtime_model_name,
@@ -812,7 +811,7 @@ class _TeamTurn:
                 record.ended_member_runs,
                 config_names=attempt.members.requested_agent_names,
                 display_names=attempt.members.display_names,
-                show_tool_calls=attempt.show_tool_calls,
+                show_tool_calls=attempt.presentation.show_tool_calls,
             )
             if blocking
             else continued_team_pause(attempt.presentation, paused)
