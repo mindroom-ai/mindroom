@@ -33,9 +33,10 @@ _MISSING_PROVIDER_KEY_PATTERN = re.compile(
     r"|could not resolve authentication method",  # Anthropic SDK
 )
 # Wording of text without a provider payload, read as whole words: a 401 status, and a throttled request's rate,
-# 429, or quota.
+# 429, or quota. Lowercased, an error's name such as ``RateLimitError`` or ``QuotaExceeded`` is one word that holds
+# its keyword, so the rate and quota arms take those names as well.
 _UNAUTHORIZED_WORDING = whole_words("401")
-_RATE_LIMIT_WORDING = whole_words("rate", "429", "quotas?")
+_RATE_LIMIT_WORDING = whole_words(r"rate(?:limit[a-z]*)?", "429", r"quotas?(?:exceeded[a-z]*)?")
 _PROVIDER_UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 _RATE_LIMITED = "⏱️ Rate limited. Please wait a moment and try again."
 

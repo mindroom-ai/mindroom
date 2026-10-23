@@ -1,6 +1,8 @@
 """Stored tool-call shapes earlier releases wrote, read in the current shape where stored runs become requests.
 
-Each repair returns request-only copies; stored history is never rewritten.
+Each repair returns copies, so the rows a request is built from are never rewritten and replayed history is never
+stored again. The one repaired shape that is stored is a paused run's: the resumed run stores the request it sent, so
+a legacy paused run is stored repaired, in the shape current releases store.
 """
 
 from __future__ import annotations
@@ -20,8 +22,10 @@ __all__ = ["repair_legacy_tool_calls"]
 # Legacy format: Agno writers omitted the arguments field for empty Anthropic tool calls.
 # Last legacy release: v2026.9.43; replacement: v2026.9.44 included the upstream Agno 3.0.7 writer fix.
 # Handling: Supply `{}` arguments in the request copies of affected calls, for every route, where stored history and
-# a paused run become request messages, until those histories are migrated or dropped.
+# a paused run become request messages, until those histories are migrated or dropped. A resumed run stores its
+# request, so a legacy paused run is stored with the arguments supplied.
 # Coverage: tests/test_history_legacy_tool_calls.py::test_a_stored_call_without_arguments_replays_with_empty_arguments,
+# tests/test_history_legacy_tool_calls.py::test_a_resumed_legacy_run_is_stored_in_the_current_shape,
 # tests/providers/test_provider_families.py::test_every_family_replays_the_tool_calls_any_provider_stored
 
 
@@ -29,10 +33,14 @@ __all__ = ["repair_legacy_tool_calls"]
 # Legacy format: Streamed OpenAI history retained id-only tool placeholders and their orphan tool results.
 # Last legacy release: v2026.7.172; replacement: v2026.7.173 filtered sparse placeholders during writes.
 # Handling: Remove each placeholder and its matching result, for every route, where stored history and a paused run
-# become request messages, before the tool-call window counts results, preserving unchanged message identities.
+# become request messages, before the message and tool-call windows count them, preserving unchanged message
+# identities. A resumed run stores its request, so a legacy paused run is stored without its placeholders and their
+# results, which no request replays.
 # Coverage: tests/test_history_legacy_tool_calls.py::test_placeholders_and_their_results_never_replay,
+# tests/test_history_legacy_tool_calls.py::test_the_message_window_counts_only_messages_that_replay,
 # tests/test_history_legacy_tool_calls.py::test_the_tool_call_window_counts_only_calls_that_replay,
 # tests/test_history_legacy_tool_calls.py::test_a_paused_run_resumes_without_its_placeholders,
+# tests/test_history_legacy_tool_calls.py::test_a_resumed_legacy_run_is_stored_in_the_current_shape,
 # tests/providers/test_provider_families.py::test_every_family_replays_the_tool_calls_any_provider_stored
 def repair_legacy_tool_calls(messages: Sequence[Message]) -> list[Message]:
     """Supply missing call arguments and drop id-only placeholder calls with their results."""

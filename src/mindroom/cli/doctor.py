@@ -292,8 +292,11 @@ def _validate_provider_key(
 ) -> tuple[bool | None, str]:
     """Validate an API key with the provider's key check, sent to a custom endpoint's model list when one is set.
 
+    A provider without a key check is never probed, at a custom endpoint either: its key style and a model list
+    are unknown, so a probe could report a valid key as invalid.
+
     Returns (True, "") if valid, (False, reason) if invalid,
-    (None, reason) if inconclusive (e.g. connection error).
+    (None, reason) if inconclusive (e.g. connection error, or a provider without a key check).
     """
     check = PROVIDER_KEY_CHECKS.get(provider_route(provider))
     if check is None:

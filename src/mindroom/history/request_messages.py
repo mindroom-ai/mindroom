@@ -64,8 +64,8 @@ def scope_history_messages(
     ``runs`` are the session's runs in stored order. The two limits are the request's own, which a replay plan may
     narrow from the configured policy. Each message is a copy marked ``from_history``, so a request never changes a
     stored run and is never stored again. Prompt roles, ``system_message_role`` included, never replay. Tool calls
-    are read in the shape current releases store, and those beyond ``max_tool_calls_from_history`` are left out, as is
-    every media item except the newest viewed images.
+    are read in the shape current releases store before either limit counts them, and those beyond
+    ``max_tool_calls_from_history`` are left out, as is every media item except the newest viewed images.
     """
     selected = _selected_messages(
         runs,
@@ -74,7 +74,7 @@ def scope_history_messages(
         num_history_messages=num_history_messages,
         prompt_roles=prompt_roles_for_history_storage(system_message_role),
     )
-    history = repair_legacy_tool_calls([_history_copy(message) for message in selected])
+    history = [_history_copy(message) for message in selected]
     if max_tool_calls_from_history is not None:
         history = filter_tool_calls(history, max_tool_calls_from_history)
     return project_history_media_for_replay(history)
@@ -113,20 +113,24 @@ def _selected_messages(
 ) -> list[Message]:
     """Select the scope's stored messages within the replay limits.
 
-    The run limit applies before the message limit. A tool result whose call the message limit cut off is dropped,
-    since it cannot replay without that call. Prompt roles never replay, nor do history copies a stored run still holds.
+    The run limit applies before the message limit. Tool calls are read in the shape current releases store, so a
+    legacy placeholder and its orphan result take no message of the limit. A tool result whose call the message limit
+    cut off is dropped, since it cannot replay without that call. Prompt roles never replay, nor do history copies a
+    stored run still holds.
     """
     replayed = [run for run in runs if is_model_history_visible_run(run) and run_in_scope(run, scope)]
     if num_history_runs is not None:
         if num_history_runs <= 0:
             return []
         replayed = replayed[-num_history_runs:]
-    messages = [
-        message
-        for run in replayed
-        for message in run.messages
-        if not message.from_history and message.role not in prompt_roles
-    ]
+    messages = repair_legacy_tool_calls(
+        [
+            message
+            for run in replayed
+            for message in run.messages
+            if not message.from_history and message.role not in prompt_roles
+        ],
+    )
     if num_history_messages is None:
         return messages
     newest = messages[-num_history_messages:] if num_history_messages > 0 else []
@@ -197,9 +201,10 @@ def build_resume_request(
     """Return the request that resumes a paused run: its stored system message, the summary, history, then the rest.
 
     ``paused`` holds the paused run's stored messages, which never include history copies; their tool calls are read in
-    the shape current releases store, as history's are. Its stored system message is reused, so a signed reasoning
-    block in the paused request stays valid against an unchanged prefix. A run paused while Agno rendered the summary
-    inside that system message keeps that single summary.
+    the shape current releases store, as history's are. The resumed run stores this request, so a legacy paused run is
+    stored in that shape too. Its stored system message is reused, so a signed reasoning block in the paused request
+    stays valid against an unchanged prefix. A run paused while Agno rendered the summary inside that system message
+    keeps that single summary.
     """
     paused = repair_legacy_tool_calls(paused)
     system = next((message for message in paused if message.role == "system"), None)
