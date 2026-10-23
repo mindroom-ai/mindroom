@@ -102,10 +102,11 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str, session_id: str) -> TeamRunRecord:
+def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
     """Return the paused team run the approval names, from the loaded session or the store.
 
-    A run the store holds for another session of the scope is refused, as the agent path refuses it.
+    A run the store holds for another session of the scope than the one ``scope`` was opened for is refused, as the
+    agent path refuses it.
     """
     persisted: AnyRunRecord | None = None
     if scope.session is not None:
@@ -114,7 +115,7 @@ def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str, session_id:
         persisted = scope.storage.get_run(run_id)
     if (
         not isinstance(persisted, TeamRunRecord)
-        or persisted.session_id != session_id
+        or persisted.session_id != scope.session_id
         or persisted.status is not RunStatus.paused
     ):
         msg = f"Paused team run {run_id!r} is no longer available"
@@ -435,7 +436,7 @@ async def continue_paused_team_run(
             # Named members always resolve a team scope, and the approval names its session.
             assert scope is not None
             set_consumption_storage(scope.storage_factory)
-            persisted = _stored_paused_team_run(scope, run_id, session_id)
+            persisted = _stored_paused_team_run(scope, run_id)
             delegated = has_delegation_state(persisted)
             approved_calls = tuple(call for call in approval_calls if decisions.get(call.tool_call_id))
             async with asyncio.TaskGroup() as recovery:
