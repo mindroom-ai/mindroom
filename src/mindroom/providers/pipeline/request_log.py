@@ -24,10 +24,9 @@ from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Mapping
 
     from mindroom.config.models import DebugConfig
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
@@ -59,40 +58,6 @@ def _attribution(context: Mapping[str, Any]) -> dict[str, Any]:
     return {name: context[name] for name in REQUEST_ATTRIBUTION_FIELDS if name in context}
 
 
-def _system_prompt(messages: Sequence[Message]) -> str:
-    return next((message.get_content_string() for message in messages if message.role == "system"), "")
-
-
-def _request_record(
-    request: ModelRequest,
-    log: RequestLog,
-    *,
-    model_id: str,
-    model_params: dict[str, Any],
-    request_log_id: str,
-    context: Mapping[str, Any],
-) -> dict[str, Any]:
-    messages = [
-        {key: value for key, value in message.to_dict().items() if key not in _NON_API_MESSAGE_FIELDS}
-        for message in request.messages
-    ]
-    tools = [json_safe(tool) for tool in request.tools]
-    return {
-        "timestamp": datetime.now().astimezone().isoformat(),
-        "request_log_id": request_log_id,
-        "agent_id": log.model_name,
-        **context,
-        "model_id": model_id,
-        "system_prompt": _system_prompt(request.messages),
-        "messages": json_safe(messages),
-        "message_count": len(messages),
-        "tools": tools,
-        "tool_count": len(tools),
-        "deferred_tool_names": sorted(request.deferred_tool_names),
-        "model_params": model_params,
-    }
-
-
 def _write_request_record(
     path: Path,
     request: ModelRequest,
@@ -108,16 +73,31 @@ def _write_request_record(
     Serializing the whole conversation and tool schemas takes long enough to stall the event loop, so the record is
     built in the writer thread; the request waits for the write, so nothing edits its messages meanwhile.
     """
+    messages = [
+        {key: value for key, value in message.to_dict().items() if key not in _NON_API_MESSAGE_FIELDS}
+        for message in request.messages
+    ]
+    tools = [json_safe(tool) for tool in request.tools]
+    system_prompt = next((message.get_content_string() for message in request.messages if message.role == "system"), "")
     _write_line(
         path,
-        _request_record(
-            request,
-            log,
-            model_id=model_id,
-            model_params=model_params,
-            request_log_id=request_log_id,
-            context=context,
-        ),
+        {
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "request_log_id": request_log_id,
+            # TODO(simplify): A request whose log context binds no `agent_id` records the model config name as its
+            # `agent_id`, here and in the response record. Leave `agent_id` out then; `LLM usage` names the model.
+            # Operators reading the request log would notice.
+            "agent_id": log.model_name,
+            **context,
+            "model_id": model_id,
+            "system_prompt": system_prompt,
+            "messages": json_safe(messages),
+            "message_count": len(messages),
+            "tools": tools,
+            "tool_count": len(tools),
+            "deferred_tool_names": sorted(request.deferred_tool_names),
+            "model_params": model_params,
+        },
     )
 
 
