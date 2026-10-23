@@ -6,7 +6,8 @@ requests through the same estimator.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
+from functools import cache
 from typing import TYPE_CHECKING
 
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
@@ -18,21 +19,15 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ToolSpec
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class _StaticTokenEstimator:
-    """Request-local static-token estimator that caches the non-prompt cost once."""
+    """Request-local static-token estimator."""
 
-    non_prompt_tokens_fn: Callable[[], int]
-    _non_prompt_tokens: int | None = field(default=None, init=False)
-
-    def non_prompt_tokens(self) -> int:
-        """Estimate the system message and tool tokens, which do not depend on the prompt text."""
-        if self._non_prompt_tokens is None:
-            self._non_prompt_tokens = self.non_prompt_tokens_fn()
-        return self._non_prompt_tokens
+    # The system message and tool tokens, which do not depend on the prompt text; computed once, on first use.
+    non_prompt_tokens: Callable[[], int]
 
     def estimate(self, full_prompt: str) -> int:
-        """Estimate the prompt text's tokens plus the non-prompt cost, which is computed once."""
+        """Estimate the prompt text's tokens plus the non-prompt cost."""
         return estimate_text_tokens(full_prompt) + self.non_prompt_tokens()
 
 
@@ -55,4 +50,4 @@ def build_static_token_estimator(
         tool_tokens = estimate_text_tokens(stable_serialize(payloads))
         return estimate_text_tokens(str(system_message.content or "")) + tool_tokens
 
-    return _StaticTokenEstimator(non_prompt_tokens)
+    return _StaticTokenEstimator(cache(non_prompt_tokens))
