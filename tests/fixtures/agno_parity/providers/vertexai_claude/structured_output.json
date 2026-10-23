@@ -68,33 +68,33 @@
   },
   "request": {
     "body": {
-      "anthropic_version": "vertex-2023-10-16",
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "What should I pack for Paris tomorrow?",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
       "system": [
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
           "text": "Route the message to the best agent.",
-          "type": "text"
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
-      ]
+      ],
+      "anthropic_version": "vertex-2023-10-16"
     },
     "headers": {
       "accept": "application/json",

@@ -164,15 +164,14 @@
     "body": {
       "messages": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "system"
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
         },
         {
-          "content": "",
           "role": "assistant",
           "tool_calls": [
             {
@@ -183,20 +182,21 @@
               "id": "call_00000000000000000000000000000000000",
               "type": "function"
             }
-          ]
+          ],
+          "content": ""
         },
         {
-          "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
           "role": "tool",
+          "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
           "tool_call_id": "call_00000000000000000000000000000000000"
         },
         {
-          "content": "Pack a light rain jacket and comfortable shoes.",
-          "role": "assistant"
+          "role": "assistant",
+          "content": "Pack a light rain jacket and comfortable shoes."
         },
         {
-          "content": "And for the evening?",
-          "role": "user"
+          "role": "user",
+          "content": "And for the evening?"
         }
       ],
       "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
@@ -206,10 +206,10 @@
       },
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Return the forecast for one city.",
-            "external_execution": false,
             "name": "get_weather",
+            "description": "Return the forecast for one city.",
             "parameters": {
               "properties": {
                 "city": {
@@ -230,15 +230,15 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Search the user's travel notes.",
-            "external_execution": false,
             "name": "search_notes",
+            "description": "Search the user's travel notes.",
             "parameters": {
               "properties": {
                 "limit": {
@@ -255,9 +255,9 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         }
       ]
     },

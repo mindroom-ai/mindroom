@@ -57,109 +57,115 @@
   },
   "requests": [
     {
-      "deferred_tool_names": [],
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "stream": true,
       "messages": [
         {
           "content": "<your_role>\n## Your Identity\nYou are Planner (Matrix ID: @mindroom_planner:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Planner and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Break work into ordered steps.\n</your_role>\n\nNumber every step.\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>\nDo not reflect on the quality of the returned search results in your response",
           "from_history": false,
-          "role": "system",
-          "stop_after_tool_call": false
+          "stop_after_tool_call": false,
+          "role": "system"
         },
         {
           "content": "Draft the launch note.",
           "from_history": false,
-          "role": "user",
-          "stop_after_tool_call": false
+          "stop_after_tool_call": false,
+          "role": "user"
         }
       ],
-      "model": {
-        "id": "claude-sonnet-5-5",
-        "provider": "Anthropic"
-      },
-      "response_format": null,
-      "stream": true,
-      "tool_choice": null,
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Add two numbers and return the result.",
-            "external_execution": false,
             "name": "add",
+            "description": "Add two numbers and return the result.",
             "parameters": {
+              "type": "object",
               "properties": {
                 "a": {
-                  "description": "(float) First number.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) First number."
                 },
                 "b": {
-                  "description": "(float) Second number.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) Second number."
                 }
               },
               "required": [
                 "a",
                 "b"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Cancel a scheduled task.",
-            "external_execution": false,
             "name": "cancel_schedule",
+            "description": "Cancel a scheduled task.",
             "parameters": {
+              "type": "object",
               "properties": {
                 "task_id": {
-                  "description": "The ID of the task to cancel (from list_schedules).",
-                  "type": "string"
+                  "type": "string",
+                  "description": "The ID of the task to cancel (from list_schedules)."
                 }
               },
               "required": [
                 "task_id"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Divide first number by second and return the result.",
-            "external_execution": false,
             "name": "divide",
+            "description": "Divide first number by second and return the result.",
             "parameters": {
+              "type": "object",
               "properties": {
                 "a": {
-                  "description": "(float) Numerator.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) Numerator."
                 },
                 "b": {
-                  "description": "(float) Denominator.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) Denominator."
                 }
               },
               "required": [
                 "a",
                 "b"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Edit an existing scheduled task by replacing its timing and content.",
-            "external_execution": false,
             "name": "edit_schedule",
+            "description": "Edit an existing scheduled task by replacing its timing and content.",
             "parameters": {
+              "type": "object",
               "properties": {
+                "task_id": {
+                  "type": "string",
+                  "description": "The ID of the task to edit (from list_schedules)."
+                },
+                "request": {
+                  "type": "string",
+                  "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\""
+                },
                 "history_limit": {
                   "anyOf": [
                     {
@@ -170,21 +176,6 @@
                     }
                   ],
                   "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history. Leave unset to keep the task's\nexisting history limit. To restore full history, say so in request."
-                },
-                "model": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
-                },
-                "request": {
-                  "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\"",
-                  "type": "string"
                 },
                 "silent": {
                   "anyOf": [
@@ -197,151 +188,162 @@
                   ],
                   "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or exact `NO_REPLY` finals while\nkeeping findings, failures, and independently sent tool messages\nvisible. Leave unset to preserve the existing mode."
                 },
-                "task_id": {
-                  "description": "The ID of the task to edit (from list_schedules).",
-                  "type": "string"
+                "model": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
                 }
               },
               "required": [
                 "task_id",
                 "request"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Raise first number to the power of the second number and return the result.",
-            "external_execution": false,
             "name": "exponentiate",
+            "description": "Raise first number to the power of the second number and return the result.",
             "parameters": {
+              "type": "object",
               "properties": {
                 "a": {
-                  "description": "(float) Base.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) Base."
                 },
                 "b": {
-                  "description": "(float) Exponent.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) Exponent."
                 }
               },
               "required": [
                 "a",
                 "b"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
-            "external_execution": false,
             "name": "factorial",
+            "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
             "parameters": {
+              "type": "object",
               "properties": {
                 "n": {
-                  "description": "(int) Number to calculate the factorial of, at most 1558.",
-                  "type": "integer"
+                  "type": "integer",
+                  "description": "(int) Number to calculate the factorial of, at most 1558."
                 }
               },
               "required": [
                 "n"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "approval_type": "mindroom_matrix_room_runtime",
-            "description": "Invite router to current Matrix room.",
-            "external_execution": false,
             "name": "invite_router",
+            "description": "Invite router to current Matrix room.",
             "parameters": {
+              "type": "object",
               "properties": {},
-              "required": [],
-              "type": "object"
+              "required": []
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false,
+            "approval_type": "mindroom_matrix_room_runtime"
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
-            "external_execution": false,
             "name": "is_prime",
+            "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
             "parameters": {
+              "type": "object",
               "properties": {
                 "n": {
-                  "description": "(int) Number to check if prime, at most 10**12.",
-                  "type": "integer"
+                  "type": "integer",
+                  "description": "(int) Number to check if prime, at most 10**12."
                 }
               },
               "required": [
                 "n"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "List all pending scheduled tasks in the current room/thread.",
-            "external_execution": false,
             "name": "list_schedules",
+            "description": "List all pending scheduled tasks in the current room/thread.",
             "parameters": {
+              "type": "object",
               "properties": {},
-              "required": [],
-              "type": "object"
+              "required": []
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Multiply two numbers and return the result.",
-            "external_execution": false,
             "name": "multiply",
+            "description": "Multiply two numbers and return the result.",
             "parameters": {
+              "type": "object",
               "properties": {
                 "a": {
-                  "description": "(float) First number.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) First number."
                 },
                 "b": {
-                  "description": "(float) Second number.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) Second number."
                 }
               },
               "required": [
                 "a",
                 "b"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
-            "external_execution": false,
             "name": "run_scheduled_call",
+            "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
             "parameters": {
+              "type": "object",
               "properties": {
+                "task_id": {
+                  "type": "string",
+                  "description": "The scheduled task's ID from its message."
+                },
                 "arguments_json": {
                   "anyOf": [
                     {
@@ -352,28 +354,32 @@
                     }
                   ],
                   "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
-                },
-                "task_id": {
-                  "description": "The scheduled task's ID from its message.",
-                  "type": "string"
                 }
               },
               "required": [
                 "task_id"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
-            "external_execution": false,
             "name": "schedule",
+            "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
             "parameters": {
+              "type": "object",
               "properties": {
+                "request": {
+                  "type": "string",
+                  "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\""
+                },
+                "new_thread": {
+                  "type": "boolean",
+                  "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+                },
                 "history_limit": {
                   "anyOf": [
                     {
@@ -385,25 +391,6 @@
                   ],
                   "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for full history."
                 },
-                "model": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
-                },
-                "new_thread": {
-                  "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger.",
-                  "type": "boolean"
-                },
-                "request": {
-                  "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\"",
-                  "type": "string"
-                },
                 "silent": {
                   "anyOf": [
                     {
@@ -414,40 +401,51 @@
                     }
                   ],
                   "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or exactly `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Leave unset to infer\nthe mode from the scheduling request."
+                },
+                "model": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
                 }
               },
               "required": [
                 "request",
                 "new_thread"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
-            "external_execution": false,
             "name": "schedule_tool_call",
+            "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
             "parameters": {
+              "type": "object",
               "properties": {
-                "arguments_json": {
-                  "description": "The call's arguments as a JSON object string.",
-                  "type": "string"
+                "tool_name": {
+                  "type": "string",
+                  "description": "One of your tool functions, e.g. \"post_slack_message\"."
                 },
-                "description": {
-                  "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs.",
-                  "type": "string"
+                "arguments_json": {
+                  "type": "string",
+                  "description": "The call's arguments as a JSON object string."
                 },
                 "execute_at": {
-                  "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\".",
-                  "type": "string"
+                  "type": "string",
+                  "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\"."
                 },
-                "tool_name": {
-                  "description": "One of your tool functions, e.g. \"post_slack_message\".",
-                  "type": "string"
+                "description": {
+                  "type": "string",
+                  "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
                 }
               },
               "required": [
@@ -455,114 +453,122 @@
                 "arguments_json",
                 "execute_at",
                 "description"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Calculate the square root of a number and return the result.",
-            "external_execution": false,
             "name": "square_root",
+            "description": "Calculate the square root of a number and return the result.",
             "parameters": {
+              "type": "object",
               "properties": {
                 "n": {
-                  "description": "(float) Number to calculate the square root of.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) Number to calculate the square root of."
                 }
               },
               "required": [
                 "n"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Subtract second number from first and return the result.",
-            "external_execution": false,
             "name": "subtract",
+            "description": "Subtract second number from first and return the result.",
             "parameters": {
+              "type": "object",
               "properties": {
                 "a": {
-                  "description": "(float) First number.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) First number."
                 },
                 "b": {
-                  "description": "(float) Second number.",
-                  "type": "number"
+                  "type": "number",
+                  "description": "(float) Second number."
                 }
               },
               "required": [
                 "a",
                 "b"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         }
-      ]
+      ],
+      "tool_choice": null,
+      "response_format": null,
+      "deferred_tool_names": []
     },
     {
-      "deferred_tool_names": [],
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "stream": true,
       "messages": [
         {
           "content": "<your_role>\n## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Writer and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `scheduler`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Write clear announcements.\n</your_role>\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>\nDo not reflect on the quality of the returned search results in your response",
           "from_history": false,
-          "role": "system",
-          "stop_after_tool_call": false
+          "stop_after_tool_call": false,
+          "role": "system"
         },
         {
           "content": "Draft the launch note.",
           "from_history": false,
-          "role": "user",
-          "stop_after_tool_call": false
+          "stop_after_tool_call": false,
+          "role": "user"
         }
       ],
-      "model": {
-        "id": "claude-sonnet-5-5",
-        "provider": "Anthropic"
-      },
-      "response_format": null,
-      "stream": true,
-      "tool_choice": null,
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Cancel a scheduled task.",
-            "external_execution": false,
             "name": "cancel_schedule",
+            "description": "Cancel a scheduled task.",
             "parameters": {
+              "type": "object",
               "properties": {
                 "task_id": {
-                  "description": "The ID of the task to cancel (from list_schedules).",
-                  "type": "string"
+                  "type": "string",
+                  "description": "The ID of the task to cancel (from list_schedules)."
                 }
               },
               "required": [
                 "task_id"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Edit an existing scheduled task by replacing its timing and content.",
-            "external_execution": false,
             "name": "edit_schedule",
+            "description": "Edit an existing scheduled task by replacing its timing and content.",
             "parameters": {
+              "type": "object",
               "properties": {
+                "task_id": {
+                  "type": "string",
+                  "description": "The ID of the task to edit (from list_schedules)."
+                },
+                "request": {
+                  "type": "string",
+                  "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\""
+                },
                 "history_limit": {
                   "anyOf": [
                     {
@@ -573,21 +579,6 @@
                     }
                   ],
                   "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history. Leave unset to keep the task's\nexisting history limit. To restore full history, say so in request."
-                },
-                "model": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
-                },
-                "request": {
-                  "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\"",
-                  "type": "string"
                 },
                 "silent": {
                   "anyOf": [
@@ -600,57 +591,68 @@
                   ],
                   "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or exact `NO_REPLY` finals while\nkeeping findings, failures, and independently sent tool messages\nvisible. Leave unset to preserve the existing mode."
                 },
-                "task_id": {
-                  "description": "The ID of the task to edit (from list_schedules).",
-                  "type": "string"
+                "model": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
                 }
               },
               "required": [
                 "task_id",
                 "request"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "approval_type": "mindroom_matrix_room_runtime",
-            "description": "Invite router to current Matrix room.",
-            "external_execution": false,
             "name": "invite_router",
+            "description": "Invite router to current Matrix room.",
             "parameters": {
+              "type": "object",
               "properties": {},
-              "required": [],
-              "type": "object"
+              "required": []
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false,
+            "approval_type": "mindroom_matrix_room_runtime"
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "List all pending scheduled tasks in the current room/thread.",
-            "external_execution": false,
             "name": "list_schedules",
+            "description": "List all pending scheduled tasks in the current room/thread.",
             "parameters": {
+              "type": "object",
               "properties": {},
-              "required": [],
-              "type": "object"
+              "required": []
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
-            "external_execution": false,
             "name": "run_scheduled_call",
+            "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
             "parameters": {
+              "type": "object",
               "properties": {
+                "task_id": {
+                  "type": "string",
+                  "description": "The scheduled task's ID from its message."
+                },
                 "arguments_json": {
                   "anyOf": [
                     {
@@ -661,28 +663,32 @@
                     }
                   ],
                   "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
-                },
-                "task_id": {
-                  "description": "The scheduled task's ID from its message.",
-                  "type": "string"
                 }
               },
               "required": [
                 "task_id"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
-            "external_execution": false,
             "name": "schedule",
+            "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
             "parameters": {
+              "type": "object",
               "properties": {
+                "request": {
+                  "type": "string",
+                  "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\""
+                },
+                "new_thread": {
+                  "type": "boolean",
+                  "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+                },
                 "history_limit": {
                   "anyOf": [
                     {
@@ -694,25 +700,6 @@
                   ],
                   "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for full history."
                 },
-                "model": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
-                },
-                "new_thread": {
-                  "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger.",
-                  "type": "boolean"
-                },
-                "request": {
-                  "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\"",
-                  "type": "string"
-                },
                 "silent": {
                   "anyOf": [
                     {
@@ -723,40 +710,51 @@
                     }
                   ],
                   "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or exactly `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Leave unset to infer\nthe mode from the scheduling request."
+                },
+                "model": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
                 }
               },
               "required": [
                 "request",
                 "new_thread"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
-            "external_execution": false,
             "name": "schedule_tool_call",
+            "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
             "parameters": {
+              "type": "object",
               "properties": {
-                "arguments_json": {
-                  "description": "The call's arguments as a JSON object string.",
-                  "type": "string"
+                "tool_name": {
+                  "type": "string",
+                  "description": "One of your tool functions, e.g. \"post_slack_message\"."
                 },
-                "description": {
-                  "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs.",
-                  "type": "string"
+                "arguments_json": {
+                  "type": "string",
+                  "description": "The call's arguments as a JSON object string."
                 },
                 "execute_at": {
-                  "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\".",
-                  "type": "string"
+                  "type": "string",
+                  "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\"."
                 },
-                "tool_name": {
-                  "description": "One of your tool functions, e.g. \"post_slack_message\".",
-                  "type": "string"
+                "description": {
+                  "type": "string",
+                  "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
                 }
               },
               "required": [
@@ -764,151 +762,153 @@
                 "arguments_json",
                 "execute_at",
                 "description"
-              ],
-              "type": "object"
+              ]
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
-        }
-      ]
-    },
-    {
-      "deferred_tool_names": [],
-      "messages": [
-        {
-          "content": "<team>\nYou coordinate this team to fulfill the user's request. You have a team of specialists, listed below. Delegate to members when their expertise or tools are needed; answer directly — including with your own tools — when they are not.\n\n<team_members>\n<member id=\"planner\" name=\"Planner\">\n  Role: ## Your Identity\nYou are Planner (Matrix ID: @mindroom_planner:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Planner and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Break work into ordered steps.\n</member>\n<member id=\"writer\" name=\"Writer\">\n  Role: ## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Writer and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `scheduler`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Write clear announcements.\n</member>\n</team_members>\n\n<delegation>\nYou work in broadcast mode: one call puts the same task to every member, then you write the answer yourself.\n\n- Call `delegate_task_to_members` exactly once. One call reaches every member; do not call it once per member.\n- Write one whole question each member can answer from its own vantage point, not a sub-task for one of them.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- Say each finding once: where members agree that is one finding, not three; where they conflict, reconcile it and say which view you took. Integrate the strongest contributions thematically — never list the responses in sequence.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\n</delegation>\n</team>\n\nDo not reflect on the quality of the returned search results in your response\n\n<additional_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</additional_context>",
-          "from_history": false,
-          "role": "system",
-          "stop_after_tool_call": false
-        },
-        {
-          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
-          "from_history": false,
-          "role": "user",
-          "stop_after_tool_call": false
-        },
-        {
-          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Plan the launch and draft the announcement.]]></msg>",
-          "from_history": false,
-          "role": "user",
-          "stop_after_tool_call": false
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         }
       ],
+      "tool_choice": null,
+      "response_format": null,
+      "deferred_tool_names": []
+    },
+    {
       "model": {
         "id": "claude-sonnet-5-5",
         "provider": "Anthropic"
       },
-      "response_format": null,
       "stream": true,
-      "tool_choice": null,
+      "messages": [
+        {
+          "content": "<team>\nYou coordinate this team to fulfill the user's request. You have a team of specialists, listed below. Delegate to members when their expertise or tools are needed; answer directly — including with your own tools — when they are not.\n\n<team_members>\n<member id=\"planner\" name=\"Planner\">\n  Role: ## Your Identity\nYou are Planner (Matrix ID: @mindroom_planner:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Planner and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Break work into ordered steps.\n</member>\n<member id=\"writer\" name=\"Writer\">\n  Role: ## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Writer and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `scheduler`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Write clear announcements.\n</member>\n</team_members>\n\n<delegation>\nYou work in broadcast mode: one call puts the same task to every member, then you write the answer yourself.\n\n- Call `delegate_task_to_members` exactly once. One call reaches every member; do not call it once per member.\n- Write one whole question each member can answer from its own vantage point, not a sub-task for one of them.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- Say each finding once: where members agree that is one finding, not three; where they conflict, reconcile it and say which view you took. Integrate the strongest contributions thematically — never list the responses in sequence.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\n</delegation>\n</team>\n\nDo not reflect on the quality of the returned search results in your response\n\n<additional_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</additional_context>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system"
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Plan the launch and draft the announcement.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        }
+      ],
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Use this function to send one task to every member agent and return their responses.\nOne call reaches all members; do not call it once per member.",
             "name": "delegate_task_to_members",
+            "description": "Use this function to send one task to every member agent and return their responses.\nOne call reaches all members; do not call it once per member.",
             "parameters": {
-              "additionalProperties": false,
+              "type": "object",
               "properties": {
                 "task": {
-                  "description": "(str) A clear and concise description of the task to send to member agents, including what a good result looks like.",
-                  "type": "string"
+                  "type": "string",
+                  "description": "(str) A clear and concise description of the task to send to member agents, including what a good result looks like."
                 }
               },
               "required": [
                 "task"
               ],
-              "type": "object"
+              "additionalProperties": false
             }
-          },
-          "type": "function"
+          }
         }
-      ]
+      ],
+      "tool_choice": null,
+      "response_format": null,
+      "deferred_tool_names": []
     },
     {
-      "deferred_tool_names": [],
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "stream": true,
       "messages": [
         {
           "content": "<team>\nYou coordinate this team to fulfill the user's request. You have a team of specialists, listed below. Delegate to members when their expertise or tools are needed; answer directly — including with your own tools — when they are not.\n\n<team_members>\n<member id=\"planner\" name=\"Planner\">\n  Role: ## Your Identity\nYou are Planner (Matrix ID: @mindroom_planner:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Planner and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Break work into ordered steps.\n</member>\n<member id=\"writer\" name=\"Writer\">\n  Role: ## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Writer and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `scheduler`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Write clear announcements.\n</member>\n</team_members>\n\n<delegation>\nYou work in broadcast mode: one call puts the same task to every member, then you write the answer yourself.\n\n- Call `delegate_task_to_members` exactly once. One call reaches every member; do not call it once per member.\n- Write one whole question each member can answer from its own vantage point, not a sub-task for one of them.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- Say each finding once: where members agree that is one finding, not three; where they conflict, reconcile it and say which view you took. Integrate the strongest contributions thematically — never list the responses in sequence.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\n</delegation>\n</team>\n\nDo not reflect on the quality of the returned search results in your response\n\n<additional_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</additional_context>",
           "from_history": false,
-          "role": "system",
-          "stop_after_tool_call": false
+          "stop_after_tool_call": false,
+          "role": "system"
         },
         {
           "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
           "from_history": false,
-          "role": "user",
-          "stop_after_tool_call": false
+          "stop_after_tool_call": false,
+          "role": "user"
         },
         {
           "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Plan the launch and draft the announcement.]]></msg>",
           "from_history": false,
-          "role": "user",
-          "stop_after_tool_call": false
+          "stop_after_tool_call": false,
+          "role": "user"
         },
         {
           "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call_team_1",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Draft the launch note.\"}"
+              }
+            }
+          ],
           "provider_data": {
             "mindroom_model": {
               "id": "claude-sonnet-5-5",
               "provider": "Anthropic"
             }
-          },
-          "role": "assistant",
-          "stop_after_tool_call": false,
-          "tool_calls": [
-            {
-              "function": {
-                "arguments": "{\"task\": \"Draft the launch note.\"}",
-                "name": "delegate_task_to_members"
-              },
-              "id": "call_team_1",
-              "type": "function"
-            }
-          ]
+          }
         },
         {
           "content": "okok",
           "from_history": false,
-          "role": "tool",
           "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call_team_1",
+          "tool_name": "delegate_task_to_members",
           "tool_args": {
             "task": "Draft the launch note."
           },
-          "tool_call_error": false,
-          "tool_call_id": "call_team_1",
-          "tool_name": "delegate_task_to_members"
+          "tool_call_error": false
         }
       ],
-      "model": {
-        "id": "claude-sonnet-5-5",
-        "provider": "Anthropic"
-      },
-      "response_format": null,
-      "stream": true,
-      "tool_choice": null,
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Use this function to send one task to every member agent and return their responses.\nOne call reaches all members; do not call it once per member.",
             "name": "delegate_task_to_members",
+            "description": "Use this function to send one task to every member agent and return their responses.\nOne call reaches all members; do not call it once per member.",
             "parameters": {
-              "additionalProperties": false,
+              "type": "object",
               "properties": {
                 "task": {
-                  "description": "(str) A clear and concise description of the task to send to member agents, including what a good result looks like.",
-                  "type": "string"
+                  "type": "string",
+                  "description": "(str) A clear and concise description of the task to send to member agents, including what a good result looks like."
                 }
               },
               "required": [
                 "task"
               ],
-              "type": "object"
+              "additionalProperties": false
             }
-          },
-          "type": "function"
+          }
         }
-      ]
+      ],
+      "tool_choice": null,
+      "response_format": null,
+      "deferred_tool_names": []
     }
   ],
   "scenario": "team_collaborate"

@@ -252,9 +252,10 @@ Matrix sync callback
 | `providers/prompt_cache_key.py` | Stable prompt-cache routing keys derived from execution identity |
 | `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys, and reports the non-secret settings that run metadata and request logs record as model params |
 | `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
-| `providers/assistant_turn.py` | What every adapter does to finish a turn: the `mindroom_model` provenance stamp, timings, `<think>` splitting, and the deltas a reply that arrived whole yields as its stream would have |
+| `providers/assistant_turn.py` | What every adapter does to finish a turn: the `mindroom_model` provenance stamp and timings |
 | `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
 | `providers/remote_media.py` | Downloads URL media for the adapters that send media only inline |
+| `providers/stored_tool_calls.py` | How every wire reads the tool calls stored in history, so a call another provider stored replays on any route; `legacy_stored_tool_calls.py` repairs the shapes earlier releases stored |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |

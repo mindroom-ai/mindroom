@@ -51,18 +51,18 @@
   },
   "request": {
     "body": {
-      "messages": [
-        {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "system"
-        },
-        {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
-        }
-      ],
       "model": "qwen3.8:27b",
       "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
+        }
+      ],
       "tools": []
     },
     "headers": {

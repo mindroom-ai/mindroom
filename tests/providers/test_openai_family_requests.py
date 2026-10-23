@@ -19,7 +19,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest
+from mindroom.llm.provider import ModelRequest, RequestOverrides
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import parse_chat_completion
@@ -838,12 +838,12 @@ def test_groq_and_cerebras_usage_keeps_cached_input_and_reasoning(tmp_path: Path
 # --- Codex ----------------------------------------------------------------------------------------------------
 
 
-def _codex(tmp_path: Path, **extra_kwargs: Any) -> ResponsesAdapter:  # noqa: ANN401
+def _codex(tmp_path: Path, model_id: str = "gpt-5.6", **extra_kwargs: Any) -> ResponsesAdapter:  # noqa: ANN401
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={})
     adapter = build_provider(
         ModelConfig(
             provider="codex",
-            id="gpt-5.6",
+            id=model_id,
             extra_kwargs={"codex_home": str(tmp_path / ".codex"), **extra_kwargs},
         ),
         ProviderRuntime(runtime_paths=paths, codex_default_instructions="Default Codex instructions."),
@@ -862,6 +862,19 @@ def test_codex_requests_carry_instructions_and_drop_the_fields_codex_rejects(tmp
     assert "max_output_tokens" not in request
     assert "temperature" not in request
     assert adapter.identity.id == "gpt-5.6-sol"
+
+
+def test_a_codex_request_drops_a_temperature_override_as_it_drops_the_configured_one(tmp_path: Path) -> None:
+    """A request's temperature override, such as a thread summary's, reaches Codex no more than a configured one."""
+    # A model that takes sampling controls, so the override is applied before Codex drops it.
+    adapter = _codex(tmp_path, model_id="o4-mini")
+    assert not adapter.capabilities.provider_default_sampling
+
+    kwargs = adapter._request_kwargs(
+        ModelRequest(messages=[Message(role="user", content="Hi")], overrides=RequestOverrides(temperature=0.2)),
+    )
+
+    assert "temperature" not in {**kwargs.pop("extra_body", {}), **kwargs}
 
 
 def test_codex_requests_carry_the_cache_key_and_the_installation_metadata(tmp_path: Path) -> None:

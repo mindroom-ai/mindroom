@@ -221,6 +221,14 @@ def load_golden(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def ordered_json(value: object) -> str:
+    """Return ``value`` as JSON text in its own key order, so comparing two of them compares key order too.
+
+    A golden's request body keeps the key order the SDK sent, which chat templates and prompt caches see.
+    """
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
 def _json_roundtrip(value: object) -> Any:  # noqa: ANN401 - arbitrary JSON
     return json.loads(json.dumps(value, sort_keys=True))
 

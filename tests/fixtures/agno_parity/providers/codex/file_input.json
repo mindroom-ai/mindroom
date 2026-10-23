@@ -64,22 +64,22 @@
       ],
       "input": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "developer"
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
+          "role": "user",
           "content": [
             {
-              "text": "Use the attached file to plan my packing.",
-              "type": "input_text"
+              "type": "input_text",
+              "text": "Use the attached file to plan my packing."
             },
             {
-              "file_data": "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK",
+              "type": "input_file",
               "filename": "itinerary.pdf",
-              "type": "input_file"
+              "file_data": "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK"
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
       "instructions": "You are a helpful assistant.",

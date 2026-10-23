@@ -69,7 +69,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {},
       "systemInstruction": {
         "parts": [
           {
@@ -77,7 +76,8 @@
           }
         ],
         "role": "user"
-      }
+      },
+      "generationConfig": {}
     },
     "headers": {
       "accept": "*/*",

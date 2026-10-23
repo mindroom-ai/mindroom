@@ -44,11 +44,11 @@ def identity() -> ToolExecutionIdentity:
 
 
 def _sent(provider: ModelProvider) -> dict[str, Any]:
-    """Return the body fields and headers one request of ``provider`` sends beyond the SDK keywords."""
+    """Return the body fields and headers one request of ``provider`` sends, as SDK keywords or in ``extra_body``."""
     adapter = bare_adapter(provider)
     assert isinstance(adapter, ChatAdapter | ResponsesAdapter)
     kwargs = adapter._request_kwargs(ModelRequest(messages=(Message(role="user", content="Write an introduction."),)))
-    return {**kwargs.get("extra_body", {}), "extra_headers": kwargs.get("extra_headers", {})}
+    return {**kwargs, **kwargs.get("extra_body", {}), "extra_headers": kwargs.get("extra_headers", {})}
 
 
 def _request(

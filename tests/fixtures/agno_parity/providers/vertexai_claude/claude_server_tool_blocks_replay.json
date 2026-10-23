@@ -237,23 +237,23 @@
   },
   "request": {
     "body": {
-      "anthropic_version": "vertex-2023-10-16",
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "Where is order A-1001?",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         },
         {
+          "role": "assistant",
           "content": [
             {
               "id": "srvtoolu_parity",
@@ -284,48 +284,43 @@
               "name": "lookup_order",
               "type": "tool_use"
             }
-          ],
-          "role": "assistant"
+          ]
         },
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
-              "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+              "type": "tool_result",
               "tool_use_id": "toolu_parity_order",
-              "type": "tool_result"
+              "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
-      "stream": true,
       "system": [
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
           "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "type": "text"
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
       ],
       "tools": [
         {
-          "name": "tool_search_tool_regex",
-          "type": "tool_search_tool_regex_20251119"
+          "type": "tool_search_tool_regex_20251119",
+          "name": "tool_search_tool_regex"
         },
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
+          "name": "get_weather",
           "description": "Return the forecast for one city.",
           "input_schema": {
-            "additionalProperties": false,
+            "type": "object",
             "properties": {
               "city": {
                 "description": "City name.",
@@ -343,47 +338,52 @@
             "required": [
               "city"
             ],
-            "type": "object"
+            "additionalProperties": false
           },
-          "name": "get_weather"
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         },
         {
-          "defer_loading": true,
+          "name": "lookup_order",
           "description": "Look up one order by id.",
           "input_schema": {
-            "additionalProperties": false,
+            "type": "object",
             "properties": {
               "order_id": {
-                "description": "",
-                "type": "string"
+                "type": "string",
+                "description": ""
               }
             },
             "required": [
               "order_id"
             ],
-            "type": "object"
+            "additionalProperties": false
           },
-          "name": "lookup_order"
+          "defer_loading": true
         },
         {
-          "defer_loading": true,
+          "name": "send_invoice",
           "description": "Email the invoice for one order.",
           "input_schema": {
-            "additionalProperties": false,
+            "type": "object",
             "properties": {
               "order_id": {
-                "description": "",
-                "type": "string"
+                "type": "string",
+                "description": ""
               }
             },
             "required": [
               "order_id"
             ],
-            "type": "object"
+            "additionalProperties": false
           },
-          "name": "send_invoice"
+          "defer_loading": true
         }
-      ]
+      ],
+      "stream": true,
+      "anthropic_version": "vertex-2023-10-16"
     },
     "headers": {
       "accept": "application/json",

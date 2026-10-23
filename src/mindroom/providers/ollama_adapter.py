@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from mindroom.credentials.sync import get_ollama_host
 from mindroom.llm.errors import InvalidRequest, ProviderError
+from mindroom.llm.messages import split_thinking
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -33,10 +34,12 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import finished_assistant_message, output_started, split_thinking
+from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
+from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.remote_media import download_media
+from mindroom.providers.stored_tool_calls import call_arguments
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -103,7 +106,10 @@ class OllamaProvider:
 
         A reply that arrives whole has its ``<think>`` reasoning split out, as Agno did for non-streamed replies.
         """
-        messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
+        messages = [
+            await _format_message(message, self.identity.provider_name)
+            for message in repair_legacy_tool_calls(request.messages)
+        ]
         chat_kwargs = self._chat_kwargs(request)
         reply = _OllamaReply()
         started = time.monotonic()
@@ -230,13 +236,9 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
             {
                 "id": call.get("id"),
                 "type": "function",
-                "function": {
-                    "name": call["function"]["name"],
-                    "arguments": _call_arguments(call["function"].get("arguments")),
-                },
+                "function": {"name": call["function"]["name"], "arguments": call_arguments(call["function"])},
             }
             for call in message.tool_calls
-            if "function" in call
         ]
         if tool_calls:
             formatted["tool_calls"] = tool_calls
@@ -245,16 +247,6 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
         if images:
             formatted["images"] = images
     return formatted
-
-
-def _call_arguments(arguments: object) -> object:
-    """Return stored tool-call arguments as the object Ollama expects; undecodable arguments become empty."""
-    if not isinstance(arguments, str):
-        return {} if arguments is None else arguments
-    try:
-        return json.loads(arguments)
-    except json.JSONDecodeError:
-        return {}
 
 
 async def _image_bytes(image: Image, provider: str) -> bytes | None:
@@ -288,8 +280,16 @@ def _read_whole_reply(reply: _OllamaReply, response: ChatResponse) -> None:
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
-    """Add one chunk to ``reply`` and return its events: its text, its tool calls, and the done chunk's usage."""
+    """Add one chunk to ``reply`` and return its events: the done chunk's usage first, then its text and tool calls.
+
+    The usage comes first, so a reply stopped while the done chunk's output is delivered still settles it.
+    """
     events: list[StreamEvent] = []
+    if chunk.done:
+        reply.done = True
+        reply.done_reason = chunk.done_reason
+        reply.usage = _usage(chunk)
+        events.append(UsageReported(reply.usage, final=False))
     message = chunk.message
     if message.content:
         reply.content += message.content
@@ -302,11 +302,6 @@ def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
         }
         reply.tool_calls.append(call)
         events.append(ToolCallReady(call))
-    if chunk.done:
-        reply.done = True
-        reply.done_reason = chunk.done_reason
-        reply.usage = _usage(chunk)
-        events.append(UsageReported(reply.usage, final=False))
     return events
 
 

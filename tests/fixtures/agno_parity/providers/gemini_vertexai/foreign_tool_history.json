@@ -178,11 +178,11 @@
           "parts": [
             {
               "functionCall": {
+                "id": "toolu_01ForeignParityWeather",
                 "args": {
                   "city": "Paris",
                   "unit": "celsius"
                 },
-                "id": "toolu_01ForeignParityWeather",
                 "name": "get_weather"
               }
             }
@@ -220,7 +220,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {},
       "systemInstruction": {
         "parts": [
           {
@@ -278,7 +277,8 @@
             }
           ]
         }
-      ]
+      ],
+      "generationConfig": {}
     },
     "headers": {
       "accept": "*/*",

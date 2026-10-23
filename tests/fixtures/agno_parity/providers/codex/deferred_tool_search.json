@@ -163,12 +163,12 @@
       ],
       "input": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "developer"
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "Where is order A-1001?",
-          "role": "user"
+          "role": "user",
+          "content": "Where is order A-1001?"
         }
       ],
       "instructions": "You are a helpful assistant.",
@@ -181,9 +181,8 @@
           "type": "tool_search"
         },
         {
-          "description": "Return the forecast for one city.",
-          "external_execution": false,
           "name": "get_weather",
+          "description": "Return the forecast for one city.",
           "parameters": {
             "properties": {
               "city": {
@@ -205,13 +204,12 @@
             "type": "object"
           },
           "requires_confirmation": false,
+          "external_execution": false,
           "type": "function"
         },
         {
-          "defer_loading": true,
-          "description": "Look up one order by id.",
-          "external_execution": false,
           "name": "lookup_order",
+          "description": "Look up one order by id.",
           "parameters": {
             "properties": {
               "order_id": {
@@ -224,13 +222,13 @@
             "type": "object"
           },
           "requires_confirmation": false,
-          "type": "function"
+          "external_execution": false,
+          "type": "function",
+          "defer_loading": true
         },
         {
-          "defer_loading": true,
-          "description": "Email the invoice for one order.",
-          "external_execution": false,
           "name": "send_invoice",
+          "description": "Email the invoice for one order.",
           "parameters": {
             "properties": {
               "order_id": {
@@ -243,7 +241,9 @@
             "type": "object"
           },
           "requires_confirmation": false,
-          "type": "function"
+          "external_execution": false,
+          "type": "function",
+          "defer_loading": true
         }
       ]
     },

@@ -58,12 +58,12 @@
     "body": {
       "messages": [
         {
-          "content": "Route the message to the best agent.",
-          "role": "system"
+          "role": "system",
+          "content": "Route the message to the best agent."
         },
         {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
         }
       ],
       "model": "openai/gpt-oss-120b",

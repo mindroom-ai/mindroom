@@ -19,7 +19,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.extra_kwargs import settings_params
-from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
+from mindroom.providers.openai.adapter_common import SDKClients, request_settings
 from mindroom.providers.openai.chat_wire import (
     ChatStream,
     ChatWire,
@@ -65,10 +65,13 @@ class ChatAdapter:
             tool_choice=request.tool_choice,
             response_format=request.response_format,
             stream=request.stream,
-            settings=self.settings,
+            settings=request_settings(
+                self.settings,
+                request.overrides,
+                sampling=not self.capabilities.provider_default_sampling,
+            ),
             wire=self.wire,
         )
-        kwargs = with_overrides(kwargs, request.overrides, temperature=not self.capabilities.provider_default_sampling)
         if self.wire.route != "openrouter":
             return kwargs
         # OpenRouter forwards Claude cache breakpoints to Anthropic upstreams; the ladder runs on the final body.

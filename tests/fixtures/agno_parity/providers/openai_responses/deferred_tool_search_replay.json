@@ -192,9 +192,9 @@
     "body": {
       "input": [
         {
+          "type": "function_call_output",
           "call_id": "call_parity_order",
-          "output": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
-          "type": "function_call_output"
+          "output": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}"
         }
       ],
       "model": "gpt-6-astra",
@@ -207,9 +207,8 @@
           "type": "tool_search"
         },
         {
-          "description": "Return the forecast for one city.",
-          "external_execution": false,
           "name": "get_weather",
+          "description": "Return the forecast for one city.",
           "parameters": {
             "properties": {
               "city": {
@@ -231,13 +230,12 @@
             "type": "object"
           },
           "requires_confirmation": false,
+          "external_execution": false,
           "type": "function"
         },
         {
-          "defer_loading": true,
-          "description": "Look up one order by id.",
-          "external_execution": false,
           "name": "lookup_order",
+          "description": "Look up one order by id.",
           "parameters": {
             "properties": {
               "order_id": {
@@ -250,13 +248,13 @@
             "type": "object"
           },
           "requires_confirmation": false,
-          "type": "function"
+          "external_execution": false,
+          "type": "function",
+          "defer_loading": true
         },
         {
-          "defer_loading": true,
-          "description": "Email the invoice for one order.",
-          "external_execution": false,
           "name": "send_invoice",
+          "description": "Email the invoice for one order.",
           "parameters": {
             "properties": {
               "order_id": {
@@ -269,7 +267,9 @@
             "type": "object"
           },
           "requires_confirmation": false,
-          "type": "function"
+          "external_execution": false,
+          "type": "function",
+          "defer_loading": true
         }
       ]
     },

@@ -895,6 +895,7 @@ async def test_a_retired_agno_field_loads_with_one_warning_and_the_model_answers
         ("anthropic", "skills"),
         ("vertexai_claude", "auth_token"),
         ("google", "url_context"),
+        ("gemini", "speech_config"),
     ],
 )
 def test_retired_agno_fields_load_with_one_warning_on_the_providers_that_took_them(provider: str, field: str) -> None:

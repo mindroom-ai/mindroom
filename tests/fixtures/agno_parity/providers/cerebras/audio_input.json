@@ -54,12 +54,12 @@
     "body": {
       "messages": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "system"
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "Use the attached audio to plan my packing.\n\n[Inline media unavailable for this model]\nThe model or provider adapter could not accept some inline attachments for this request. Their content was not inspected. Do not claim to have seen, heard, or read the removed media. Do not repeat get_attachment(view=True) for it on this model. Use get_attachment without view to inspect metadata or save the file with mindroom_output_path. Then use other available tools to extract or interpret its content. If no suitable tool is available, explain the limitation to the user.",
-          "role": "user"
+          "role": "user",
+          "content": "Use the attached audio to plan my packing.\n\n[Inline media unavailable for this model]\nThe model or provider adapter could not accept some inline attachments for this request. Their content was not inspected. Do not claim to have seen, heard, or read the removed media. Do not repeat get_attachment(view=True) for it on this model. Use get_attachment without view to inspect metadata or save the file with mindroom_output_path. Then use other available tools to extract or interpret its content. If no suitable tool is available, explain the limitation to the user."
         }
       ],
       "model": "gpt-oss-120b",

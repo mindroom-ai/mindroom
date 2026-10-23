@@ -210,13 +210,13 @@
           "parts": [
             {
               "functionCall": {
+                "id": "parity_order",
                 "args": {
+                  "name": "lookup_order",
                   "arguments": {
                     "order_id": "A-1001"
-                  },
-                  "name": "lookup_order"
+                  }
                 },
-                "id": "parity_order",
                 "name": "call_tool"
               },
               "thoughtSignature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl"
@@ -239,7 +239,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {},
       "systemInstruction": {
         "parts": [
           {
@@ -315,7 +314,8 @@
             }
           ]
         }
-      ]
+      ],
+      "generationConfig": {}
     },
     "headers": {
       "accept": "*/*",

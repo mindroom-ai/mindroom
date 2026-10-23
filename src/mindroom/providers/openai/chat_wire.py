@@ -8,20 +8,22 @@ call from canonical messages and fold SDK chunks or completions into one finishe
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import cache
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from pydantic import BaseModel
 
+from mindroom.llm.messages import split_thinking
 from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics
-from mindroom.providers.assistant_turn import split_thinking
+from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.providers.openai.errors import error_body_error
-from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
@@ -46,10 +48,12 @@ __all__ = [
     "chat_stop_reason",
     "function_definition",
     "parse_chat_completion",
-    "with_sdk_options",
+    "sdk_call_kwargs",
 ]
 
 type ChatDialect = Literal["openai", "groq", "cerebras"]
+# The two SDK endpoints the OpenAI family calls: ``chat.completions.create`` and ``responses.create``.
+type _SDKEndpoint = Literal["chat", "responses"]
 
 # Groq Compound runs hosted tools on its own, which a decision that must not run tools cannot allow.
 _GROQ_COMPOUND_MODELS = frozenset({"groq/compound", "groq/compound-mini", "compound-beta", "compound-beta-mini"})
@@ -182,30 +186,31 @@ def _cerebras_message(message: Message) -> dict[str, Any]:
 
 
 def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSettings) -> list[dict[str, Any]]:
+    replayable = repair_legacy_tool_calls(messages)
     if wire.dialect == "groq":
-        return [_groq_message(message) for message in messages]
+        return [_groq_message(message) for message in replayable]
     if wire.dialect == "cerebras":
-        return [_cerebras_message(message) for message in messages]
+        return [_cerebras_message(message) for message in replayable]
     role_map = settings.role_map or {
         "system": "developer" if wire.developer_system_role else "system",
         "model": "assistant",
     }
-    canonical = reformat_tool_call_ids(repair_legacy_tool_replay(messages), "chat")
+    canonical = reformat_tool_call_ids(replayable, "chat")
     return [_openai_message(message, wire, role_map) for message in canonical]
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
-    """Return the function definition OpenAI-family wires send, in the shape of Agno's ``Function.to_dict()``."""
-    definition: dict[str, Any] = {"name": tool.name, "parameters": deepcopy(dict(tool.parameters))}
-    flags = {
+    """Return the function definition OpenAI-family wires send, as Agno's ``Function.to_dict()``: same keys, same order."""
+    fields = {
+        "name": tool.name,
         "description": tool.description,
+        "parameters": deepcopy(dict(tool.parameters)),
         "strict": tool.strict,
         "requires_confirmation": tool.requires_confirmation,
         "external_execution": tool.external_execution,
         "approval_type": tool.approval_type,
     }
-    definition.update({key: value for key, value in flags.items() if value is not None})
-    return definition
+    return {key: value for key, value in fields.items() if value is not None}
 
 
 def _chat_tools(tools: Sequence[ToolSpec], wire: ChatWire) -> list[dict[str, Any]]:
@@ -273,65 +278,6 @@ def _cerebras_response_format(response_format: Mapping[str, Any], *, strict: boo
     return prepared
 
 
-def _openai_params(settings: ChatSettings, response_format: object) -> dict[str, Any]:
-    return {
-        "store": settings.store,
-        "reasoning_effort": settings.reasoning_effort,
-        "verbosity": settings.verbosity,
-        "frequency_penalty": settings.frequency_penalty,
-        "logit_bias": settings.logit_bias,
-        "logprobs": settings.logprobs,
-        "top_logprobs": settings.top_logprobs,
-        "max_tokens": settings.max_tokens,
-        "max_completion_tokens": settings.max_completion_tokens,
-        "presence_penalty": settings.presence_penalty,
-        "seed": settings.seed,
-        "stop": settings.stop,
-        "temperature": settings.temperature,
-        "user": settings.user,
-        "top_p": settings.top_p,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-        "extra_body": settings.extra_body,
-        "metadata": settings.metadata,
-        "service_tier": settings.service_tier,
-        "response_format": response_format,
-    }
-
-
-def _groq_params(settings: ChatSettings, response_format: object) -> dict[str, Any]:
-    return {
-        "frequency_penalty": settings.frequency_penalty,
-        "logit_bias": settings.logit_bias,
-        "logprobs": settings.logprobs,
-        "max_tokens": settings.max_tokens,
-        "presence_penalty": settings.presence_penalty,
-        "response_format": response_format,
-        "seed": settings.seed,
-        "stop": settings.stop,
-        "temperature": settings.temperature,
-        "top_logprobs": settings.top_logprobs,
-        "top_p": settings.top_p,
-        "user": settings.user,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-    }
-
-
-def _cerebras_params(settings: ChatSettings, response_format: object) -> dict[str, Any]:
-    return {
-        "max_completion_tokens": settings.max_completion_tokens,
-        "repetition_penalty": settings.repetition_penalty,
-        "temperature": settings.temperature,
-        "top_p": settings.top_p,
-        "top_k": settings.top_k,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-        "extra_body": settings.extra_body,
-        "response_format": response_format,
-    }
-
-
 def _deepseek_thinking(params: dict[str, Any], settings: ChatSettings, model_id: str) -> None:
     """Enable thinking for thinking-capable DeepSeek ids unless the config turns it off."""
     thinking = settings.use_thinking if settings.use_thinking is not None else model_id != "deepseek-chat"
@@ -390,12 +336,12 @@ def _dialect_params(
     else:
         prepared = _json_schema_format(response_format, strict=settings.strict_output)
     if wire.dialect == "groq":
-        params = _groq_params(settings, prepared)
+        fields = settings.groq_request_fields()
     elif wire.dialect == "cerebras":
-        params = _cerebras_params(settings, prepared)
+        fields = settings.cerebras_request_fields()
     else:
-        params = _openai_params(settings, prepared)
-    return {key: value for key, value in params.items() if value is not None}
+        fields = settings.openai_request_fields()
+    return {key: value for key, value in {**fields, "response_format": prepared}.items() if value is not None}
 
 
 def _add_tools(
@@ -436,18 +382,32 @@ def _add_route_params(params: dict[str, Any], *, model_id: str, settings: ChatSe
         _reject_native_search(params, model_id, wire)
 
 
-def with_sdk_options(kwargs: dict[str, Any], params: dict[str, Any], *, keywords: tuple[str, ...]) -> dict[str, Any]:
-    """Move ``keywords`` and the SDK request options from ``params`` into ``kwargs``; the rest becomes ``extra_body``.
+@cache
+def _sdk_body_fields(endpoint: _SDKEndpoint) -> frozenset[str]:
+    """Return the body fields the SDK's ``create`` takes as keywords."""
+    if endpoint == "chat":
+        from openai.resources.chat.completions import AsyncCompletions  # noqa: PLC0415
 
-    The SDK merges ``extra_body`` over the body it serializes, so authored ``extra_body`` keys still win.
+        create = AsyncCompletions.create
+    else:
+        from openai.resources.responses import AsyncResponses  # noqa: PLC0415
+
+        create = AsyncResponses.create
+    return frozenset(inspect.signature(create).parameters) - {"self", *_SDK_OPTION_KEYS}
+
+
+def sdk_call_kwargs(params: Mapping[str, Any], endpoint: _SDKEndpoint) -> dict[str, Any]:
+    """Return the SDK ``create`` arguments for one request's body fields and SDK options.
+
+    The SDK serializes its keywords in its own order and appends ``extra_body`` after them, so every field the SDK
+    names travels as its keyword, as Agno passed it, and only the fields it does not name travel in ``extra_body``.
+    Authored ``extra_body`` keys still win, because the SDK merges them over the fields it serializes.
     """
-    for key in keywords:
-        if key in params:
-            kwargs[key] = params.pop(key)
-    options = {key: params.pop(key) for key in _SDK_OPTION_KEYS if key in params}
-    if body := {**params, **(options.pop("extra_body", None) or {})}:
+    named = _sdk_body_fields(endpoint)
+    kwargs = {key: value for key, value in params.items() if key in named or key in _SDK_OPTION_KEYS}
+    unnamed = {key: value for key, value in params.items() if key not in kwargs}
+    if body := {**unnamed, **(kwargs.pop("extra_body", None) or {})}:
         kwargs["extra_body"] = body
-    kwargs.update(options)
     return kwargs
 
 
@@ -464,9 +424,7 @@ def chat_request_kwargs(
 ) -> dict[str, Any]:
     """Return the ``chat.completions.create`` keyword arguments for one request.
 
-    ``model``, ``messages``, ``tools``, ``tool_choice``, and the stream flags are SDK keywords; every other
-    body field travels in ``extra_body``, and the SDK's ``extra_headers``, ``extra_query``, and ``timeout``
-    options stay separate.
+    Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
     params = _dialect_params(settings, wire, response_format)
     _add_tools(
@@ -478,13 +436,12 @@ def chat_request_kwargs(
         wire=wire,
     )
     _add_route_params(params, model_id=model_id, settings=settings, wire=wire)
-    params = disable_tool_selection(params)
-    kwargs: dict[str, Any] = {"model": model_id, "messages": _chat_messages(messages, wire, settings)}
+    params = {"model": model_id, "messages": _chat_messages(messages, wire, settings), **disable_tool_selection(params)}
     if stream:
-        kwargs["stream"] = True
+        params["stream"] = True
         if wire.dialect == "openai":
-            kwargs["stream_options"] = {"include_usage": True}
-    return with_sdk_options(kwargs, params, keywords=("tools", "tool_choice"))
+            params["stream_options"] = {"include_usage": True}
+    return sdk_call_kwargs(params, "chat")
 
 
 # --- Replies --------------------------------------------------------------------------------------------------
@@ -603,8 +560,11 @@ class ChatStream:
     _calls: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     def add(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
-        """Fold one chunk and return the events it carried: its deltas, and a partial report of usage it carried."""
-        events: list[StreamEvent] = []
+        """Fold one chunk and return the events it carried: a partial report of usage it carried, then its deltas.
+
+        The usage comes first, so a reply stopped while the chunk's deltas are delivered still settles it.
+        """
+        events = self._add_usage(chunk)
         if chunk.choices:
             choice = chunk.choices[0]
             if choice.finish_reason is not None:
@@ -615,7 +575,6 @@ class ChatStream:
                     self._add_call_delta(call, position)
                 if self.wire.dialect == "openai":
                     events.extend(self._add_reasoning(_extra(delta)))
-        events.extend(self._add_usage(chunk))
         return events
 
     def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:

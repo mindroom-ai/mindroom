@@ -137,8 +137,8 @@
     "body": {
       "context_management": [
         {
-          "compact_threshold": 60000,
-          "type": "compaction"
+          "type": "compaction",
+          "compact_threshold": 60000
         }
       ],
       "include": [
@@ -146,8 +146,8 @@
       ],
       "input": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "developer"
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
           "encrypted_content": "parity-compaction",
@@ -168,8 +168,8 @@
           "type": "message"
         },
         {
-          "content": "Anything else?",
-          "role": "user"
+          "role": "user",
+          "content": "Anything else?"
         }
       ],
       "instructions": "You are a helpful assistant.",

@@ -105,9 +105,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {
-        "responseMimeType": "application/json"
-      },
       "systemInstruction": {
         "parts": [
           {
@@ -115,11 +112,6 @@
           }
         ],
         "role": "user"
-      },
-      "toolConfig": {
-        "functionCallingConfig": {
-          "mode": "NONE"
-        }
       },
       "tools": [
         {
@@ -170,7 +162,15 @@
             }
           ]
         }
-      ]
+      ],
+      "toolConfig": {
+        "functionCallingConfig": {
+          "mode": "NONE"
+        }
+      },
+      "generationConfig": {
+        "responseMimeType": "application/json"
+      }
     },
     "headers": {
       "accept": "*/*",

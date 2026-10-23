@@ -200,7 +200,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {},
       "systemInstruction": {
         "parts": [
           {
@@ -213,7 +212,8 @@
         {
           "googleSearch": {}
         }
-      ]
+      ],
+      "generationConfig": {}
     },
     "headers": {
       "accept": "*/*",

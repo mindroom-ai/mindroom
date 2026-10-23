@@ -63,28 +63,28 @@
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "What should I pack for Paris tomorrow?",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
       "model": "claude-sonnet-5-5",
       "system": [
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
           "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "type": "text"
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
       ]
     },

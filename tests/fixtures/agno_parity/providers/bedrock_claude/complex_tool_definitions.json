@@ -351,35 +351,92 @@
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional.",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
       "model": "anthropic.claude-sonnet-5-5",
-      "stream": true,
       "system": [
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
           "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "type": "text"
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
       ],
       "tools": [
         {
+          "name": "calendar_create_event",
           "description": "Create a calendar event and invite attendees.",
           "input_schema": {
+            "type": "object",
+            "properties": {
+              "attendees": {
+                "description": "People to invite.",
+                "items": {
+                  "$ref": "#/$defs/Attendee"
+                },
+                "maxItems": 50,
+                "title": "Attendees",
+                "type": "array"
+              },
+              "labels": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Free-form labels.",
+                "title": "Labels",
+                "type": "object"
+              },
+              "location": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Location"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": ""
+              },
+              "reminder_minutes": {
+                "default": 10,
+                "maximum": 1440,
+                "minimum": 0,
+                "title": "Reminder Minutes",
+                "type": "integer",
+                "description": ""
+              },
+              "starts_at": {
+                "format": "date-time",
+                "title": "Starts At",
+                "type": "string",
+                "description": ""
+              },
+              "title": {
+                "description": "Event title.",
+                "title": "Title",
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "starts_at",
+              "attendees"
+            ],
+            "additionalProperties": false,
             "$defs": {
               "Attendee": {
                 "properties": {
@@ -453,80 +510,18 @@
                 "title": "Location",
                 "type": "object"
               }
-            },
-            "additionalProperties": false,
-            "properties": {
-              "attendees": {
-                "description": "People to invite.",
-                "items": {
-                  "$ref": "#/$defs/Attendee"
-                },
-                "maxItems": 50,
-                "title": "Attendees",
-                "type": "array"
-              },
-              "labels": {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "description": "Free-form labels.",
-                "title": "Labels",
-                "type": "object"
-              },
-              "location": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Location"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": ""
-              },
-              "reminder_minutes": {
-                "default": 10,
-                "description": "",
-                "maximum": 1440,
-                "minimum": 0,
-                "title": "Reminder Minutes",
-                "type": "integer"
-              },
-              "starts_at": {
-                "description": "",
-                "format": "date-time",
-                "title": "Starts At",
-                "type": "string"
-              },
-              "title": {
-                "description": "Event title.",
-                "title": "Title",
-                "type": "string"
-              }
-            },
-            "required": [
-              "title",
-              "starts_at",
-              "attendees"
-            ],
-            "type": "object"
-          },
-          "name": "calendar_create_event"
+            }
+          }
         },
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
+          "name": "plan_trip",
           "description": "Plan a multi-stop trip.",
           "input_schema": {
-            "additionalProperties": false,
+            "type": "object",
             "properties": {
               "budget": {
                 "anyOf": [
                   {
-                    "additionalProperties": false,
                     "description": "Total budget for the trip.",
                     "properties": {
                       "amount": {
@@ -547,7 +542,8 @@
                       "amount"
                     ],
                     "title": "TripBudget",
-                    "type": "object"
+                    "type": "object",
+                    "additionalProperties": false
                   },
                   {
                     "type": "null"
@@ -574,7 +570,6 @@
               "stops": {
                 "description": "Ordered stops with nights per stop.",
                 "items": {
-                  "additionalProperties": false,
                   "description": "One stop on the trip.",
                   "properties": {
                     "city": {
@@ -594,7 +589,8 @@
                     "city"
                   ],
                   "title": "TripStop",
-                  "type": "object"
+                  "type": "object",
+                  "additionalProperties": false
                 },
                 "type": "array"
               },
@@ -623,11 +619,15 @@
               "destination",
               "stops"
             ],
-            "type": "object"
+            "additionalProperties": false
           },
-          "name": "plan_trip"
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
-      ]
+      ],
+      "stream": true
     },
     "headers": {
       "accept": "application/json",

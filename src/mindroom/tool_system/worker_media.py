@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 from httpx._utils import get_environment_proxies
 
+from mindroom.llm.media import canonical_mime_type
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.agno_toolkits import AgnoAudio, AgnoFile, AgnoImage, AgnoVideo, ToolResult
@@ -86,8 +87,7 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
                         msg = "Worker media exceeds the byte limit."
                         raise ValueError(msg)
                     content.extend(chunk)
-                mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                return bytes(content), mime or None
+                return bytes(content), canonical_mime_type(response.headers.get("content-type"))
             finally:
                 response.close()
         msg = "Exceeded maximum allowed redirects."

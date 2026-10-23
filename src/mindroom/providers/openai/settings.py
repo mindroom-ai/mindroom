@@ -35,89 +35,6 @@ CLIENT_FIELDS = frozenset(
         "client_params",
     },
 )
-# Agno OpenAIChat request fields; ``modalities`` and ``audio`` (audio output) are retired.
-CHAT_REQUEST_FIELDS = frozenset(
-    {
-        "store",
-        "reasoning_effort",
-        "verbosity",
-        "metadata",
-        "frequency_penalty",
-        "logit_bias",
-        "logprobs",
-        "top_logprobs",
-        "max_tokens",
-        "max_completion_tokens",
-        "presence_penalty",
-        "seed",
-        "stop",
-        "temperature",
-        "user",
-        "top_p",
-        "service_tier",
-        "strict_output",
-        "extra_headers",
-        "extra_query",
-        "extra_body",
-        "request_params",
-        "role_map",
-    },
-)
-CHAT_FIELDS = CHAT_REQUEST_FIELDS | CLIENT_FIELDS
-# Agno's Groq and Cerebras classes took their own field sets; Groq had no ``organization`` or ``extra_body``.
-GROQ_FIELDS = CLIENT_FIELDS - {"organization"} | {
-    "frequency_penalty",
-    "logit_bias",
-    "logprobs",
-    "max_tokens",
-    "presence_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_logprobs",
-    "top_p",
-    "user",
-    "extra_headers",
-    "extra_query",
-    "request_params",
-}
-CEREBRAS_FIELDS = CLIENT_FIELDS - {"organization"} | {
-    "parallel_tool_calls",
-    "max_completion_tokens",
-    "repetition_penalty",
-    "temperature",
-    "top_p",
-    "top_k",
-    "strict_output",
-    "extra_headers",
-    "extra_query",
-    "extra_body",
-    "request_params",
-}
-RESPONSES_FIELDS = CLIENT_FIELDS | {
-    "include",
-    "max_output_tokens",
-    "max_tool_calls",
-    "metadata",
-    "parallel_tool_calls",
-    "reasoning",
-    "verbosity",
-    "reasoning_effort",
-    "reasoning_summary",
-    "store",
-    "temperature",
-    "top_p",
-    "truncation",
-    "user",
-    "service_tier",
-    "strict_output",
-    "extra_headers",
-    "extra_query",
-    "extra_body",
-    "request_params",
-    "cache_system_prompt",
-}
-CODEX_FIELDS = RESPONSES_FIELDS | {"codex_home", "prompt_cache_key", "session_id", "default_instructions"}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -176,6 +93,62 @@ class ChatSettings:
     kimi_home: str | None = None
     prompt_cache_key: str | None = None
 
+    def openai_request_fields(self) -> dict[str, Any]:
+        """Return the request fields the ``openai`` Chat dialect sends from these settings, unset ones as None."""
+        return {
+            "store": self.store,
+            "reasoning_effort": self.reasoning_effort,
+            "verbosity": self.verbosity,
+            "frequency_penalty": self.frequency_penalty,
+            "logit_bias": self.logit_bias,
+            "logprobs": self.logprobs,
+            "top_logprobs": self.top_logprobs,
+            "max_tokens": self.max_tokens,
+            "max_completion_tokens": self.max_completion_tokens,
+            "presence_penalty": self.presence_penalty,
+            "seed": self.seed,
+            "stop": self.stop,
+            "temperature": self.temperature,
+            "user": self.user,
+            "top_p": self.top_p,
+            "extra_headers": self.extra_headers,
+            "extra_query": self.extra_query,
+            "extra_body": self.extra_body,
+            "metadata": self.metadata,
+            "service_tier": self.service_tier,
+        }
+
+    def groq_request_fields(self) -> dict[str, Any]:
+        """Return the request fields the ``groq`` dialect sends; Agno's Groq had no ``organization`` or ``extra_body``."""
+        return {
+            "frequency_penalty": self.frequency_penalty,
+            "logit_bias": self.logit_bias,
+            "logprobs": self.logprobs,
+            "max_tokens": self.max_tokens,
+            "presence_penalty": self.presence_penalty,
+            "seed": self.seed,
+            "stop": self.stop,
+            "temperature": self.temperature,
+            "top_logprobs": self.top_logprobs,
+            "top_p": self.top_p,
+            "user": self.user,
+            "extra_headers": self.extra_headers,
+            "extra_query": self.extra_query,
+        }
+
+    def cerebras_request_fields(self) -> dict[str, Any]:
+        """Return the request fields the ``cerebras`` dialect sends from these settings, unset ones as None."""
+        return {
+            "max_completion_tokens": self.max_completion_tokens,
+            "repetition_penalty": self.repetition_penalty,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "extra_headers": self.extra_headers,
+            "extra_query": self.extra_query,
+            "extra_body": self.extra_body,
+        }
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResponsesSettings:
@@ -217,3 +190,51 @@ class ResponsesSettings:
     prompt_cache_key: str | None = None
     session_id: str | None = None
     default_instructions: str | None = None
+
+    def request_fields(self) -> dict[str, Any]:
+        """Return the request fields the Responses wire sends as configured, unset ones as None.
+
+        ``store``, ``reasoning``, and the text settings are combined into the request by the wire itself.
+        """
+        return {
+            "include": self.include,
+            "max_output_tokens": self.max_output_tokens,
+            "max_tool_calls": self.max_tool_calls,
+            "metadata": self.metadata,
+            "parallel_tool_calls": self.parallel_tool_calls,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "truncation": self.truncation,
+            "user": self.user,
+            "service_tier": self.service_tier,
+            "extra_headers": self.extra_headers,
+            "extra_query": self.extra_query,
+            "extra_body": self.extra_body,
+        }
+
+
+# Each route accepts the request fields its wire sends and the settings the wire or client reads otherwise. Agno
+# OpenAIChat's ``modalities`` and ``audio`` (audio output) are retired.
+CHAT_REQUEST_FIELDS = frozenset(
+    {*ChatSettings().openai_request_fields(), "strict_output", "request_params", "role_map"},
+)
+CHAT_FIELDS = CHAT_REQUEST_FIELDS | CLIENT_FIELDS
+GROQ_FIELDS = CLIENT_FIELDS - {"organization"} | {*ChatSettings().groq_request_fields(), "request_params"}
+CEREBRAS_FIELDS = CLIENT_FIELDS - {"organization"} | {
+    *ChatSettings().cerebras_request_fields(),
+    "parallel_tool_calls",
+    "strict_output",
+    "request_params",
+}
+RESPONSES_FIELDS = CLIENT_FIELDS | {
+    *ResponsesSettings().request_fields(),
+    "reasoning",
+    "verbosity",
+    "reasoning_effort",
+    "reasoning_summary",
+    "store",
+    "strict_output",
+    "request_params",
+    "cache_system_prompt",
+}
+CODEX_FIELDS = RESPONSES_FIELDS | {"codex_home", "prompt_cache_key", "session_id", "default_instructions"}

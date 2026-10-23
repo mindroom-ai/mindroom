@@ -250,8 +250,8 @@ class Video:
         )
 
 
-def _image_format(data: bytes) -> str | None:
-    """Return the image format named by the file header's magic bytes."""
+def image_format(data: bytes) -> str | None:
+    """Return the image format named by the file header's magic bytes, or None when they name none."""
     if len(data) < IMAGE_HEADER_BYTES:
         return None
     if data[0:4] == b"GIF8" and data[5:6] == b"a":
@@ -259,6 +259,17 @@ def _image_format(data: bytes) -> str | None:
     if data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "webp"
     return next((name for offset, signature, name in _IMAGE_SIGNATURES if data[offset:].startswith(signature)), None)
+
+
+def canonical_mime_type(mime_type: str | None) -> str | None:
+    """Return ``mime_type``, such as a Content-Type header, as a lowercase ``type/subtype`` without parameters.
+
+    None when it names no type.
+    """
+    if not isinstance(mime_type, str):
+        return None
+    normalized = mime_type.split(";", 1)[0].strip().lower()
+    return normalized or None
 
 
 def image_mime_type(image: Image, data: bytes) -> str:
@@ -272,7 +283,7 @@ def image_mime_type(image: Image, data: bytes) -> str:
         return f"image/{image.format.lower()}"
     if image.filepath and (guessed := mimetypes.guess_type(image.filepath)[0]):
         return guessed
-    detected = _image_format(data)
+    detected = image_format(data)
     return f"image/{detected}" if detected else "image/jpeg"
 
 
@@ -360,5 +371,7 @@ __all__ = [
     "File",
     "Image",
     "Video",
+    "canonical_mime_type",
+    "image_format",
     "image_mime_type",
 ]

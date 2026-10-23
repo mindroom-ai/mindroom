@@ -175,7 +175,7 @@ def _responses_body(request: ModelRequest) -> dict[str, object]:
         settings=ResponsesSettings(),
         wire=_RESPONSES_WIRE,
     )
-    return kwargs["extra_body"]
+    return {**kwargs, **kwargs.get("extra_body", {})}
 
 
 def _small_window_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:

@@ -194,23 +194,23 @@
   },
   "request": {
     "body": {
-      "anthropic_version": "vertex-2023-10-16",
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "What should I pack for Paris tomorrow?",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         },
         {
+          "role": "assistant",
           "content": [
             {
               "signature": "parity-thinking-signature",
@@ -226,44 +226,39 @@
               "name": "get_weather",
               "type": "tool_use"
             }
-          ],
-          "role": "assistant"
+          ]
         },
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
-              "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
+              "type": "tool_result",
               "tool_use_id": "toolu_parity_weather",
-              "type": "tool_result"
+              "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
-      "stream": true,
       "system": [
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
           "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "type": "text"
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
       ],
-      "thinking": {
-        "budget_tokens": 2048,
-        "type": "enabled"
-      },
       "tools": [
         {
+          "name": "get_weather",
           "description": "Return the forecast for one city.",
           "input_schema": {
-            "additionalProperties": false,
+            "type": "object",
             "properties": {
               "city": {
                 "description": "City name.",
@@ -281,18 +276,14 @@
             "required": [
               "city"
             ],
-            "type": "object"
-          },
-          "name": "get_weather"
+            "additionalProperties": false
+          }
         },
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
+          "name": "search_notes",
           "description": "Search the user's travel notes.",
           "input_schema": {
-            "additionalProperties": false,
+            "type": "object",
             "properties": {
               "limit": {
                 "description": "Maximum results.",
@@ -306,11 +297,20 @@
             "required": [
               "query"
             ],
-            "type": "object"
+            "additionalProperties": false
           },
-          "name": "search_notes"
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
-      ]
+      ],
+      "thinking": {
+        "budget_tokens": 2048,
+        "type": "enabled"
+      },
+      "stream": true,
+      "anthropic_version": "vertex-2023-10-16"
     },
     "headers": {
       "accept": "application/json",

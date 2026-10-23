@@ -57,7 +57,11 @@ _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GeminiSettings:
-    """The ``extra_kwargs`` a Gemini model accepts, named as Agno's ``Gemini`` fields."""
+    """The ``extra_kwargs`` a Gemini model accepts, named as Agno's ``Gemini`` fields.
+
+    Agno's ``response_modalities`` and ``speech_config`` are retired: they ask for image or audio output, which
+    replies do not carry.
+    """
 
     api_key: str | None = field(default=None, metadata=SECRET)
     vertexai: bool = False
@@ -79,8 +83,6 @@ class GeminiSettings:
     presence_penalty: float | None = None
     frequency_penalty: float | None = None
     seed: int | None = None
-    response_modalities: Sequence[str] | None = None
-    speech_config: Mapping[str, Any] | None = None
     cached_content: str | None = None
     thinking_budget: int | None = None
     include_thoughts: bool | None = None
@@ -111,8 +113,8 @@ class GeminiProvider:
         """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.
 
         Media uploads and downloads happen first, so their SDK and transport errors are normalized too. Usage is
-        reported as the reply's finished candidate carries it, so an attempt that fails or is cut off afterwards,
-        such as one that ended in a malformed tool call, still settles it.
+        reported as each chunk carries it, ahead of the chunk's output, so an attempt that fails or is cut off
+        afterwards, such as one that ended in a malformed tool call, still settles it.
         """
         started = time.monotonic()
         reply = GeminiReply()
@@ -190,8 +192,6 @@ class GeminiProvider:
             "presence_penalty": settings.presence_penalty,
             "frequency_penalty": settings.frequency_penalty,
             "seed": settings.seed,
-            "response_modalities": settings.response_modalities,
-            "speech_config": settings.speech_config,
             "cached_content": settings.cached_content,
         }
         if system_instruction is not None:

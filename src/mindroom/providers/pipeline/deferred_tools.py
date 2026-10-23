@@ -13,7 +13,8 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.call_tool import CALL_TOOL_NAME, arguments_object
+from mindroom.llm.call_tool import CALL_TOOL_NAME
+from mindroom.providers.stored_tool_calls import call_arguments
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -27,11 +28,10 @@ __all__ = ["portable_tool_search_stream"]
 
 def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, Any]:
     function = call.get("function")
-    # A persisted id-only OpenAI placeholder has no function; ``providers/openai/legacy_replay.py`` drops it later.
+    # A persisted id-only placeholder has no function; ``providers/legacy_stored_tool_calls.py`` drops it later.
     if not isinstance(function, dict) or function.get("name") not in deferred:
         return call
-    arguments = arguments_object(function.get("arguments")) or {}
-    wrapped = json.dumps({"name": function["name"], "arguments": arguments}, ensure_ascii=False)
+    wrapped = json.dumps({"name": function["name"], "arguments": call_arguments(function)}, ensure_ascii=False)
     return {**call, "function": {**function, "name": CALL_TOOL_NAME, "arguments": wrapped}}
 
 

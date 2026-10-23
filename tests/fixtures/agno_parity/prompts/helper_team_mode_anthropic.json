@@ -46,26 +46,29 @@
   },
   "requests": [
     {
-      "deferred_tool_names": [],
-      "messages": [
-        {
-          "content": "<your_role>\nDetermine team mode\n</your_role>",
-          "from_history": false,
-          "role": "system",
-          "stop_after_tool_call": false
-        },
-        {
-          "content": "Determine the best team collaboration mode for this task.\n\nTask: Plan the launch and draft the announcement.\nAgents: assistant, researcher\n\nTeam Modes (from Agno documentation):\n- \"coordinate\": Team leader delegates tasks to members and synthesizes their outputs.\n               The leader decides whether to send tasks sequentially or in parallel based on what's appropriate.\n- \"collaborate\": All team members are given the SAME task and work on it simultaneously.\n                The leader synthesizes all their outputs into a cohesive response.\n\nDecision Guidelines:\n- Use \"coordinate\" when agents need to do DIFFERENT subtasks (whether sequential or parallel)\n- Use \"collaborate\" when you want ALL agents working on the SAME problem for diverse perspectives\n\nExamples:\n- \"Email me then call me\" -> coordinate (different tasks: email agent sends email, phone agent makes call)\n- \"Get weather and news\" -> coordinate (different tasks: weather agent gets weather, news agent gets news)\n- \"Research this topic and analyze the data\" -> coordinate (different subtasks for each agent)\n- \"What do you think about X?\" -> collaborate (all agents provide their perspective on the same question)\n- \"Brainstorm solutions\" -> collaborate (all agents work on the same brainstorming task)\n\nReturn the mode and a one-sentence reason why.",
-          "from_history": false,
-          "role": "user",
-          "stop_after_tool_call": false
-        }
-      ],
       "model": {
         "id": "claude-sonnet-5-5",
         "provider": "Anthropic"
       },
+      "stream": false,
+      "messages": [
+        {
+          "content": "<your_role>\nDetermine team mode\n</your_role>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system"
+        },
+        {
+          "content": "Determine the best team collaboration mode for this task.\n\nTask: Plan the launch and draft the announcement.\nAgents: assistant, researcher\n\nTeam Modes (from Agno documentation):\n- \"coordinate\": Team leader delegates tasks to members and synthesizes their outputs.\n               The leader decides whether to send tasks sequentially or in parallel based on what's appropriate.\n- \"collaborate\": All team members are given the SAME task and work on it simultaneously.\n                The leader synthesizes all their outputs into a cohesive response.\n\nDecision Guidelines:\n- Use \"coordinate\" when agents need to do DIFFERENT subtasks (whether sequential or parallel)\n- Use \"collaborate\" when you want ALL agents working on the SAME problem for diverse perspectives\n\nExamples:\n- \"Email me then call me\" -> coordinate (different tasks: email agent sends email, phone agent makes call)\n- \"Get weather and news\" -> coordinate (different tasks: weather agent gets weather, news agent gets news)\n- \"Research this topic and analyze the data\" -> coordinate (different subtasks for each agent)\n- \"What do you think about X?\" -> collaborate (all agents provide their perspective on the same question)\n- \"Brainstorm solutions\" -> collaborate (all agents work on the same brainstorming task)\n\nReturn the mode and a one-sentence reason why.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
       "response_format": {
+        "pydantic_model": "_TeamModeDecision",
         "json_schema": {
           "description": "AI decision for team collaboration mode.",
           "properties": {
@@ -90,12 +93,9 @@
           ],
           "title": "_TeamModeDecision",
           "type": "object"
-        },
-        "pydantic_model": "_TeamModeDecision"
+        }
       },
-      "stream": false,
-      "tool_choice": null,
-      "tools": []
+      "deferred_tool_names": []
     }
   ],
   "scenario": "helper_team_mode_anthropic"

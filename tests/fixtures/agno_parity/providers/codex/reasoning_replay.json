@@ -122,12 +122,12 @@
       ],
       "input": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "developer"
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
         },
         {
           "encrypted_content": "parity-encrypted-reasoning",
@@ -154,8 +154,8 @@
           "type": "message"
         },
         {
-          "content": "And for the evening?",
-          "role": "user"
+          "role": "user",
+          "content": "And for the evening?"
         }
       ],
       "instructions": "You are a helpful assistant.",

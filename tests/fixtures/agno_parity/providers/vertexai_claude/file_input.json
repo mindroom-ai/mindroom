@@ -76,45 +76,45 @@
   },
   "request": {
     "body": {
-      "anthropic_version": "vertex-2023-10-16",
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "user",
           "content": [
             {
-              "text": "Use the attached file to plan my packing.",
-              "type": "text"
+              "type": "text",
+              "text": "Use the attached file to plan my packing."
             },
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
+              "type": "document",
+              "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": "JVBERi0xLjQKJSVFT0YK"
               },
               "citations": {
                 "enabled": true
               },
-              "source": {
-                "data": "JVBERi0xLjQKJSVFT0YK",
-                "media_type": "application/pdf",
-                "type": "base64"
-              },
-              "type": "document"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
+        }
+      ],
+      "system": [
+        {
+          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
       ],
       "stream": true,
-      "system": [
-        {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
-          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "type": "text"
-        }
-      ]
+      "anthropic_version": "vertex-2023-10-16"
     },
     "headers": {
       "accept": "application/json",

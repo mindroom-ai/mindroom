@@ -25,9 +25,9 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
 from mindroom.providers.errors import classify_provider_error
-from mindroom.providers.openai.chat_wire import function_definition, with_sdk_options
+from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
+from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
-from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
 from mindroom.providers.openai.prompt_cache import formatted_input_with_shared_system_prefix
 from mindroom.providers.openai.response_replay import (
@@ -208,7 +208,7 @@ def responses_input(
     """
     prepared, explicit = _prepare_continuation(messages, explicit_replay=portable_replay)
     route = native_compaction.route if native_compaction is not None else None
-    prepared = native_replay_messages(repair_legacy_tool_replay(prepared), route)
+    prepared = native_replay_messages(repair_legacy_tool_calls(prepared), route)
     replay_store = False if explicit else store
     formatted = _agno_input(prepared, store=replay_store)
     # Ordered output is restored only for the spans the request still sends.
@@ -291,20 +291,9 @@ def _base_params(settings: ResponsesSettings, request: ModelRequest, store: bool
     if isinstance(response_format, type) and issubclass(response_format, BaseModel):
         text["format"] = _text_format(response_format, strict=settings.strict_output)
     params = {
+        **settings.request_fields(),
         "include": copy.deepcopy(settings.include),
-        "max_output_tokens": settings.max_output_tokens,
-        "max_tool_calls": settings.max_tool_calls,
-        "metadata": settings.metadata,
-        "parallel_tool_calls": settings.parallel_tool_calls,
         "store": store,
-        "temperature": settings.temperature,
-        "top_p": settings.top_p,
-        "truncation": settings.truncation,
-        "user": settings.user,
-        "service_tier": settings.service_tier,
-        "extra_headers": settings.extra_headers,
-        "extra_query": settings.extra_query,
-        "extra_body": settings.extra_body,
         "reasoning": reasoning,
         "text": text or None,
     }
@@ -344,7 +333,7 @@ def responses_request_kwargs(
 ) -> dict[str, Any]:
     """Return the ``responses.create`` keyword arguments for one request.
 
-    ``model``, ``input``, and ``tools`` are SDK keywords; other body fields travel in ``extra_body``.
+    Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
     store = request_store(wire, request)
     params = _base_params(settings, request, store)
@@ -359,18 +348,15 @@ def responses_request_kwargs(
     params = disable_tool_selection(request_params_with_deferred_tool_search(params, request.deferred_tool_names))
     if wire.route == "codex":
         _codex_params(params, settings, wire)
-    kwargs: dict[str, Any] = {
-        "model": model_id,
-        "input": responses_input(
-            request.messages,
-            store=store,
-            portable_replay=request.portable_replay,
-            native_compaction=request.native_compaction,
-            cache_system_prompt=settings.cache_system_prompt,
-            explicit_breakpoint=wire.explicit_breakpoint,
-        ),
-    }
-    return with_sdk_options(kwargs, params, keywords=("tools",))
+    formatted_input = responses_input(
+        request.messages,
+        store=store,
+        portable_replay=request.portable_replay,
+        native_compaction=request.native_compaction,
+        cache_system_prompt=settings.cache_system_prompt,
+        explicit_breakpoint=wire.explicit_breakpoint,
+    )
+    return sdk_call_kwargs({"model": model_id, "input": formatted_input, **params}, "responses")
 
 
 # --- Responses ------------------------------------------------------------------------------------------------
@@ -434,6 +420,40 @@ def _record_tool_search_items(parts: ResponsesTurnParts, output_items: Sequence[
         parts.provider_data.setdefault(TOOL_SEARCH_ITEMS_KEY, []).extend(items)
 
 
+def _incomplete_reason(response: Response) -> str | None:
+    return None if response.incomplete_details is None else response.incomplete_details.reason
+
+
+def _read_ended_response(
+    parts: ResponsesTurnParts,
+    response: Response,
+    items: list[dict[str, Any]],
+    *,
+    store: bool | None,
+    portable_replay: bool,
+    native_compaction: NativeCompactionReplay | None,
+) -> None:
+    """Record what a response that ended says about its turn, the same whether it streamed or arrived whole.
+
+    A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
+    status and the incomplete reason; only a completed response's output is recorded for replay.
+    """
+    parts.status = response.status
+    parts.incomplete_reason = _incomplete_reason(response)
+    if response.usage is not None:
+        parts.usage = _usage(response.usage)
+    if response.status == "completed":
+        _record_completed_output(
+            parts,
+            items,
+            store=store,
+            portable_replay=portable_replay,
+            native_compaction=native_compaction,
+        )
+    else:
+        parts.provider_data[_STORED_KEY] = store is not False
+
+
 def responses_stop_reason(status: str | None, incomplete_reason: str | None, *, tool_calls: bool) -> StopReason | None:
     """Map a response's terminal status to the normalized stop vocabulary."""
     if status == "completed":
@@ -461,7 +481,8 @@ class ResponsesStream:
     native_compaction: NativeCompactionReplay | None
     text_as_reasoning: bool
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
-    completed: bool = False
+    # Whether the response ended, completed or incomplete; a stream that stops before then did not finish the turn.
+    ended: bool = False
     _content: list[str] = field(default_factory=list)
     _reasoning: list[str] = field(default_factory=list)
     _tool_use: dict[str, Any] = field(default_factory=dict)
@@ -511,33 +532,31 @@ class ResponsesStream:
             _record_tool_search_items(self.parts, [current.item])
             if self.store is False or self.portable_replay:
                 self._items[current.output_index] = current.item.model_dump(mode="json", exclude_none=True)
-        elif event.type == "response.completed":
-            self._complete(current.response)
+        elif event.type in {"response.completed", "response.incomplete"}:
+            self._end(current.response)
         return events
 
-    def _complete(self, response: Response) -> None:
-        self.completed = True
+    def _end(self, response: Response) -> None:
+        self.ended = True
         if self.store is False:
             for item in response.output:
                 if item.type == "reasoning":
                     self.parts.provider_data["reasoning_output"] = item.model_dump(exclude_none=True)
-        if response.usage is not None:
-            self.parts.usage = _usage(response.usage)
         self.parts.provider_data["response_id"] = response.id
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [
             self._items[index] for index in sorted(self._items)
         ]
-        _record_completed_output(
+        _read_ended_response(
             self.parts,
+            response,
             items,
             store=self.store,
             portable_replay=self.portable_replay,
             native_compaction=self.native_compaction,
         )
-        self.parts.status = response.status
 
     def finish(self) -> ResponsesTurnParts:
-        """Return the finished turn after ``response.completed``."""
+        """Return the finished turn after the response ended."""
         self.parts.content = "".join(self._content) or None
         self.parts.reasoning = "".join(self._reasoning) or None
         return self.parts
@@ -586,11 +605,7 @@ def parse_response(
     """
     if response.error:
         raise _response_error(response.error.code, response.error.message, provider=wire.provider_name)
-    parts = ResponsesTurnParts(
-        provider_data={"response_id": response.id} if response.id else {},
-        status=response.status,
-        incomplete_reason=response.incomplete_details.reason if response.incomplete_details is not None else None,
-    )
+    parts = ResponsesTurnParts(provider_data={"response_id": response.id} if response.id else {})
     # The SDK's output union does not narrow on ``type``.
     for output in cast("list[Any]", response.output):
         if output.type == "message":
@@ -607,18 +622,16 @@ def parse_response(
         elif output.type == "reasoning" and store is False:
             parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
     parts.reasoning = _reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
-    if response.usage is not None:
-        parts.usage = _usage(response.usage)
     parts.provider_data[_STORED_KEY] = store is not False
     parts.provider_data["response_status"] = response.status
-    parts.provider_data["incomplete_reason"] = parts.incomplete_reason
+    parts.provider_data["incomplete_reason"] = _incomplete_reason(response)
     _record_tool_search_items(parts, response.output)
-    if response.status == "completed":
-        _record_completed_output(
-            parts,
-            [item.model_dump(mode="json", exclude_none=True) for item in response.output],
-            store=store,
-            portable_replay=portable_replay,
-            native_compaction=native_compaction,
-        )
+    _read_ended_response(
+        parts,
+        response,
+        [item.model_dump(mode="json", exclude_none=True) for item in response.output],
+        store=store,
+        portable_replay=portable_replay,
+        native_compaction=native_compaction,
+    )
     return parts

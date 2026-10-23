@@ -156,11 +156,11 @@
           "parts": [
             {
               "functionCall": {
+                "id": "parity_weather",
                 "args": {
                   "city": "Paris",
                   "unit": "celsius"
                 },
-                "id": "parity_weather",
                 "name": "get_weather"
               },
               "thoughtSignature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl"
@@ -183,12 +183,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {
-        "thinkingConfig": {
-          "include_thoughts": true,
-          "thinking_budget": 1024
-        }
-      },
       "systemInstruction": {
         "parts": [
           {
@@ -246,7 +240,13 @@
             }
           ]
         }
-      ]
+      ],
+      "generationConfig": {
+        "thinkingConfig": {
+          "include_thoughts": true,
+          "thinking_budget": 1024
+        }
+      }
     },
     "headers": {
       "accept": "*/*",

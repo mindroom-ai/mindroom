@@ -17,7 +17,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.events import ContentDelta, ReasoningDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
-from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     Capabilities,
@@ -116,6 +116,23 @@ def test_media_to_dict_without_content_keeps_scalars() -> None:
 
 
 # --- messages --------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("declared", "canonical"),
+    [
+        ("Image/PNG; charset=binary", "image/png"),
+        ("application/pdf", "application/pdf"),
+        (" ; q=1", None),
+        (None, None),
+    ],
+)
+def test_a_declared_mime_type_reads_as_its_lowercase_type_without_parameters(
+    declared: str | None,
+    canonical: str | None,
+) -> None:
+    """A Content-Type header or an attachment's MIME type is compared as a bare lowercase ``type/subtype``."""
+    assert canonical_mime_type(declared) == canonical
 
 
 def test_message_defaults() -> None:

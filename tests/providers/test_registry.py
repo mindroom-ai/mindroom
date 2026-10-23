@@ -47,6 +47,7 @@ from tests.providers.golden_support import (
     load_golden,
     normalized_parsed,
     normalized_request,
+    ordered_json,
     sse_response,
 )
 from tests.providers.openai_family_support import write_cli_logins
@@ -532,7 +533,9 @@ async def test_a_golden_of_every_family_replays_through_the_registry(
 
     assert len(wire.requests) == 1
     await wire.requests[0].aread()
-    assert normalized_request(wire.requests[0]) == golden["request"]
+    request = normalized_request(wire.requests[0])
+    assert request == golden["request"]
+    assert ordered_json(request["body"]) == ordered_json(golden["request"]["body"])
     completed = events[-1]
     assert isinstance(completed, TurnCompleted)
     assert normalized_parsed(completed.message) == expected_parsed(golden)

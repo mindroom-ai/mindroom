@@ -75,21 +75,21 @@
     "body": {
       "messages": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "system"
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
         },
         {
+          "role": "assistant",
           "content": "Pack a light rain jacket and comfortable shoes.",
-          "reasoning_content": "Rain is likely, so pack for wet weather.",
-          "role": "assistant"
+          "reasoning_content": "Rain is likely, so pack for wet weather."
         },
         {
-          "content": "And for the evening?",
-          "role": "user"
+          "role": "user",
+          "content": "And for the evening?"
         }
       ],
       "model": "deepseek-flash",

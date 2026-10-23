@@ -101,12 +101,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {
-        "thinkingConfig": {
-          "include_thoughts": true,
-          "thinking_budget": 1024
-        }
-      },
       "systemInstruction": {
         "parts": [
           {
@@ -114,6 +108,12 @@
           }
         ],
         "role": "user"
+      },
+      "generationConfig": {
+        "thinkingConfig": {
+          "include_thoughts": true,
+          "thinking_budget": 1024
+        }
       }
     },
     "headers": {

@@ -114,71 +114,71 @@
   },
   "request": {
     "body": {
-      "messages": [
-        {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "system"
-        },
-        {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
-        }
-      ],
       "model": "qwen3.8:27b",
       "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
+        }
+      ],
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Return the forecast for one city.",
             "name": "get_weather",
+            "description": "Return the forecast for one city.",
             "parameters": {
+              "type": "object",
+              "required": [
+                "city"
+              ],
               "properties": {
-                "background_after": {
-                  "description": "Seconds to wait for this call before it continues in the background, without cancelling it. Omit or pass null to wait until completion or a newer message you answer; zero continues in the background at once and returns a job handle."
-                },
                 "city": {
-                  "description": "City name.",
-                  "type": "string"
+                  "type": "string",
+                  "description": "City name."
                 },
                 "unit": {
+                  "type": "string",
                   "description": "Temperature unit.",
                   "enum": [
                     "celsius",
                     "fahrenheit"
-                  ],
-                  "type": "string"
+                  ]
+                },
+                "background_after": {
+                  "description": "Seconds to wait for this call before it continues in the background, without cancelling it. Omit or pass null to wait until completion or a newer message you answer; zero continues in the background at once and returns a job handle."
                 }
-              },
-              "required": [
-                "city"
-              ],
-              "type": "object"
+              }
             }
-          },
-          "type": "function"
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Search the user's travel notes.",
             "name": "search_notes",
+            "description": "Search the user's travel notes.",
             "parameters": {
-              "properties": {
-                "limit": {
-                  "description": "Maximum results.",
-                  "type": "integer"
-                },
-                "query": {
-                  "description": "Search text.",
-                  "type": "string"
-                }
-              },
+              "type": "object",
               "required": [
                 "query"
               ],
-              "type": "object"
+              "properties": {
+                "limit": {
+                  "type": "integer",
+                  "description": "Maximum results."
+                },
+                "query": {
+                  "type": "string",
+                  "description": "Search text."
+                }
+              }
             }
-          },
-          "type": "function"
+          }
         }
       ]
     },

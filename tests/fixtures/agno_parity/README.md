@@ -1,7 +1,8 @@
 # Agno parity goldens
 
 These fixtures pin what MindRoom sent and stored while Agno 3.0.9 ran it, so the owned runtime can prove it changes no persisted data and no model-visible bytes (`docs/dev/2026-10-20-replace-agno-design.md`).
-The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime, so no golden can be captured again; the owned code's parity tests read them.
+The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime; the owned code's parity tests read them.
+The scripts still run from the history trees that hold Agno's provider layer (`tests/agno_parity/capture_providers.py` at `b1d5c30b1`, `tests/agno_parity/capture_prompts.py` at `58bbd84fb`), and a rerun reproduces the goldens those commits stored, which is how the send order of request bodies and prompt requests was recorded.
 The tool goldens are the exception: `tests.agno_parity.regenerate_tool_goldens` rewrites them from the owned toolkit adapter, so a deliberate tool change regenerates them instead of editing them by hand.
 A deliberate change to model-visible bytes, a provider request, or the `io.mindroom.ai_run` metadata edits its golden by hand in the same commit; the storage, run, history, and codec goldens hold data Agno wrote and never change.
 
@@ -48,7 +49,10 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 
 ### Normalization
 
-- Files are pretty-printed with sorted keys, and capture runs from that same key-sorted input, so dict key order is not pinned; list order is.
+- Files are pretty-printed with sorted keys, except `request.body`, which keeps the key order the SDK sent; capture runs from that same key-sorted input, so a key order the body takes from the input is the sorted one.
+- The parity tests compare each request body's serialized text, so a reordered key fails parity, because chat templates and prompt caches see key order.
+- `cerebras` bodies list `messages` before `model`, edited by hand: the OpenAI SDK, which now sends them, puts `messages` first, where the Cerebras SDK put `model` first.
+- Agno closed the Cerebras structured-output schema in place, so the capture recorded the closed schema as its input; `cerebras/structured_output` and `cerebras/structured_output_nested` hold the schema Agno received.
 - Request headers are dropped when they carry credentials (`authorization`, `x-api-key`, `api-key`, `x-goog-api-key`, AWS `x-amz-*` signing headers) or SDK, platform, and transport details (`x-stainless-*`, `amz-sdk-*`, `user-agent`, `x-goog-api-client`, `host`, `content-length`, `accept-encoding`, `connection`); every other header, such as `anthropic-beta`, `anthropic-version`, `chatgpt-account-id`, and the Codex session headers, is kept.
 - `id` and `created_at` are dropped from `parsed.message`, and the wall-clock `duration` and `time_to_first_token` from `parsed.metrics`.
 - uuid4 values Agno generates for tool calls sent without ids (every Ollama call, and the Gemini `tool_definitions` reply) become `<uuid4>`; a follow-up golden replays such a call with the id `parity-generated-call-<n>`.
@@ -133,6 +137,7 @@ Normalization:
 - The scenario's temporary root becomes `<TMP>`, which appears in preloaded context-file headings.
 - Today's date in the date context, such as `Monday, October 19, 2026`, becomes `<DATE>`; the timezone is pinned to `UTC`, and message timestamps and the schedule parser's current time are fixed inputs.
 - A delegation's tool result names its record by a random 32-digit hex id under the day the delegation started; the ids become `<ID-1>`, `<ID-2>`, and so on in first-appearance order, and the day becomes `<DATE>`.
+- `requests` and `exported` keep the key order the recorder received them in under Agno, and the parity tests compare their serialized text, so a reordered key fails parity; ids are numbered in the key-sorted text.
 - Requests are grouped by the model instance that received them, in the order MindRoom built those models, and each model's requests stay in call order.
   A team builds its members before its leader, so member requests come first; members run concurrently, so their relative call order is not part of the contract.
 - Collaborate-mode members all answer `ok`, because Agno's streaming broadcast result concatenates member output in arrival order, which is not deterministic.

@@ -4,172 +4,180 @@
     "instructions": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).## Personality Context\nEach section below is headed by the path of the file it was read from, inlined here automatically every turn. Do not re-read a file to recall what it says; open it to edit it, or when a marker says content was omitted.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\nWhen using skills, access them via the skill tools:\n- get_skill_instructions(...)\n- get_skill_reference(...)\n- get_skill_script(...)\nDo not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.\n\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>\n\n<skills_system>\n\n## What are Skills?\nSkills are packages of domain expertise that extend your capabilities. Each skill contains:\n- **Instructions**: Detailed guidance on when and how to apply the skill\n- **Scripts**: Executable code templates you can use or adapt\n- **References**: Supporting documentation (guides, cheatsheets, examples)\n\n## IMPORTANT: How to Use Skills\n**Skill names are NOT callable functions.** You cannot call a skill directly by its name.\nInstead, you MUST use the provided skill access tools:\n\n1. `get_skill_instructions(skill_name)` - Load the full instructions for a skill\n2. `get_skill_reference(skill_name, reference_path)` - Access specific documentation\n3. `get_skill_script(skill_name, script_path)` - Read scripts\n\n## Progressive Discovery Workflow\n1. **Browse**: Review the skill summaries below to understand what's available\n2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first\n3. **Reference**: Use `get_skill_reference` to access specific documentation as needed\n4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them\n\n**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when `<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`.\n\nThis approach ensures you only load detailed instructions when actually needed.\n\n## Available Skills\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n  <scripts>none</scripts>\n</skill>\n\n</skills_system>\nDo not reflect on the quality of the returned search results in your response",
     "tools": [
       {
-        "description": "Add two numbers and return the result.",
         "name": "add",
+        "description": "Add two numbers and return the result.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
             "a": {
-              "description": "(float) First number.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) First number."
             },
             "b": {
-              "description": "(float) Second number.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) Second number."
             }
           },
           "required": [
             "a",
             "b"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Subtract second number from first and return the result.",
         "name": "subtract",
+        "description": "Subtract second number from first and return the result.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
             "a": {
-              "description": "(float) First number.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) First number."
             },
             "b": {
-              "description": "(float) Second number.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) Second number."
             }
           },
           "required": [
             "a",
             "b"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Multiply two numbers and return the result.",
         "name": "multiply",
+        "description": "Multiply two numbers and return the result.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
             "a": {
-              "description": "(float) First number.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) First number."
             },
             "b": {
-              "description": "(float) Second number.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) Second number."
             }
           },
           "required": [
             "a",
             "b"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Divide first number by second and return the result.",
         "name": "divide",
+        "description": "Divide first number by second and return the result.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
             "a": {
-              "description": "(float) Numerator.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) Numerator."
             },
             "b": {
-              "description": "(float) Denominator.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) Denominator."
             }
           },
           "required": [
             "a",
             "b"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Raise first number to the power of the second number and return the result.",
         "name": "exponentiate",
+        "description": "Raise first number to the power of the second number and return the result.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
             "a": {
-              "description": "(float) Base.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) Base."
             },
             "b": {
-              "description": "(float) Exponent.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) Exponent."
             }
           },
           "required": [
             "a",
             "b"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
         "name": "factorial",
+        "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
             "n": {
-              "description": "(int) Number to calculate the factorial of, at most 1558.",
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number to calculate the factorial of, at most 1558."
             }
           },
           "required": [
             "n"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
         "name": "is_prime",
+        "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
             "n": {
-              "description": "(int) Number to check if prime, at most 10**12.",
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number to check if prime, at most 10**12."
             }
           },
           "required": [
             "n"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Calculate the square root of a number and return the result.",
         "name": "square_root",
+        "description": "Calculate the square root of a number and return the result.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
             "n": {
-              "description": "(float) Number to calculate the square root of.",
-              "type": "number"
+              "type": "number",
+              "description": "(float) Number to calculate the square root of."
             }
           },
           "required": [
             "n"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
         "name": "schedule",
+        "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
+            "request": {
+              "type": "string",
+              "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\""
+            },
+            "new_thread": {
+              "type": "boolean",
+              "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
+            },
             "history_limit": {
               "anyOf": [
                 {
@@ -181,25 +189,6 @@
               ],
               "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for full history."
             },
-            "model": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
-            },
-            "new_thread": {
-              "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger.",
-              "type": "boolean"
-            },
-            "request": {
-              "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\"",
-              "type": "string"
-            },
             "silent": {
               "anyOf": [
                 {
@@ -210,91 +199,6 @@
                 }
               ],
               "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or exactly `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Leave unset to infer\nthe mode from the scheduling request."
-            }
-          },
-          "required": [
-            "request",
-            "new_thread"
-          ],
-          "type": "object"
-        }
-      },
-      {
-        "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
-        "name": "schedule_tool_call",
-        "parameters": {
-          "additionalProperties": false,
-          "properties": {
-            "arguments_json": {
-              "description": "The call's arguments as a JSON object string.",
-              "type": "string"
-            },
-            "description": {
-              "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs.",
-              "type": "string"
-            },
-            "execute_at": {
-              "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\".",
-              "type": "string"
-            },
-            "tool_name": {
-              "description": "One of your tool functions, e.g. \"post_slack_message\".",
-              "type": "string"
-            }
-          },
-          "required": [
-            "tool_name",
-            "arguments_json",
-            "execute_at",
-            "description"
-          ],
-          "type": "object"
-        }
-      },
-      {
-        "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
-        "name": "run_scheduled_call",
-        "parameters": {
-          "additionalProperties": false,
-          "properties": {
-            "arguments_json": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
-            },
-            "task_id": {
-              "description": "The scheduled task's ID from its message.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "task_id"
-          ],
-          "type": "object"
-        }
-      },
-      {
-        "description": "Edit an existing scheduled task by replacing its timing and content.",
-        "name": "edit_schedule",
-        "parameters": {
-          "additionalProperties": false,
-          "properties": {
-            "history_limit": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history. Leave unset to keep the task's\nexisting history limit. To restore full history, say so in request."
             },
             "model": {
               "anyOf": [
@@ -305,11 +209,100 @@
                   "type": "null"
                 }
               ],
-              "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
+              "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+            }
+          },
+          "required": [
+            "request",
+            "new_thread"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "schedule_tool_call",
+        "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tool_name": {
+              "type": "string",
+              "description": "One of your tool functions, e.g. \"post_slack_message\"."
+            },
+            "arguments_json": {
+              "type": "string",
+              "description": "The call's arguments as a JSON object string."
+            },
+            "execute_at": {
+              "type": "string",
+              "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\"."
+            },
+            "description": {
+              "type": "string",
+              "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
+            }
+          },
+          "required": [
+            "tool_name",
+            "arguments_json",
+            "execute_at",
+            "description"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "run_scheduled_call",
+        "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "The scheduled task's ID from its message."
+            },
+            "arguments_json": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "edit_schedule",
+        "description": "Edit an existing scheduled task by replacing its timing and content.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "The ID of the task to edit (from list_schedules)."
             },
             "request": {
-              "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\"",
-              "type": "string"
+              "type": "string",
+              "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\""
+            },
+            "history_limit": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history. Leave unset to keep the task's\nexisting history limit. To restore full history, say so in request."
             },
             "silent": {
               "anyOf": [
@@ -322,76 +315,87 @@
               ],
               "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or exact `NO_REPLY` finals while\nkeeping findings, failures, and independently sent tool messages\nvisible. Leave unset to preserve the existing mode."
             },
-            "task_id": {
-              "description": "The ID of the task to edit (from list_schedules).",
-              "type": "string"
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
             }
           },
           "required": [
             "task_id",
             "request"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "List all pending scheduled tasks in the current room/thread.",
         "name": "list_schedules",
+        "description": "List all pending scheduled tasks in the current room/thread.",
         "parameters": {
+          "type": "object",
           "properties": {},
-          "required": [],
-          "type": "object"
+          "required": []
         }
       },
       {
-        "description": "Cancel a scheduled task.",
         "name": "cancel_schedule",
+        "description": "Cancel a scheduled task.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
             "task_id": {
-              "description": "The ID of the task to cancel (from list_schedules).",
-              "type": "string"
+              "type": "string",
+              "description": "The ID of the task to cancel (from list_schedules)."
             }
           },
           "required": [
             "task_id"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Invite router to current Matrix room.",
         "name": "invite_router",
+        "description": "Invite router to current Matrix room.",
         "parameters": {
+          "type": "object",
           "properties": {},
-          "required": [],
-          "type": "object"
+          "required": []
         }
       },
       {
-        "description": "Load the full instructions for a skill. Use this when you need to follow a skill's guidance.",
         "name": "get_skill_instructions",
+        "description": "Load the full instructions for a skill. Use this when you need to follow a skill's guidance.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
             "skill_name": {
-              "description": "The name of the skill to get instructions for.",
-              "type": "string"
+              "type": "string",
+              "description": "The name of the skill to get instructions for."
             }
           },
           "required": [
             "skill_name"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Load a reference document from a skill's references. Use this to access detailed documentation.",
         "name": "get_skill_reference",
+        "description": "Load a reference document from a skill's references. Use this to access detailed documentation.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
+            "skill_name": {
+              "type": "string",
+              "description": "The name of the skill."
+            },
             "reference_path": {
               "anyOf": [
                 {
@@ -402,24 +406,24 @@
                 }
               ],
               "description": "The filename of the reference document."
-            },
-            "skill_name": {
-              "description": "The name of the skill.",
-              "type": "string"
             }
           },
           "required": [
             "skill_name"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       },
       {
-        "description": "Read a script from a skill. This never runs the script; run it with your shell tool if you have one.",
         "name": "get_skill_script",
+        "description": "Read a script from a skill. This never runs the script; run it with your shell tool if you have one.",
         "parameters": {
-          "additionalProperties": false,
+          "type": "object",
           "properties": {
+            "skill_name": {
+              "type": "string",
+              "description": "The name of the skill."
+            },
             "script_path": {
               "anyOf": [
                 {
@@ -430,16 +434,12 @@
                 }
               ],
               "description": "The filename of the script."
-            },
-            "skill_name": {
-              "description": "The name of the skill.",
-              "type": "string"
             }
           },
           "required": [
             "skill_name"
           ],
-          "type": "object"
+          "additionalProperties": false
         }
       }
     ]

@@ -26,10 +26,13 @@ from anthropic.types.beta import (
     BetaUsage,
 )
 
+from mindroom.llm.media import canonical_mime_type, image_format
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.providers.claude_wire_blocks import as_dict
+from mindroom.providers.legacy_stored_tool_calls import repair_legacy_tool_calls
+from mindroom.providers.stored_tool_calls import call_arguments
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -86,12 +89,6 @@ _IMAGE_MEDIA_TYPES = {
     "gif": "image/gif",
     "webp": "image/webp",
 }
-_IMAGE_SIGNATURES = (
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"GIF87a", "image/gif"),
-    (b"GIF89a", "image/gif"),
-)
 # Documents Claude reads as plain text; every other type is a base64 document, which the API accepts for PDF only.
 _TEXT_DOCUMENT_MEDIA_TYPES = frozenset(
     {
@@ -109,8 +106,6 @@ _TEXT_DOCUMENT_MEDIA_TYPES = frozenset(
         "application/x-python",
     },
 )
-# Claude stop reasons of a response the output limit cut off before it was complete.
-OUTPUT_LIMIT_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
 _STOP_REASONS: dict[str, StopReason] = {
     "end_turn": "end",
     "stop_sequence": "end",
@@ -175,7 +170,7 @@ def format_claude_messages(
     """
     turns: list[dict[str, Any]] = []
     system_texts: list[str] = []
-    for message in messages:
+    for message in repair_legacy_tool_calls(messages):
         if message.role in {"system", "developer"}:
             system_texts.append(message.get_content_string())
             continue
@@ -240,13 +235,8 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
         return image.mime_type
     if image.format and (media_type := _IMAGE_MEDIA_TYPES.get(image.format.lower())) is not None:
         return media_type
-    if data is not None:
-        for signature, media_type in _IMAGE_SIGNATURES:
-            if data.startswith(signature):
-                return media_type
-        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-            return "image/webp"
-    return None
+    detected = None if data is None else image_format(data)
+    return None if detected is None else _IMAGE_MEDIA_TYPES.get(detected)
 
 
 def _url_document_stays_remote(file: File) -> bool:
@@ -262,8 +252,7 @@ async def _fetched(url: str, http_client: httpx.AsyncClient) -> tuple[bytes, str
     except (httpx.HTTPError, httpx.InvalidURL) as error:
         logger.warning("claude_url_media_dropped", url=url, error=str(error))
         return None
-    media_type = response.headers.get("content-type", "").partition(";")[0].strip()
-    return response.content, media_type or None
+    return response.content, canonical_mime_type(response.headers.get("content-type"))
 
 
 async def _inlined_images(images: Sequence[Image] | None, http_client: httpx.AsyncClient) -> list[Image]:
@@ -441,12 +430,7 @@ def _assistant_blocks(message: Message) -> list[Any]:
     for call in message.tool_calls or []:
         function = call["function"]
         blocks.append(
-            ToolUseBlock(
-                id=call["id"],
-                input=json.loads(function["arguments"]) if "arguments" in function else {},
-                name=function["name"],
-                type="tool_use",
-            ),
+            ToolUseBlock(id=call["id"], input=call_arguments(function), name=function["name"], type="tool_use"),
         )
     return blocks
 
@@ -645,7 +629,6 @@ def _stored_reasoning(blocks: list[str], *, streamed: bool) -> str | None:
 
 
 __all__ = [
-    "OUTPUT_LIMIT_STOP_REASONS",
     "TRAILING_USER_MESSAGE",
     "FormattedConversation",
     "assistant_message_from_response",

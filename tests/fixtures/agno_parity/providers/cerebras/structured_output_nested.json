@@ -26,7 +26,6 @@
           "schema": {
             "$defs": {
               "CronSchedule": {
-                "additionalProperties": false,
                 "description": "Standard cron-like schedule definition.",
                 "properties": {
                   "day": {
@@ -64,7 +63,6 @@
                 "type": "object"
               }
             },
-            "additionalProperties": false,
             "description": "Structured representation of a scheduled task or workflow.",
             "properties": {
               "created_by": {
@@ -199,8 +197,7 @@
             ],
             "title": "ScheduledWorkflow",
             "type": "object"
-          },
-          "strict": true
+          }
         },
         "type": "json_schema"
       }
@@ -233,12 +230,12 @@
     "body": {
       "messages": [
         {
-          "content": "Parse the scheduling request into a workflow.",
-          "role": "system"
+          "role": "system",
+          "content": "Parse the scheduling request into a workflow."
         },
         {
-          "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris.",
-          "role": "user"
+          "role": "user",
+          "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
         }
       ],
       "model": "gpt-oss-120b",
@@ -248,7 +245,6 @@
           "schema": {
             "$defs": {
               "CronSchedule": {
-                "additionalProperties": false,
                 "description": "Standard cron-like schedule definition.",
                 "properties": {
                   "day": {
@@ -283,10 +279,10 @@
                   }
                 },
                 "title": "CronSchedule",
-                "type": "object"
+                "type": "object",
+                "additionalProperties": false
               }
             },
-            "additionalProperties": false,
             "description": "Structured representation of a scheduled task or workflow.",
             "properties": {
               "created_by": {
@@ -420,7 +416,8 @@
               "description"
             ],
             "title": "ScheduledWorkflow",
-            "type": "object"
+            "type": "object",
+            "additionalProperties": false
           },
           "strict": true
         },

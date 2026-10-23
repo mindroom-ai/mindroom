@@ -473,7 +473,7 @@ Retired Agno model settings that older configs still set, such as `retries`, loa
 | `anthropic` | `api_key`, `auth_token`, `betas`, `cache_system_prompt`, `client_params`, `context_management`, `default_headers`, `extended_cache_time`, `max_tokens`, `output_config`, `request_params`, `stop_sequences`, `temperature`, `thinking`, `timeout`, `top_k`, `top_p` |
 | `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `base_url`, `project_id`, and `region` |
 | `bedrock_claude` | The `anthropic` keys without `auth_token`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
-| `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `response_modalities`, `safety_settings`, `search`, `seed`, `speech_config`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
+| `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `safety_settings`, `search`, `seed`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
 | `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `timeout` |
 | `synthetic` | `chars_per_second`, `chunk_chars`, `max_response_chars`, `min_response_chars`, `seed`, `tool_call_probability` (see [Built-In Synthetic Model](#built-in-synthetic-model)) |
 

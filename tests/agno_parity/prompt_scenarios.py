@@ -325,14 +325,21 @@ def call_dict(call: ModelCall) -> dict[str, Any]:
 
 
 def normalize(value: object, root: Path) -> object:
-    """Replace what changes between runs: the scenario's temporary root, today's date, and random ids."""
-    text = json.dumps(value, ensure_ascii=False, sort_keys=True)
-    for path in {str(root.resolve()), str(root)}:
-        text = text.replace(path, "<TMP>")
-    text = _DELEGATION_RECORD_DATE.sub("<DATE>", _DATE_PATTERN.sub("<DATE>", text))
+    """Replace what changes between runs: the scenario's temporary root, today's date, and random ids.
+
+    Keys keep their order, which the goldens pin; ids are numbered in first-appearance order of the key-sorted
+    text, as the goldens number them.
+    """
+
+    def stable(text: str) -> str:
+        for path in {str(root.resolve()), str(root)}:
+            text = text.replace(path, "<TMP>")
+        return _DELEGATION_RECORD_DATE.sub("<DATE>", _DATE_PATTERN.sub("<DATE>", text))
+
     ids: dict[str, str] = {}
-    text = _HEX_ID.sub(lambda match: ids.setdefault(match.group(), f"<ID-{len(ids) + 1}>"), text)
-    return json.loads(text)
+    for match in _HEX_ID.finditer(stable(json.dumps(value, ensure_ascii=False, sort_keys=True))):
+        ids.setdefault(match.group(), f"<ID-{len(ids) + 1}>")
+    return json.loads(_HEX_ID.sub(lambda match: ids[match.group()], stable(json.dumps(value, ensure_ascii=False))))
 
 
 def _bound_config(root: Path, authored: dict[str, Any]) -> tuple[Config, RuntimePaths]:

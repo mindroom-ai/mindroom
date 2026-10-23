@@ -69,7 +69,6 @@ from mindroom.providers.anthropic.native_compaction import (
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
 from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings, parse_claude_settings
 from mindroom.providers.anthropic.wire import (
-    OUTPUT_LIMIT_STOP_REASONS,
     assistant_message_from_response,
     build_system_blocks,
     format_claude_messages,
@@ -305,16 +304,17 @@ class ClaudeProvider:
         stamp_finished_turn(message, self.identity, started=started, first_output_at=first_output_at)
         record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=prepared.checkpoint_prefix)
         raw_stop_reason = response.stop_reason
-        if raw_stop_reason in OUTPUT_LIMIT_STOP_REASONS:
+        stop_reason = stop_reason_of(raw_stop_reason)
+        if stop_reason == "output_limit":
             logger.warning(
                 "claude_output_limit_reached",
                 model_id=self.identity.id,
                 stop_reason=raw_stop_reason,
                 tool_calls=len(message.tool_calls or []),
             )
-        elif raw_stop_reason == "refusal":
+        elif stop_reason == "refusal":
             logger.warning("claude_safeguard_refusal", model_id=self.identity.id, stop_reason=raw_stop_reason)
-        return message, stop_reason_of(raw_stop_reason)
+        return message, stop_reason
 
     def _output_format(self, response_format: type[BaseModel] | Mapping[str, Any] | None) -> dict[str, Any] | None:
         """Return the ``output_config.format`` value, or None when the route answers in JSON mode instead.

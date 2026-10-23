@@ -109,7 +109,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {},
       "systemInstruction": {
         "parts": [
           {
@@ -117,11 +116,6 @@
           }
         ],
         "role": "user"
-      },
-      "toolConfig": {
-        "functionCallingConfig": {
-          "mode": "NONE"
-        }
       },
       "tools": [
         {
@@ -172,7 +166,13 @@
             }
           ]
         }
-      ]
+      ],
+      "toolConfig": {
+        "functionCallingConfig": {
+          "mode": "NONE"
+        }
+      },
+      "generationConfig": {}
     },
     "headers": {
       "accept": "*/*",

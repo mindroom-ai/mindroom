@@ -154,6 +154,68 @@ async def test_unset_tool_fields_are_omitted_where_agno_omitted_them(family: str
         }
 
 
+# --- Stored tool calls ------------------------------------------------------------------------------------------
+
+# A thread that switched models replays tool calls other providers stored: a Chat call the output limit cut off
+# mid-arguments, a Gemini call stored with empty arguments, a call stored without arguments by releases through
+# v2026.9.43, and an id-only placeholder streamed Chat history kept through v2026.7.172, each with its result.
+_STORED_CALLS = [
+    {"id": "call_cut", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Par'}},
+    {"id": "call_empty", "type": "function", "function": {"name": "get_weather", "arguments": ""}},
+    {"id": "call_bare", "type": "function", "function": {"name": "get_weather"}},
+    {"id": "call_placeholder"},
+]
+_STORED_TOOL_TURN = [
+    Message(role="user", content="Weather?"),
+    Message(role="assistant", tool_calls=_STORED_CALLS),
+    *(
+        Message(role="tool", tool_call_id=call["id"], tool_name="get_weather", content="sunny")
+        for call in _STORED_CALLS
+    ),
+    Message(role="user", content="And tomorrow?"),
+]
+
+
+def _replayed_tool_turn(family: str, body: dict[str, Any]) -> tuple[list[object], int]:
+    """Return the arguments of every tool call the request replays, in order, and how many results it replays."""
+    if family == "anthropic":
+        blocks = [block for message in body["messages"] for block in message["content"] if isinstance(block, dict)]
+        calls = [block["input"] for block in blocks if block["type"] == "tool_use"]
+        return calls, sum(block["type"] == "tool_result" for block in blocks)
+    if family.startswith("gemini"):
+        parts = [part for content in body["contents"] for part in content["parts"]]
+        calls = [part["functionCall"].get("args") for part in parts if "functionCall" in part]
+        return calls, sum("functionResponse" in part for part in parts)
+    if family == "openai_responses":
+        calls = [item["arguments"] for item in body["input"] if item.get("type") == "function_call"]
+        return calls, sum(item.get("type") == "function_call_output" for item in body["input"])
+    messages = body["messages"]
+    calls = [call["function"]["arguments"] for message in messages for call in message.get("tool_calls") or ()]
+    return calls, sum(message["role"] == "tool" for message in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_replays_the_tool_calls_any_provider_stored(family: str, tmp_path: Path) -> None:
+    """Every stored call shape replays on every route: the placeholder and its result are dropped everywhere.
+
+    Routes that send arguments as text replay the stored text, with ``{}`` for a call stored without any; routes
+    that send an object replay ``{}`` for arguments that are not one.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+
+    await complete(
+        _pipeline(spec.adapter(tmp_path, wire)),
+        ModelRequest(messages=_STORED_TOOL_TURN, tools=[_tool("get_weather")]),
+    )
+
+    body = wire.body()
+    assert "call_placeholder" not in json.dumps(body)
+    as_text = family in {"openai_chat", "openai_responses", "cerebras"}
+    assert _replayed_tool_turn(family, body) == (['{"city": "Par', "", "{}"] if as_text else [{}, {}, {}], 3)
+
+
 # --- The composed pipeline --------------------------------------------------------------------------------------
 
 

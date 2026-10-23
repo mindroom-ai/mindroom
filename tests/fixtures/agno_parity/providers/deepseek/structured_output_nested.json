@@ -55,12 +55,12 @@
     "body": {
       "messages": [
         {
-          "content": "Parse the scheduling request into a workflow.",
-          "role": "system"
+          "role": "system",
+          "content": "Parse the scheduling request into a workflow."
         },
         {
-          "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris.",
-          "role": "user"
+          "role": "user",
+          "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
         }
       ],
       "model": "deepseek-flash",

@@ -21,6 +21,7 @@ from tests.providers.golden_support import (
     golden_id,
     golden_paths,
     load_golden,
+    ordered_json,
 )
 
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> No
     fixture = load_golden(path)
     replay = await run_golden(fixture, tmp_path)
     assert replay.request == fixture["request"]
+    assert ordered_json(replay.request["body"]) == ordered_json(fixture["request"]["body"])
     assert replay.parsed == expected_parsed(fixture)
     assert replay.stop_reason == expected_stop_reason(fixture)
 

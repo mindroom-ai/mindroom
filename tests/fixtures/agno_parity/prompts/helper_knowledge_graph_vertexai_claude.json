@@ -47,31 +47,31 @@
   },
   "requests": [
     {
-      "deferred_tool_names": [],
-      "messages": [
-        {
-          "content": "You extract entities from conversations.\n\nAny extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.\n\nProvide your output as a JSON containing the following fields:\n<json_fields>\n[\"extracted_entities\"]\n</json_fields>\n\nHere are the properties for each field:\n<json_field_properties>\n{\n  \"extracted_entities\": {\n    \"description\": \"List of extracted entities\",\n    \"items\": {\n      \"$ref\": \"#/$defs/ExtractedEntity\"\n    },\n    \"type\": \"array\"\n  },\n  \"$defs\": {\n    \"ExtractedEntity\": {\n      \"name\": {\n        \"description\": \"Name of the extracted entity\",\n        \"type\": \"string\"\n      },\n      \"entity_type_id\": {\n        \"description\": \"ID of the classified entity type. Must be one of the provided entity_type_id integers.\",\n        \"type\": \"integer\"\n      },\n      \"episode_indices\": {\n        \"description\": \"List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].\",\n        \"items\": {\n          \"type\": \"integer\"\n        },\n        \"type\": \"array\"\n      }\n    }\n  }\n}\n</json_field_properties>\nStart your response with `{` and end it with `}`.\nYour output will be passed to json.loads() to convert it to a Python object.\nMake sure it only contains valid JSON.",
-          "from_history": false,
-          "role": "system",
-          "stop_after_tool_call": false
-        },
-        {
-          "content": "<CURRENT MESSAGE>\nAlice booked the Berlin offsite.\n</CURRENT MESSAGE>\n\nRespond with a JSON object in the following format:\n\n{\"$defs\": {\"ExtractedEntity\": {\"properties\": {\"name\": {\"description\": \"Name of the extracted entity\", \"title\": \"Name\", \"type\": \"string\"}, \"entity_type_id\": {\"description\": \"ID of the classified entity type. Must be one of the provided entity_type_id integers.\", \"title\": \"Entity Type Id\", \"type\": \"integer\"}, \"episode_indices\": {\"description\": \"List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].\", \"items\": {\"type\": \"integer\"}, \"title\": \"Episode Indices\", \"type\": \"array\"}}, \"required\": [\"name\", \"entity_type_id\"], \"title\": \"ExtractedEntity\", \"type\": \"object\"}}, \"properties\": {\"extracted_entities\": {\"description\": \"List of extracted entities\", \"items\": {\"$ref\": \"#/$defs/ExtractedEntity\"}, \"title\": \"Extracted Entities\", \"type\": \"array\"}}, \"required\": [\"extracted_entities\"], \"title\": \"ExtractedEntities\", \"type\": \"object\"}",
-          "from_history": false,
-          "role": "user",
-          "stop_after_tool_call": false
-        }
-      ],
       "model": {
         "id": "claude-sonnet-5-5",
         "provider": "VertexAI"
       },
+      "stream": false,
+      "messages": [
+        {
+          "content": "You extract entities from conversations.\n\nAny extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.\n\nProvide your output as a JSON containing the following fields:\n<json_fields>\n[\"extracted_entities\"]\n</json_fields>\n\nHere are the properties for each field:\n<json_field_properties>\n{\n  \"extracted_entities\": {\n    \"description\": \"List of extracted entities\",\n    \"items\": {\n      \"$ref\": \"#/$defs/ExtractedEntity\"\n    },\n    \"type\": \"array\"\n  },\n  \"$defs\": {\n    \"ExtractedEntity\": {\n      \"name\": {\n        \"description\": \"Name of the extracted entity\",\n        \"type\": \"string\"\n      },\n      \"entity_type_id\": {\n        \"description\": \"ID of the classified entity type. Must be one of the provided entity_type_id integers.\",\n        \"type\": \"integer\"\n      },\n      \"episode_indices\": {\n        \"description\": \"List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].\",\n        \"items\": {\n          \"type\": \"integer\"\n        },\n        \"type\": \"array\"\n      }\n    }\n  }\n}\n</json_field_properties>\nStart your response with `{` and end it with `}`.\nYour output will be passed to json.loads() to convert it to a Python object.\nMake sure it only contains valid JSON.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system"
+        },
+        {
+          "content": "<CURRENT MESSAGE>\nAlice booked the Berlin offsite.\n</CURRENT MESSAGE>\n\nRespond with a JSON object in the following format:\n\n{\"$defs\": {\"ExtractedEntity\": {\"properties\": {\"name\": {\"description\": \"Name of the extracted entity\", \"title\": \"Name\", \"type\": \"string\"}, \"entity_type_id\": {\"description\": \"ID of the classified entity type. Must be one of the provided entity_type_id integers.\", \"title\": \"Entity Type Id\", \"type\": \"integer\"}, \"episode_indices\": {\"description\": \"List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].\", \"items\": {\"type\": \"integer\"}, \"title\": \"Episode Indices\", \"type\": \"array\"}}, \"required\": [\"name\", \"entity_type_id\"], \"title\": \"ExtractedEntity\", \"type\": \"object\"}}, \"properties\": {\"extracted_entities\": {\"description\": \"List of extracted entities\", \"items\": {\"$ref\": \"#/$defs/ExtractedEntity\"}, \"title\": \"Extracted Entities\", \"type\": \"array\"}}, \"required\": [\"extracted_entities\"], \"title\": \"ExtractedEntities\", \"type\": \"object\"}",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
       "response_format": {
         "type": "json_object"
       },
-      "stream": false,
-      "tool_choice": null,
-      "tools": []
+      "deferred_tool_names": []
     }
   ],
   "scenario": "helper_knowledge_graph_vertexai_claude"

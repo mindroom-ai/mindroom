@@ -123,7 +123,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {},
       "systemInstruction": {
         "parts": [
           {
@@ -140,11 +139,6 @@
               "name": "get_weather",
               "parameters": {
                 "properties": {
-                  "background_after": {
-                    "minimum": 0.0,
-                    "nullable": true,
-                    "type": "NUMBER"
-                  },
                   "city": {
                     "description": "City name.",
                     "type": "STRING"
@@ -156,6 +150,11 @@
                       "fahrenheit"
                     ],
                     "type": "STRING"
+                  },
+                  "background_after": {
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "NUMBER"
                   }
                 },
                 "required": [
@@ -186,7 +185,8 @@
             }
           ]
         }
-      ]
+      ],
+      "generationConfig": {}
     },
     "headers": {
       "accept": "*/*",

@@ -35,7 +35,7 @@ from tests.providers.gemini_ollama_support import (
     replay,
     runtime_paths_for,
 )
-from tests.providers.golden_support import comparable_metrics, expected_parsed, expected_stop_reason
+from tests.providers.golden_support import comparable_metrics, expected_parsed, expected_stop_reason, ordered_json
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,8 +59,19 @@ async def test_adapter_reproduces_golden(golden: Golden, tmp_path: Path, monkeyp
     result = await replay(golden, tmp_path)
 
     assert result.request == golden.data["request"]
+    assert ordered_json(result.request["body"]) == ordered_json(golden.data["request"]["body"])
     assert result.parsed == expected_parsed(golden.data)
     assert result.stop_reason == expected_stop_reason(golden.data)
+
+
+def _chunks_reporting_usage(golden: Golden) -> int:
+    """Count the reply's chunks that carry usage: Ollama's done chunk, and each Gemini chunk with a candidate."""
+    raw = golden.data["response_raw"]
+    if golden.family == "ollama":
+        return sum(1 for chunk in raw.get("ndjson", []) if chunk["done"])
+    if "json" in raw:
+        return int("usageMetadata" in raw["json"])
+    return sum(1 for event in raw["sse"] if event["data"].get("candidates") and "usageMetadata" in event["data"])
 
 
 @pytest.mark.asyncio
@@ -72,8 +83,8 @@ async def test_stream_events_match_the_finished_message(
 ) -> None:
     """A stream's deltas add up to the finished message, and usage is final once, as the message's own metrics.
 
-    A whole reply yields no deltas. The chunk that carries the usage reports it as a partial report first, which the
-    final report replaces.
+    A whole reply yields no deltas. Every chunk that carries usage reports it as a partial report, and the final
+    report replaces the last of them.
     """
     hide_provider_environment(monkeypatch)
 
@@ -96,10 +107,9 @@ async def test_stream_events_match_the_finished_message(
     assert len(final) == 1
     assert final[0] is message.metrics
     assert comparable_metrics(final[0]) == golden.data["parsed"]["metrics"]
-    assert [comparable_metrics(report.usage) for report in reports if not report.final] in (
-        [],
-        [comparable_metrics(final[0])],
-    )
+    partial = [comparable_metrics(report.usage) for report in reports if not report.final]
+    assert len(partial) == _chunks_reporting_usage(golden)
+    assert partial[-1:] in ([], [comparable_metrics(final[0])])
     # Every chunk carries output, usage, or a hosted tool's start, so none shows up as bare provider activity.
     assert not [event for event in result.events if isinstance(event, StreamProgress) and not event.commits]
 

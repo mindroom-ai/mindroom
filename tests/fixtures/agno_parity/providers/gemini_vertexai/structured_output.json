@@ -83,6 +83,14 @@
           "role": "user"
         }
       ],
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "Route the message to the best agent."
+          }
+        ],
+        "role": "user"
+      },
       "generationConfig": {
         "responseMimeType": "application/json",
         "responseSchema": {
@@ -110,14 +118,6 @@
           "title": "_RoutingSuggestion",
           "type": "OBJECT"
         }
-      },
-      "systemInstruction": {
-        "parts": [
-          {
-            "text": "Route the message to the best agent."
-          }
-        ],
-        "role": "user"
       }
     },
     "headers": {
