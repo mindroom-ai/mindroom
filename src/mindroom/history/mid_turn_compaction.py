@@ -229,7 +229,9 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
             "Native compaction left the request over its limit; compacted as text",
             run_id=state.record.run_id,
         )
-        _stop_native_compaction(state)
+        # The fold replaced the checkpoints the provider's compaction replayed, so the loop's later requests carry no
+        # native settings: each route sends them as plain requests, and this hook sizes and compacts them as text.
+        state.request_template = replace(state.request_template, native_compaction=None)
     rewritten_tokens = await asyncio.to_thread(_estimated_request_tokens, binding, messages, state.tools)
     _require_fit(policy, rewritten_tokens, summary_message)
     if rewritten_tokens > policy.limit:
@@ -240,15 +242,6 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
             run_id=state.record.run_id,
         )
         binding.stopped = True
-
-
-def _stop_native_compaction(state: LoopState) -> None:
-    """Turn the provider's compaction off for the rest of this loop; the fold replaced the checkpoints it replayed.
-
-    Later requests of the loop carry no native settings, so each route sends them as plain requests (Responses with
-    its storage setting restored), and the hook, which reads them from the request, sizes and compacts them as text.
-    """
-    state.request_template = replace(state.request_template, native_compaction=None)
 
 
 async def _summarize(
@@ -273,8 +266,6 @@ async def _summarize(
             _finish(messages, layout, summary_message, record)
             return summary_message
         return await _compact_scope(binding, inputs, layout, messages, record, session, request_tokens)
-    except asyncio.CancelledError:
-        raise
     except Exception:
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=record.run_id)
         return None
