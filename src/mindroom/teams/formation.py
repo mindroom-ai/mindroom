@@ -6,7 +6,7 @@ execution-time mode choice for an ad hoc team asks a model.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -103,26 +103,6 @@ class TeamResolution:
         )
 
     @classmethod
-    def reject(
-        cls,
-        *,
-        intent: TeamIntent,
-        requested_members: list[MatrixID],
-        member_statuses: list[TeamResolutionMember],
-        reason: str,
-    ) -> TeamResolution:
-        """Return an explicit rejection result."""
-        eligible_members = [member.agent for member in member_statuses if member.status is TeamMemberStatus.ELIGIBLE]
-        return cls(
-            intent=intent,
-            requested_members=requested_members,
-            member_statuses=member_statuses,
-            eligible_members=eligible_members,
-            outcome=TeamOutcome.REJECT,
-            reason=reason,
-        )
-
-    @classmethod
     def team(
         cls,
         *,
@@ -165,7 +145,7 @@ class TeamResolution:
 class _SelectedTeamRequest:
     """Normalized team request selected from one message context."""
 
-    intent: TeamIntent | None
+    intent: TeamIntent
     requested_members: list[MatrixID]
 
 
@@ -175,17 +155,9 @@ async def _select_team_mode(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> TeamMode:
-    """Use AI to determine optimal team collaboration mode.
+    """Ask the default model whether ``agent_names`` should coordinate or collaborate on ``message``.
 
-    Args:
-        message: The user's message/task
-        agent_names: List of agents that will form the team
-        config: Application configuration for model access
-        runtime_paths: Explicit runtime context for model and Matrix identity resolution
-
-    Returns:
-        TeamMode.COORDINATE or TeamMode.COLLABORATE
-
+    A failed call or an answer outside the schema collaborates.
     """
     prompt = config.render_prompt(
         "TEAM_MODE_SELECTION_PROMPT_TEMPLATE",
@@ -201,19 +173,15 @@ async def _select_team_mode(
             schema=_TeamModeDecision,
         )
         await record_system_usage(result.record, runtime_paths=runtime_paths, kind="team_mode")
-        decision = result.content
-        if isinstance(decision, _TeamModeDecision):
-            logger.info("team_mode_decided", mode=decision.mode, reasoning=decision.reasoning)
-            return TeamMode.COORDINATE if decision.mode == "coordinate" else TeamMode.COLLABORATE
-        # Fallback if response is unexpected
-        logger.debug(
-            "team_mode_decision_unexpected_type",
-            response_type=type(decision).__name__,
-        )
-        return TeamMode.COLLABORATE  # noqa: TRY300
     except Exception as e:
         logger.warning("team_mode_decision_failed", error=str(e))
         return TeamMode.COLLABORATE
+    decision = result.content
+    if not isinstance(decision, _TeamModeDecision):
+        logger.debug("team_mode_decision_unexpected_type", response_type=type(decision).__name__)
+        return TeamMode.COLLABORATE
+    logger.info("team_mode_decided", mode=decision.mode, reasoning=decision.reasoning)
+    return TeamMode(decision.mode)
 
 
 def resolve_live_shared_agent_names(
@@ -265,27 +233,11 @@ def decide_team_formation(
 ) -> TeamResolution:
     """Determine if a team should form, purely from mention, thread, and room context.
 
-    Team resolutions carry a heuristic provisional mode: COORDINATE when agents
-    are explicitly tagged (they likely have different roles), COLLABORATE when
-    agents come from thread history (likely discussing the same topic). The
-    execution layer may refine it with ``select_ad_hoc_team_mode``.
-
-    Args:
-        tagged_agents: Raw agents explicitly mentioned in the current message
-        agents_in_thread: Agents that have participated in the thread
-        all_mentioned_in_thread: All agents ever mentioned in the thread
-        room: The Matrix room object when room-membership visibility is available
-        runtime_paths: Explicit runtime context for permissions and identity resolution
-        config: Application configuration
-        is_dm_room: Whether this is a DM room
-        is_thread: Whether the current message is in a thread
-        available_responders_in_room: Optional pre-filtered room responders for sender-visible availability
-        materializable_agent_names: Optional live agent names that can currently produce a response
-        allow_explicit_private_agents: Whether explicitly tagged requester-private agents may join
-
-    Returns:
-        TeamResolution with explicit intent, member statuses, and final outcome
-
+    ``available_responders_in_room`` are the room's responders the sender may see and ``materializable_agent_names``
+    the live agents that can answer now, each when known; ``allow_explicit_private_agents`` lets explicitly tagged
+    requester-private agents join. A team carries a heuristic provisional mode: COORDINATE when agents are explicitly
+    tagged (they likely have different roles), COLLABORATE when agents come from thread history (likely discussing the
+    same topic). The execution layer may refine it with ``select_ad_hoc_team_mode``.
     """
     team_request = _select_team_request(
         tagged_agents,
@@ -298,7 +250,7 @@ def decide_team_formation(
         is_thread=is_thread,
         available_responders_in_room=available_responders_in_room,
     )
-    if team_request.intent is None or not team_request.requested_members:
+    if team_request is None:
         return TeamResolution.none()
 
     allow_direct_private_agents = allow_explicit_private_agents and team_request.intent is TeamIntent.EXPLICIT_MEMBERS
@@ -316,18 +268,14 @@ def decide_team_formation(
         materializable_agent_names=materializable_agent_names,
         allow_direct_private_agents=allow_direct_private_agents,
     )
-    resolution = _resolve_team_request(
+    return _resolve_team_request(
         intent=team_request.intent,
         requested_members=team_request.requested_members,
         member_statuses=member_statuses,
         config=config,
         reason_prefix="Team request",
+        mode=TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE,
     )
-    if resolution.outcome is not TeamOutcome.TEAM:
-        return resolution
-
-    mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
-    return replace(resolution, mode=mode)
 
 
 async def select_ad_hoc_team_mode(
@@ -404,51 +352,36 @@ def _select_team_request(
     is_dm_room: bool,
     is_thread: bool,
     available_responders_in_room: list[MatrixID] | None,
-) -> _SelectedTeamRequest:
-    """Return the normalized team request implied by one message context."""
-    normalized_tagged_agents = _normalize_team_request_members(tagged_agents, config, runtime_paths)
-    if len(normalized_tagged_agents) > 1:
-        logger.info(
-            "team_formation_requested",
-            trigger="tagged_agents",
-            agents=[agent.full_id for agent in normalized_tagged_agents],
-        )
-        return _SelectedTeamRequest(TeamIntent.EXPLICIT_MEMBERS, normalized_tagged_agents)
+) -> _SelectedTeamRequest | None:
+    """Return the normalized team request implied by one message context, or None when it implies no team.
 
-    normalized_mentioned_agents = _normalize_team_request_members(all_mentioned_in_thread, config, runtime_paths)
-    if not normalized_tagged_agents and len(normalized_mentioned_agents) > 1:
-        logger.info(
-            "team_formation_requested",
-            trigger="previously_mentioned_agents",
-            agents=[agent.full_id for agent in normalized_mentioned_agents],
-        )
-        return _SelectedTeamRequest(TeamIntent.IMPLICIT_THREAD_TEAM, normalized_mentioned_agents)
+    One tagged agent answers alone; with none tagged, the thread's agents or a DM room's responders may form a team.
+    """
+    tagged_members = _normalize_team_request_members(tagged_agents, config, runtime_paths)
+    if len(tagged_members) > 1:
+        return _requested_team("tagged_agents", TeamIntent.EXPLICIT_MEMBERS, tagged_members)
+    if tagged_members:
+        return None
+    for trigger, thread_agents in (
+        ("previously_mentioned_agents", all_mentioned_in_thread),
+        ("thread_agents", agents_in_thread),
+    ):
+        thread_members = _normalize_team_request_members(thread_agents, config, runtime_paths)
+        if len(thread_members) > 1:
+            return _requested_team(trigger, TeamIntent.IMPLICIT_THREAD_TEAM, thread_members)
+    if not is_dm_room or is_thread or room is None:
+        return None
+    if available_responders_in_room is None:
+        available_responders_in_room = get_available_responders_in_room(room, config, runtime_paths)
+    responders = _normalize_team_request_members(available_responders_in_room, config, runtime_paths)
+    if len(responders) <= 1:
+        return None
+    return _requested_team("dm_room_multiple_agents", TeamIntent.DM_AUTO_TEAM, responders)
 
-    normalized_thread_agents = _normalize_team_request_members(agents_in_thread, config, runtime_paths)
-    if not normalized_tagged_agents and len(normalized_thread_agents) > 1:
-        logger.info(
-            "team_formation_requested",
-            trigger="thread_agents",
-            agents=[agent.full_id for agent in normalized_thread_agents],
-        )
-        return _SelectedTeamRequest(TeamIntent.IMPLICIT_THREAD_TEAM, normalized_thread_agents)
 
-    if not (is_dm_room and not is_thread and not normalized_tagged_agents and room):
-        return _SelectedTeamRequest(None, [])
-
-    available_responders = available_responders_in_room
-    if available_responders is None:
-        available_responders = get_available_responders_in_room(room, config, runtime_paths)
-    normalized_available_responders = _normalize_team_request_members(available_responders, config, runtime_paths)
-    if len(normalized_available_responders) <= 1:
-        return _SelectedTeamRequest(None, [])
-
-    logger.info(
-        "team_formation_requested",
-        trigger="dm_room_multiple_agents",
-        agents=[responder.full_id for responder in normalized_available_responders],
-    )
-    return _SelectedTeamRequest(TeamIntent.DM_AUTO_TEAM, normalized_available_responders)
+def _requested_team(trigger: str, intent: TeamIntent, members: list[MatrixID]) -> _SelectedTeamRequest:
+    logger.info("team_formation_requested", trigger=trigger, agents=[agent.full_id for agent in members])
+    return _SelectedTeamRequest(intent, members)
 
 
 # How a rejection reads for one agent and for several, by the status that rejected them.
@@ -489,32 +422,26 @@ def _evaluate_team_members(
     materializable_agent_names: set[str] | None,
     allow_direct_private_agents: bool,
 ) -> list[TeamResolutionMember]:
-    """Evaluate one status and response capability for each requested member."""
-    room_visible_ids: set[str] | None = None
-    if sender_visible_responders is None and room is not None:
-        room_visible_ids = {
-            agent_id.full_id
-            for agent_id in _normalize_team_request_members(
-                get_available_responders_in_room(room, config, runtime_paths),
-                config,
-                runtime_paths,
-            )
-        }
-    sender_visible_ids: set[str] | None = None
-    if sender_visible_responders is not None:
-        sender_visible_ids = {
-            agent_id.full_id
-            for agent_id in _normalize_team_request_members(sender_visible_responders, config, runtime_paths)
-        }
+    """Evaluate one status and response capability for each requested member, a teamable agent.
 
+    The sender's view of the room decides visibility when given, else the room's membership when known.
+    """
+    sender_visible_ids = (
+        {agent_id.full_id for agent_id in sender_visible_responders} if sender_visible_responders is not None else None
+    )
+    room_visible_ids = (
+        {agent_id.full_id for agent_id in get_available_responders_in_room(room, config, runtime_paths)}
+        if sender_visible_ids is None and room is not None
+        else None
+    )
+    agent_names = [_team_member_name(agent_id, config, runtime_paths) for agent_id in requested_members]
     unsupported_agents = config.get_unsupported_team_agents(
-        [_team_member_name(agent_id, config, runtime_paths) for agent_id in requested_members],
+        agent_names,
         allow_direct_private_agents=allow_direct_private_agents,
     )
 
     member_statuses: list[TeamResolutionMember] = []
-    for agent_id in requested_members:
-        agent_name = _team_member_name(agent_id, config, runtime_paths)
+    for agent_id, agent_name in zip(requested_members, agent_names, strict=True):
         private_targets = unsupported_agents.get(agent_name)
         is_room_visible = room_visible_ids is None or agent_id.full_id in room_visible_ids
         is_sender_visible = sender_visible_ids is None or agent_id.full_id in sender_visible_ids
@@ -547,7 +474,7 @@ def _resolve_team_request(
     member_statuses: list[TeamResolutionMember],
     config: Config,
     reason_prefix: str,
-    mode: TeamMode | None = None,
+    mode: TeamMode,
 ) -> TeamResolution:
     """Apply one clear outcome policy after intent and member evaluation.
 
@@ -558,41 +485,35 @@ def _resolve_team_request(
 
     if intent in {TeamIntent.EXPLICIT_MEMBERS, TeamIntent.CONFIGURED_TEAM}:
         if rejected_members:
-            return TeamResolution.reject(
+            return TeamResolution(
                 intent=intent,
                 requested_members=requested_members,
                 member_statuses=member_statuses,
+                eligible_members=eligible_members,
+                outcome=TeamOutcome.REJECT,
                 reason=_team_resolution_reason(rejected_members, config, reason_prefix=reason_prefix),
             )
-        return TeamResolution.team(
-            intent=intent,
-            requested_members=requested_members,
-            member_statuses=member_statuses,
-            eligible_members=eligible_members,
-            mode=mode or TeamMode.COLLABORATE,
-        )
-
-    if len(eligible_members) >= 2:
-        return TeamResolution.team(
-            intent=intent,
-            requested_members=requested_members,
-            member_statuses=member_statuses,
-            eligible_members=eligible_members,
-            mode=mode or TeamMode.COLLABORATE,
-        )
-    if len(eligible_members) == 1:
+    elif len(eligible_members) == 1:
         return TeamResolution.individual(
             intent=intent,
             requested_members=requested_members,
             member_statuses=member_statuses,
             agent=eligible_members[0],
         )
-    return TeamResolution(
+    elif not eligible_members:
+        return TeamResolution(
+            intent=intent,
+            requested_members=requested_members,
+            member_statuses=member_statuses,
+            eligible_members=[],
+            outcome=TeamOutcome.NONE,
+        )
+    return TeamResolution.team(
         intent=intent,
         requested_members=requested_members,
         member_statuses=member_statuses,
-        eligible_members=[],
-        outcome=TeamOutcome.NONE,
+        eligible_members=eligible_members,
+        mode=mode,
     )
 
 
