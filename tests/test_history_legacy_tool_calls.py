@@ -7,11 +7,17 @@ import copy
 import json
 from typing import Any
 
+import pytest
+
+from mindroom.agent_loop.run import resume_agent, run_agent
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request, scope_history_messages
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.codec import run_from_row
+from tests.agent_loop.helpers import collect, context, gated, spec
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 _CALL = {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}
@@ -108,3 +114,50 @@ def test_a_paused_run_resumes_without_its_placeholders() -> None:
 
     assert _calls_and_results(request) == ([_CALL], [])
     assert request[0] is paused[0]
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_legacy_run_is_stored_in_the_current_shape() -> None:
+    """The resumed run stores the request it sent, so a legacy paused run is stored repaired and its row is not."""
+
+    def run_shell_command(args: list[str]) -> str:
+        """Run one command.
+
+        Args:
+            args: The command and its arguments.
+
+        """
+        return " ".join(args)
+
+    model = ScriptedModel([calls(tool_call("run_shell_command", "call-1", args=["echo", "hi"])), answer("Done.")])
+    agent = spec(model, gated(run_shell_command))
+    _events, paused = await collect(run_agent(agent, [Message(role="user", content="Run it")], ctx=context()))
+    assert paused.status is RunStatus.paused
+    call_message = next(message for message in paused.messages if message.tool_calls)
+    call_message.tool_calls = [_PLACEHOLDER, *(call_message.tool_calls or [])]
+    paused.messages.append(Message(role="tool", tool_call_id="call_0", content="orphan"))
+    stored_paused = copy.deepcopy(paused.messages)
+    approved = ApprovalCall(
+        tool_call_id="call-1",
+        tool_name="run_shell_command",
+        invoking_agent="code",
+        expires_at_ns=2**62,
+        toolkit_name="gated",
+        arguments_digest=approval_arguments_digest({"args": ["echo", "hi"]}),
+    )
+
+    _events, record = await collect(
+        resume_agent(
+            agent,
+            paused,
+            build_resume_request(paused=paused.messages, summary=None, history=[]),
+            approved=[approved],
+            ctx=context(),
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    stored_calls, stored_results = _calls_and_results(record.messages)
+    assert [call["id"] for call in stored_calls] == ["call-1"]
+    assert stored_results == ["call-1"]
+    assert paused.messages == stored_paused
