@@ -384,24 +384,20 @@ class ConversationStore:
 
     def get_run(self, run_id: str) -> AnyRunRecord | None:
         """Return one stored run, in whatever session, as stored."""
-        with self.transaction(write=False) as connection:
-            if self.names.runs not in table_names(connection):
-                return None
-            row = connection.execute(
-                f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} WHERE run_id = ?",  # noqa: S608
-                (run_id,),
-            ).fetchone()
-        return None if row is None else run_from_row(*row)
+        return next(iter(self._stored_runs("run_id = ?", run_id)), None)
 
     def list_runs(self, session_id: str) -> list[AnyRunRecord]:
         """Return the session's whole run log as stored, member runs included, in log order."""
+        return self._stored_runs("session_id = ? ORDER BY run_index, created_at, run_id", session_id)
+
+    def _stored_runs(self, condition: str, value: str) -> list[AnyRunRecord]:
+        """Decode the stored runs whose rows match ``condition`` on ``value``, skipping rows of other run types."""
         with self.transaction(write=False) as connection:
             if self.names.runs not in table_names(connection):
                 return []
             rows = connection.execute(
-                f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} "  # noqa: S608
-                "WHERE session_id = ? ORDER BY run_index, created_at, run_id",
-                (session_id,),
+                f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} WHERE {condition}",  # noqa: S608
+                (value,),
             ).fetchall()
         return [run for run in (run_from_row(*row) for row in rows) if run is not None]
 
