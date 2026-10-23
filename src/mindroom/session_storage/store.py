@@ -29,7 +29,7 @@ from mindroom.session_storage.codec import run_from_row, run_type
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_runs, move_blob_runs_to_rows
 from mindroom.session_storage.schema import run_log_sql, schema_sql, table_names
-from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
+from mindroom.session_storage.types import ConversationSession, SessionFields, SessionStateWrite, session_state_snapshot
 from mindroom.usage.storage import TOKEN_FIELDS, project_usage, quote_identifier, usage_upsert_sql
 
 if TYPE_CHECKING:
@@ -232,7 +232,14 @@ class ConversationStore:
             created = _ensure_session_row(connection, self.names, session)
         _record_stored_state(session, created)
 
-    def save_run(self, session: ConversationSession, run: AnyRunRecord, *, record_usage: bool) -> SaveOutcome:
+    def save_run(
+        self,
+        session: ConversationSession,
+        run: AnyRunRecord,
+        *,
+        record_usage: bool,
+        state: SessionStateWrite | None = None,
+    ) -> SaveOutcome:
         """Save one run of ``session`` under the conversation log's insertion rules, creating the session row if needed.
 
         A run a cut removed, or a member of one, writes no row (``"removed"``). A visible run behind its scope's
@@ -243,9 +250,18 @@ class ConversationStore:
         A frozen run's usage is final and changes neither. A run that names a requester gives a session row that has
         none the requester, whoever created the row.
 
+        With ``state``, the run and the session state it ran with commit in one transaction, so a failure leaves
+        neither (see ``SessionStateWrite``).
+
         Once the save commits, ``session.runs`` holds the run as the store does (see ``_reconcile``).
         """
-        return self._save_run_dict(session, run.to_dict(), row_type=run_type(run), record_usage=record_usage)
+        return self._save_run_dict(
+            session,
+            run.to_dict(),
+            row_type=run_type(run),
+            record_usage=record_usage,
+            state=state,
+        )
 
     def _save_run_dict(
         self,
@@ -254,18 +270,28 @@ class ConversationStore:
         *,
         row_type: SessionKind,
         record_usage: bool,
+        state: SessionStateWrite | None,
     ) -> SaveOutcome:
         with self.transaction(write=True) as connection:
             created = _ensure_session_row(connection, self.names, session)
             saved = self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
+            written = self._write_state(connection, session, created, state)
         _record_stored_state(session, created)
+        _record_written_state(state, written)
         _reconcile(session, [saved])
         return saved.outcome
 
-    def save_runs(self, session: ConversationSession, runs: Iterable[AnyRunRecord]) -> None:
+    def save_runs(
+        self,
+        session: ConversationSession,
+        runs: Iterable[AnyRunRecord],
+        *,
+        state: SessionStateWrite | None = None,
+    ) -> None:
         """Write conversation-only changes to runs of ``session`` in one transaction, then reconcile its copies.
 
-        Conversation rewrites leave the usage ledger and session totals untouched. Once the transaction commits,
+        Conversation rewrites leave the usage ledger and session totals untouched. With ``state``, the session state
+        commits in the same transaction (see ``SessionStateWrite``). Once the transaction commits,
         ``session.runs`` holds each run as the store does (see ``_reconcile``), so a removed run leaves the session
         and a frozen one keeps the session's copy. Callers therefore edit a copy and hand the copy here: a refused
         save must leave the session's copy as stored.
@@ -289,7 +315,9 @@ class ConversationStore:
                 )
                 for run in runs
             ]
+            written = self._write_state(connection, session, created, state)
         _record_stored_state(session, created)
+        _record_written_state(state, written)
         _reconcile(session, saved)
 
     def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
@@ -299,22 +327,30 @@ class ConversationStore:
         before awaiting it, as the run's tools change the live state in place meanwhile. It is recorded as
         ``session.stored_session_state``, so the caller must not change it.
         """
-        sessions = quote_identifier(self.names.sessions)
         with self.transaction(write=True) as connection:
             _ensure_session_row(connection, self.names, session)
-            (stored,) = connection.execute(
-                f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
-                (session.session_id,),
-            ).fetchone()
-            connection.execute(
-                f"UPDATE {sessions} SET session_data = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
-                (
-                    json.dumps({**(_decoded_mapping(stored) or {}), "session_state": state}),
-                    int(time()),
-                    session.session_id,
-                ),
-            )
+            _write_session_state(connection, self.names, session.session_id, state)
         _record_stored_state(session, state)
+
+    def _write_state(
+        self,
+        connection: sqlite3.Connection,
+        session: ConversationSession,
+        created: dict[str, Any] | None,
+        state: SessionStateWrite | None,
+    ) -> dict[str, Any] | None:
+        """Write ``state`` into ``session``'s row in the caller's write transaction unless the row already holds it.
+
+        The row holds ``created`` when this transaction created it, and otherwise what ``state.session`` last knew
+        it to hold, which every committed write of the field records. Returns the state written, or None.
+        """
+        if state is None:
+            return None
+        held = state.session.stored_session_state if created is None else created
+        if state.state == held:
+            return None
+        _write_session_state(connection, self.names, session.session_id, state.state)
+        return state.state
 
     def update_metadata(
         self,
@@ -564,9 +600,9 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
 
     The record and ``session.session_state``, which the run's tools change in place, are copied on the caller's task
-    before the lane is awaited, so what lands is what was handed over. The state is written back when it differs
-    from ``session.stored_session_state``, which every write of the field records, after the record and in the same
-    lane, so a turn whose runs or checkpoints change the state and restore it stores it restored.
+    before the lane is awaited, so what lands is what was handed over. The state is written back, in the record's
+    own transaction, when it differs from ``session.stored_session_state``, which every write of the field records,
+    so a turn whose runs or checkpoints change the state and restore it stores it restored.
     The save reconciles ``session.runs`` with what it stored (see ``_reconcile``) in the lane, where the session's
     saves run one at a time; it completes even when the caller is cancelled, as the lane's operations do.
     """
@@ -574,16 +610,33 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     async def persist(record: AnyRunRecord) -> None:
         data = record.to_dict()
         row_type = run_type(record)
-        state = session_state_snapshot(session.session_state)
-
-        def operation(opened: ConversationStore) -> None:
-            opened._save_run_dict(session, data, row_type=row_type, record_usage=True)
-            if state != session.stored_session_state:
-                opened.save_session_state(session, state)
-
-        await run_session_storage_operation(lambda: store, operation)
+        await write_with_session_state(
+            store,
+            session,
+            lambda opened, state: opened._save_run_dict(
+                session,
+                data,
+                row_type=row_type,
+                record_usage=True,
+                state=state,
+            ),
+        )
 
     return persist
+
+
+async def write_with_session_state[Result](
+    store: ConversationStore,
+    session: ConversationSession,
+    write: Callable[[ConversationStore, SessionStateWrite], Result],
+) -> Result:
+    """Run ``write`` in ``store``'s lane with a copy of ``session``'s state taken now, on the caller's task.
+
+    The run's tools change the live state in place while the lane is busy, so the copy is taken before the lane is
+    awaited. ``write`` hands it to the run save it makes (``state=``), which commits it with the run.
+    """
+    state = SessionStateWrite(session, session_state_snapshot(session.session_state))
+    return await run_session_storage_operation(lambda: store, lambda opened: write(opened, state))
 
 
 def _decoded_mapping(raw_value: object) -> dict[str, Any] | None:
@@ -658,6 +711,30 @@ def _record_stored_state(session: ConversationSession, state: dict[str, Any] | N
     """Record ``state``, the session state a committed write left in the row, as ``session.stored_session_state``."""
     if state is not None:
         session.stored_session_state = state
+
+
+def _record_written_state(state: SessionStateWrite | None, written: dict[str, Any] | None) -> None:
+    """Record the state a committed save wrote beside its run on the session its snapshot was taken from."""
+    if state is not None:
+        _record_stored_state(state.session, written)
+
+
+def _write_session_state(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    state: dict[str, Any],
+) -> None:
+    """Replace the ``session_state`` of an existing session row, leaving the rest of its ``session_data`` alone."""
+    sessions = quote_identifier(names.sessions)
+    (stored,) = connection.execute(
+        f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
+        (session_id,),
+    ).fetchone()
+    connection.execute(
+        f"UPDATE {sessions} SET session_data = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
+        (json.dumps({**(_decoded_mapping(stored) or {}), "session_state": state}), int(time()), session_id),
+    )
 
 
 def _write_run_row(
@@ -926,4 +1003,5 @@ __all__ = [
     "open_conversation_store",
     "persist_to",
     "runs_without",
+    "write_with_session_state",
 ]

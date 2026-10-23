@@ -1075,8 +1075,8 @@ async def test_persist_to_writes_back_a_session_state_restored_after_an_earlier_
 
 
 @pytest.mark.asyncio
-async def test_persist_to_retries_a_changed_session_state_whose_write_failed(store: ConversationStore) -> None:
-    """A state write that fails is written by the next save of the same state, so a lost write is never taken as done."""
+async def test_persist_to_stores_a_record_and_its_state_together_or_neither(store: ConversationStore) -> None:
+    """A state write that fails takes its record with it, so a paused run never stores without the state it ran with."""
     _seed(store, [_run("r1")])
     session = _loaded(store)
     session.session_state = {"cwd": "/repo"}
@@ -1091,14 +1091,17 @@ async def test_persist_to_retries_a_changed_session_state_whose_write_failed(sto
     session.session_state["cwd"] = "/repo/sub"
 
     with pytest.raises(sqlite3.IntegrityError, match="state refused"):
-        await persist(_run("r2"))
+        await persist(_run("r2", RunStatus.paused))
     assert _loaded(store).session_state == {"cwd": "/repo"}
+    assert _loaded_ids(store) == ["r1"]
+    assert not _has_usage(store, "r2")
+    assert session.stored_session_state == {"cwd": "/repo"}
 
     _execute(store, "DROP TRIGGER refuse_state")
-    await persist(_run("r3"))
+    await persist(_run("r2", RunStatus.paused))
 
     assert _loaded(store).session_state == {"cwd": "/repo/sub"}
-    assert _loaded_ids(store) == ["r1", "r2", "r3"]
+    assert _loaded_ids(store) == ["r1", "r2"]
 
 
 @pytest.mark.asyncio

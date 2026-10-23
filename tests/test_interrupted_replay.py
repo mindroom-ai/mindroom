@@ -23,7 +23,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.types import ConversationSession
+from mindroom.session_storage.types import ConversationSession, SessionStateWrite, session_state_snapshot
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import seed_session
 from tests.history_helpers import store_fold
@@ -444,6 +444,72 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
     assert persisted is not None
     assert persisted.runs is not None
     assert [run.run_id for run in persisted.runs] == ["old1", "old2", "cancelled-run"]
+
+
+def test_an_interrupted_replay_and_the_session_state_it_carries_commit_together_or_neither(tmp_path: Path) -> None:
+    """A recovered call's state and the replay run that records it land in one transaction, as the session recorded it."""
+    storage = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
+    seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id="session-1",
+            owner_id="test_agent",
+            runs=[_completed_run("old1", "First response")],
+            metadata={},
+            created_at=1,
+            updated_at=1,
+        ),
+    )
+    session = storage.load_session("session-1", "agent")
+    assert session is not None
+    session.session_state["recovered"] = "value"
+    state = SessionStateWrite(session, session_state_snapshot(session.session_state))
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        user_message_is_structured=False,
+        partial_text="Text emitted before interruption",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=None,
+    )
+    replay = {
+        "storage": storage,
+        "session": session,
+        "session_id": "session-1",
+        "scope_id": "test_agent",
+        "run_id": "cancelled-run",
+        "snapshot": snapshot,
+        "is_team": False,
+        "state": state,
+    }
+    database = tmp_path / "sessions" / "test_agent.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TRIGGER refuse_replay BEFORE INSERT ON test_agent_sessions_runs "
+            "WHEN NEW.run_id = 'cancelled-run' BEGIN SELECT RAISE(ABORT, 'replay refused'); END",
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="replay refused"):
+        persist_interrupted_replay_snapshot(**replay)
+
+    fields = storage.read_session_fields("session-1")
+    assert fields is not None
+    assert fields.session_state == {}
+    assert session.stored_session_state == {}
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER refuse_replay")
+    persist_interrupted_replay_snapshot(**replay)
+
+    fields = storage.read_session_fields("session-1")
+    assert fields is not None
+    assert fields.session_state == {"recovered": "value"}
+    # The replay run is saved through a fresh load of the row; the session the state came from still records it.
+    assert session.stored_session_state == {"recovered": "value"}
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs] == ["old1", "cancelled-run"]
 
 
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])

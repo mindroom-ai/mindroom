@@ -196,19 +196,16 @@ path = "mindroom.agent_cli.checkpoint"
 depends_on = [
     "mindroom.agent_loop",
     "mindroom.llm",
-    "mindroom.session_storage.lanes",
-    "mindroom.session_storage.types",
+    "mindroom.session_storage.store",
 ]
 visibility = [
     "mindroom.agent_cli.turn",
-    "mindroom.agent_cli.cli_approval_recovery",
 ]
 
 [[interfaces]]
 from = ["mindroom.agent_cli.checkpoint"]
 expose = [
     "BatchCheckpoint",
-    "save_cli_session",
 ]
 
 [[modules]]
@@ -8600,10 +8597,10 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
-    "mindroom.agent_cli.checkpoint",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_loop",
     "mindroom.llm",
+    "mindroom.session_storage.store",
 ]
 visibility = [
     "mindroom.approval.execution",

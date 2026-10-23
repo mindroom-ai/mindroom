@@ -30,6 +30,18 @@ def session_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionStateWrite:
+    """The ``session_state`` a run save writes beside its run: ``state``, a ``session_state_snapshot`` of ``session``.
+
+    ``session`` is the loaded copy of the row that the snapshot was taken from, and it records what the row holds
+    afterwards. The save writes ``state`` only when the row does not already hold it.
+    """
+
+    session: ConversationSession
+    state: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class SessionFields:
     """The two session-row fields MindRoom writes by field: scope metadata and the tools' shared ``session_state``."""
 
@@ -76,5 +88,6 @@ __all__ = [
     "SaveOutcome",
     "SessionFields",
     "SessionKind",
+    "SessionStateWrite",
     "session_state_snapshot",
 ]

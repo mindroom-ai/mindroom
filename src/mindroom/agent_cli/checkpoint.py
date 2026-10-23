@@ -15,21 +15,18 @@ from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.tools import tool_result_message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.types import session_state_snapshot
+from mindroom.session_storage.store import write_with_session_state
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from mindroom.agent_loop.model_loop import LoopState
     from mindroom.agent_loop.tools import PlannedCall
     from mindroom.llm.messages import Message
-    from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
     from mindroom.tool_system.tool_function import ToolValue
 
-__all__ = ["BatchCheckpoint", "save_cli_session"]
+__all__ = ["BatchCheckpoint"]
 
 
 @dataclass
@@ -136,30 +133,14 @@ class BatchCheckpoint:
     async def _save(self, run: RunRecord) -> None:
         run.status = RunStatus.cancelled
         catalog = self.catalog
-        await save_cli_session(
-            catalog.store,
-            catalog.session,
-            lambda store, session: store.save_run(session, run, record_usage=False),
+        store = catalog.store
+        if store is None:
+            msg = "CLI history requires persisted session storage"
+            raise RuntimeError(msg)
+        session = catalog.session
+        # The run and the session state its Bash calls ran with commit together, failures propagate unchanged.
+        await write_with_session_state(
+            store,
+            session,
+            lambda opened, state: opened.save_run(session, run, record_usage=False, state=state),
         )
-
-
-async def save_cli_session(
-    store: ConversationStore | None,
-    session: ConversationSession,
-    write: Callable[[ConversationStore, ConversationSession], object],
-) -> None:
-    """Save the session's current state, then ``write``'s runs, in the store's lane; failures propagate.
-
-    The store records the state it writes as ``session.stored_session_state``, and ``write`` saves through the
-    session, which then holds its runs as the store does.
-    """
-    if store is None:
-        msg = "CLI history requires persisted session storage"
-        raise RuntimeError(msg)
-    state = session_state_snapshot(session.session_state)
-
-    def operation(opened: ConversationStore) -> None:
-        opened.save_session_state(session, state)
-        write(opened, session)
-
-    await run_session_storage_operation(lambda: store, operation)
