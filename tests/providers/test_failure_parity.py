@@ -20,6 +20,7 @@ import httpx
 import pytest
 
 from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
     INCOMPLETE_STREAM,
     MALFORMED_TOOL_CALL,
@@ -1255,6 +1256,38 @@ async def test_a_failed_request_is_retried_and_reported_as_the_parity_table_says
     assert get_user_friendly_error_message(raised.value).startswith(row.message)
     if row.code is not None:
         assert raised.value.code == row.code
+
+
+# Each route's answer to a request its server failed, which the SDK and the stream retry would both reissue.
+_SERVER_FAILURES = {row.route: row.reply for row in ROWS if row.failure in {"http_500", "http_503"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", sorted(_SERVER_FAILURES))
+async def test_a_compaction_summary_attempt_sends_one_request_on_every_route(route: str, tmp_path: Path) -> None:
+    """Compaction retries a failed summary itself, so neither the SDK nor the stream retry reissues an attempt.
+
+    Codex streams every request, and its summaries once took the stream's four retries on top of compaction's.
+    """
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        answer = _SERVER_FAILURES[route]()
+        assert isinstance(answer, httpx.Response)
+        return answer
+
+    provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+
+    with pytest.raises(ProviderUnavailable):
+        await generate_compaction_summary(
+            model=provider,
+            summary_input="Conversation",
+            summary_prompt="Summarize",
+            timeout_seconds=10,
+        )
+
+    assert len(sent) == 1
 
 
 # --- CLI login refresh --------------------------------------------------------------------------------------------

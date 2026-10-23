@@ -178,7 +178,7 @@ async def test_an_unreadable_structured_answer_stays_text() -> None:
 async def test_a_request_carries_the_callers_overrides_and_no_tools() -> None:
     """Per-call overrides reach the request, and a helper request offers no tools."""
     provider = _RecordingProvider(answer="ok")
-    overrides = RequestOverrides(temperature=0.2, sdk_max_retries=0)
+    overrides = RequestOverrides(temperature=0.2, caller_retries=True)
 
     await complete_once(provider, _messages(PromptSpec(role="Summarize."), "Thread: ..."), overrides=overrides)
 

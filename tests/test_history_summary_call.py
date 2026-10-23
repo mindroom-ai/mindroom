@@ -104,7 +104,7 @@ async def test_the_summary_request_is_one_call_without_provider_retries_thinking
     assert request.stream is False
     assert request.tools == ()
     assert request.tool_choice is None
-    assert request.overrides == RequestOverrides(sdk_max_retries=0, prompt_cache=False, disable_thinking=True)
+    assert request.overrides == RequestOverrides(caller_retries=True, prompt_cache=False, disable_thinking=True)
 
 
 class _ProviderCall:

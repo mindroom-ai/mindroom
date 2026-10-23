@@ -516,8 +516,8 @@ async def test_http_errors_map_to_typed_provider_errors(
     retryable: bool,
 ) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _json_reply(body, status=status))
-    # A non-streaming request skips the stream retry stage, so the adapter's own error reaches the caller.
-    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(sdk_max_retries=0))
+    # A caller that retries the request itself turns the SDK's retries off, so the adapter's own error arrives at once.
+    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(caller_retries=True))
 
     with pytest.raises(ProviderError) as info:
         await _turn(built, request)
@@ -613,7 +613,7 @@ async def test_a_context_window_error_inside_a_stream_is_typed(tmp_path: Path) -
 async def test_an_error_body_without_a_message_reports_the_response_text(tmp_path: Path) -> None:
     """Servers that answer outside the OpenAI error shape still surface what they said."""
     built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply({"detail": "Not Found"}, status=404))
-    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(sdk_max_retries=0))
+    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(caller_retries=True))
 
     with pytest.raises(InvalidRequest) as info:
         await _turn(built, request)

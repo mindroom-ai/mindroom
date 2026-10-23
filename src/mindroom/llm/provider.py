@@ -80,10 +80,14 @@ class ToolSpec:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestOverrides:
-    """Per-request knobs that override the adapter's configured defaults; None leaves a default untouched."""
+    """Per-request knobs that override the adapter's configured defaults; None leaves a default untouched.
+
+    ``caller_retries`` says the caller retries a failed request itself, so nothing below it may: neither the SDK's
+    own HTTP retries nor the pipeline's stream retry reissues the request.
+    """
 
     temperature: float | None = None
-    sdk_max_retries: int | None = None
+    caller_retries: bool = False
     prompt_cache: bool | None = None
     disable_thinking: bool = False
 

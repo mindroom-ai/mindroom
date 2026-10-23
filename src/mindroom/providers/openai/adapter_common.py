@@ -25,7 +25,7 @@ class SDKClients:
     _cache: list[AsyncOpenAI] = field(default_factory=list, repr=False, compare=False)
 
     async def client(self, overrides: RequestOverrides) -> AsyncOpenAI:
-        """Return the client for one request, with the request's SDK retry override applied."""
+        """Return the client for one request, without the SDK's retries when the caller retries the request itself."""
         if self.per_request:
             # Borrowing a CLI login token may refresh it under a file lock, so it stays off the event loop.
             client = await asyncio.to_thread(self.factory)
@@ -34,8 +34,8 @@ class SDKClients:
         else:
             client = self.factory()
             self._cache.append(client)
-        if overrides.sdk_max_retries is not None:
-            client = client.with_options(max_retries=overrides.sdk_max_retries)
+        if overrides.caller_retries:
+            client = client.with_options(max_retries=0)
         return client
 
 
