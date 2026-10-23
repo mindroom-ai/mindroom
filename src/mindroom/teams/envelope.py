@@ -320,13 +320,10 @@ def _team_storage(run: TurnRunState) -> TeamStorage | None:
 
     A team without a bound scope stores nothing, as Agno's team ran without a database then.
     """
-    scope_context = run.scope_context
-    if scope_context is None:
+    if run.scope_context is None:
         return None
-    storage = scope_storage(scope_context)
-    if scope_context.session is None:
-        run.scope_context = replace(scope_context, session=storage.session)
-    return storage
+    run.scope_context = run.scope_context.with_session()
+    return scope_storage(run.scope_context)
 
 
 @dataclass(frozen=True)

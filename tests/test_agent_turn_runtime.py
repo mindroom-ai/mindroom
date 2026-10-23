@@ -928,6 +928,34 @@ async def test_a_turn_that_reads_the_approval_receipt_sends_it_with_its_first_re
 
 
 @pytest.mark.asyncio
+async def test_a_later_attempt_of_a_turn_on_a_new_scope_replays_the_run_an_earlier_attempt_saved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """The scope's first session stays with the turn, so the attempt after a model switch replays the first one's run.
+
+    The scope has no stored session when the turn starts; the second attempt's request carries both calls of the first.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(tool_call("touch", "call_1", label="a")),
+            calls(tool_call("switch_thread_model", "call_2", model_name="missing", when="next-turn")),
+            answer("ok"),
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+
+    await _stream(reply)
+
+    assert probe.calls == ["a"]
+    *_, last = reply.model.requests
+    assert [message.tool_call_id for message in last.messages if message.role == "tool"] == ["call_1", "call_2"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
 async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     tmp_path: Path,

@@ -765,17 +765,18 @@ def _attempt_storage(run: TurnRunState, build: AgentBuild, *, session_id: str, a
     The new session stays on the turn's scope context, so a later attempt of the same turn replays this one's run
     and an empty-run discard finds it, as a reload of the scope would.
     """
-    scope_context = run.scope_context
-    if scope_context is None:
+    if run.scope_context is None:
         return _AttemptStorage(
             store=build.store,
             session=new_scope_session(session_id=session_id, scope_id=agent_name, is_team=False),
             scope=None,
         )
-    session = scope_context.stored_or_first_session()
-    if scope_context.session is None:
-        run.scope_context = replace(scope_context, session=session)
-    return _AttemptStorage(store=scope_context.storage, session=session, scope=scope_context.scope)
+    scope_context = run.scope_context = run.scope_context.with_session()
+    return _AttemptStorage(
+        store=scope_context.storage,
+        session=scope_context.stored_or_first_session(),
+        scope=scope_context.scope,
+    )
 
 
 def _persist_into(terminal: _TerminalRecord, storage: _AttemptStorage) -> Persist[RunRecord]:

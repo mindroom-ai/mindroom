@@ -59,6 +59,13 @@ class ScopeSessionContext:
         """Return the session a run of this scope is saved into: the stored one, else the scope's first."""
         return self.session if self.session is not None else self.first_session()
 
+    def with_session(self) -> ScopeSessionContext:
+        """Return this context holding the session its runs save into (``stored_or_first_session``).
+
+        A turn keeps the returned context, so its later runs load the session an earlier one was saved into.
+        """
+        return replace(self, session=self.stored_or_first_session())
+
 
 @dataclass(frozen=True)
 class BoundTeamScopeContext:
@@ -134,9 +141,7 @@ def open_resolved_scope_session_context(
         storage_factory=storage_factory,
         session_exists=session is not None,
     )
-    if session is None and create_session_if_missing:
-        context = replace(context, session=context.first_session())
-    yield context
+    yield context.with_session() if create_session_if_missing else context
 
 
 @contextmanager
