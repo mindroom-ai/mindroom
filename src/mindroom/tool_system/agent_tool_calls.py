@@ -117,12 +117,17 @@ class PreparedAgentToolCatalog:
     _closed: bool = field(default=False, init=False)
     _closes: list[ToolkitClose] = field(default_factory=list, init=False)
 
+    def __post_init__(self) -> None:
+        """Refuse a run without a session, which the catalog's checkpoints and delegations need."""
+        if self.run.session is None:
+            msg = "A tool catalog needs a run that belongs to a session"
+            raise ValueError(msg)
+
     @property
     def session(self) -> ConversationSession:
         """Return the session the turn's run is stored to, which the catalog's checkpoints and delegations write."""
-        if self.run.session is None:
-            msg = "A tool catalog needs a run that belongs to a session"
-            raise RuntimeError(msg)
+        # RunContext is frozen, and construction refused a run without a session.
+        assert self.run.session is not None
         return self.run.session
 
     @contextmanager
