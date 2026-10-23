@@ -61,7 +61,8 @@ class ConversationSession:
     and a change to its summary rows, such as a compaction chunk, a mid-turn fold, or a cut, leaves ``runs`` and
     ``summary`` as a load returns them. ``summary`` is the owner scope's latest summary row, derived on load and on
     those changes and never written back. ``metadata`` is the row's, as loaded and as the store's latest metadata
-    change for this session left it. Only the store assigns these fields.
+    change for this session left it; a row without metadata stores the JSON text ``null``, as Agno's JSON column did.
+    Only the store assigns these fields.
     ``user_id`` is the row's requester as loaded; a row created without one takes the first requester a saved run
     names, which the store does not mirror here.
     ``session_state`` is the dict the run's tools share and change in place. ``stored_session_state`` is the state the

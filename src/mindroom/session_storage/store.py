@@ -376,7 +376,7 @@ class ConversationStore:
                 created = _ensure_session_row(connection, self.names, session)
                 connection.execute(
                     f"UPDATE {sessions} SET metadata = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
-                    (_json_or_null(updated), int(time()), session.session_id),
+                    (json.dumps(updated), int(time()), session.session_id),
                 )
         _record_stored_state(session, created)
         session.metadata = updated
@@ -654,10 +654,6 @@ def _session_state(raw_session_data: object) -> dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
-def _json_or_null(value: object) -> str | None:
-    return None if value is None else json.dumps(value)
-
-
 def _ensure_session_row(
     connection: sqlite3.Connection,
     names: TableNames,
@@ -681,7 +677,8 @@ def _ensure_session_row(
             session.owner_id,
             session.user_id,
             session_data,
-            _json_or_null(session.metadata),
+            # Agno's JSON column stored no metadata as the text ``null``, never as SQL NULL.
+            json.dumps(session.metadata),
             session.created_at,
             session.created_at,
         ),

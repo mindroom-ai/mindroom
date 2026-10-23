@@ -929,6 +929,48 @@ def test_session_field_writes_leave_the_other_field_and_the_totals_alone(store: 
     assert _totals(store)["input_tokens"] == 10
 
 
+@pytest.mark.parametrize(
+    "create",
+    ["ensure_session_row", "save_run", "save_runs", "save_session_state", "save_independent_usage"],
+)
+def test_every_writer_of_a_session_row_stores_absent_metadata_as_json_null(
+    store: ConversationStore,
+    create: str,
+) -> None:
+    """Agno's JSON column stored no metadata as the text ``null``; no writer stores SQL NULL or an empty object."""
+    session = ConversationSession(session_id="s1", kind="agent", owner_id="code")
+    writes = {
+        "ensure_session_row": lambda: store.ensure_session_row(session),
+        "save_run": lambda: store.save_run(session, _run("r1"), record_usage=True),
+        "save_runs": lambda: store.save_runs(session, [_run("r1")]),
+        "save_session_state": lambda: store.save_session_state(session, {}),
+        "save_independent_usage": lambda: store.save_independent_usage(
+            session_id="s1",
+            usage_id="u1",
+            kind="compaction_summary",
+            requester_id=None,
+            run={"model_provider": "P", "model": "m", "created_at": 1, "metrics": {}, "messages": []},
+            initial_session=session,
+        ),
+    }
+
+    writes[create]()
+
+    assert _query(store, "SELECT metadata, typeof(metadata) FROM code_sessions") == [("null", "text")]
+
+
+def test_clearing_metadata_stores_it_as_json_null(store: ConversationStore) -> None:
+    """A metadata update that removes every key, or the whole mapping, leaves the same text a row created without it holds."""
+    session = ConversationSession(session_id="s1", kind="agent", owner_id="code")
+    store.update_metadata(session, lambda _metadata: {"k": "v"})
+    assert _query(store, "SELECT metadata FROM code_sessions") == [('{"k": "v"}',)]
+
+    store.update_metadata(session, lambda _metadata: None)
+
+    assert _query(store, "SELECT metadata, typeof(metadata) FROM code_sessions") == [("null", "text")]
+    assert _loaded(store).metadata is None
+
+
 def test_ensure_session_row_creates_a_missing_row_from_the_session(store: ConversationStore) -> None:
     """A new conversation's row is created from the session."""
     session = _session()
