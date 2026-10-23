@@ -1898,9 +1898,6 @@ class KnowledgeManager:
                     progress.retrying = self._embedding_retry_count
                     progress.maybe_log()
 
-                async def _record_batch(active_run: _CandidateRun = run) -> None:
-                    await self._compact_candidate_checkpoint(active_run)
-
                 progress.indexed_this_run += await self._reindex_files_locked(
                     list(plan.pending),
                     collection=run.collection,
@@ -1908,7 +1905,7 @@ class KnowledgeManager:
                     indexed_signatures=run.completed,
                     vanished_files=run.vanished,
                     on_file_result=_record_file,
-                    on_batch_complete=_record_batch,
+                    on_batch_complete=partial(self._compact_candidate_checkpoint, run),
                 )
                 progress.completed = len(run.completed)
                 progress.failed = len(run.failed)
