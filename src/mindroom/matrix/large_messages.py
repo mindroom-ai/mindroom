@@ -76,7 +76,7 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
 _FILE_FALLBACK_KEYS = ("url", "file", "filename", "info")
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
-_HTML_PREVIEW_SHRINK_MARGIN = 0.9
+_PREVIEW_SHRINK_MARGIN = 0.9
 _MATRIX_EVENT_HARD_LIMIT = 64000
 _MEGOLM_AES_BLOCK_BYTES = 16
 _MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES = 5
@@ -407,25 +407,6 @@ def _build_terminal_edit_preview(
     calculate_event_size: Callable[[dict[str, Any]], int],
 ) -> dict[str, Any]:
     """Fit a terminal edit after all replacement and wrapper metadata is present."""
-    preview_body = preview_content.get("body")
-    if not isinstance(preview_body, str):
-        msg = "Large-message preview body must be text"
-        raise TypeError(msg)
-
-    def build_inner(inner_limit: int) -> dict[str, Any]:
-        inner_content = dict(preview_content)
-        _set_preview_text(
-            inner_content,
-            _create_preview(
-                preview_text,
-                inner_limit,
-                continuation_indicator=continuation_indicator,
-            )
-            if inner_limit > 0
-            else "",
-            preview_text,
-        )
-        return inner_content
 
     def build_event(inner_content: dict[str, Any], outer_limit: int) -> dict[str, Any]:
         outer_body = (
@@ -437,86 +418,54 @@ def _build_terminal_edit_preview(
         modified_content["body"] = outer_body
         return modified_content
 
-    def fits(inner_content: dict[str, Any], outer_limit: int) -> bool:
-        return calculate_event_size(build_event(inner_content, outer_limit)) <= _MATRIX_EVENT_HARD_LIMIT
-
-    empty_inner = build_inner(0)
-    if not fits(empty_inner, 0):
-        raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
-
     fitted_inner = _fit_preview(
-        build_inner,
-        len(preview_body.encode("utf-8")),
-        lambda inner_content: calculate_event_size(build_event(inner_content, 0)),
+        preview_content,
+        preview_text,
+        continuation_indicator=continuation_indicator,
+        calculate_event_size=lambda inner_content: calculate_event_size(build_event(inner_content, 0)),
     )
     outer_limit = _largest_fitting_limit(
         len(fitted_inner["body"].encode("utf-8")),
-        lambda candidate_limit: fits(fitted_inner, candidate_limit),
+        lambda candidate_limit: (
+            calculate_event_size(build_event(fitted_inner, candidate_limit)) <= _MATRIX_EVENT_HARD_LIMIT
+        ),
     )
     return build_event(fitted_inner, outer_limit)
 
 
-def _fit_regular_preview(
+def _fit_preview(
     preview_content: dict[str, Any],
     preview_text: str,
     *,
     continuation_indicator: str,
     calculate_event_size: Callable[[dict[str, Any]], int],
 ) -> dict[str, Any]:
-    """Fit a non-edit preview after all metadata and relations are present."""
+    """Return the preview whose event fits, shrinking its text in proportion to the overshoot.
+
+    Each candidate with HTML renders Markdown, which takes tens of milliseconds
+    on the event loop for a long preview, so this takes one to three renders
+    where a bisection takes about twenty, for a preview somewhat shorter than
+    the largest that fits.
+    """
     preview_body = preview_content.get("body")
     if not isinstance(preview_body, str):
         msg = "Large-message preview body must be text"
         raise TypeError(msg)
 
-    def build_event(preview_limit: int) -> dict[str, Any]:
-        event = dict(preview_content)
-        _set_preview_text(
-            event,
-            _create_preview(
-                preview_text,
-                preview_limit,
-                continuation_indicator=continuation_indicator,
-            )
-            if preview_limit > 0
-            else "",
-            preview_text,
-        )
-        return event
-
-    empty_preview = build_event(0)
-    if calculate_event_size(empty_preview) > _MATRIX_EVENT_HARD_LIMIT:
-        raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
-
-    return _fit_preview(build_event, len(preview_body.encode("utf-8")), calculate_event_size)
-
-
-def _fit_preview(
-    build: Callable[[int], dict[str, Any]],
-    maximum: int,
-    event_size: Callable[[dict[str, Any]], int],
-) -> dict[str, Any]:
-    """Return the preview built at the largest byte limit whose event fits, or close to it.
-
-    The caller has proven that the empty preview fits. A plain preview takes
-    the exact largest limit. Each HTML preview candidate renders Markdown, which
-    takes tens of milliseconds on the event loop for a long preview, so an HTML
-    preview instead shrinks in proportion to its overshoot: one to three
-    renders where a bisection takes about twenty, for a preview somewhat
-    shorter than the largest.
-    """
-    preview = build(maximum)
-    if event_size(preview) <= _MATRIX_EVENT_HARD_LIMIT:
+    def build(limit: int) -> dict[str, Any]:
+        preview = dict(preview_content)
+        text = _create_preview(preview_text, limit, continuation_indicator=continuation_indicator) if limit > 0 else ""
+        _set_preview_text(preview, text, preview_text)
         return preview
-    if "formatted_body" not in preview:
-        return build(
-            _largest_fitting_limit(maximum, lambda limit: event_size(build(limit)) <= _MATRIX_EVENT_HARD_LIMIT),
-        )
-    overhead = event_size(build(0))
+
+    overhead = calculate_event_size(build(0))
+    if overhead > _MATRIX_EVENT_HARD_LIMIT:
+        raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
     budget = _MATRIX_EVENT_HARD_LIMIT - overhead
-    limit = maximum
-    while (used := event_size(preview) - overhead) > budget:
-        limit = int(limit * budget / used * _HTML_PREVIEW_SHRINK_MARGIN)
+    limit = len(preview_body.encode("utf-8"))
+    preview = build(limit)
+    while (used := calculate_event_size(preview) - overhead) > budget:
+        limit = int(limit * budget / used * _PREVIEW_SHRINK_MARGIN)
         preview = build(limit)
     return preview
 
@@ -853,7 +802,7 @@ def _fit_large_message_preview(
             continuation_indicator=continuation_indicator,
             calculate_event_size=calculate_event_size,
         )
-    return _fit_regular_preview(
+    return _fit_preview(
         preview_content,
         preview_text,
         continuation_indicator=continuation_indicator,

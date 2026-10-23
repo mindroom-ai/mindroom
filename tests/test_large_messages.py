@@ -1035,23 +1035,38 @@ async def test_prepare_terminal_edit_preview_keeps_the_rendered_answer_when_only
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_edit", [False, True])
 @pytest.mark.parametrize("room_encrypted", [False, True])
-async def test_prepare_large_message_preview_html_follows_the_truncated_text(room_encrypted: bool) -> None:
+async def test_prepare_large_message_preview_html_follows_the_truncated_text(
+    room_encrypted: bool,
+    is_edit: bool,
+) -> None:
     """A truncated preview renders exactly the text it shows and still fits the event limit."""
     client = _UploadClient(nio.UploadResponse("mxc://server/truncated-rich-preview"))
     text = "Some **bold** words and a `code` span.\n\n" * 3000
-    content = {
+    message = {
         "body": text,
         "format": "org.matrix.custom.html",
         "formatted_body": markdown_to_html(text),
         "msgtype": "m.text",
     }
+    content = (
+        {
+            **message,
+            "body": f"* {text}",
+            "m.new_content": message,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        }
+        if is_edit
+        else message
+    )
 
     result = await prepare_large_message(client, "!room:server", content, room_encrypted=room_encrypted)
 
-    assert result["body"].endswith("[Message continues in attached file]")
-    assert result["format"] == "org.matrix.custom.html"
-    assert result["formatted_body"] == markdown_to_html(result["body"])
+    preview = result["m.new_content"] if is_edit else result
+    assert preview["body"].endswith("[Message continues in attached file]")
+    assert preview["format"] == "org.matrix.custom.html"
+    assert preview["formatted_body"] == markdown_to_html(preview["body"])
     size = (
         _actual_encrypted_event_size(result, room_id="!room:server") if room_encrypted else calculate_event_size(result)
     )
