@@ -47,31 +47,31 @@
   },
   "requests": [
     {
-      "deferred_tool_names": [],
-      "messages": [
-        {
-          "content": "<your_role>\nGenerate contextual room topics\n</your_role>\n\nProvide your output as a JSON containing the following fields:\n<json_fields>\n[\"topic\"]\n</json_fields>\n\nHere are the properties for each field:\n<json_field_properties>\n{\n  \"topic\": {\n    \"description\": \"The room topic - concise, informative, with emoji\",\n    \"type\": \"string\"\n  }\n}\n</json_field_properties>\nStart your response with `{` and end it with `}`.\nYour output will be passed to json.loads() to convert it to a Python object.\nMake sure it only contains valid JSON.",
-          "from_history": false,
-          "role": "system",
-          "stop_after_tool_call": false
-        },
-        {
-          "content": "Generate a concise, informative room topic for a MindRoom Matrix room.\n\nContext about MindRoom:\nMindRoom is a platform that frees AI agents from being trapped in single apps. Key features:\n- AI agents with persistent memory that work across all platforms (Slack, Discord, Telegram, WhatsApp)\n- Agents collaborate naturally in threads and remember everything across sessions\n- Built on Matrix protocol for secure, federated communication\n- 100+ integrations with tools like Gmail, GitHub, Spotify, Home Assistant\n- Self-hosted or cloud options with military-grade encryption\n\nRoom details:\n- Room key/alias: lobby\n- Room name: Lobby\n- Configured agents and teams: No specific agents or teams configured yet\n\nCreate a topic that:\n1. Describes the room's purpose based on its name\n2. Mentions the AI agents, teams, or capabilities available\n3. Highlights MindRoom's persistent memory or cross-platform nature when relevant\n4. Is welcoming and informative\n5. Uses 1-2 relevant emojis\n6. Is under 100 characters\n7. Follows this format: [emoji] [Description] • [Capabilities/Purpose]\n\nExamples:\n- 💻 Development Hub • AI agents that remember your code patterns across sessions\n- 📊 Analysis Center • Persistent insights with cross-platform data access\n- 🏠 Main Lobby • Your AI team headquarters with continuous memory\n- 💰 Finance Room • AI agents tracking markets 24/7 with full context\n- 🔬 Research Lab • Collaborative AI exploration with shared knowledge\n\nGenerate the topic:",
-          "from_history": false,
-          "role": "user",
-          "stop_after_tool_call": false
-        }
-      ],
       "model": {
         "id": "claude-sonnet-5-5",
         "provider": "VertexAI"
       },
+      "stream": false,
+      "messages": [
+        {
+          "content": "<your_role>\nGenerate contextual room topics\n</your_role>\n\nProvide your output as a JSON containing the following fields:\n<json_fields>\n[\"topic\"]\n</json_fields>\n\nHere are the properties for each field:\n<json_field_properties>\n{\n  \"topic\": {\n    \"description\": \"The room topic - concise, informative, with emoji\",\n    \"type\": \"string\"\n  }\n}\n</json_field_properties>\nStart your response with `{` and end it with `}`.\nYour output will be passed to json.loads() to convert it to a Python object.\nMake sure it only contains valid JSON.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system"
+        },
+        {
+          "content": "Generate a concise, informative room topic for a MindRoom Matrix room.\n\nContext about MindRoom:\nMindRoom is a platform that frees AI agents from being trapped in single apps. Key features:\n- AI agents with persistent memory that work across all platforms (Slack, Discord, Telegram, WhatsApp)\n- Agents collaborate naturally in threads and remember everything across sessions\n- Built on Matrix protocol for secure, federated communication\n- 100+ integrations with tools like Gmail, GitHub, Spotify, Home Assistant\n- Self-hosted or cloud options with military-grade encryption\n\nRoom details:\n- Room key/alias: lobby\n- Room name: Lobby\n- Configured agents and teams: No specific agents or teams configured yet\n\nCreate a topic that:\n1. Describes the room's purpose based on its name\n2. Mentions the AI agents, teams, or capabilities available\n3. Highlights MindRoom's persistent memory or cross-platform nature when relevant\n4. Is welcoming and informative\n5. Uses 1-2 relevant emojis\n6. Is under 100 characters\n7. Follows this format: [emoji] [Description] • [Capabilities/Purpose]\n\nExamples:\n- 💻 Development Hub • AI agents that remember your code patterns across sessions\n- 📊 Analysis Center • Persistent insights with cross-platform data access\n- 🏠 Main Lobby • Your AI team headquarters with continuous memory\n- 💰 Finance Room • AI agents tracking markets 24/7 with full context\n- 🔬 Research Lab • Collaborative AI exploration with shared knowledge\n\nGenerate the topic:",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
       "response_format": {
         "type": "json_object"
       },
-      "stream": false,
-      "tool_choice": null,
-      "tools": []
+      "deferred_tool_names": []
     }
   ],
   "scenario": "helper_topic_vertexai_claude"

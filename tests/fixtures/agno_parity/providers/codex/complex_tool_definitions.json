@@ -309,12 +309,12 @@
       ],
       "input": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "developer"
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional.",
-          "role": "user"
+          "role": "user",
+          "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional."
         }
       ],
       "instructions": "You are a helpful assistant.",
@@ -324,9 +324,8 @@
       "stream": true,
       "tools": [
         {
-          "description": "Create a calendar event and invite attendees.",
-          "external_execution": false,
           "name": "calendar_create_event",
+          "description": "Create a calendar event and invite attendees.",
           "parameters": {
             "$defs": {
               "Attendee": {
@@ -458,12 +457,12 @@
             "type": "object"
           },
           "requires_confirmation": false,
+          "external_execution": false,
           "type": "function"
         },
         {
-          "description": "Plan a multi-stop trip.",
-          "external_execution": false,
           "name": "plan_trip",
+          "description": "Plan a multi-stop trip.",
           "parameters": {
             "properties": {
               "budget": {
@@ -567,6 +566,7 @@
             "type": "object"
           },
           "requires_confirmation": false,
+          "external_execution": false,
           "type": "function"
         }
       ]

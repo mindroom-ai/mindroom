@@ -241,19 +241,20 @@
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "Where is order A-1001?",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         },
         {
+          "role": "assistant",
           "content": [
             {
               "id": "toolu_parity_order",
@@ -266,41 +267,40 @@
               "name": "call_tool",
               "type": "tool_use"
             }
-          ],
-          "role": "assistant"
+          ]
         },
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
-              "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+              "type": "tool_result",
               "tool_use_id": "toolu_parity_order",
-              "type": "tool_result"
+              "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
       "model": "anthropic.claude-sonnet-5-5",
-      "stream": true,
       "system": [
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
           "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "type": "text"
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
       ],
       "tools": [
         {
+          "name": "call_tool",
           "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
           "input_schema": {
-            "additionalProperties": false,
+            "type": "object",
             "properties": {
               "arguments": {
                 "description": "The function's arguments as a JSON object.",
@@ -314,14 +314,14 @@
             "required": [
               "name"
             ],
-            "type": "object"
-          },
-          "name": "call_tool"
+            "additionalProperties": false
+          }
         },
         {
+          "name": "get_weather",
           "description": "Return the forecast for one city.",
           "input_schema": {
-            "additionalProperties": false,
+            "type": "object",
             "properties": {
               "city": {
                 "description": "City name.",
@@ -339,18 +339,14 @@
             "required": [
               "city"
             ],
-            "type": "object"
-          },
-          "name": "get_weather"
+            "additionalProperties": false
+          }
         },
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
+          "name": "tool_search",
           "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
           "input_schema": {
-            "additionalProperties": false,
+            "type": "object",
             "properties": {
               "max_results": {
                 "description": "Maximum number of function definitions to return, at most 20.",
@@ -362,11 +358,15 @@
               }
             },
             "required": [],
-            "type": "object"
+            "additionalProperties": false
           },
-          "name": "tool_search"
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
-      ]
+      ],
+      "stream": true
     },
     "headers": {
       "accept": "application/json",

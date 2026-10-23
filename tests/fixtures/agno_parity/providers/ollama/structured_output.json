@@ -75,6 +75,8 @@
   },
   "request": {
     "body": {
+      "model": "qwen3.8:27b",
+      "stream": false,
       "format": {
         "description": "Structured output for routing decisions.",
         "properties": {
@@ -98,16 +100,14 @@
       },
       "messages": [
         {
-          "content": "Route the message to the best agent.",
-          "role": "system"
+          "role": "system",
+          "content": "Route the message to the best agent."
         },
         {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "model": "qwen3.8:27b",
-      "stream": false,
       "tools": []
     },
     "headers": {

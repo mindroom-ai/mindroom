@@ -194,40 +194,41 @@
     "body": {
       "messages": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "system"
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "Where is order A-1001?",
-          "role": "user"
+          "role": "user",
+          "content": "Where is order A-1001?"
         },
         {
-          "content": "",
           "role": "assistant",
+          "content": "",
           "tool_calls": [
             {
-              "function": {
-                "arguments": "{\"name\": \"lookup_order\", \"arguments\": {\"order_id\": \"A-1001\"}}",
-                "name": "call_tool"
-              },
               "id": "call_parity_order",
-              "type": "function"
+              "type": "function",
+              "function": {
+                "name": "call_tool",
+                "arguments": "{\"name\": \"lookup_order\", \"arguments\": {\"order_id\": \"A-1001\"}}"
+              }
             }
           ]
         },
         {
-          "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
           "role": "tool",
-          "tool_call_id": "call_parity_order"
+          "tool_call_id": "call_parity_order",
+          "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}"
         }
       ],
       "model": "gpt-oss-120b",
       "stream": true,
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
             "name": "call_tool",
+            "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
             "parameters": {
               "properties": {
                 "arguments": {
@@ -244,13 +245,13 @@
               ],
               "type": "object"
             }
-          },
-          "type": "function"
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Return the forecast for one city.",
             "name": "get_weather",
+            "description": "Return the forecast for one city.",
             "parameters": {
               "properties": {
                 "city": {
@@ -271,13 +272,13 @@
               ],
               "type": "object"
             }
-          },
-          "type": "function"
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
             "name": "tool_search",
+            "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
             "parameters": {
               "properties": {
                 "max_results": {
@@ -292,8 +293,7 @@
               "required": [],
               "type": "object"
             }
-          },
-          "type": "function"
+          }
         }
       ]
     },

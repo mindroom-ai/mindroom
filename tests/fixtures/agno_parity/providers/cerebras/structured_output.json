@@ -24,7 +24,6 @@
         "json_schema": {
           "name": "_RoutingSuggestion",
           "schema": {
-            "additionalProperties": false,
             "description": "Structured output for routing decisions.",
             "properties": {
               "entity_name": {
@@ -44,8 +43,7 @@
             ],
             "title": "_RoutingSuggestion",
             "type": "object"
-          },
-          "strict": true
+          }
         },
         "type": "json_schema"
       }
@@ -78,12 +76,12 @@
     "body": {
       "messages": [
         {
-          "content": "Route the message to the best agent.",
-          "role": "system"
+          "role": "system",
+          "content": "Route the message to the best agent."
         },
         {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
         }
       ],
       "model": "gpt-oss-120b",
@@ -91,7 +89,6 @@
         "json_schema": {
           "name": "_RoutingSuggestion",
           "schema": {
-            "additionalProperties": false,
             "description": "Structured output for routing decisions.",
             "properties": {
               "entity_name": {
@@ -110,7 +107,8 @@
               "reasoning"
             ],
             "title": "_RoutingSuggestion",
-            "type": "object"
+            "type": "object",
+            "additionalProperties": false
           },
           "strict": true
         },

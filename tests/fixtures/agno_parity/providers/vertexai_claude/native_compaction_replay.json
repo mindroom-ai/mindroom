@@ -177,23 +177,10 @@
   },
   "request": {
     "body": {
-      "anthropic_version": "vertex-2023-10-16",
-      "context_management": {
-        "edits": [
-          {
-            "instructions": "Summarize the conversation for continuation inside <summary></summary> tags. Preserve user requests, decisions, constraints, completed work, and next steps. Do not repeat system instructions. Do not call any tools; respond with text only.",
-            "pause_after_compaction": false,
-            "trigger": {
-              "type": "input_tokens",
-              "value": 60000
-            },
-            "type": "compact_20260112"
-          }
-        ]
-      },
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "assistant",
           "content": [
             {
               "content": "<summary>Alice is packing for a rainy Paris trip and asked about the evening.</summary>",
@@ -201,41 +188,54 @@
               "type": "compaction"
             },
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
               "text": "Add a warm layer.",
-              "type": "text"
+              "type": "text",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "assistant"
+          ]
         },
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "Anything else?",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
+        }
+      ],
+      "context_management": {
+        "edits": [
+          {
+            "type": "compact_20260112",
+            "trigger": {
+              "type": "input_tokens",
+              "value": 60000
+            },
+            "pause_after_compaction": false,
+            "instructions": "Summarize the conversation for continuation inside <summary></summary> tags. Preserve user requests, decisions, constraints, completed work, and next steps. Do not repeat system instructions. Do not call any tools; respond with text only."
+          }
+        ]
+      },
+      "system": [
+        {
+          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
       ],
       "stream": true,
-      "system": [
-        {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
-          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "type": "text"
-        }
-      ]
+      "anthropic_version": "vertex-2023-10-16"
     },
     "headers": {
       "accept": "application/json",

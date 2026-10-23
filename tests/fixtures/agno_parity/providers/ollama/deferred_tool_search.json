@@ -169,89 +169,89 @@
   },
   "request": {
     "body": {
-      "messages": [
-        {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "system"
-        },
-        {
-          "content": "Where is order A-1001?",
-          "role": "user"
-        }
-      ],
       "model": "qwen3.8:27b",
       "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": "Where is order A-1001?"
+        }
+      ],
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
             "name": "call_tool",
+            "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
             "parameters": {
-              "properties": {
-                "arguments": {
-                  "description": "The function's arguments as a JSON object.",
-                  "type": "object"
-                },
-                "name": {
-                  "description": "Exact function name from tool_search.",
-                  "type": "string"
-                }
-              },
+              "type": "object",
               "required": [
                 "name"
               ],
-              "type": "object"
+              "properties": {
+                "arguments": {
+                  "type": "object",
+                  "description": "The function's arguments as a JSON object."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Exact function name from tool_search."
+                }
+              }
             }
-          },
-          "type": "function"
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Return the forecast for one city.",
             "name": "get_weather",
+            "description": "Return the forecast for one city.",
             "parameters": {
+              "type": "object",
+              "required": [
+                "city"
+              ],
               "properties": {
                 "city": {
-                  "description": "City name.",
-                  "type": "string"
+                  "type": "string",
+                  "description": "City name."
                 },
                 "unit": {
+                  "type": "string",
                   "description": "Temperature unit.",
                   "enum": [
                     "celsius",
                     "fahrenheit"
-                  ],
-                  "type": "string"
+                  ]
                 }
-              },
-              "required": [
-                "city"
-              ],
-              "type": "object"
+              }
             }
-          },
-          "type": "function"
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
             "name": "tool_search",
+            "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
             "parameters": {
+              "type": "object",
+              "required": [],
               "properties": {
                 "max_results": {
-                  "description": "Maximum number of function definitions to return, at most 20.",
-                  "type": "integer"
+                  "type": "integer",
+                  "description": "Maximum number of function definitions to return, at most 20."
                 },
                 "query": {
-                  "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
-                  "type": "string"
+                  "type": "string",
+                  "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions."
                 }
-              },
-              "required": [],
-              "type": "object"
+              }
             }
-          },
-          "type": "function"
+          }
         }
       ]
     },

@@ -229,15 +229,17 @@
   },
   "request": {
     "body": {
+      "model": "qwen3.8:27b",
+      "stream": false,
       "format": {
         "$defs": {
           "CronSchedule": {
             "description": "Standard cron-like schedule definition.",
             "properties": {
-              "day": {
+              "minute": {
                 "default": "*",
-                "description": "1-31, *, or comma-separated",
-                "title": "Day",
+                "description": "0-59, *, */5, or comma-separated",
+                "title": "Minute",
                 "type": "string"
               },
               "hour": {
@@ -246,10 +248,10 @@
                 "title": "Hour",
                 "type": "string"
               },
-              "minute": {
+              "day": {
                 "default": "*",
-                "description": "0-59, *, */5, or comma-separated",
-                "title": "Minute",
+                "description": "1-31, *, or comma-separated",
+                "title": "Day",
                 "type": "string"
               },
               "month": {
@@ -271,32 +273,18 @@
         },
         "description": "Structured representation of a scheduled task or workflow.",
         "properties": {
-          "created_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+          "schedule_type": {
+            "enum": [
+              "once",
+              "cron"
             ],
-            "default": null,
-            "title": "Created By"
-          },
-          "cron_schedule": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/CronSchedule"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null
-          },
-          "description": {
-            "title": "Description",
+            "title": "Schedule Type",
             "type": "string"
+          },
+          "is_conditional": {
+            "default": false,
+            "title": "Is Conditional",
+            "type": "boolean"
           },
           "execute_at": {
             "anyOf": [
@@ -310,6 +298,25 @@
             ],
             "default": null,
             "title": "Execute At"
+          },
+          "cron_schedule": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CronSchedule"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
           },
           "history_limit": {
             "anyOf": [
@@ -325,15 +332,6 @@
             "description": "Max recent thread messages the responding agent sees when the task fires; 0 means no history",
             "title": "History Limit"
           },
-          "is_conditional": {
-            "default": false,
-            "title": "Is Conditional",
-            "type": "boolean"
-          },
-          "message": {
-            "title": "Message",
-            "type": "string"
-          },
           "model": {
             "anyOf": [
               {
@@ -347,16 +345,29 @@
             "description": "Configured model alias for this scheduled run only",
             "title": "Model"
           },
-          "new_thread": {
-            "default": false,
-            "title": "New Thread",
-            "type": "boolean"
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Created By"
           },
-          "pre_approved_call": {
-            "default": false,
-            "description": "Whether the requester approved this one-time task's tool call while scheduling it",
-            "title": "Pre Approved Call",
-            "type": "boolean"
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Thread Id"
           },
           "room_id": {
             "anyOf": [
@@ -370,30 +381,21 @@
             "default": null,
             "title": "Room Id"
           },
-          "schedule_type": {
-            "enum": [
-              "once",
-              "cron"
-            ],
-            "title": "Schedule Type",
-            "type": "string"
+          "new_thread": {
+            "default": false,
+            "title": "New Thread",
+            "type": "boolean"
           },
           "silent": {
             "default": false,
             "title": "Silent",
             "type": "boolean"
           },
-          "thread_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Thread Id"
+          "pre_approved_call": {
+            "default": false,
+            "description": "Whether the requester approved this one-time task's tool call while scheduling it",
+            "title": "Pre Approved Call",
+            "type": "boolean"
           }
         },
         "required": [
@@ -406,16 +408,14 @@
       },
       "messages": [
         {
-          "content": "Parse the scheduling request into a workflow.",
-          "role": "system"
+          "role": "system",
+          "content": "Parse the scheduling request into a workflow."
         },
         {
-          "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris.",
-          "role": "user"
+          "role": "user",
+          "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
         }
       ],
-      "model": "qwen3.8:27b",
-      "stream": false,
       "tools": []
     },
     "headers": {

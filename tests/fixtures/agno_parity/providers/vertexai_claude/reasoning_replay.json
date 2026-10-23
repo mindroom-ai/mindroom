@@ -116,19 +116,19 @@
   },
   "request": {
     "body": {
-      "anthropic_version": "vertex-2023-10-16",
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "user",
           "content": [
             {
-              "text": "What should I pack for Paris tomorrow?",
-              "type": "text"
+              "type": "text",
+              "text": "What should I pack for Paris tomorrow?"
             }
-          ],
-          "role": "user"
+          ]
         },
         {
+          "role": "assistant",
           "content": [
             {
               "signature": "parity-thinking-signature",
@@ -136,45 +136,45 @@
               "type": "thinking"
             },
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
               "text": "Pack a light rain jacket and comfortable shoes.",
-              "type": "text"
+              "type": "text",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "assistant"
+          ]
         },
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "And for the evening?",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
-      "stream": true,
       "system": [
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
           "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "type": "text"
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
       ],
       "thinking": {
         "budget_tokens": 2048,
         "type": "enabled"
-      }
+      },
+      "stream": true,
+      "anthropic_version": "vertex-2023-10-16"
     },
     "headers": {
       "accept": "application/json",

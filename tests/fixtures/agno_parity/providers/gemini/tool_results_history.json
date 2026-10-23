@@ -147,11 +147,11 @@
           "parts": [
             {
               "functionCall": {
+                "id": "parity-generated-call-1",
                 "args": {
                   "city": "Paris",
                   "unit": "celsius"
                 },
-                "id": "parity-generated-call-1",
                 "name": "get_weather"
               },
               "thoughtSignature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl"
@@ -174,7 +174,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {},
       "systemInstruction": {
         "parts": [
           {
@@ -232,7 +231,8 @@
             }
           ]
         }
-      ]
+      ],
+      "generationConfig": {}
     },
     "headers": {
       "accept": "*/*",

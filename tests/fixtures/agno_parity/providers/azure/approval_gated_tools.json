@@ -131,12 +131,12 @@
     "body": {
       "messages": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "system"
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "Email the invoice for order A-1001.",
-          "role": "user"
+          "role": "user",
+          "content": "Email the invoice for order A-1001."
         }
       ],
       "model": "gpt-6-astra",
@@ -146,10 +146,10 @@
       },
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Return the forecast for one city.",
-            "external_execution": false,
             "name": "get_weather",
+            "description": "Return the forecast for one city.",
             "parameters": {
               "properties": {
                 "city": {
@@ -170,15 +170,15 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Run a task with another agent and return its answer.",
-            "external_execution": true,
             "name": "run_subagent",
+            "description": "Run a task with another agent and return its answer.",
             "parameters": {
               "properties": {
                 "agent_name": {
@@ -196,16 +196,15 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": true
+          }
         },
         {
+          "type": "function",
           "function": {
-            "approval_type": "mindroom_policy",
-            "description": "Email the invoice for one order.",
-            "external_execution": false,
             "name": "send_invoice",
+            "description": "Email the invoice for one order.",
             "parameters": {
               "properties": {
                 "order_id": {
@@ -218,9 +217,10 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": true
-          },
-          "type": "function"
+            "requires_confirmation": true,
+            "external_execution": false,
+            "approval_type": "mindroom_policy"
+          }
         }
       ]
     },

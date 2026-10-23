@@ -237,24 +237,46 @@
           "role": "user"
         }
       ],
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "Parse the scheduling request into a workflow."
+          }
+        ],
+        "role": "user"
+      },
       "generationConfig": {
         "responseMimeType": "application/json",
         "responseSchema": {
           "description": "Structured representation of a scheduled task or workflow.",
           "properties": {
-            "created_by": {
+            "schedule_type": {
+              "enum": [
+                "once",
+                "cron"
+              ],
+              "title": "Schedule Type",
+              "type": "STRING"
+            },
+            "is_conditional": {
+              "default": false,
+              "title": "Is Conditional",
+              "type": "BOOLEAN"
+            },
+            "execute_at": {
+              "format": "date-time",
               "nullable": true,
-              "title": "Created By",
+              "title": "Execute At",
               "type": "STRING"
             },
             "cron_schedule": {
               "description": "Standard cron-like schedule definition.",
               "nullable": true,
               "properties": {
-                "day": {
+                "minute": {
                   "default": "*",
-                  "description": "1-31, *, or comma-separated",
-                  "title": "Day",
+                  "description": "0-59, *, */5, or comma-separated",
+                  "title": "Minute",
                   "type": "STRING"
                 },
                 "hour": {
@@ -263,10 +285,10 @@
                   "title": "Hour",
                   "type": "STRING"
                 },
-                "minute": {
+                "day": {
                   "default": "*",
-                  "description": "0-59, *, */5, or comma-separated",
-                  "title": "Minute",
+                  "description": "1-31, *, or comma-separated",
+                  "title": "Day",
                   "type": "STRING"
                 },
                 "month": {
@@ -292,14 +314,12 @@
               "title": "CronSchedule",
               "type": "OBJECT"
             },
-            "description": {
-              "title": "Description",
+            "message": {
+              "title": "Message",
               "type": "STRING"
             },
-            "execute_at": {
-              "format": "date-time",
-              "nullable": true,
-              "title": "Execute At",
+            "description": {
+              "title": "Description",
               "type": "STRING"
             },
             "history_limit": {
@@ -309,19 +329,25 @@
               "title": "History Limit",
               "type": "INTEGER"
             },
-            "is_conditional": {
-              "default": false,
-              "title": "Is Conditional",
-              "type": "BOOLEAN"
-            },
-            "message": {
-              "title": "Message",
-              "type": "STRING"
-            },
             "model": {
               "description": "Configured model alias for this scheduled run only",
               "nullable": true,
               "title": "Model",
+              "type": "STRING"
+            },
+            "created_by": {
+              "nullable": true,
+              "title": "Created By",
+              "type": "STRING"
+            },
+            "thread_id": {
+              "nullable": true,
+              "title": "Thread Id",
+              "type": "STRING"
+            },
+            "room_id": {
+              "nullable": true,
+              "title": "Room Id",
               "type": "STRING"
             },
             "new_thread": {
@@ -329,34 +355,16 @@
               "title": "New Thread",
               "type": "BOOLEAN"
             },
-            "pre_approved_call": {
-              "default": false,
-              "description": "Whether the requester approved this one-time task's tool call while scheduling it",
-              "title": "Pre Approved Call",
-              "type": "BOOLEAN"
-            },
-            "room_id": {
-              "nullable": true,
-              "title": "Room Id",
-              "type": "STRING"
-            },
-            "schedule_type": {
-              "enum": [
-                "once",
-                "cron"
-              ],
-              "title": "Schedule Type",
-              "type": "STRING"
-            },
             "silent": {
               "default": false,
               "title": "Silent",
               "type": "BOOLEAN"
             },
-            "thread_id": {
-              "nullable": true,
-              "title": "Thread Id",
-              "type": "STRING"
+            "pre_approved_call": {
+              "default": false,
+              "description": "Whether the requester approved this one-time task's tool call while scheduling it",
+              "title": "Pre Approved Call",
+              "type": "BOOLEAN"
             }
           },
           "property_ordering": [
@@ -383,14 +391,6 @@
           "title": "ScheduledWorkflow",
           "type": "OBJECT"
         }
-      },
-      "systemInstruction": {
-        "parts": [
-          {
-            "text": "Parse the scheduling request into a workflow."
-          }
-        ],
-        "role": "user"
       }
     },
     "headers": {

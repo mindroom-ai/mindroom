@@ -83,8 +83,8 @@
     "body": {
       "input": [
         {
-          "content": "And for the evening?",
-          "role": "user"
+          "role": "user",
+          "content": "And for the evening?"
         }
       ],
       "model": "gpt-6-astra",

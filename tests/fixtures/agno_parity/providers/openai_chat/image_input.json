@@ -58,23 +58,23 @@
     "body": {
       "messages": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "developer"
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
+          "role": "user",
           "content": [
             {
-              "text": "Use the attached image to plan my packing.",
-              "type": "text"
+              "type": "text",
+              "text": "Use the attached image to plan my packing."
             },
             {
+              "type": "image_url",
               "image_url": {
                 "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-              },
-              "type": "image_url"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
       "model": "gpt-6-astra",

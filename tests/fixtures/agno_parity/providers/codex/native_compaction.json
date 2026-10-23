@@ -107,8 +107,8 @@
     "body": {
       "context_management": [
         {
-          "compact_threshold": 60000,
-          "type": "compaction"
+          "type": "compaction",
+          "compact_threshold": 60000
         }
       ],
       "include": [
@@ -116,20 +116,20 @@
       ],
       "input": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "developer"
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
         },
         {
-          "content": "Pack a light rain jacket and comfortable shoes.",
-          "role": "assistant"
+          "role": "assistant",
+          "content": "Pack a light rain jacket and comfortable shoes."
         },
         {
-          "content": "And for the evening?",
-          "role": "user"
+          "role": "user",
+          "content": "And for the evening?"
         }
       ],
       "instructions": "You are a helpful assistant.",

@@ -167,12 +167,12 @@
     "body": {
       "messages": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "system"
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "Where is order A-1001?",
-          "role": "user"
+          "role": "user",
+          "content": "Where is order A-1001?"
         }
       ],
       "model": "glm-5.3",
@@ -182,10 +182,10 @@
       },
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
-            "external_execution": false,
             "name": "call_tool",
+            "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
             "parameters": {
               "properties": {
                 "arguments": {
@@ -202,15 +202,15 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Return the forecast for one city.",
-            "external_execution": false,
             "name": "get_weather",
+            "description": "Return the forecast for one city.",
             "parameters": {
               "properties": {
                 "city": {
@@ -231,15 +231,15 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
-            "external_execution": false,
             "name": "tool_search",
+            "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
             "parameters": {
               "properties": {
                 "max_results": {
@@ -254,9 +254,9 @@
               "required": [],
               "type": "object"
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         }
       ]
     },

@@ -108,12 +108,12 @@
     "body": {
       "messages": [
         {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "developer"
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
         },
         {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
         }
       ],
       "model": "gpt-6-astra",
@@ -123,10 +123,10 @@
       },
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Return the forecast for one city.",
-            "external_execution": false,
             "name": "get_weather",
+            "description": "Return the forecast for one city.",
             "parameters": {
               "properties": {
                 "city": {
@@ -147,15 +147,15 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Search the user's travel notes.",
-            "external_execution": false,
             "name": "search_notes",
+            "description": "Search the user's travel notes.",
             "parameters": {
               "properties": {
                 "limit": {
@@ -172,9 +172,9 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         }
       ]
     },

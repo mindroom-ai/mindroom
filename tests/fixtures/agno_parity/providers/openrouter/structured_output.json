@@ -75,20 +75,20 @@
     "body": {
       "messages": [
         {
-          "content": "Route the message to the best agent.",
-          "role": "system"
+          "role": "system",
+          "content": "Route the message to the best agent."
         },
         {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
         }
       ],
       "model": "z-ai/glm-5.3",
       "response_format": {
+        "type": "json_schema",
         "json_schema": {
           "name": "_RoutingSuggestion",
           "schema": {
-            "additionalProperties": false,
             "description": "Structured output for routing decisions.",
             "properties": {
               "entity_name": {
@@ -107,11 +107,11 @@
               "reasoning"
             ],
             "title": "_RoutingSuggestion",
-            "type": "object"
+            "type": "object",
+            "additionalProperties": false
           },
           "strict": true
-        },
-        "type": "json_schema"
+        }
       }
     },
     "headers": {

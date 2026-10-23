@@ -170,21 +170,21 @@
           "parts": [
             {
               "functionCall": {
+                "id": "parity_weather",
                 "args": {
                   "city": "Paris",
                   "unit": "celsius"
                 },
-                "id": "parity_weather",
                 "name": "get_weather"
               },
               "thoughtSignature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl"
             },
             {
               "functionCall": {
+                "id": "parity_notes",
                 "args": {
                   "query": "Paris packing list"
                 },
-                "id": "parity_notes",
                 "name": "search_notes"
               }
             }
@@ -215,7 +215,6 @@
           "role": "user"
         }
       ],
-      "generationConfig": {},
       "systemInstruction": {
         "parts": [
           {
@@ -273,7 +272,8 @@
             }
           ]
         }
-      ]
+      ],
+      "generationConfig": {}
     },
     "headers": {
       "accept": "*/*",

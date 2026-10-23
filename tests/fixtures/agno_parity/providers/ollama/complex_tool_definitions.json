@@ -303,24 +303,55 @@
   },
   "request": {
     "body": {
-      "messages": [
-        {
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "role": "system"
-        },
-        {
-          "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional.",
-          "role": "user"
-        }
-      ],
       "model": "qwen3.8:27b",
       "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional."
+        }
+      ],
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Create a calendar event and invite attendees.",
             "name": "calendar_create_event",
+            "description": "Create a calendar event and invite attendees.",
             "parameters": {
+              "type": "object",
+              "required": [
+                "title",
+                "starts_at",
+                "attendees"
+              ],
+              "properties": {
+                "attendees": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Attendee"
+                  },
+                  "description": "People to invite."
+                },
+                "labels": {
+                  "type": "object",
+                  "description": "Free-form labels."
+                },
+                "location": {},
+                "reminder_minutes": {
+                  "type": "integer"
+                },
+                "starts_at": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string",
+                  "description": "Event title."
+                }
+              },
               "$defs": {
                 "Attendee": {
                   "properties": {
@@ -394,68 +425,43 @@
                   "title": "Location",
                   "type": "object"
                 }
-              },
-              "properties": {
-                "attendees": {
-                  "description": "People to invite.",
-                  "items": {
-                    "$ref": "#/$defs/Attendee"
-                  },
-                  "type": "array"
-                },
-                "labels": {
-                  "description": "Free-form labels.",
-                  "type": "object"
-                },
-                "location": {},
-                "reminder_minutes": {
-                  "type": "integer"
-                },
-                "starts_at": {
-                  "type": "string"
-                },
-                "title": {
-                  "description": "Event title.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "title",
-                "starts_at",
-                "attendees"
-              ],
-              "type": "object"
+              }
             }
-          },
-          "type": "function"
+          }
         },
         {
+          "type": "function",
           "function": {
-            "description": "Plan a multi-stop trip.",
             "name": "plan_trip",
+            "description": "Plan a multi-stop trip.",
             "parameters": {
+              "type": "object",
+              "required": [
+                "destination",
+                "stops"
+              ],
               "properties": {
                 "budget": {
                   "description": "Optional total budget."
                 },
                 "days": {
-                  "description": "Total trip length in days.",
-                  "type": "integer"
+                  "type": "integer",
+                  "description": "Total trip length in days."
                 },
                 "destination": {
-                  "description": "Country or region to visit.",
-                  "type": "string"
+                  "type": "string",
+                  "description": "Country or region to visit."
                 },
                 "pace": {
+                  "type": "string",
                   "description": "How full each day should be.",
                   "enum": [
                     "relaxed",
                     "packed"
-                  ],
-                  "type": "string"
+                  ]
                 },
                 "stops": {
-                  "description": "Ordered stops with nights per stop.",
+                  "type": "array",
                   "items": {
                     "description": "One stop on the trip.",
                     "properties": {
@@ -478,20 +484,14 @@
                     "title": "TripStop",
                     "type": "object"
                   },
-                  "type": "array"
+                  "description": "Ordered stops with nights per stop."
                 },
                 "travelers": {
                   "description": "Traveler names and roles."
                 }
-              },
-              "required": [
-                "destination",
-                "stops"
-              ],
-              "type": "object"
+              }
             }
-          },
-          "type": "function"
+          }
         }
       ]
     },

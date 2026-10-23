@@ -232,28 +232,28 @@
     "body": {
       "messages": [
         {
-          "content": "Parse the scheduling request into a workflow.",
-          "role": "system"
+          "role": "system",
+          "content": "Parse the scheduling request into a workflow."
         },
         {
-          "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris.",
-          "role": "user"
+          "role": "user",
+          "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
         }
       ],
       "model": "gpt-6-astra",
       "response_format": {
+        "type": "json_schema",
         "json_schema": {
           "name": "ScheduledWorkflow",
           "schema": {
             "$defs": {
               "CronSchedule": {
-                "additionalProperties": false,
                 "description": "Standard cron-like schedule definition.",
                 "properties": {
-                  "day": {
+                  "minute": {
                     "default": "*",
-                    "description": "1-31, *, or comma-separated",
-                    "title": "Day",
+                    "description": "0-59, *, */5, or comma-separated",
+                    "title": "Minute",
                     "type": "string"
                   },
                   "hour": {
@@ -262,10 +262,10 @@
                     "title": "Hour",
                     "type": "string"
                   },
-                  "minute": {
+                  "day": {
                     "default": "*",
-                    "description": "0-59, *, */5, or comma-separated",
-                    "title": "Minute",
+                    "description": "1-31, *, or comma-separated",
+                    "title": "Day",
                     "type": "string"
                   },
                   "month": {
@@ -281,44 +281,32 @@
                     "type": "string"
                   }
                 },
+                "title": "CronSchedule",
+                "type": "object",
+                "additionalProperties": false,
                 "required": [
                   "minute",
                   "hour",
                   "day",
                   "month",
                   "weekday"
-                ],
-                "title": "CronSchedule",
-                "type": "object"
+                ]
               }
             },
-            "additionalProperties": false,
             "description": "Structured representation of a scheduled task or workflow.",
             "properties": {
-              "created_by": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
+              "schedule_type": {
+                "enum": [
+                  "once",
+                  "cron"
                 ],
-                "title": "Created By"
-              },
-              "cron_schedule": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/CronSchedule"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "description": {
-                "title": "Description",
+                "title": "Schedule Type",
                 "type": "string"
+              },
+              "is_conditional": {
+                "default": false,
+                "title": "Is Conditional",
+                "type": "boolean"
               },
               "execute_at": {
                 "anyOf": [
@@ -331,6 +319,24 @@
                   }
                 ],
                 "title": "Execute At"
+              },
+              "cron_schedule": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CronSchedule"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "message": {
+                "title": "Message",
+                "type": "string"
+              },
+              "description": {
+                "title": "Description",
+                "type": "string"
               },
               "history_limit": {
                 "anyOf": [
@@ -345,15 +351,6 @@
                 "description": "Max recent thread messages the responding agent sees when the task fires; 0 means no history",
                 "title": "History Limit"
               },
-              "is_conditional": {
-                "default": false,
-                "title": "Is Conditional",
-                "type": "boolean"
-              },
-              "message": {
-                "title": "Message",
-                "type": "string"
-              },
               "model": {
                 "anyOf": [
                   {
@@ -366,16 +363,27 @@
                 "description": "Configured model alias for this scheduled run only",
                 "title": "Model"
               },
-              "new_thread": {
-                "default": false,
-                "title": "New Thread",
-                "type": "boolean"
+              "created_by": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Created By"
               },
-              "pre_approved_call": {
-                "default": false,
-                "description": "Whether the requester approved this one-time task's tool call while scheduling it",
-                "title": "Pre Approved Call",
-                "type": "boolean"
+              "thread_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Thread Id"
               },
               "room_id": {
                 "anyOf": [
@@ -388,29 +396,21 @@
                 ],
                 "title": "Room Id"
               },
-              "schedule_type": {
-                "enum": [
-                  "once",
-                  "cron"
-                ],
-                "title": "Schedule Type",
-                "type": "string"
+              "new_thread": {
+                "default": false,
+                "title": "New Thread",
+                "type": "boolean"
               },
               "silent": {
                 "default": false,
                 "title": "Silent",
                 "type": "boolean"
               },
-              "thread_id": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Thread Id"
+              "pre_approved_call": {
+                "default": false,
+                "description": "Whether the requester approved this one-time task's tool call while scheduling it",
+                "title": "Pre Approved Call",
+                "type": "boolean"
               }
             },
             "required": [
@@ -430,11 +430,11 @@
               "pre_approved_call"
             ],
             "title": "ScheduledWorkflow",
-            "type": "object"
+            "type": "object",
+            "additionalProperties": false
           },
           "strict": true
-        },
-        "type": "json_schema"
+        }
       }
     },
     "headers": {

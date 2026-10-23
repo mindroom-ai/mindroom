@@ -145,9 +145,9 @@
     "body": {
       "input": [
         {
+          "type": "function_call_output",
           "call_id": "call_parity_weather",
-          "output": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
-          "type": "function_call_output"
+          "output": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}"
         }
       ],
       "model": "gpt-6-astra",
@@ -157,9 +157,8 @@
       "stream": true,
       "tools": [
         {
-          "description": "Return the forecast for one city.",
-          "external_execution": false,
           "name": "get_weather",
+          "description": "Return the forecast for one city.",
           "parameters": {
             "properties": {
               "city": {
@@ -181,12 +180,12 @@
             "type": "object"
           },
           "requires_confirmation": false,
+          "external_execution": false,
           "type": "function"
         },
         {
-          "description": "Search the user's travel notes.",
-          "external_execution": false,
           "name": "search_notes",
+          "description": "Search the user's travel notes.",
           "parameters": {
             "properties": {
               "limit": {
@@ -204,6 +203,7 @@
             "type": "object"
           },
           "requires_confirmation": false,
+          "external_execution": false,
           "type": "function"
         }
       ]

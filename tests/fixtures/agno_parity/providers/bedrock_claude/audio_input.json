@@ -79,31 +79,31 @@
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "Use the attached audio to plan my packing.\n\n[Inline media unavailable for this model]\nThe model or provider adapter could not accept some inline attachments for this request. Their content was not inspected. Do not claim to have seen, heard, or read the removed media. Do not repeat get_attachment(view=True) for it on this model. Use get_attachment without view to inspect metadata or save the file with mindroom_output_path. Then use other available tools to extract or interpret its content. If no suitable tool is available, explain the limitation to the user.",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
       "model": "anthropic.claude-sonnet-5-5",
-      "stream": true,
       "system": [
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
           "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
-          "type": "text"
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
-      ]
+      ],
+      "stream": true
     },
     "headers": {
       "accept": "application/json",

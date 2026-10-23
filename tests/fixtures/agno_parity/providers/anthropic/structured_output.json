@@ -87,55 +87,55 @@
       "max_tokens": 8192,
       "messages": [
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "What should I pack for Paris tomorrow?",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
       "model": "claude-sonnet-5-5",
       "output_config": {
         "format": {
+          "type": "json_schema",
           "schema": {
-            "additionalProperties": false,
+            "type": "object",
             "description": "Structured output for routing decisions.",
+            "title": "_RoutingSuggestion",
             "properties": {
               "entity_name": {
+                "type": "string",
                 "description": "The name of the agent or team that should respond",
-                "title": "Entity Name",
-                "type": "string"
+                "title": "Entity Name"
               },
               "reasoning": {
+                "type": "string",
                 "description": "Brief explanation of why this agent or team was chosen",
-                "title": "Reasoning",
-                "type": "string"
+                "title": "Reasoning"
               }
             },
+            "additionalProperties": false,
             "required": [
               "entity_name",
               "reasoning"
-            ],
-            "title": "_RoutingSuggestion",
-            "type": "object"
-          },
-          "type": "json_schema"
+            ]
+          }
         }
       },
       "system": [
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
           "text": "Route the message to the best agent.",
-          "type": "text"
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
       ]
     },

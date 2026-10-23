@@ -105,34 +105,34 @@
     "body": {
       "messages": [
         {
+          "role": "system",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.\n\n",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             },
             {
-              "text": "<mindroom_session_context>\nToday is Tuesday, October 20, 2026 (UTC).\n</mindroom_session_context>",
-              "type": "text"
+              "type": "text",
+              "text": "<mindroom_session_context>\nToday is Tuesday, October 20, 2026 (UTC).\n</mindroom_session_context>"
             }
-          ],
-          "role": "system"
+          ]
         },
         {
+          "role": "user",
           "content": [
             {
-              "cache_control": {
-                "ttl": "1h",
-                "type": "ephemeral"
-              },
+              "type": "text",
               "text": "What should I pack for Paris tomorrow?",
-              "type": "text"
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
             }
-          ],
-          "role": "user"
+          ]
         }
       ],
       "model": "anthropic/claude-sonnet-5.5",
@@ -142,10 +142,10 @@
       },
       "tools": [
         {
+          "type": "function",
           "function": {
-            "description": "Return the forecast for one city.",
-            "external_execution": false,
             "name": "get_weather",
+            "description": "Return the forecast for one city.",
             "parameters": {
               "properties": {
                 "city": {
@@ -166,19 +166,15 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": false
-          },
-          "type": "function"
+            "requires_confirmation": false,
+            "external_execution": false
+          }
         },
         {
-          "cache_control": {
-            "ttl": "1h",
-            "type": "ephemeral"
-          },
+          "type": "function",
           "function": {
-            "description": "Search the user's travel notes.",
-            "external_execution": false,
             "name": "search_notes",
+            "description": "Search the user's travel notes.",
             "parameters": {
               "properties": {
                 "limit": {
@@ -195,9 +191,13 @@
               ],
               "type": "object"
             },
-            "requires_confirmation": false
+            "requires_confirmation": false,
+            "external_execution": false
           },
-          "type": "function"
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
         }
       ]
     },

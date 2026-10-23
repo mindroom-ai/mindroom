@@ -104,29 +104,26 @@
   },
   "request": {
     "body": {
-      "client_metadata": {
-        "x-codex-installation-id": "parity-installation"
-      },
       "include": [
         "reasoning.encrypted_content"
       ],
       "input": [
         {
+          "role": "developer",
           "content": [
             {
-              "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.\n\n",
-              "type": "input_text"
+              "type": "input_text",
+              "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.\n\n"
             }
-          ],
-          "role": "developer"
+          ]
         },
         {
-          "content": "<mindroom_session_context>\nToday is Tuesday, October 20, 2026 (UTC).\n</mindroom_session_context>",
-          "role": "developer"
+          "role": "developer",
+          "content": "<mindroom_session_context>\nToday is Tuesday, October 20, 2026 (UTC).\n</mindroom_session_context>"
         },
         {
-          "content": "What should I pack for Paris tomorrow?",
-          "role": "user"
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
         }
       ],
       "instructions": "You are a helpful assistant.",
@@ -137,9 +134,8 @@
       "stream": true,
       "tools": [
         {
-          "description": "Return the forecast for one city.",
-          "external_execution": false,
           "name": "get_weather",
+          "description": "Return the forecast for one city.",
           "parameters": {
             "properties": {
               "city": {
@@ -161,12 +157,12 @@
             "type": "object"
           },
           "requires_confirmation": false,
+          "external_execution": false,
           "type": "function"
         },
         {
-          "description": "Search the user's travel notes.",
-          "external_execution": false,
           "name": "search_notes",
+          "description": "Search the user's travel notes.",
           "parameters": {
             "properties": {
               "limit": {
@@ -184,9 +180,13 @@
             "type": "object"
           },
           "requires_confirmation": false,
+          "external_execution": false,
           "type": "function"
         }
-      ]
+      ],
+      "client_metadata": {
+        "x-codex-installation-id": "parity-installation"
+      }
     },
     "headers": {
       "accept": "application/json",
