@@ -705,8 +705,8 @@ class StreamingResponse:
         self.last_delta_at = time.time()
 
     def _mark_nonadditive_text_mutation(self) -> None:
-        """Record a visible in-place text change that did not append characters."""
-        self.chars_since_last_update = max(1, self.chars_since_last_update)
+        """Count a visible in-place text change that did not append characters as one received character."""
+        self.chars_since_last_update += 1
         self.last_delta_at = time.time()
 
     def _ensure_hidden_tool_gap(self) -> None:
@@ -764,12 +764,14 @@ class StreamingResponse:
             return
 
         # The outbound payload was captured before newer live state arrived.
-        # What the stream received after the capture is still pending, at least
-        # one character when only the trace or presentation changed, and
+        # What the stream received after the capture stays pending, and
         # boundary-refresh eligibility stays intact, so a later request
-        # delivers it when the throttle allows.
+        # delivers it when the throttle allows. The single delivery owner
+        # captures and lands each edit, so the counter only grows in between.
+        # A tool-trace or presentation change alone adds nothing here, just as
+        # it adds nothing when it arrives between edits.
         self.last_boundary_refresh_at = None
-        self.chars_since_last_update = max(1, self.chars_since_last_update - committed_state.chars_since_last_update)
+        self.chars_since_last_update -= committed_state.chars_since_last_update
 
     def _live_state_matches(self, captured: _CommittedDeliveryState) -> bool:
         """Return whether the live text, tool trace, and presentation still equal one captured state."""

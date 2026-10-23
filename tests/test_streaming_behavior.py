@@ -1584,6 +1584,70 @@ class TestStreamingBehavior:
         assert bodies == ["0123456789", "abcdefghij"]
 
     @pytest.mark.asyncio
+    async def test_tool_completion_during_an_edit_stays_pending(self) -> None:
+        """A completion marker rewritten while an edit is in flight goes out with a later request."""
+        mock_client = _make_matrix_client_mock()
+        first_send_started = asyncio.Event()
+        allow_first_send_to_finish = asyncio.Event()
+        first_send_landed = asyncio.Event()
+
+        async def room_send(*args: object, **kwargs: object) -> nio.RoomSendResponse:
+            _ = (args, kwargs)
+            if mock_client.room_send.await_count == 1:
+                first_send_started.set()
+                await allow_first_send_to_finish.wait()
+            mock_response = MagicMock()
+            mock_response.__class__ = nio.RoomSendResponse
+            mock_response.event_id = "$tool_completion"
+            return mock_response
+
+        mock_client.room_send.side_effect = room_send
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            update_interval=10.0,
+            interval_ramp_seconds=0.0,
+            update_char_threshold=1,
+            min_char_update_interval=0.35,
+            max_idle=10.0,
+            show_tool_calls=True,
+            visible_progress_callback=lambda _body, _trace: first_send_landed.set(),
+        )
+        streaming.last_update = float("-inf")
+        tool = ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}, result="ok")
+
+        async def response_stream() -> AsyncIterator[object]:
+            yield ToolCallStartedEvent(tool=tool)
+            await first_send_started.wait()
+            yield ToolCallCompletedEvent(tool=tool, content="ok")
+
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        clock = 100.0
+
+        with patch("mindroom.streaming.time.time", side_effect=lambda: clock):
+            # The stream ends once the completion has rewritten the marker, while the first edit is in flight.
+            await _consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue)
+            clock = 100.2
+            allow_first_send_to_finish.set()
+            await first_send_landed.wait()
+
+            # A later request with no new text delivers the rewrite once the window has passed.
+            clock = 100.6
+            _queue_delivery_request(delivery_queue, progress_hint=True)
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+
+        assert shutdown_error is None
+        bodies = [
+            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
+            for call in mock_client.room_send.call_args_list
+        ]
+        assert len(bodies) == 2
+        assert "⏳" in bodies[0]
+        assert "⏳" not in bodies[1]
+
+    @pytest.mark.asyncio
     async def test_stale_nonterminal_send_does_not_strand_newer_text(self) -> None:
         """Text that arrived while an edit was in flight stays pending until the throttle delivers it."""
         mock_client = _make_matrix_client_mock()
@@ -1639,11 +1703,12 @@ class TestStreamingBehavior:
             clock = 100.2
             allow_first_send_to_finish.set()
             await consume_task
-            # The delivery owner records the landed edit and declines the queued "B" request
-            # without yielding, so both have happened once this wait returns.
+            # The delivery owner records the landed edit before this wait returns.
             await first_send_landed.wait()
 
-            # The edit that just landed restarts the throttle window; only "B" is pending.
+            # The edit that just landed restarts the throttle window, so the queued "B"
+            # request waits, and only "B" is pending.
+            assert streaming.last_update == pytest.approx(100.2)
             assert mock_client.room_send.call_count == 1
             assert streaming.chars_since_last_update == 1
 
