@@ -187,6 +187,8 @@ def format_claude_messages(
     merged = _merged_turns(turns)
     if append_trailing_user_message and merged and merged[-1]["role"] == "assistant":
         merged.append({"role": "user", "content": [{"type": "text", "text": _TRAILING_USER_MESSAGE}]})
+    # TODO(simplify): System and developer messages join with one space, as Agno joined them, so a later one runs on
+    # from the end of the previous one. Join them with a blank line. Models would notice.
     return FormattedConversation(messages=merged, system=" ".join(system_texts))
 
 
