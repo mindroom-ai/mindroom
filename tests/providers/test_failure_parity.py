@@ -711,6 +711,15 @@ _OPENAI_HTTP_CASES = [
         1,
         1,
     ),
+    # Text that names an ``author`` property is not wording about the credentials.
+    _Case(
+        "http_400_author_property",
+        _openai_status(400, "Invalid schema for function 'save_note': 'author' is not of type 'string'.", "invalid"),
+        InvalidRequest,
+        ERROR,
+        1,
+        1,
+    ),
     _Case(
         "http_413",
         _openai_status(413, "Request Entity Too Large", "invalid_request_error"),
@@ -1213,8 +1222,32 @@ _OLLAMA_CASES = [
     *_early_ends(_ollama_stream(_ollama_chunk()), _ollama_stream(_ollama_chunk(_PARTIAL))),
 ]
 
+# llama.cpp's own wording for a request larger than the context size the server was started with.
+_LLAMA_CPP_CASES = [
+    _Case(
+        "http_400_context_size",
+        _json(
+            400,
+            {
+                "error": {
+                    "code": 400,
+                    "message": "the request exceeds the available context size, try increasing it",
+                    "type": "exceed_context_size_error",
+                    "n_prompt_tokens": 9000,
+                    "n_ctx": 8192,
+                },
+            },
+        ),
+        ContextWindowExceeded,
+        CONTEXT_WINDOW,
+        1,
+        1,
+    ),
+]
+
 # Vertex AI Claude, Bedrock Claude, and Vertex AI Gemini failed exactly as their family's direct route did on the
-# Agno-backed runtime, so they run every row of that family; the other OpenAI-compatible Chat routes run three.
+# Agno-backed runtime, so they run every row of that family; the other OpenAI-compatible Chat routes run the shared
+# Chat rows, and llama.cpp its own context-size wording too.
 ROWS = [
     *_rows("anthropic", _CLAUDE_CASES),
     *_rows("vertexai_claude", _CLAUDE_CASES),
@@ -1225,6 +1258,7 @@ ROWS = [
         for route in ("openrouter", "azure", "deepseek", "zai", "llama_cpp", "kimi", "groq", "cerebras")
         for row in _rows(route, _CHAT_SHARED)
     ),
+    *_rows("llama_cpp", _LLAMA_CPP_CASES),
     *_rows("openai_responses", _RESPONSES_CASES),
     *_rows("codex", _RESPONSES_CASES, streams_only=True),
     *_rows("gemini", _GEMINI_CASES),

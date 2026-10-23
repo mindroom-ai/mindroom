@@ -8,6 +8,7 @@ error reply see one rule with one precedence.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import httpx
@@ -56,14 +57,15 @@ _TRANSIENT_NAMES = frozenset(
         "vector_store_timeout",
     },
 )
-# Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid"
-# and Anthropic's 403 permission error that names the API key.
-_CREDENTIAL_MARKERS = ("auth", "api key", "api_key", "apikey")
+# Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid",
+# Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, or a whole word of
+# the auth family, so text that names an ``author`` property, an ``authority``, or ``oauth`` is not one.
+_CREDENTIAL_WORDING = re.compile(r"\b(?:un)?auth(?:enticat\w*|oriz\w*)?\b|api[ _]?key")
 
 # Wording providers use when a request does not fit the model's context window (Agno's
 # ``ModelProviderError.CONTEXT_WINDOW_PATTERNS`` without its over-broad ``max_tokens``, plus the
-# payload-size wording OpenAI-compatible servers and Anthropic use, and older Claude models' "input length and
-# `max_tokens` exceed context limit").
+# payload-size wording OpenAI-compatible servers and Anthropic use, older Claude models' "input length and
+# `max_tokens` exceed context limit", and llama.cpp's "exceeds the available context size").
 _CONTEXT_WINDOW_MARKERS = (
     "context_length_exceeded",
     "context window",
@@ -80,6 +82,7 @@ _CONTEXT_WINDOW_MARKERS = (
     "prompt is too long",
     "prompt too long",
     "exceeds the model",
+    "context size",
 )
 # A timeout as the HTTP client raises it, or as aiohttp and the socket layer raise it.
 _TRANSPORT_TIMEOUTS = (httpx.TimeoutException, TimeoutError)
@@ -147,7 +150,7 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
         return typed(ContextWindowExceeded)
     if names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered:
         return typed(ProviderUnavailable)
-    if client_side and any(marker in lowered for marker in _CREDENTIAL_MARKERS):
+    if client_side and _CREDENTIAL_WORDING.search(lowered):
         return typed(AuthenticationFailed)
     if status in _INVALID_REQUEST_STATUSES:
         return typed(InvalidRequest)
