@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.tools import tool_result_message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
@@ -139,7 +139,6 @@ class BatchCheckpoint:
         await save_cli_session(
             catalog.store,
             catalog.session,
-            catalog.run.session_state,
             lambda store, session: store.save_run(session, run, record_usage=False),
         )
 
@@ -147,7 +146,6 @@ class BatchCheckpoint:
 async def save_cli_session(
     store: ConversationStore | None,
     session: ConversationSession,
-    session_state: dict[str, Any],
     write: Callable[[ConversationStore, ConversationSession], object],
 ) -> None:
     """Save the session's current state, then ``write``'s runs, in the store's lane; failures propagate.
@@ -158,7 +156,7 @@ async def save_cli_session(
     if store is None:
         msg = "CLI history requires persisted session storage"
         raise RuntimeError(msg)
-    state = session_state_snapshot(session_state)
+    state = session_state_snapshot(session.session_state)
     saved = replace(session, session_state=deepcopy(state))
 
     def operation(opened: ConversationStore) -> None:

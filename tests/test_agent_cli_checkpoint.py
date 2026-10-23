@@ -252,7 +252,6 @@ async def test_a_checkpoint_saves_a_session_state_another_thread_keeps_changing(
             await save_cli_session(
                 store,
                 session,
-                live,
                 lambda opened, saved: opened.save_run(saved, record, record_usage=False),
             )
             fields = store.read_session_fields("session")
