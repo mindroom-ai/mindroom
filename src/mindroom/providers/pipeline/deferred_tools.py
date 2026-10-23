@@ -44,18 +44,13 @@ def _projected_message(message: Message, deferred: frozenset[str]) -> Message:
     return message
 
 
-def _projected_request(request: ModelRequest) -> ModelRequest:
-    deferred = request.deferred_tool_names
-    return replace(
-        request,
-        messages=[_projected_message(message, deferred) for message in request.messages],
-        tools=[tool for tool in request.tools if tool.name not in deferred],
-        deferred_tool_names=frozenset(),
-    )
-
-
 def portable_tool_search_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with deferred tools hidden behind ``call_tool`` unless the route searches natively."""
-    if request.deferred_tool_names and not inner.capabilities.native_tool_search:
-        request = _projected_request(request)
+    if (deferred := request.deferred_tool_names) and not inner.capabilities.native_tool_search:
+        request = replace(
+            request,
+            messages=[_projected_message(message, deferred) for message in request.messages],
+            tools=[tool for tool in request.tools if tool.name not in deferred],
+            deferred_tool_names=frozenset(),
+        )
     return inner.stream(request)
