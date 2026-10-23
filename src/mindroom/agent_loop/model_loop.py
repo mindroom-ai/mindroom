@@ -57,10 +57,10 @@ class LoopState:
     ``messages`` is the live list the loop sends and appends to, so a hook rewrites it in place; ``offered`` holds the
     functions that answer the run's calls; ``tools`` are the definitions this request offers, which start as the
     offered functions' own and which a hook may extend (the wait budget job admission accepts) or replace (a skill
-    review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions and requirements the loop
-    fills as it goes; ``loop_start_ids`` are the ids of the messages the loop started with; ``request_template``
-    carries the per-run request settings, which a hook may replace for the rest of the run (mid-turn compaction
-    turning the provider's compaction off after it compacted as text).
+    review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions
+    and requirements the loop fills as it goes; ``loop_start_ids`` are the ids of the messages the loop started
+    with; ``request_template`` carries the per-run request settings, which a hook may replace for the rest of the run
+    (mid-turn compaction turning the provider's compaction off after it compacted as text).
     """
 
     messages: list[Message]
@@ -277,7 +277,7 @@ async def _run_tool_batch(
     hooks: LoopHooks,
     tool_call_limit: int | None,
 ) -> AsyncIterator[ToolStarted | ToolCompleted]:
-    """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan, announce, and run them."""
+    """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan and run them."""
     assert message.tool_calls
     answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, stop_reason)
     if answers is not None:
@@ -386,8 +386,8 @@ async def _answer_batch(
 
     Each result is one canonical tool message; media leave them first, so a wire that merges results never carries
     them, and reach the model on one user message after the results. Every batch path answers here, so one rule
-    decides the stop: a batch stops the run when any of its results does, the results a resumed batch answered
-    before its pause included, as Agno's loop stopped after such a batch. No later request reads what a hook would
+    decides the stop: a batch stops the run when any of its results does, counting the results a resumed batch
+    answered before its pause, as Agno's loop decided for a fresh batch. No later request reads what a hook would
     add after a batch that stops the run, so none runs.
     """
     follow_up = media_follow_up(results)
