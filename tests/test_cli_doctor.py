@@ -221,6 +221,29 @@ def test_a_provider_key_is_checked_with_the_request_that_proves_it_valid(
     assert sent == [(url, headers)]
 
 
+@pytest.mark.parametrize(
+    ("provider", "base_url"),
+    [
+        ("zai", "https://zai-proxy.example/v4"),
+        ("huggingface", "http://embeddings.local:8080"),
+        ("zai", None),
+    ],
+)
+def test_a_provider_without_a_key_check_is_not_probed_even_at_a_custom_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    base_url: str | None,
+) -> None:
+    """Only a route with a known key check is probed, so a custom endpoint cannot misreport a valid key as invalid."""
+
+    def get(url: str, **_kwargs: object) -> httpx.Response:
+        raise AssertionError(url)
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+
+    assert _validate_provider_key(provider, "k", base_url) == (None, "unknown provider")
+
+
 def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A healthy embedding round-trip counts as a pass."""
     monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: None)
