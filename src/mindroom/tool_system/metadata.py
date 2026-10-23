@@ -99,7 +99,6 @@ _TOOLKIT_FILTER_CONFIG_FIELDS = (
 )
 _AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
 _VALIDATION_PLUGIN_MODULE_SUFFIX = "__validation__"
-_OMIT_TOOL_CONFIG_ARG = object()
 
 
 class ToolInitOverrideError(ValueError):
@@ -468,19 +467,16 @@ def coerce_optional_finite_number(value: object) -> int | float | None:
     raise TypeError
 
 
-def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: object) -> int | float | object:
-    """Normalize a persisted dashboard number field before passing it to a tool constructor."""
+def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: object) -> int | float | None:
+    """Normalize a persisted dashboard number field before passing it to a tool constructor; None omits it."""
     try:
-        coerced = coerce_optional_finite_number(value)
+        return coerce_optional_finite_number(value)
     except OverflowError as exc:
         msg = f"Stored config value for '{tool_name}.{field_name}' must be a finite number."
         raise ToolConfigOverrideError(msg) from exc
     except (TypeError, ValueError) as exc:
         msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
         raise ToolConfigOverrideError(msg) from exc
-    if coerced is None:
-        return _OMIT_TOOL_CONFIG_ARG
-    return coerced
 
 
 def _coerce_boolean_tool_config_value(tool_name: str, field_name: str, value: object) -> bool | None:
@@ -499,26 +495,6 @@ def _coerce_boolean_tool_config_value(tool_name: str, field_name: str, value: ob
     raise ToolConfigOverrideError(msg)
 
 
-def _coerce_runtime_tool_config_value(tool_name: str, field: ConfigField, value: object) -> object:
-    if field.type == "number":
-        return _coerce_number_tool_config_value(tool_name, field.name, value)
-    if field.type == "boolean":
-        return _coerce_boolean_tool_config_value(tool_name, field.name, value)
-    return value
-
-
-def _set_tool_config_init_kwarg(
-    init_kwargs: dict[str, object],
-    *,
-    tool_name: str,
-    field: ConfigField,
-    value: object,
-) -> None:
-    coerced_value = _coerce_runtime_tool_config_value(tool_name, field, value)
-    if coerced_value is not _OMIT_TOOL_CONFIG_ARG:
-        init_kwargs[field.name] = coerced_value
-
-
 def _apply_tool_config_init_values(
     init_kwargs: dict[str, object],
     *,
@@ -535,12 +511,13 @@ def _apply_tool_config_init_values(
         value = values[field.name]
         if skip_inherited and value == _AUTHORED_OVERRIDE_INHERIT:
             continue
-        _set_tool_config_init_kwarg(
-            init_kwargs,
-            tool_name=tool_name,
-            field=field,
-            value=value,
-        )
+        if field.type == "number":
+            value = _coerce_number_tool_config_value(tool_name, field.name, value)
+            if value is None:
+                continue
+        elif field.type == "boolean":
+            value = _coerce_boolean_tool_config_value(tool_name, field.name, value)
+        init_kwargs[field.name] = value
 
 
 def _build_tool_config_init_kwargs(
