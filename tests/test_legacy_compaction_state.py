@@ -29,11 +29,11 @@ if TYPE_CHECKING:
 
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 _EPOCH = datetime.fromtimestamp(0, UTC)
-_NAMES = TableNames("code_sessions")
+_NAMES = TableNames("code")
 
 
 def _open(tmp_path: Path) -> ConversationStore:
-    db = create_state_storage("code", tmp_path, session_table="code_sessions")
+    db = create_state_storage("code", tmp_path)
     assert isinstance(db, ConversationStore)
     return db
 
@@ -306,7 +306,7 @@ def test_an_agent_named_agno_migrates_the_agno_runs_table(tmp_path: Path) -> Non
     """Agno names the runs table beside ``agno_sessions`` ``agno_runs``; the migration works on it and adds no other."""
     scope = HistoryScope(kind="agent", scope_id="agno")
     _seed_as_older_release(
-        create_state_storage("agno", tmp_path, session_table="agno_sessions"),
+        create_state_storage("agno", tmp_path),
         ConversationSession(
             kind="agent",
             session_id="session",
@@ -322,7 +322,7 @@ def test_an_agent_named_agno_migrates_the_agno_runs_table(tmp_path: Path) -> Non
         connection.execute("DROP TABLE agno_sessions_removed_runs")
         connection.execute("UPDATE agno_runs SET run_index = NULL WHERE run_id = 'r2'")
 
-    storage = create_state_storage("agno", tmp_path, session_table="agno_sessions")
+    storage = create_state_storage("agno", tmp_path)
     assert stored_run_ids(storage, "session") == ["r2", "r1"]
     assert summary_rows_of(storage, scope.key, "session") == [
         StoredSummaryRow(summary="legacy summary", summary_model=None, legacy=True),

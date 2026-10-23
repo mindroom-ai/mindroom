@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import SessionKind
 
-_NAMES = TableNames("code_sessions")
+_NAMES = TableNames("code")
 
 
 def _store(tmp_path: Path, *, prompt_roles: frozenset[str] = frozenset({"system"})) -> ConversationStore:

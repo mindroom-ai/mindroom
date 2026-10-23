@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from copy import deepcopy
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -49,7 +51,7 @@ def golden_stores() -> list[GoldenStore]:
         GoldenStore(
             label=label,
             db_path=spec["db_path"],
-            names=TableNames(spec["session_table"]),
+            names=TableNames(Path(spec["db_path"]).stem),
             sessions=cast("dict[str, SessionKind]", spec["sessions"]),
         )
         for label, spec in stores.items()
@@ -61,9 +63,15 @@ def golden_sessions() -> list[tuple[GoldenStore, str]]:
     return [(store, session_id) for store in golden_stores() for session_id in store.sessions]
 
 
+@cache
+def _loaded_sessions() -> dict[str, dict[str, dict[str, Any]]]:
+    """Read the sessions Agno loaded once, as the dump is large and every test of a session asks for its own."""
+    return json.loads((STORAGE / "loaded_sessions.json").read_text(encoding="utf-8"))
+
+
 def agno_loaded_session(store: GoldenStore, session_id: str) -> dict[str, Any]:
     """Return ``AgentSession.to_dict()`` or ``TeamSession.to_dict()`` of a golden session as Agno loaded it."""
-    return json.loads((STORAGE / "loaded_sessions.json").read_text(encoding="utf-8"))[store.label][session_id]
+    return deepcopy(_loaded_sessions()[store.label][session_id])
 
 
 def stored_rows(db_file: Path, table: str, session_id: str) -> list[dict[str, Any]]:

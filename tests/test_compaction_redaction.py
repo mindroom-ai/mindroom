@@ -36,7 +36,7 @@ _EPOCH = datetime.fromtimestamp(0, UTC)
 
 
 def _open(tmp_path: Path) -> ConversationStore:
-    db = create_state_storage("code", tmp_path, session_table="code_sessions")
+    db = create_state_storage("code", tmp_path)
     assert isinstance(db, ConversationStore)
     return db
 

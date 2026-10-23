@@ -273,11 +273,7 @@ def test_postgres_query_reads_the_journal_and_cannot_write(postgres_journal_url:
 
 def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]]) -> None:
     """Persist one session holding `(run_id, created_at)` runs in the conversation database under `state_root`."""
-    storage = create_state_storage(
-        state_root.name,
-        state_root,
-        session_table=f"{state_root.name}_sessions",
-    )
+    storage = create_state_storage(state_root.name, state_root)
     seed_session(
         storage,
         ConversationSession(

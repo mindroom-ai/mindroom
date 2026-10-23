@@ -6023,7 +6023,7 @@ async def test_streaming_midstream_failure_persists_partial_and_finalizes_error(
     assert snapshot.user_message == "hello\n\n<mindroom_message_context>persist me</mindroom_message_context>"
     assert snapshot.partial_text == "partial body"
     assert snapshot.run_metadata["matrix_response_event_id"] == "$stream"
-    assert persist.call_args.kwargs["is_team"] is False
+    assert persist.call_args.kwargs["session"].kind == "agent"
 
 
 @pytest.mark.asyncio

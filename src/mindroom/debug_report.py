@@ -295,13 +295,13 @@ def _read_run_database(
 ) -> tuple[int, list[dict[str, Any]]]:
     """Return how many runs match and the newest `_MAX_RUNS` of the database's runs table, oldest first.
 
-    A conversation database `<name>.db` holds the tables of the sessions table `<name>_sessions`.
+    The tables of a conversation database `<name>.db` are those `TableNames(<name>)` names.
     """
     # The schema module loads the history package, which the CLI's import path keeps out (tests/test_cli_config.py).
     from mindroom.session_storage.schema import TableNames, table_names  # noqa: PLC0415
 
     where = " OR ".join(conditions)
-    runs_table = TableNames(f"{database.stem}_sessions").runs
+    runs_table = TableNames(database.stem).runs
     with _read_only_connection(database) as connection:
         if runs_table not in table_names(connection):
             return 0, []

@@ -61,7 +61,7 @@ from mindroom.event_journal import (
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot, render_stopped_attempt
-from mindroom.history.storage import has_queued_force_compaction
+from mindroom.history.storage import has_queued_force_compaction, new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
@@ -2853,12 +2853,9 @@ class ResponseRunner:
             recorder.set_response_event_id(response_event_id)
         persist_interrupted_replay_snapshot(
             storage=self.deps.state_writer.create_storage(execution_identity, scope=session_scope),
-            session=None,
-            session_id=session_id,
-            scope_id=session_scope.scope_id,
+            session=new_scope_session(session_id=session_id, scope_id=session_scope.scope_id, is_team=is_team),
             run_id=recorder.run_id or run_id or str(uuid4()),
             snapshot=recorder.interrupted_snapshot(),
-            is_team=is_team,
         )
 
     def _ensure_recorder_interrupted(self, recorder: TurnRecorder) -> None:

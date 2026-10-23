@@ -71,7 +71,7 @@ def _db(tmp_path: Path) -> Path:
 
 
 def _open(tmp_path: Path) -> ConversationStore:
-    storage = create_state_storage("code", tmp_path, session_table="code_sessions")
+    storage = create_state_storage("code", tmp_path)
     assert isinstance(storage, ConversationStore)
     return storage
 

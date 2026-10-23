@@ -21,6 +21,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
@@ -78,7 +79,7 @@ def _source(
         path=Path("/not-read.db"),
         path_label=f"{scope}/{agent_name or 'team'}.db",
         scope=scope,  # type: ignore[arg-type]
-        expected_session_table="sessions",
+        names=TableNames("code"),
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset({"code", "other"}),
         requester_isolated=requester_isolated,
@@ -732,11 +733,7 @@ def test_daily_usage_returns_empty_breakdown_without_retained_runs(
 def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool) -> None:
     paths = _paths(tmp_path)
     config = Config(agents={"code": AgentConfig(display_name="Code")})
-    storage = create_state_storage(
-        "code",
-        paths.storage_root / "agents" / "code",
-        session_table="code_sessions",
-    )
+    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
     first_day = int(datetime(2026, 9, 14, tzinfo=UTC).timestamp())
     metrics = RunMetrics(
         input_tokens=17,
@@ -894,7 +891,7 @@ def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: b
         with sqlite3.connect(database) as connection:
             runs = connection.execute("SELECT runs FROM code_sessions").fetchone()[0]
             connection.execute("UPDATE code_sessions SET runs = ?", (json.loads(runs),))
-    migrate_usage_database(database, "code_sessions")
+    migrate_usage_database(database, TableNames("code"))
 
     report = collect_self_usage(
         agent_name="code",
@@ -939,7 +936,7 @@ def test_migration_keeps_valid_usage_beside_a_malformed_counter(tmp_path: Path) 
                 ),
             ),
         )
-    migrate_usage_database(database, "code_sessions")
+    migrate_usage_database(database, TableNames("code"))
 
     report = collect_self_usage(
         agent_name="code",
@@ -969,11 +966,7 @@ def test_migration_keeps_valid_usage_beside_a_malformed_counter(tmp_path: Path) 
 def test_unusable_model_details_preserve_daily_totals(tmp_path: Path, details: object) -> None:
     paths = _paths(tmp_path)
     config = Config(agents={"code": AgentConfig(display_name="Code")})
-    storage = create_state_storage(
-        "code",
-        paths.storage_root / "agents" / "code",
-        session_table="code_sessions",
-    )
+    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
     storage.save_run(
         ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
         RunRecord(

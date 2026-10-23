@@ -35,7 +35,6 @@ USAGE_KINDS: frozenset[str] = frozenset({"run", *get_args(IndependentUsageKind._
 
 SYSTEM_USAGE_ENTITY = "system:internal"
 SYSTEM_USAGE_STORAGE_NAME = "system"
-SYSTEM_USAGE_SESSION_TABLE = "system_sessions"
 SYSTEM_USAGE_RELATIVE_PATH = "system/sessions/system.db"
 
 TOKEN_FIELDS = (
@@ -61,10 +60,15 @@ def quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
+def usage_table_name(session_table: str) -> str:
+    """Return the name of the usage table that sits beside a sessions table."""
+    return f"{session_table}_usage"
+
+
 def usage_table_sql(session_table: str) -> str:
     """Create the usage table; its publication also marks completed initial seeding."""
     return (
-        f"CREATE TABLE IF NOT EXISTS {quote_identifier(session_table + '_usage')} ("
+        f"CREATE TABLE IF NOT EXISTS {quote_identifier(usage_table_name(session_table))} ("
         "id INTEGER PRIMARY KEY, "
         f"session_id TEXT NOT NULL REFERENCES {quote_identifier(session_table)}(session_id) ON DELETE CASCADE, "
         "run_id TEXT, usage_data TEXT, UNIQUE(session_id, run_id))"
@@ -74,7 +78,7 @@ def usage_table_sql(session_table: str) -> str:
 def usage_upsert_sql(session_table: str) -> str:
     """Replace a saved run's snapshot; missing historical IDs remain distinct rows."""
     return (
-        f"INSERT INTO {quote_identifier(session_table + '_usage')} (session_id, run_id, usage_data) "  # noqa: S608
+        f"INSERT INTO {quote_identifier(usage_table_name(session_table))} (session_id, run_id, usage_data) "  # noqa: S608
         "VALUES (?, ?, ?) ON CONFLICT(session_id, run_id) DO UPDATE SET usage_data = excluded.usage_data"
     )
 

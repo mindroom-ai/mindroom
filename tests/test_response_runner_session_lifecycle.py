@@ -98,7 +98,7 @@ THREAD_SESSION_ID = "!test:localhost:$thread-root"
 
 def _history_store(tmp_path: Path) -> ConversationStore:
     """Return the agent scope's store the runner opens for its session probe and its interrupted-turn records."""
-    return create_state_storage("general", tmp_path / "scope_history", session_table="general_sessions")
+    return create_state_storage("general", tmp_path / "scope_history")
 
 
 def _start_session(storage: ConversationStore, session_id: str) -> None:

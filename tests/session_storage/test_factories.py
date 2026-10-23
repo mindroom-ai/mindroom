@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 def _open(tmp_path: Path) -> ConversationStore:
-    return create_state_storage("code", tmp_path, session_table="code_sessions")
+    return create_state_storage("code", tmp_path)
 
 
 def _tables(db_file: Path) -> set[str]:

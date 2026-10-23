@@ -720,7 +720,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
     Redacting it, or the reply that read it, must remove that run and everything after it
     before the history is used again, while the history before it stays.
     """
-    storage = create_state_storage("crew", tmp_path, session_table="crew_sessions")
+    storage = create_state_storage("crew", tmp_path)
     runs = [
         _history_run("earlier", team=team, event_id="$earlier", seen=["$earlier"]),
         _history_run("newer", team=team, event_id="$newer", seen=["$older", "$newer"]),

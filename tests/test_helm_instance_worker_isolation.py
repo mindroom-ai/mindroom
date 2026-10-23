@@ -1260,7 +1260,7 @@ def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
 
 
 def _open_sessions(state_root: Path) -> ConversationStore:
-    return create_state_storage("helper", state_root, session_table="helper_sessions")
+    return create_state_storage("helper", state_root)
 
 
 def test_instance_chart_static_runner_generates_primary_api_key_without_other_auth() -> None:

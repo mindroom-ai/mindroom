@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-def create_state_storage(storage_name: str, state_root: Path, *, session_table: str) -> ConversationStore:
+def create_state_storage(storage_name: str, state_root: Path) -> ConversationStore:
     """Open the conversation database ``<state_root>/sessions/<storage_name>.db`` with its migrations applied.
 
     Under the recovery lock, in order: a database missing required session columns is archived, an older
@@ -35,14 +35,13 @@ def create_state_storage(storage_name: str, state_root: Path, *, session_table: 
     with session_storage_preflight(
         state_root,
         storage_name=storage_name,
-        session_table=session_table,
         timeout_seconds=BUSY_TIMEOUT_SECONDS,
     ):
         db_dir = state_root / "sessions"
         db_dir.mkdir(parents=True, exist_ok=True)
         db_path = db_dir / f"{storage_name}.db"
-        names = TableNames(session_table)
-        migrate_usage_database(db_path, session_table)
+        names = TableNames(storage_name)
+        migrate_usage_database(db_path, names)
         migrate_to_summary_rows(db_path, names)
         return open_conversation_store(db_path, names, prompt_roles=prompt_roles_for_history_storage())
 
@@ -57,11 +56,7 @@ def create_session_storage(
     resolved_storage = resolve_agent_storage(agent_name, config, runtime_paths, execution_identity=execution_identity)
     # A turn can read its session before it builds the agent, which is the other place this record is written.
     record_private_instance_owner(agent_name, resolved_storage.execution, runtime_paths)
-    return create_state_storage(
-        agent_name,
-        resolved_storage.session_state_root,
-        session_table=f"{agent_name}_sessions",
-    )
+    return create_state_storage(agent_name, resolved_storage.session_state_root)
 
 
 def save_compaction_usage(

@@ -633,6 +633,10 @@ async def write_with_session_state[Result](
 
     The run's tools change the live state in place while the lane is busy, so the copy is taken before the lane is
     awaited. ``write`` hands it to the run save it makes (``state=``), which commits it with the run.
+
+    The hand-off stays in each callback because the three callers save three shapes, a run encoded on the caller's
+    task (``persist_to``), a run record (the CLI checkpoint), and a replay run built in the lane (the CLI approval
+    recovery); binding the state would take a wrapper per shape. Every caller has a test that fails without ``state=``.
     """
     state = session_state_snapshot(session.session_state)
     return await run_session_storage_operation(lambda: store, lambda opened: write(opened, state))

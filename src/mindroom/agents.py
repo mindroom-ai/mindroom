@@ -1667,11 +1667,7 @@ def _open_agent_session_storage(
             return None
         if history_storage is not None:
             return history_storage
-        return agent_storage.create_state_storage(
-            agent_name,
-            agent_runtime.session_state_root,
-            session_table=f"{agent_name}_sessions",
-        )
+        return agent_storage.create_state_storage(agent_name, agent_runtime.session_state_root)
 
 
 def _build_agent_role_context(

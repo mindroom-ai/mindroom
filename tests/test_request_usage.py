@@ -17,6 +17,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.stats import collect_admin_usage
@@ -104,7 +105,7 @@ def request_usage(tmp_path: Path) -> Iterator[tuple[Config, RuntimePaths, Conver
         agents={"code": AgentConfig(display_name="Code")},
         authorization=AuthorizationConfig(aliases={"@alice:example.test": ["@alias:example.test"]}),
     )
-    storage = create_state_storage("code", tmp_path / "agents/code", session_table="code_sessions")
+    storage = create_state_storage("code", tmp_path / "agents/code")
     storage.save_run(_session(), _run(), record_usage=True)
     return config, paths, storage
 
@@ -379,14 +380,14 @@ def test_initial_migration_imports_available_requests_without_reseeding_old_ledg
     config, paths, storage = request_usage
     with sqlite3.connect(storage.path) as connection:
         connection.execute("DROP TABLE code_sessions_usage")
-    migrate_usage_database(storage.path, "code_sessions")
+    migrate_usage_database(storage.path, TableNames("code"))
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert [row.totals.input_tokens for row in report.request_breakdown] == [120_000, 130_000]
     with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         del payload["requests"]
         connection.execute("UPDATE code_sessions_usage SET usage_data = ?", (json.dumps(payload),))
-    migrate_usage_database(storage.path, "code_sessions")
+    migrate_usage_database(storage.path, TableNames("code"))
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 250_014
     assert report.request_breakdown == ()

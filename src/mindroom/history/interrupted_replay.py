@@ -310,34 +310,31 @@ def _unfolded(tools: Sequence[ToolTraceEntry], folded_tool_call_ids: Collection[
 def persist_interrupted_replay_snapshot(
     *,
     storage: ConversationStore,
-    session: ConversationSession | None,
-    session_id: str,
-    scope_id: str,
+    session: ConversationSession,
     run_id: str,
     snapshot: InterruptedReplaySnapshot,
-    is_team: bool,
     state: dict[str, Any] | None = None,
 ) -> None:
-    """Persist one canonical interrupted replay snapshot into session history.
+    """Persist one canonical interrupted replay snapshot into ``session``'s history.
 
-    Calls the run's mid-turn folds already summarized stay out, whichever path built the snapshot. The run is saved
-    through ``session`` when given, so it learns the replay run. With ``state``, a ``session_state_snapshot``, the
-    session state commits in the same transaction as the replay run.
+    The session names the row, its owner, and whether the run is a team's, so the replay run and the row it is
+    saved into cannot disagree, and the run is saved through it, so it learns the replay run. Calls the run's
+    mid-turn folds already summarized stay out, whichever path built the snapshot. With ``state``, a
+    ``session_state_snapshot`` of the state ``session`` ran with, the session state commits in the same transaction
+    as the replay run.
     """
-    folded = run_folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
+    folded = run_folded_tool_call_ids(storage, session_id=session.session_id, run_id=run_id)
     snapshot = replace(
         snapshot,
         completed_tools=_unfolded(snapshot.completed_tools, folded),
         interrupted_tools=_unfolded(snapshot.interrupted_tools, folded),
     )
-    if session is None:
-        session = new_scope_session(session_id=session_id, scope_id=scope_id, is_team=is_team)
     persisted_run = _build_interrupted_replay_run(
         snapshot=snapshot,
         run_id=run_id,
-        scope_id=scope_id,
-        session_id=session_id,
-        is_team=is_team,
+        scope_id=session.owner_id,
+        session_id=session.session_id,
+        is_team=session.kind == "team",
     )
     storage.save_runs(session, [persisted_run], state=state)
 
@@ -356,14 +353,17 @@ def persist_interrupted_replay(
     is_team: bool,
     original_status: RunStatus = RunStatus.cancelled,
 ) -> None:
-    """Persist one interrupted top-level turn from trusted runtime state."""
+    """Persist one interrupted top-level turn from trusted runtime state.
+
+    The scope's stored session is the one saved into; ``session_id`` and ``is_team`` name the first one of a scope
+    that has none yet.
+    """
     if scope_context is None:
         return
     persist_interrupted_replay_snapshot(
         storage=scope_context.storage,
-        session=scope_context.session,
-        session_id=session_id,
-        scope_id=scope_context.scope.scope_id,
+        session=scope_context.session
+        or new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=is_team),
         run_id=run_id,
         snapshot=build_interrupted_replay_snapshot(
             user_message=user_message,
@@ -375,5 +375,4 @@ def persist_interrupted_replay(
             response_event_id=None,
             original_status=original_status,
         ),
-        is_team=is_team,
     )

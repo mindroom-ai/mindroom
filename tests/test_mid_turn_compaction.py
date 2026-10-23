@@ -1016,7 +1016,7 @@ async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
     summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    owner_storage = create_state_storage("owner", tmp_path, session_table="owner_sessions")
+    owner_storage = create_state_storage("owner", tmp_path)
     owner = HelperUsageOwner(
         storage_factory=lambda: owner_storage,
         session_id="owner-session",

@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 @pytest.fixture
 def storage(tmp_path: Path) -> ConversationStore:
     """Conversation storage for reading seen ids, which include the summary rows'."""
-    return create_state_storage("test_agent", tmp_path / "seen", session_table="test_agent_sessions")
+    return create_state_storage("test_agent", tmp_path / "seen")
 
 
 def _shared_session(*, is_team: bool) -> ConversationSession:

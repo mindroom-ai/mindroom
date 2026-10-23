@@ -13,7 +13,7 @@ from mindroom.durable_write import fsync_directory_durable
 from mindroom.file_locks import wait_for_exclusive_lock
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at
-from mindroom.session_storage.schema import SESSION_COLUMNS
+from mindroom.session_storage.schema import SESSION_COLUMNS, TableNames
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -35,7 +35,6 @@ def session_storage_preflight(
     state_root: Path,
     *,
     storage_name: str,
-    session_table: str,
     timeout_seconds: float,
 ) -> Iterator[None]:
     """Inspect and, if necessary, archive one owned sessions directory before use."""
@@ -45,6 +44,7 @@ def session_storage_preflight(
         msg = "Session storage name must identify a file directly inside its sessions directory"
         raise ValueError(msg)
 
+    session_table = TableNames(storage_name).sessions
     with _recovery_lock(state_root, timeout_seconds=timeout_seconds):
         if _existing_session_database(db_dir, db_file):
             try:

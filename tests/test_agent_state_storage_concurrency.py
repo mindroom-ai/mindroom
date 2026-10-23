@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 def _storage(tmp_path: Path) -> ConversationStore:
-    return create_state_storage("probe", tmp_path, session_table="probe_sessions")
+    return create_state_storage("probe", tmp_path)
 
 
 def test_a_state_database_keeps_rollback_journal_and_waits_for_locks(tmp_path: Path) -> None:

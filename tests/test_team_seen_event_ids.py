@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_snapshot(tmp_path: Path) -> None:
     """The post-run write merges into the row, so the state the run wrote back and a compaction request survive."""
-    storage = create_state_storage("eng", tmp_path, session_table="eng_sessions")
+    storage = create_state_storage("eng", tmp_path)
     scope = HistoryScope(kind="team", scope_id="eng")
     stored = ConversationSession(
         session_id="t1",

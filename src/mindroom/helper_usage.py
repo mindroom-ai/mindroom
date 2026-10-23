@@ -14,7 +14,6 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
-    SYSTEM_USAGE_SESSION_TABLE,
     SYSTEM_USAGE_STORAGE_NAME,
 )
 
@@ -120,7 +119,6 @@ async def record_system_usage(
             storage_factory=lambda: create_state_storage(
                 SYSTEM_USAGE_STORAGE_NAME,
                 session_root / SYSTEM_USAGE_STORAGE_NAME,
-                session_table=SYSTEM_USAGE_SESSION_TABLE,
             ),
             session_id=kind,
             initial_session=new_scope_session(session_id=kind, scope_id=SYSTEM_USAGE_ENTITY, is_team=False),

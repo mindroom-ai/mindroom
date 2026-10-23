@@ -148,7 +148,7 @@ class _Runner:
             self._check()
 
     def _open(self) -> ConversationStore:
-        return create_state_storage("code", self._root, session_table="code_sessions")
+        return create_state_storage("code", self._root)
 
     @staticmethod
     def _legacy_session() -> ConversationSession:

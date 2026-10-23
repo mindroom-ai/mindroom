@@ -28,7 +28,7 @@ SESSION = f"{ROOM}:$thread"
 @pytest.fixture
 def storage(tmp_path: Path) -> Iterator[ConversationStore]:
     """The production conversation storage owner."""
-    db = create_state_storage("mind", tmp_path, session_table="mind_sessions")
+    db = create_state_storage("mind", tmp_path)
     assert isinstance(db, ConversationStore)
     return db
 

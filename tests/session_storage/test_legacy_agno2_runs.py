@@ -23,7 +23,7 @@ from tests.session_storage.goldens import golden_stores, stored_rows
 if TYPE_CHECKING:
     from pathlib import Path
 
-_NAMES = TableNames("code_sessions")
+_NAMES = TableNames("code")
 
 
 def _blob(db_file: Path) -> object:

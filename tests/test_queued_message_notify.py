@@ -396,11 +396,7 @@ def _notice_count(
 
 
 def _queued_notice_storage(tmp_path: Path) -> ConversationStore:
-    return create_state_storage(
-        "queued_notice",
-        tmp_path,
-        session_table="queued_notice_sessions",
-    )
+    return create_state_storage("queued_notice", tmp_path)
 
 
 async def _after_batch(
@@ -449,7 +445,7 @@ class _RecordingStore(ConversationStore):
 
 
 def _recording_store(tmp_path: Path, name: str, *, held: threading.Event | None = None) -> _RecordingStore:
-    store = create_state_storage(name, tmp_path, session_table=f"{name}_sessions")
+    store = create_state_storage(name, tmp_path)
     return _RecordingStore(store.path, store.names, store.prompt_roles, held=held)
 
 
