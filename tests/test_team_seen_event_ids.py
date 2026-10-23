@@ -5,6 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import _with_scope_state, read_scope_seen_event_ids, read_scope_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
@@ -16,7 +18,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_snapshot(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_snapshot(tmp_path: Path) -> None:
     """The post-run write merges into the row, so the state the run wrote back and a compaction request survive."""
     storage = create_state_storage("eng", tmp_path, session_table="eng_sessions")
     scope = HistoryScope(kind="team", scope_id="eng")
@@ -40,7 +43,7 @@ def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_snapshot
         lambda metadata: _with_scope_state(metadata, scope, HistoryScopeState(force_compact_before_next_run=True)),
     )
 
-    _persist_bound_seen_event_ids(
+    await _persist_bound_seen_event_ids(
         scope_context=ScopeSessionContext(scope=scope, storage=storage, session=snapshot),
         session_id="t1",
         event_ids=["$reply", "$unseen"],

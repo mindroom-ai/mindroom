@@ -3303,6 +3303,7 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.providers.registry",
     "mindroom.response_turn",
+    "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
     "mindroom.system_prompt",
     "mindroom.thread_models",

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
@@ -36,6 +37,7 @@ from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.session_storage.store import ConversationStore
 from mindroom.teams.envelope import prepare_materialized_team_execution, team_response, team_response_stream
 from mindroom.teams.formation import resolve_live_shared_agent_names
 from mindroom.teams.members import (
@@ -800,6 +802,34 @@ async def test_a_matrix_reply_marks_its_trigger_and_the_unread_thread_events_see
     session = team.storage.load_session(SESSION_ID, "team")
     assert session is not None
     assert read_scope_seen_event_ids(team.storage, session, team.scope) == {"$event-1", EVENT_ID}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_a_team_reply_writes_session_metadata_in_the_database_s_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """Every metadata write of the turn, the events it marks seen included, runs in the database's lane."""
+    team = _team(tmp_path, monkeypatch, leader=[answer("Recovered team response")])
+    writing_threads: list[str] = []
+    update_metadata = ConversationStore.update_metadata
+
+    def recording(self: ConversationStore, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        writing_threads.append(threading.current_thread().name)
+        update_metadata(self, *args, **kwargs)
+
+    monkeypatch.setattr(ConversationStore, "update_metadata", recording)
+
+    await team.reply(stream=stream, response_sender_id="@mindroom_team:localhost")
+
+    session = team.storage.load_session(SESSION_ID, "team")
+    assert session is not None
+    assert read_scope_seen_event_ids(team.storage, session, team.scope) == {EVENT_ID}
+    assert writing_threads
+    assert all(name.startswith("conversation-store") for name in writing_threads), writing_threads
 
 
 # ---------------------------------------------------------------------------
