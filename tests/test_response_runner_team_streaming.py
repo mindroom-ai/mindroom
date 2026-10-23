@@ -1392,26 +1392,22 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
     )
     recorder = TurnRecorder(user_message="Hello")
     recorder.set_run_metadata({"matrix_seen_event_ids": ["$user_msg"]})
-    recorder.set_assistant_text("Partial answer")
-    recorder.set_completed_tools(
-        [
-            ToolTraceEntry(
-                type="tool_call_completed",
-                tool_name="run_shell_command",
-                args_preview="cmd=pwd",
-                result_preview="/app",
-            ),
-        ],
-    )
-    recorder.set_interrupted_tools(
-        [
-            ToolTraceEntry(
-                type="tool_call_started",
-                tool_name="save_file",
-                args_preview="file_name=main.py",
-            ),
-        ],
-    )
+    recorder.assistant_text = "Partial answer"
+    recorder.completed_tools = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="run_shell_command",
+            args_preview="cmd=pwd",
+            result_preview="/app",
+        ),
+    ]
+    recorder.interrupted_tools = [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="save_file",
+            args_preview="file_name=main.py",
+        ),
+    ]
 
     assert coordinator._record_stream_delivery_error(
         recorder=recorder,
