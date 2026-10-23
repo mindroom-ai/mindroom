@@ -1056,13 +1056,15 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     caller_identity = replace(execution_identity, agent_name=caller)
     resolve_result = partial(_resolve_delegation_requirement, requirement, on_event=on_event)
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
+    # Whether this call waits on its retained child's own approval, the pause the presented decisions are about.
+    waits_on_retained = retained is not None and retained.delegation_id == pending_id
     # What the decisions answer for this call: its own card, or the calls of the child it waits on, which go to that
     # child under its own call ids.
     card_decision = None if decisions is None else decisions.get(requirement_key)
     child_decisions = None
     child_reasons = None
     child_calls: tuple[ApprovalCall, ...] = ()
-    if decisions is not None and retained is not None and retained.delegation_id == pending_id:
+    if decisions is not None and retained is not None and waits_on_retained:
         delegation_id = retained.delegation_id
         child_decisions = {child_call_id(delegation_id, key): value for key, value in decisions.items()}
         child_reasons = {child_call_id(delegation_id, key): value for key, value in (denial_reasons or {}).items()}
@@ -1141,7 +1143,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     runtime_paths=runtime_paths,
                     reason=authorization,
                 )
-            if pending_id == retained.delegation_id and on_event is not None:
+            if waits_on_retained and on_event is not None:
                 _settle_pending_child_tools(prior_pending_tools, on_event, reason=authorization)
         result = resolve_result(authorization)
         if requirement.id in state.hooks:

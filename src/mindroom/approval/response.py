@@ -104,11 +104,10 @@ def identify_approval_tools(
     default_agent_name: str,
 ) -> tuple[tuple[ToolExecution, str, str, str], ...]:
     """Resolve exact paused call IDs, names, and invoking member ownership."""
-    config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
+    # Each frozen member slot's config name, by slot id; a requirement names its member by either.
+    slots = _team_config_names_by_provider_id(paused.response_presentation_state)
     owners = {
-        requirement.tool_execution.tool_call_id: config_names_by_provider_id[
-            member_slot_id(config_names_by_provider_id, requirement.member_agent_id)
-        ]
+        requirement.tool_execution.tool_call_id: slots[member_slot_id(slots, requirement.member_agent_id)]
         for requirement in paused.requirements
         if requirement.tool_execution is not None and requirement.member_agent_id
     }
