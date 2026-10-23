@@ -52,7 +52,7 @@ from mindroom.workers.backends import docker as docker_backend_module
 from mindroom.workers.backends import docker_projection as docker_projection_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
-    _WORKER_CONTROL_DIRNAME,
+    WORKER_CONTROL_DIRNAME,
     DockerWorkerBackend,
     _DockerLaunchConfig,
     _load_docker_client_and_errors,
@@ -88,7 +88,7 @@ _TEST_UNSCOPED_WORKER_KEY = "v1:default:unscoped:code"
 
 def _control_metadata_path(storage_root: Path, worker_key: str) -> Path:
     """Return one worker's control metadata, which lives outside its mounted state root."""
-    control_root = storage_root / "workers" / _WORKER_CONTROL_DIRNAME / worker_dir_name(worker_key)
+    control_root = storage_root / "workers" / WORKER_CONTROL_DIRNAME / worker_dir_name(worker_key)
     return control_root / "metadata" / "worker.json"
 
 

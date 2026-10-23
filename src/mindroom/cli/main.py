@@ -17,6 +17,7 @@ from rich.markup import escape
 from mindroom.constants import ensure_writable_config_path
 from mindroom.origins import with_api_port
 
+from .agents import rename_account
 from .api import is_loopback_host
 from .banner import make_banner
 from .config import (
@@ -88,6 +89,14 @@ app = typer.Typer(
 avatars_app = typer.Typer(help="Generate and sync agent, room, and space avatars.")
 threads_app = typer.Typer(help="Export Matrix threads to searchable files.")
 journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
+agents_app = typer.Typer(help="Manage agents.")
+agents_app.command(
+    "rename-account",
+    epilog=examples(
+        ("mindroom agents rename-account nova @nova:example.org", "Show the plan"),
+        ("mindroom agents rename-account nova @nova:example.org --apply", "Apply it"),
+    ),
+)(rename_account)
 config_app.command("migrate", rich_help_panel="Create and edit")(config_migrate)
 config_app.command("fingerprint", rich_help_panel="Deployment")(config_fingerprint)
 config_app.command("install-bundle", rich_help_panel="Deployment")(config_install_bundle)
@@ -97,6 +106,7 @@ config_app.command("check-applied", rich_help_panel="Deployment")(config_check_a
 app.add_typer(config_app, name="config", rich_help_panel="Configure")
 app.add_typer(plugins_app, name="plugins", rich_help_panel="Configure")
 app.add_typer(avatars_app, name="avatars", rich_help_panel="Configure")
+app.add_typer(agents_app, name="agents", rich_help_panel="Configure")
 app.add_typer(service_app, name="service", rich_help_panel="Keep running")
 app.add_typer(desktop_app, name="desktop", rich_help_panel="Desktop")
 app.add_typer(threads_app, name="threads", rich_help_panel="Troubleshoot")

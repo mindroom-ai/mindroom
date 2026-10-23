@@ -88,6 +88,7 @@
 - [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)
 - [Trusted Upstream Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/)
 - [Data Storage & Journal](https://docs.mindroom.chat/deployment/storage/)
+- [Rename Agent Account](https://docs.mindroom.chat/deployment/rename-agent-account/)
 - [Config Bundles](https://docs.mindroom.chat/deployment/config-bundles/)
 - [Logs & Monitoring](https://docs.mindroom.chat/deployment/operational-log-events/)
 - [Upgrade Notes](https://docs.mindroom.chat/deployment/upgrades/)

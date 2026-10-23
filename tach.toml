@@ -119,6 +119,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
+    "mindroom.agent_rename.account_files",
     "mindroom.private_storage.legacy_private_storage_aliases",
     "mindroom.private_storage.alias_paths",
     "mindroom.private_storage.legacy_private_storage",
@@ -564,6 +565,7 @@ depends_on = [
 visibility = [
     "mindroom.api.config_lifecycle",
     "mindroom.bot",
+    "mindroom.cli.agents",
     "mindroom.cli.main",
     "mindroom.commands.config_commands",
     "mindroom.orchestration.config_lifecycle",
@@ -3782,6 +3784,7 @@ visibility = ["mindroom.response_runner", "mindroom.approval.execution"]
 path = "mindroom.matrix.client_session"
 depends_on = ["mindroom.constants"]
 visibility = [
+    "mindroom.agent_rename.account_files",
     "mindroom.bot",
     "mindroom.cli.doctor",
     "mindroom.desktop.identity",
@@ -4779,10 +4782,26 @@ depends_on = [
 visibility = ["mindroom.cli.main"]
 
 [[modules]]
+path = "mindroom.cli.agents"
+depends_on = [
+    # Mostly deferred imports, so `mindroom --help` does not load the rename engine.
+    "mindroom.agent_rename.account_files",
+    "mindroom.cli.config",
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.desktop.native_config",
+    "mindroom.event_journal.opening",
+    "mindroom.matrix.state",
+    "mindroom.matrix_identifiers",
+]
+visibility = ["mindroom.cli.main"]
+
+[[modules]]
 path = "mindroom.cli.main"
 depends_on = [
     "mindroom.origins",
     "mindroom.api.auth",
+    "mindroom.cli.agents",
     "mindroom.cli.api",
     "mindroom.cli.config_bundle",
     "mindroom.cli.config_reload",
@@ -6733,6 +6752,7 @@ expose = [
     "build_requester_execution_identity",
     "build_tool_execution_identity",
     "build_worker_target_from_runtime_env",
+    "encode_worker_requester_part",
     "get_tool_execution_identity",
     "private_instance_scope_root_path",
     "private_instances_root_path",
@@ -9348,4 +9368,15 @@ visibility = [
     "mindroom.approval.receipt",
     "mindroom.history.agno_compat_message_builder",
     "mindroom.history.mid_turn_compaction",
+]
+
+# Moves the files keyed by an agent's Matrix ID after a server-side account rename.
+[[modules]]
+path = "mindroom.agent_rename.account_files"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.desktop.native_config",
+    "mindroom.matrix.client_session",
+    "mindroom.private_storage.private_instance_identity_store",
+    "mindroom.tool_system.worker_routing",
 ]

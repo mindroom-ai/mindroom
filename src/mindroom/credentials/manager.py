@@ -59,7 +59,7 @@ _ABSENT_CREDENTIALS_ERRNOS = frozenset({errno.ELOOP, errno.ENOENT, errno.ENOTDIR
 # A directory whose name is now held by something else is never hardened through, and a
 # layer mounted read-only into a worker is hardened by the primary that owns it.
 _UNHARDENABLE_DIRECTORY_ERRNOS = _ABSENT_CREDENTIALS_ERRNOS | {errno.EEXIST, errno.EROFS}
-_PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
+PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 # Sanitized scope directory parts never start with "_", so this literal cannot
 # collide with a requester directory inside the primary-runtime scoped store.
 _PRIMARY_RUNTIME_AGENT_SCOPED_DIRNAME = "_agents"
@@ -72,6 +72,7 @@ _AES_GCM_NONCE_SIZE = 12
 logger = get_logger(__name__)
 
 __all__ = [
+    "PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME",
     "CredentialsManager",
     "StoredCredentialsUpdate",
     "WorkerCredentialPathError",
@@ -84,6 +85,7 @@ __all__ = [
     "remove_worker_service_credentials",
     "runtime_credentials_manager_key",
     "save_scoped_credentials",
+    "scoped_credentials_dir_part",
     "scoped_credentials_path",
     "sync_shared_credentials_to_worker",
     "update_stored_service_credentials",
@@ -120,7 +122,8 @@ def validate_service_name(service: str) -> str:
     return normalized
 
 
-def _scoped_credentials_dir_part(value: str) -> str:
+def scoped_credentials_dir_part(value: str) -> str:
+    """Return the directory name that holds one requester's or agent's primary-runtime scoped credentials."""
     safe_prefix = re.sub(r"[^a-zA-Z0-9._-]+", "_", value).strip("._-")[:80]
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
     return f"{safe_prefix or 'scope'}-{digest}"
@@ -219,7 +222,7 @@ def _credential_owned_directory_chain(path: Path) -> list[Path]:
     """Return credential-owned directories that should be private."""
     chain = [path, *path.parents]
     for index, directory_path in enumerate(chain):
-        if directory_path.name == _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME:
+        if directory_path.name == PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME:
             return list(reversed(chain[: index + 1]))
     return [path]
 
@@ -505,10 +508,10 @@ class CredentialsManager:
 
     def for_primary_runtime_scope(self, requester_id: str, agent_name: str | None) -> CredentialsManager:
         """Return a primary-runtime-only scoped credentials manager."""
-        requester_dir = _scoped_credentials_dir_part(requester_id)
+        requester_dir = scoped_credentials_dir_part(requester_id)
         # Config reserves "_shared" as an entity name, so no agent's store collides with the requester-wide one.
-        agent_dir = _scoped_credentials_dir_part(agent_name or "_shared")
-        scoped_path = self.storage_root / _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME / requester_dir / agent_dir
+        agent_dir = scoped_credentials_dir_part(agent_name or "_shared")
+        scoped_path = self.storage_root / PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME / requester_dir / agent_dir
         return CredentialsManager(
             base_path=scoped_path,
             shared_base_path=scoped_path,
@@ -517,10 +520,10 @@ class CredentialsManager:
 
     def for_primary_runtime_agent_scope(self, agent_name: str) -> CredentialsManager:
         """Return a primary-runtime-only agent-scoped credentials manager."""
-        agent_dir = _scoped_credentials_dir_part(agent_name)
+        agent_dir = scoped_credentials_dir_part(agent_name)
         scoped_path = (
             self.storage_root
-            / _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME
+            / PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME
             / _PRIMARY_RUNTIME_AGENT_SCOPED_DIRNAME
             / agent_dir
         )

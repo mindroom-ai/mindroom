@@ -285,7 +285,8 @@ def _requester_localpart(requester: str) -> str:
     return requester
 
 
-def _encode_worker_requester_part(value: str) -> str:
+def encode_worker_requester_part(value: str) -> str:
+    """Return the lossless requester component of a ``user`` or ``user_agent`` worker key."""
     return "~" + quote(value, safe="._:@+-")
 
 
@@ -296,7 +297,7 @@ def _normalize_worker_dir_part(value: str) -> str:
 
 def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
-        return _encode_worker_requester_part(identity.requester_id)
+        return encode_worker_requester_part(identity.requester_id)
     return None
 
 

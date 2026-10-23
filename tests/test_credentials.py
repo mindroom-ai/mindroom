@@ -576,7 +576,7 @@ class TestCredentialsManager:
         """Encrypted scoped credentials should harden pre-existing credential-owned parents."""
         encryption_key = _test_encryption_key()
         monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
-        requester_dir = credentials_module._scoped_credentials_dir_part("@user:example.test")
+        requester_dir = credentials_module.scoped_credentials_dir_part("@user:example.test")
         scoped_root = tmp_path / "private_oauth"
         scoped_requester_path = scoped_root / requester_dir
         scoped_requester_path.mkdir(parents=True)
