@@ -225,16 +225,19 @@ def test_internal_provider_error_is_user_friendly() -> None:
 
 
 @pytest.mark.parametrize(
-    ("error_type", "message"),
+    ("error_type", "message", "transient"),
     [
-        ("api_error", "Unexpected upstream failure"),
-        ("server_error", "The server had an error."),
-        ("timeout_error", "Request timed out"),
+        ("api_error", "Unexpected upstream failure", True),
+        ("server_error", "The server had an error.", True),
+        ("timeout_error", "Request timed out", True),
+        ("invalid_request_error", "messages: bad block", False),
     ],
 )
-def test_an_untyped_provider_payload_is_unavailable_when_the_classifier_says_transient(
+def test_an_untyped_provider_payload_is_unavailable_exactly_when_the_classifier_says_transient(
     error_type: str,
     message: str,
+    *,
+    transient: bool,
 ) -> None:
     """An untyped error's provider payload reads as temporary unavailability exactly when its typed twin would."""
     payload = {"type": "error", "error": {"type": error_type, "message": message}, "request_id": "req_secret"}
@@ -242,8 +245,8 @@ def test_an_untyped_provider_payload_is_unavailable_when_the_classifier_says_tra
 
     reply = get_user_friendly_error_message(Exception(repr(payload)))
 
-    assert isinstance(typed, ProviderUnavailable)
-    assert reply == "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
+    assert isinstance(typed, ProviderUnavailable) is transient
+    assert reply.startswith("⚠️ Model provider temporarily unavailable" if transient else "⚠️ Error: ")
 
 
 def test_json_provider_error_is_case_insensitive() -> None:

@@ -151,8 +151,9 @@ class SyntheticProvider:
             if request.stream:
                 yield TextDelta(chunk)
         tool_calls = [] if continuation or plan.tool_call_id is None else [shell_call(plan.tool_call_id)]
-        for call in tool_calls if request.stream else ():
-            yield ToolCallReady(call)
+        if request.stream:
+            for call in tool_calls:
+                yield ToolCallReady(call)
         message = finished_assistant_message(
             self.identity,
             content=content or None,
