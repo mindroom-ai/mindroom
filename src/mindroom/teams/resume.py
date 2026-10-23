@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
+from mindroom import ai_runtime
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.ai import run_delegated_child_response
@@ -22,7 +23,7 @@ from mindroom.approval.tool_owners import require_original_toolkit, required_app
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.native import restore_native_history
+from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
 from mindroom.history.session_context import open_resolved_scope_session_context
@@ -51,7 +52,6 @@ from mindroom.teams.runtime import MemberEvent, continue_team
 from mindroom.teams.storage import (
     configured_team,
     persist_into,
-    register_team_notice_storage,
     scope_storage,
     team_history_settings,
 )
@@ -77,7 +77,6 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord, RunRecord, RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.streaming import ProgressPublisher
-    from mindroom.teams.attempt import TeamReplyText
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.teams.spec import TeamMode, TeamSpec
     from mindroom.teams.storage import TeamRunRecords, TeamStorage
@@ -103,10 +102,11 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str, session_id: str) -> TeamRunRecord:
+def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
     """Return the paused team run the approval names, from the loaded session or the store.
 
-    A run the store holds for another session of the scope is refused, as the agent path refuses it.
+    A run the store holds for another session of the scope than the one ``scope`` was opened for is refused, as the
+    agent path refuses it.
     """
     persisted: AnyRunRecord | None = None
     if scope.session is not None:
@@ -115,7 +115,7 @@ def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str, session_id:
         persisted = scope.storage.get_run(run_id)
     if (
         not isinstance(persisted, TeamRunRecord)
-        or persisted.session_id != session_id
+        or persisted.session_id != scope.session_id
         or persisted.status is not RunStatus.paused
     ):
         msg = f"Paused team run {run_id!r} is no longer available"
@@ -315,37 +315,17 @@ def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirem
     return f"agent:{presentation.resolve_member_id(member_id, requirement.member_agent_name)}", call_id
 
 
-def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | dict[str, Any] | None:
-    """Return what ``run`` hands over (``handover_content``) that its events have not shown.
-
-    A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
-    unless that is not its content: a failed run hands over why it failed.
-    """
-    handover = run.handover_content
-    return None if streamed and handover == run.content else handover
-
-
-def _append_unshown_handovers(
-    presentation: TeamStreamPresentation,
-    record: TeamRunRecord,
-    members: Sequence[RunRecord],
-    reply: TeamReplyText,
-) -> None:
-    """Add to each resumed run's slot what the run hands over and its events did not show (``_unshown_handover``).
+def _show_unshown_handovers(attempt: TeamAttempt, record: TeamRunRecord) -> None:
+    """Add to each resumed run's slot what the run hands over and its events did not show (``show_unshown_handover``).
 
     The leader's goes to the consensus and each member run's to its member's slot, as Agno's resume added their
     content: a run that pauses again without text adds its paused notice, and a member run that fails adds the reason
     its run recorded, credentials redacted, also after text it streamed and when its record still holds the content
-    it had before the pause. Each member run is matched by its run id, so an earlier run of the same member keeps its
-    text without standing for a later one, and each addition starts a paragraph of its own. A run without content
-    adds nothing, where Agno's resume added its messages' text, which repeated what the run wrote before the pause.
+    it had before the pause. A run without content adds nothing, where Agno's resume added its messages' text, which
+    repeated what the run wrote before the pause.
     """
-    # The leader is one run whose text only the consensus holds.
-    presentation.append_consensus(_unshown_handover(record, streamed=bool(reply.consensus)), separate=True)
-    for member in members:
-        member_id = presentation.resolve_member_id(member.agent_id, member.agent_name)
-        handover = _unshown_handover(member, streamed=member.run_id in reply.streamed_member_runs)
-        presentation.append_member(member_id, handover, separate=True)
+    for run in (record, *record.ended_member_runs):
+        attempt.show_unshown_handover(run)
 
 
 def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
@@ -456,7 +436,7 @@ async def continue_paused_team_run(
             # Named members always resolve a team scope, and the approval names its session.
             assert scope is not None
             set_consumption_storage(scope.storage_factory)
-            persisted = _stored_paused_team_run(scope, run_id, session_id)
+            persisted = _stored_paused_team_run(scope, run_id)
             delegated = has_delegation_state(persisted)
             approved_calls = tuple(call for call in approval_calls if decisions.get(call.tool_call_id))
             async with asyncio.TaskGroup() as recovery:
@@ -539,11 +519,7 @@ async def continue_paused_team_run(
                     tool_middleware=built.leader_middleware,
                     jobs=built.leader_jobs,
                 ),
-                request_template=ModelRequest(
-                    messages=(),
-                    native_compaction=native.native_compaction if native is not None else None,
-                    portable_replay=native.portable_replay if native is not None else False,
-                ),
+                request_template=with_native_history(ModelRequest(messages=()), native),
                 settings=settings,
                 plan=plan,
                 user_id=user_id,
@@ -574,7 +550,7 @@ async def continue_paused_team_run(
                         if attempt.apply(event):
                             await publish_team_presentation(progress, presentation)
             continued = attempt.records.terminal(entity_name)
-            _append_unshown_handovers(presentation, continued, continued.ended_member_runs, attempt.reply)
+            _show_unshown_handovers(attempt, continued)
             paused = paused_attempt_from_response(
                 continued,
                 fallback_session_id=session_id,
@@ -599,7 +575,7 @@ async def continue_paused_team_run(
             try:
                 await finalize_consumption()
             finally:
-                register_team_notice_storage(scope_context=scope, entity_name=entity_name)
+                ai_runtime.register_scope_notice_storage(scope_context=scope, entity_name=entity_name)
 
 
 __all__ = [

@@ -4,7 +4,8 @@
 turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply delivers
 no tool trace and renders from the finished run's records, as Agno's blocking team reply did: each member run's text
 in the order the runs ended, then the consensus. Its pause and the text a stopped or failed blocking turn records
-render from the records too. The streamed reply shows its trace through its chunks and keeps the configured order.
+render from the records too. The streamed reply shows its trace through its chunks and keeps the configured order;
+it adds each failed member run's reason when the team run ends, as a resumed reply does.
 ``run_prepared_team`` runs an OpenAI-compatible API team turn under the same leader hooks and storage.
 """
 
@@ -32,6 +33,7 @@ from mindroom.execution_preparation import (
     render_prepared_team_messages_text,
 )
 from mindroom.history.mid_turn_compaction import without_fold_records
+from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import open_bound_scope_session_context
@@ -91,7 +93,6 @@ from mindroom.teams.runtime import leader_tool_specs, run_team
 from mindroom.teams.spec import TeamMode
 from mindroom.teams.storage import (
     persist_into,
-    register_team_notice_storage,
     scope_storage,
     team_history_settings,
 )
@@ -319,13 +320,10 @@ def _team_storage(run: TurnRunState) -> TeamStorage | None:
 
     A team without a bound scope stores nothing, as Agno's team ran without a database then.
     """
-    scope_context = run.scope_context
-    if scope_context is None:
+    if run.scope_context is None:
         return None
-    storage = scope_storage(scope_context)
-    if scope_context.session is None:
-        run.scope_context = replace(scope_context, session=storage.session)
-    return storage
+    run.scope_context = run.scope_context.with_session()
+    return scope_storage(run.scope_context)
 
 
 @dataclass(frozen=True)
@@ -379,7 +377,6 @@ def _leader_run(
 ) -> _LeaderRun:
     """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
     history = prepared.prepared_history
-    native = history.native_history
     return _LeaderRun(
         spec=built.spec,
         storage=storage,
@@ -403,12 +400,7 @@ def _leader_run(
             tool_middleware=built.leader_middleware,
             jobs=built.leader_jobs,
         ),
-        request_template=ModelRequest(
-            messages=(),
-            stream=stream,
-            native_compaction=native.native_compaction if native is not None else None,
-            portable_replay=native.portable_replay if native is not None else False,
-        ),
+        request_template=with_native_history(ModelRequest(messages=(), stream=stream), history.native_history),
     )
 
 
@@ -753,6 +745,10 @@ class _TeamTurn:
             yield AttemptResolved(HandledAttempt(metadata_content=self.failure_metadata(attempt)))
             return
         record = attempt.records.terminal(self.entity_name)
+        # A failed member run's deltas never show why it failed; the document adds its reason now the team run ended.
+        shown_reasons = attempt.show_failure_reasons(record)
+        if shown_reasons:
+            self.sync_live_turn_recorder(run, attempt)
         if record.status is RunStatus.paused:
             paused = self.resolve_paused(attempt, record, blocking=False)
             if paused.response_text:
@@ -763,6 +759,9 @@ class _TeamTurn:
                 )
             yield AttemptResolved(paused)
             return
+        if shown_reasons and (chunk := attempt.chunk()) is not None:
+            emitted_output = True
+            yield chunk
         # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
         # carries the trigger either, so the next turn still reads it.
         yield AttemptResolved(
@@ -780,7 +779,7 @@ class _TeamTurn:
         if not self.holder.attempt_started:
             return
         self.holder.attempt_started = False
-        self.register_notice_storage(scope_context)
+        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=self.entity_name)
 
     def sync_live_turn_recorder(self, run: TurnRunState, attempt: TeamAttempt) -> None:
         """Refresh the live turn state from the attempt, so an interruption records its text and its tool calls."""
@@ -847,8 +846,8 @@ class _TeamTurn:
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
         # its trace through its chunks. A blocking reply renders the finished runs, as Agno's did; a streamed one
-        # records the document its events built, in the configured member order. The "No team response generated."
-        # fallback is display chrome, not replayable assistant text.
+        # records the document its events built and its failed member runs' reasons, in the configured member order.
+        # The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
             leader_text = finished_run_text(record)
             has_visible_output = bool(format_team_response(record, members)) or bool(leader_text.strip())
@@ -896,9 +895,6 @@ class _TeamTurn:
 
     def error_text(self, error: Exception) -> str:
         return get_user_friendly_error_message(error, self.ctx.entity_label, runtime_paths=self.runtime_paths)
-
-    def register_notice_storage(self, scope_context: ScopeSessionContext | None) -> None:
-        register_team_notice_storage(scope_context=scope_context, entity_name=self.entity_name)
 
     def discard_empty_run(self, scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
         ai_runtime.discard_empty_completed_run(

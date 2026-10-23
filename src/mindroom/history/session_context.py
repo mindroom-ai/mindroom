@@ -36,8 +36,10 @@ _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
 class ScopeSessionContext:
     """Resolved storage/session context for one logical history scope.
 
-    ``session`` is the stored session, None while the scope has none. ``session_id`` is the id the context was opened
-    for, which the scope's first session takes, so a run is saved from the context alone.
+    ``session`` is the session the scope's runs load from and save into: the stored one, or a first one the context
+    was given (``with_session``) before anything stored it; None while the context holds neither.
+    ``session_exists`` tells whether the scope had a stored session when the context was opened. ``session_id`` is
+    the id the context was opened for, which the scope's first session takes, so a run is saved from the context alone.
     """
 
     scope: HistoryScope
@@ -58,6 +60,13 @@ class ScopeSessionContext:
     def stored_or_first_session(self) -> ConversationSession:
         """Return the session a run of this scope is saved into: the stored one, else the scope's first."""
         return self.session if self.session is not None else self.first_session()
+
+    def with_session(self) -> ScopeSessionContext:
+        """Return this context holding the session its runs save into (``stored_or_first_session``).
+
+        A run that reads the returned context later loads the session an earlier run was saved into.
+        """
+        return replace(self, session=self.stored_or_first_session())
 
 
 @dataclass(frozen=True)
@@ -134,9 +143,7 @@ def open_resolved_scope_session_context(
         storage_factory=storage_factory,
         session_exists=session is not None,
     )
-    if session is None and create_session_if_missing:
-        context = replace(context, session=context.first_session())
-    yield context
+    yield context.with_session() if create_session_if_missing else context
 
 
 @contextmanager

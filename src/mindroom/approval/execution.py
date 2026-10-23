@@ -494,14 +494,14 @@ class AgentApprovalExecution:
             ),
             delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
         )
+        scope_context = ScopeSessionContext(
+            scope=HistoryScope(kind="agent", scope_id=continuation.entity_name),
+            storage=store,
+            session=session,
+            session_id=continuation.session_id,
+            storage_factory=storage_factory,
+        )
         try:
-            scope_context = ScopeSessionContext(
-                scope=HistoryScope(kind="agent", scope_id=continuation.entity_name),
-                storage=store,
-                session=session,
-                session_id=continuation.session_id,
-                storage_factory=storage_factory,
-            )
             async with typing_indicator(
                 self.client(),
                 continuation.room_id,
@@ -600,10 +600,8 @@ class AgentApprovalExecution:
             try:
                 await finalize_consumption()
             finally:
-                ai_runtime.register_queued_notice_storage(
-                    storage_factory=storage_factory,
-                    session_id=continuation.session_id,
-                    session_kind="agent",
+                ai_runtime.register_scope_notice_storage(
+                    scope_context=scope_context,
                     entity_name=continuation.entity_name,
                 )
         return result

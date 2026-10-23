@@ -40,6 +40,7 @@ from mindroom.history.interrupted_replay import (
     tool_execution_call_id,
 )
 from mindroom.history.mid_turn_compaction import without_fold_records
+from mindroom.history.native import with_native_history
 from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
@@ -764,17 +765,18 @@ def _attempt_storage(run: TurnRunState, build: AgentBuild, *, session_id: str, a
     The new session stays on the turn's scope context, so a later attempt of the same turn replays this one's run
     and an empty-run discard finds it, as a reload of the scope would.
     """
-    scope_context = run.scope_context
-    if scope_context is None:
+    if run.scope_context is None:
         return _AttemptStorage(
             store=build.store,
             session=new_scope_session(session_id=session_id, scope_id=agent_name, is_team=False),
             scope=None,
         )
-    session = scope_context.stored_or_first_session()
-    if scope_context.session is None:
-        run.scope_context = replace(scope_context, session=session)
-    return _AttemptStorage(store=scope_context.storage, session=session, scope=scope_context.scope)
+    scope_context = run.scope_context = run.scope_context.with_session()
+    return _AttemptStorage(
+        store=scope_context.storage,
+        session=scope_context.stored_or_first_session(),
+        scope=scope_context.scope,
+    )
 
 
 def _persist_into(terminal: _TerminalRecord, storage: _AttemptStorage) -> Persist[RunRecord]:
@@ -998,12 +1000,7 @@ async def _run_non_streaming_agent_attempts(
         logger.exception("Error generating AI response", agent=run_context.agent_name)
         return _NonStreamingAttemptResult(record=terminal.record, attempt=attempt, user_error=e)
     finally:
-        ai_runtime.register_queued_notice_storage(
-            storage_factory=scope_context.storage_factory if scope_context is not None else None,
-            session_id=run_context.session_id,
-            session_kind="agent",
-            entity_name=run_context.agent_name,
-        )
+        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=run_context.agent_name)
 
 
 def _failed_agent_attempt(
@@ -1427,12 +1424,7 @@ async def _prepare_agent_run_context(
         note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
     build = prepared_run.build
-    native = prepared_run.prepared_history.native_history
-    request_template = replace(
-        build.request_template,
-        native_compaction=native.native_compaction if native is not None else None,
-        portable_replay=native.portable_replay if native is not None else False,
-    )
+    request_template = with_native_history(build.request_template, prepared_run.prepared_history.native_history)
     run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
     metadata = build_matrix_run_metadata(
         ctx.reply_to_event_id,
@@ -2126,12 +2118,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         if not holder.attempt_started:
             return
         holder.attempt_started = False
-        ai_runtime.register_queued_notice_storage(
-            storage_factory=scope_context.storage_factory if scope_context is not None else None,
-            session_id=session_id,
-            session_kind="agent",
-            entity_name=agent_name,
-        )
+        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=agent_name)
 
     async def _run_streaming_attempt(  # noqa: C901
         run: TurnRunState,

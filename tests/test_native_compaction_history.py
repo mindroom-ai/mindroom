@@ -12,7 +12,7 @@ import pytest
 
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig
-from mindroom.history.native import configure_native_history, restore_native_history
+from mindroom.history.native import configure_native_history, restore_native_history, with_native_history
 from mindroom.history.replay import compaction_marker, compaction_summary_message
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.runtime import (
@@ -78,12 +78,7 @@ def _inputs(config: Config) -> HistoryPreparationInputs:
 
 def _sent(adapter: ResponsesAdapter, messages: Sequence[Message], native: NativeHistory | None) -> dict[str, Any]:
     """Return the ``responses.create`` arguments a request of ``messages`` sends under ``native``."""
-    request = ModelRequest(
-        messages=tuple(messages),
-        native_compaction=native.native_compaction if native is not None else None,
-        portable_replay=native.portable_replay if native is not None else False,
-    )
-    return adapter._request_kwargs(request)
+    return adapter._request_kwargs(with_native_history(ModelRequest(messages=tuple(messages)), native))
 
 
 def _continues(sent: dict[str, Any]) -> str | None:

@@ -77,6 +77,7 @@ from tests.team_turn_helpers import (
     TeamTurn,
     delegate,
     member_approval,
+    rendered,
     squad_turn,
 )
 from tests.tool_job_helpers import saved_jobs, tool_job_runtime
@@ -1089,6 +1090,76 @@ async def test_an_approved_resume_shows_a_failed_run_s_reason_after_the_text_its
 
     assert ProbeToolkit.calls == ["dangerous"]
     assert result.response_text == HEADER + body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("checker", "slot"),
+    [
+        pytest.param(
+            [[TextDelta("Checking it"), Await(_checker_leaks_its_key)]],
+            "Checking it\n\nChecker unavailable: api_key=***redacted***",
+            id="failed-after-writing",
+        ),
+        pytest.param(
+            [[Await(_checker_leaks_its_key)]],
+            "Checker unavailable: api_key=***redacted***",
+            id="failed-before-writing",
+        ),
+    ],
+)
+async def test_a_streamed_team_reply_shows_a_failed_member_run_s_reason_after_the_text_it_streamed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checker: list[list[ScriptStep]],
+    slot: str,
+) -> None:
+    """A member run that fails in a live streamed turn shows why in its own paragraph, as a resumed reply shows it.
+
+    The checker's deltas show only what it wrote before its request failed. The reply delivers and records the
+    reason after that text, credentials redacted.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-check", "checker", "Check"), answer("Done.")],
+        checker=checker,
+    )
+
+    chunks = await team.stream(show_tool_calls=False)
+
+    text = f"{HEADER}**Checker**: {slot}\n\n\n**Team Consensus**:\n\nDone."
+    assert rendered(chunks[-1]) == text
+    assert team.recorder.assistant_text == text
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it_streamed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The document a live streamed pause shows, and its resume continues, holds a failed member run's reason.
+
+    The checker fails after writing; the writer the leader then hands a task pauses on its gated call.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-check", "checker", "Check"), delegate("call-write", "writer", "Touch it")],
+        checker=[[TextDelta("Checking it"), Await(_checker_leaks_its_key)]],
+        writer=[calls(tool_call("touch", "call-touch", label="dangerous"))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+
+    paused = raised.value.paused
+    slot = "Checking it\n\nChecker unavailable: api_key=***redacted***"
+    assert paused.response_text == (
+        f"{HEADER}**Checker**: {slot}\n\n\n*No team consensus - showing individual responses only*"
+    )
+    assert [member["content"] for member in paused.response_presentation_state["members"]] == ["", slot]
 
 
 @pytest.mark.asyncio

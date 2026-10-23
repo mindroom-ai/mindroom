@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.history.replay import compaction_summary_message, current_summary_text
@@ -11,7 +12,7 @@ from mindroom.native_compaction import recorded_native_settings
 if TYPE_CHECKING:
     from mindroom.history.types import ResolvedHistoryExecutionPlan, ResolvedHistorySettings
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
 
@@ -76,6 +77,15 @@ def restore_native_history(
     return NativeHistory(native_compaction=native, portable_replay=_restored_portable_replay(latest))
 
 
+def with_native_history(template: ModelRequest, native: NativeHistory | None) -> ModelRequest:
+    """Return ``template`` carrying ``native``'s settings for provider-managed history; None carries none."""
+    return replace(
+        template,
+        native_compaction=native.native_compaction if native is not None else None,
+        portable_replay=native.portable_replay if native is not None else False,
+    )
+
+
 def _restored_portable_replay(message: Message | None) -> bool:
     """Return the replay policy the paused request ran with, from the provenance its last response recorded.
 
@@ -119,4 +129,5 @@ __all__ = [
     "configure_native_history",
     "native_history_route",
     "restore_native_history",
+    "with_native_history",
 ]

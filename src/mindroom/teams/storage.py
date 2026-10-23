@@ -1,14 +1,10 @@
-"""Where a team's new runs and resumes store: the scope's store and session, and the records a run hands over.
-
-``register_team_notice_storage`` hands the team's storage to the turn's queued-notice finalization.
-"""
+"""Where a team's new runs and resumes store: the scope's store and session, and the records a run hands over."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom import ai_runtime
 from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.session_storage.store import persist_to
@@ -101,24 +97,11 @@ def team_history_settings(config: Config, team_name: str | None) -> ResolvedHist
     return config.resolve_entity(configured_team(config, team_name)).history_settings
 
 
-def register_team_notice_storage(*, scope_context: ScopeSessionContext | None, entity_name: str) -> None:
-    """Register the scope's storage for response-boundary notice finalization; a team without a bound scope has none."""
-    if scope_context is None:
-        return
-    ai_runtime.register_queued_notice_storage(
-        storage_factory=scope_context.storage_factory,
-        session_id=scope_context.session_id,
-        session_kind="team",
-        entity_name=entity_name,
-    )
-
-
 __all__ = [
     "TeamRunRecords",
     "TeamStorage",
     "configured_team",
     "persist_into",
-    "register_team_notice_storage",
     "scope_storage",
     "team_history_settings",
 ]

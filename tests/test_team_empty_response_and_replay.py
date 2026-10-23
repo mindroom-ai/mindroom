@@ -209,6 +209,34 @@ async def test_the_empty_retry_shares_the_turn_s_budget_with_model_switch_contin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_a_later_attempt_of_a_team_turn_on_a_new_scope_replays_the_run_an_earlier_attempt_saved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """The scope's first session stays with the turn, so the attempt after a member's switch replays the first run.
+
+    The scope has no stored session when the turn starts; the second attempt's leader request carries the first
+    attempt's delegation.
+    """
+    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn")
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Go"), answer("Asked."), answer("Done.")],
+        general=[calls(switch)],
+    )
+
+    text = await team.reply(stream=stream)
+
+    assert text.endswith("Done.")
+    *_, last = team.models["default"].requests
+    assert [message.tool_call_id for message in last.messages if message.role == "tool"] == ["call-team"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("member_finding", [None, "Queue depth is elevated."])
 async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_member_found_something(
     tmp_path: Path,

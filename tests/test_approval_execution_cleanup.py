@@ -84,7 +84,6 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
         patch("mindroom.teams.resume.open_resolved_scope_session_context", return_value=open_scope()),
         patch("mindroom.teams.resume.materialize_exact_team_members", side_effect=RuntimeError("assembly failed")),
         patch("mindroom.teams.resume.finalize_consumption", new=fail_finalization),
-        patch("mindroom.teams.resume.register_team_notice_storage"),
         pytest.raises(RuntimeError, match="consumption finalization failed"),
     ):
         await continue_paused_team_run(

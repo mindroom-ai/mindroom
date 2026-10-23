@@ -1,9 +1,10 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
 ``TeamReplyText`` is the reply's text without tool markers as the run's events build it, which a streamed turn records,
-also when it is interrupted, and which tells a resume the runs that streamed text. The attempt also collects
-the records the run hands over, which a blocking turn renders its reply from and records however it ends, and renders
-the run's metadata from them.
+also when it is interrupted, and which tells the attempt the runs that streamed text. When the team run ends, the
+attempt adds what a run hands over and its events did not show to the document and to that text alike
+(``TeamAttempt.show_unshown_handover``). The attempt also collects the records the run hands over, which a blocking
+turn renders its reply from and records however it ends, and renders the run's metadata from them.
 """
 
 from __future__ import annotations
@@ -13,19 +14,20 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import TurnPartialSnapshot
 from mindroom.teams.presentation import apply_team_event, format_team_response, render_team_member_slots
 from mindroom.teams.runtime import MemberEvent, team_usage
 from mindroom.teams.storage import TeamRunRecords
 from mindroom.timing import emit_timing_event
-from mindroom.tool_system.events import StructuredStreamChunk
+from mindroom.tool_system.events import StructuredStreamChunk, append_stream_text
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.config.main import Config
     from mindroom.history.types import PreparedHistoryState
-    from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord, RunRecord, ToolExecution
     from mindroom.teams.members import ResolvedExactTeamMembers
     from mindroom.teams.presentation import TeamStreamPresentation
     from mindroom.teams.runtime import TeamRunEvent
@@ -42,6 +44,16 @@ def team_tool_executions(record: TeamRunRecord, members: Sequence[RunRecord]) ->
     return [*(record.tools or ()), *(tool for member in members for tool in member.tools or ())]
 
 
+def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | dict[str, Any] | None:
+    """Return what ``run`` hands over (``handover_content``) that its events have not shown.
+
+    A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
+    unless that is not its content: a failed run hands over why it failed.
+    """
+    handover = run.handover_content
+    return None if streamed and handover == run.content else handover
+
+
 @dataclass
 class TeamReplyText:
     """The text of one team reply without tool markers: each member's text and the consensus, as the run's events build it.
@@ -49,7 +61,8 @@ class TeamReplyText:
     ``presentation`` owns the member identities: the configured slot order, the display names, and the slot an event's
     member resolves to. A member's deltas join directly, so a hidden tool call between them leaves no gap, as the
     run's own content joins them. ``streamed_member_runs`` names the member runs whose deltas gave text, by run id,
-    since a member's slot holds the text of each of its runs.
+    since a member's slot holds the text of each of its runs. What a run hands over and its events did not show
+    joins the text when the team run ends (``TeamAttempt.show_unshown_handover``).
     """
 
     presentation: TeamStreamPresentation
@@ -123,10 +136,10 @@ class TeamAttempt:
     def interrupted_text(self) -> str:
         """Return the text the turn records when this attempt is stopped or fails.
 
-        A streamed attempt records the text its events built. A blocking attempt records its stored runs' document,
-        stripped, as Agno's blocking turn did, or nothing before the run stored a record. A stopped leader that wrote
-        nothing contributes nothing, as Agno's stopped run then held only its cancellation notice, which it dropped;
-        a failed one contributes the reason its run recorded, credentials redacted.
+        A streamed attempt records its reply's text (``TeamReplyText``). A blocking attempt records its stored runs'
+        document, stripped, as Agno's blocking turn did, or nothing before the run stored a record. A stopped leader
+        that wrote nothing contributes nothing, as Agno's stopped run then held only its cancellation notice, which it
+        dropped; a failed one contributes the reason its run recorded, credentials redacted.
         """
         if self.stream:
             return self.reply.canonical_text()
@@ -150,6 +163,37 @@ class TeamAttempt:
             return False
         apply_team_event(self.presentation, event)
         return True
+
+    def show_unshown_handover(self, run: AnyRunRecord) -> bool:
+        """Add to ``run``'s slot what the run hands over and its events did not show; return whether anything was added.
+
+        The team run is the leader, whose text only the consensus holds; a member run goes to its member's slot and is
+        matched by its run id, so an earlier run of the same member keeps its text without standing for a later one.
+        The addition starts a paragraph of its own, in the document and in the reply's text alike.
+        """
+        reply = self.reply
+        if isinstance(run, TeamRunRecord):
+            handover = _unshown_handover(run, streamed=bool(reply.consensus))
+            self.presentation.append_consensus(handover, separate=True)
+            reply.consensus = append_stream_text(reply.consensus, handover, separate=True)
+        else:
+            member_id = self.presentation.resolve_member_id(run.agent_id, run.agent_name)
+            handover = _unshown_handover(run, streamed=run.run_id in reply.streamed_member_runs)
+            self.presentation.append_member(member_id, handover, separate=True)
+            reply.per_member[member_id] = append_stream_text(reply.per_member[member_id], handover, separate=True)
+        return bool(handover)
+
+    def show_failure_reasons(self, record: TeamRunRecord) -> bool:
+        """Add the reason each failed member run of ``record`` recorded, credentials redacted, that its deltas did not show.
+
+        A live streamed turn shows its runs' deltas, as Agno's did, and each failed member run's reason when the team
+        run ends, as a resumed reply shows it (``show_unshown_handover``). Return whether any reason was added.
+        """
+        shown = False
+        for member in record.ended_member_runs:
+            if member.status is RunStatus.error:
+                shown = self.show_unshown_handover(member) or shown
+        return shown
 
     def _emit_tool_timing(
         self,

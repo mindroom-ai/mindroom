@@ -60,3 +60,18 @@ def test_a_team_scope_without_a_stored_session_stores_its_runs_in_its_first_one(
     storage = scope_storage(_context("team", None))
 
     assert (storage.session.session_id, storage.session.kind, storage.session.owner_id) == ("session-1", "team", "crew")
+
+
+@pytest.mark.parametrize("stored", [True, False], ids=["stored", "first"])
+def test_a_context_given_its_session_holds_the_one_its_runs_save_into(*, stored: bool) -> None:
+    """The context holds its stored session as itself, or the scope's first one; the rest of the context stays."""
+    session = ConversationSession(session_id="session-1", kind="team", owner_id="crew", created_at=1)
+    context = _context("team", session if stored else None)
+
+    given = context.with_session()
+
+    assert given.session is not None
+    assert (given.session.session_id, given.session.kind, given.session.owner_id) == ("session-1", "team", "crew")
+    assert (given.session is session) is stored
+    assert (given.scope, given.storage, given.session_id) == (context.scope, context.storage, context.session_id)
+    assert given.stored_or_first_session() is given.session

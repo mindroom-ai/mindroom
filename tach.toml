@@ -761,6 +761,7 @@ depends_on = [
     "mindroom.execution_preparation",
     "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.native",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
     "mindroom.history.runtime",
@@ -2683,6 +2684,7 @@ depends_on = [
     "mindroom.native_compaction",
 ]
 visibility = [
+    "mindroom.ai",
     "mindroom.approval.resume",
     "mindroom.history.runtime",
     "mindroom.teams",

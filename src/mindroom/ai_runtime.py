@@ -45,6 +45,7 @@ __all__ = [
     "queued_notice_after_tool_batch",
     "queued_notice_on_resume_entry",
     "register_queued_notice_storage",
+    "register_scope_notice_storage",
     "run_attempt_with_model",
     "scrub_queued_notice_session_context",
     "stream_attempt_with_model",
@@ -543,6 +544,18 @@ def register_queued_notice_storage(
             entity_name=entity_name,
         )
         notice_context.storage_targets[target_key] = target
+
+
+def register_scope_notice_storage(*, scope_context: ScopeSessionContext | None, entity_name: str) -> None:
+    """Register the storage of the scope one response ran in, by its context; a response without a scope has none."""
+    if scope_context is None:
+        return
+    register_queued_notice_storage(
+        storage_factory=scope_context.storage_factory,
+        session_id=scope_context.session_id,
+        session_kind=scope_context.scope.kind,
+        entity_name=entity_name,
+    )
 
 
 def _finalize_queued_notice_storage_targets(

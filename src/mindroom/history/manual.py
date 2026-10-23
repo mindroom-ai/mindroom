@@ -72,7 +72,7 @@ def request_compaction_before_next_reply(
             return f"Error: Compaction is unavailable for this scope because {unavailable}."
 
         session = scope_context.session
-        # create_session_if_missing opens a new session when none is stored yet.
+        # create_session_if_missing gives a scope without a stored session its first one.
         assert session is not None
         update_scope_state_on_latest(
             scope_context.storage,
