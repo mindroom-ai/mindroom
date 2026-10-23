@@ -47,10 +47,7 @@ class TeamRunRecords:
         return False
 
     def keep(self, record: AnyRunRecord) -> None:
-        """Keep the team's terminal record.
-
-        Member records reach that record's ``ended_member_runs`` through the team runtime's member persist instead.
-        """
+        """Keep the team's terminal record; the team runtime adds member records to its ``ended_member_runs``."""
         if isinstance(record, TeamRunRecord):
             self.record = record
 
