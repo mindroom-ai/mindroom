@@ -1019,7 +1019,7 @@ async def test_an_approved_resume_shows_a_failed_member_s_redacted_reason(
     """A member whose run fails in an approval resume shows why in the resumed reply, credentials redacted.
 
     The writer the resumed leader hands a task fails before it writes anything. The approved checker fails after its
-    approved call ran, while its record still holds its paused notice, which the reply no longer shows instead.
+    approved call ran, while its record still holds its paused notice, which the reply does not show for it.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(leader)
