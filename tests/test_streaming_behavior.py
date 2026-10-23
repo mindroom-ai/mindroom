@@ -1618,9 +1618,9 @@ class TestStreamingBehavior:
         tool = ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}, result="ok")
 
         async def response_stream() -> AsyncIterator[object]:
-            yield ToolCallStartedEvent(tool=tool)
+            yield ToolStarted(tool=tool)
             await first_send_started.wait()
-            yield ToolCallCompletedEvent(tool=tool, content="ok")
+            yield ToolCompleted(tool=tool)
 
         delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
         delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
