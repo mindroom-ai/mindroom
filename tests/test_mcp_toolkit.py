@@ -13,7 +13,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPToolUnavailableError
-from mindroom.mcp.toolkit import MindRoomMCPToolkit, hide_mcp_function_collisions
+from mindroom.mcp.toolkit import MindRoomMCPToolkit, mcp_function_collisions
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -613,16 +613,12 @@ def test_final_projection_hides_cross_mcp_catalog_collisions(tmp_path: Path) -> 
         worker_target=worker_target,
     )
 
-    hidden = hide_mcp_function_collisions([alpha, beta])
+    hidden = mcp_function_collisions([(alpha, alpha.async_functions), (beta, beta.async_functions)])
 
     assert hidden == {
         "alpha": (function_name,),
         "beta": (function_name,),
     }
-    assert function_name not in alpha.async_functions
-    assert function_name not in beta.async_functions
-    assert "foo_list_tools" in alpha.async_functions
-    assert "foo_bar_list_tools" in beta.async_functions
 
 
 def test_final_projection_hides_catalogless_oauth_bridge_local_collision(tmp_path: Path) -> None:
@@ -642,9 +638,6 @@ def test_final_projection_hides_catalogless_oauth_bridge_local_collision(tmp_pat
         entrypoint=lambda: "local",
     )
 
-    hidden = hide_mcp_function_collisions([bridge, local])
+    hidden = mcp_function_collisions([(bridge, bridge.async_functions), (local, local.functions)])
 
     assert hidden == {"demo": ("demo_list_tools",)}
-    assert "demo_list_tools" not in bridge.async_functions
-    assert "demo_list_tools" in local.functions
-    assert "demo_connection_status" in bridge.async_functions

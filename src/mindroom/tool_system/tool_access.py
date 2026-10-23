@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from mindroom.tool_system.agno_toolkits import Function
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 class _InvalidToolArgumentsError(ValueError):
@@ -50,8 +51,12 @@ def function_definition(function: Function) -> dict[str, object]:
     """Return the name, description, and input schema the model is shown for one Agno function."""
     if function.entrypoint is None:
         return {"name": function.name, "description": function.description or "", "parameters": function.parameters}
-    adapted = adapt_function(function)
-    return {"name": adapted.name, "description": adapted.description or "", "parameters": dict(adapted.parameters)}
+    return tool_definition(adapt_function(function))
+
+
+def tool_definition(function: ToolFunction) -> dict[str, object]:
+    """Return the name, description, and input schema the model is shown for one adapted function."""
+    return {"name": function.name, "description": function.description or "", "parameters": dict(function.parameters)}
 
 
 def _no_remote_schema(uri: str) -> Never:

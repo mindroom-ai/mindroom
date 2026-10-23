@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from functools import partial
+from functools import cached_property, partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -37,7 +37,7 @@ from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
-from mindroom.mcp.toolkit import hide_mcp_function_collisions
+from mindroom.mcp.toolkit import MindRoomMCPToolkit, mcp_function_collisions
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.providers.registry import build_model_provider
@@ -68,9 +68,9 @@ from mindroom.tool_system.declarations import (
 )
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
+    ToolDeferral,
     VisibleToolSurface,
     defer_toolkit,
-    drop_shadowed_deferred_functions,
     visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
@@ -91,7 +91,7 @@ from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Collection, Iterator, Sequence
     from contextlib import AbstractContextManager
 
     from mindroom.agent_modes import AgentMode
@@ -147,19 +147,18 @@ class _AdditionalContextChunk:
 class _ToolkitEntry:
     """One toolkit assembled for an agent: the Agno toolkit built for it, what a run offers of it, and its owner.
 
-    ``owner`` is the authored toolkit that approvals and tool jobs name its functions by; ``toolkit`` is the concrete
-    toolkit tool jobs check a call's grant and exclusions by. ``deferred`` is set for a toolkit whose functions stay
-    off the provider request until tool search finds them.
+    ``adapted`` holds the functions a run offers of the toolkit; the steps across toolkits leave functions out of it,
+    never out of the Agno toolkit. ``owner`` is the authored toolkit that approvals and tool jobs name its functions
+    by; ``toolkit`` is the concrete toolkit tool jobs check a call's grant and exclusions by. ``deferral`` is set for
+    a toolkit whose functions stay off the provider request until tool search finds them.
     """
 
     toolkit: Toolkit
     adapted: AdaptedToolkit
     owner: str
-    deferred: DeferredToolkit | None = None
+    deferral: ToolDeferral | None = None
 
 
-# A toolkit a run offers, with its entry, or None for one generated beside the assembled toolkits.
-type _OfferedToolkit = tuple[_ToolkitEntry | None, AdaptedToolkit]
 # One function a run offers from a configured toolkit, with that toolkit's entry.
 type _OfferedFunction = tuple[_ToolkitEntry, ToolFunction]
 
@@ -177,20 +176,35 @@ class _AgentToolAssembly:
     # computer announcement.
     tool_middleware: tuple[ToolMiddleware, ...]
 
-    @property
-    def deferred_toolkits(self) -> tuple[DeferredToolkit, ...]:
-        """Return the toolkits whose surviving functions stay off the provider request until tool search finds them.
+    @cached_property
+    def offered(self) -> tuple[_OfferedFunction, ...]:
+        """Return each function a run offers of the configured toolkits, with its entry.
 
-        They are kept rather than a snapshot of names because the final MCP collision projection may remove a
-        deferred function while preserving an eager local function with the same wire name.
+        The functions generated beside them, the knowledge search and the skills, come after them, so a generated
+        function never displaces one of these.
         """
-        return _deferred_toolkits(self.entries)
+        return _offered_entries(self.entries)
+
+    @cached_property
+    def deferred_toolkits(self) -> tuple[DeferredToolkit, ...]:
+        """Return each deferred toolkit with the functions a run offers of it, which only tool search shows.
+
+        A deferred function that a same-named function of an earlier toolkit shadows is not offered, so neither the
+        search nor the request's deferred names show it, and the earlier function keeps its name.
+        """
+        return tuple(
+            DeferredToolkit(entry.deferral, tuple(function for owner, function in self.offered if owner is entry))
+            for entry in self.entries
+            if entry.deferral is not None
+        )
 
     @property
     def deferred_tool_names(self) -> tuple[str, ...]:
         """Return authored deferred-tool domains with a surviving function surface."""
         return tuple(
-            dict.fromkeys(deferred.domain_name for deferred in self.deferred_toolkits if deferred.wire_function_names),
+            dict.fromkeys(
+                deferred.deferral.domain_name for deferred in self.deferred_toolkits if deferred.wire_function_names
+            ),
         )
 
     @property
@@ -650,9 +664,18 @@ def _log_toolkits_without_offered_functions(
             )
 
 
-def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> dict[str, tuple[str, ...]]:
-    """Project MCP functions against the exact session-local tool surface, returning those hidden per tool."""
-    hidden = hide_mcp_function_collisions(toolkits)
+def _without_session_mcp_function_collisions(
+    entries: Sequence[_ToolkitEntry],
+    *,
+    agent_name: str,
+) -> tuple[list[_ToolkitEntry], dict[str, tuple[str, ...]]]:
+    """Leave the MCP functions that collide in the session's tool surface out of what a run offers.
+
+    Return the entries and, per tool, the functions left out.
+    """
+    hidden = mcp_function_collisions(
+        [(entry.toolkit, [function.name for function in entry.adapted.functions]) for entry in entries],
+    )
     for server_id, function_names in hidden.items():
         logger.warning(
             "Hiding colliding MCP functions from session tool surface",
@@ -660,7 +683,21 @@ def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name
             server_id=server_id,
             function_names=list(function_names),
         )
-    return {mcp_tool_name(server_id): function_names for server_id, function_names in hidden.items()}
+    kept = [
+        _without_functions(entry, hidden.get(entry.toolkit.server_id, ()))
+        if isinstance(entry.toolkit, MindRoomMCPToolkit)
+        else entry
+        for entry in entries
+    ]
+    return kept, {mcp_tool_name(server_id): function_names for server_id, function_names in hidden.items()}
+
+
+def _without_functions(entry: _ToolkitEntry, names: Collection[str]) -> _ToolkitEntry:
+    """Return ``entry`` offering none of the functions ``names`` names."""
+    if not names:
+        return entry
+    functions = tuple(function for function in entry.adapted.functions if function.name not in names)
+    return replace(entry, adapted=replace(entry.adapted, functions=functions))
 
 
 class _MatrixRoomRuntimeToolCollisionError(ValueError):
@@ -742,7 +779,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     persona: SubagentPersona | None = None,
-    deferred_toolkits: Sequence[DeferredToolkit] = (),
+    deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None = None,
     list_mcp_functions: bool = False,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
@@ -754,7 +791,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     Returns ``None`` when the configured tool should be skipped, such as an
     explicit ``delegate`` entry without valid delegation targets.
 
-    ``deferred_toolkits`` are the wire-deferred toolkits that ``dynamic_tools`` searches.
+    ``deferred_toolkits`` returns the wire-deferred toolkits that ``dynamic_tools`` searches, as the agent's runs offer
+    them; without it ``dynamic_tools`` is skipped.
     ``list_mcp_functions`` registers the functions of an Agno MCP toolkit that is not connected yet, for an agent
     whose runs connect it.
     """
@@ -893,7 +931,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     if tool_name == "dynamic_tools":
         from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit  # noqa: PLC0415
 
-        if not deferred_toolkits:
+        if deferred_toolkits is None:
             return None
         # Search results must reach the model inline, so they skip output-file redirection.
         return bind_toolkit_construction(
@@ -1069,7 +1107,7 @@ def _build_dynamic_tooling_instruction_block(
 ) -> str | None:
     """Return the static deferred-tool catalog for portable tool search."""
     catalog = {
-        deferred.domain_name: deferred.description.strip()
+        deferred.deferral.domain_name: deferred.deferral.description.strip()
         for deferred in deferred_toolkits
         if deferred.wire_function_names
     }
@@ -1438,6 +1476,13 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         )
     entity_view = config.resolve_entity(agent_name)
     entries: list[_ToolkitEntry] = []
+    # The finished assembly, which tool search reads: its toolkit is built before the steps across toolkits run.
+    assembled: list[_AgentToolAssembly] = []
+
+    def searched_toolkits() -> tuple[DeferredToolkit, ...]:
+        [assembly] = assembled
+        return assembly.deferred_toolkits
+
     local_tool_names: list[str] = []
     worker_routed_tool_names: list[str] = []
     persona_built: dict[str, frozenset[str]] = {}
@@ -1466,7 +1511,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 persona=persona,
-                deferred_toolkits=_deferred_toolkits(entries),
+                deferred_toolkits=searched_toolkits,
                 list_mcp_functions=not routed,
             )
         if routed and toolkit is not None and is_unconnected_mcp_toolkit(toolkit):
@@ -1497,12 +1542,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
 
     def adapt_entry(toolkit: Toolkit, tool_entry: EffectiveToolConfig, authored_name: str) -> _ToolkitEntry:
         tool_name = tool_entry.name
-        deferred = None
+        deferral = None
         # initial deferred tools stay in the rendered prompt prefix as plain non-deferred tools.
         if wire_deferred_tools and tool_entry.defer and not tool_entry.initial:
             metadata = TOOL_METADATA.get(authored_name)
             # Deferred before it is adapted, so its instructions leave the prompt for the search results.
-            deferred = defer_toolkit(authored_name, metadata.description if metadata else "", toolkit)
+            deferral = defer_toolkit(authored_name, metadata.description if metadata else "", toolkit)
         adapted = adapt_toolkit(toolkit)
         announcement = computer_announcement_middleware(
             toolkit,
@@ -1529,7 +1574,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 approvals_as_jobs=approvals_as_jobs
                 and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
             )
-        return _ToolkitEntry(toolkit=toolkit, adapted=adapted, owner=authored_name, deferred=deferred)
+        return _ToolkitEntry(toolkit=toolkit, adapted=adapted, owner=authored_name, deferral=deferral)
 
     cli_deferred = []
     for deferred_entry in deferred_configs.values():
@@ -1552,7 +1597,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         yield from resolved_tool_configs.items()
         # The search toolkit comes after every deferred toolkit it searches, and only portable tool search rewrites
         # call_tool, so an authored dynamic_tools entry is ignored everywhere else.
-        if dynamic_tools_entry is not None and portable_deferred_tools and _deferred_toolkits(entries):
+        if (
+            dynamic_tools_entry is not None
+            and portable_deferred_tools
+            and any(entry.deferral is not None for entry in entries)
+        ):
             yield dynamic_tools_entry.name, dynamic_tools_entry
 
     for tool_name, tool_entry in tool_entries():
@@ -1592,18 +1641,18 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     if controls is not None:
         entries.append(_job_controls_entry(controls))
-    tools = [entry.toolkit for entry in entries]
-    hidden_mcp_functions = _hide_session_mcp_function_collisions(tools, agent_name=agent_name)
-    drop_shadowed_deferred_functions(tools, _deferred_toolkits(entries))
+    kept_entries, hidden_mcp_functions = _without_session_mcp_function_collisions(entries, agent_name=agent_name)
     if persona_tools is not None:
         require_built_persona_tools(persona_tools, persona_built, hidden_mcp_functions)
-    return _AgentToolAssembly(
-        entries=tuple(_without_hidden_functions(entry) for entry in entries),
+    assembly = _AgentToolAssembly(
+        entries=tuple(kept_entries),
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
         tool_middleware=(hook_middleware,),
     )
+    assembled.append(assembly)
+    return assembly
 
 
 def _open_agent_session_storage(
@@ -1850,7 +1899,7 @@ def team_background_jobs(
     )
     entry = _job_controls_entry(controls)
     # The job tools come from the selection a run of the controls makes: one function and one source per name.
-    offered = _offered_entries(((entry, entry.adapted),))
+    offered = _offered_entries((entry,))
     functions = {function.name: function for _entry, function in offered}
     control_names = frozenset(functions)
 
@@ -1882,14 +1931,13 @@ def _agent_toolkits(
     knowledge: AgentKnowledge | None,
     skills: SkillsToolkit | None,
     generated_visible: Callable[[Function], bool],
-) -> tuple[_OfferedToolkit, ...]:
+) -> tuple[AdaptedToolkit, ...]:
     """Return the agent's tools in the order the model is offered them: configured toolkits, knowledge search, skills.
 
-    Each toolkit comes with its entry; the knowledge search and skill functions are generated beside the configured
-    toolkits, so they have none, and they get the approval and persona policy here that configured functions got
-    while their toolkits were built.
+    The knowledge search and skill functions are generated beside the configured toolkits, and they get the approval
+    and persona policy here that configured functions got while their toolkits were built.
     """
-    offered: list[_OfferedToolkit] = [(entry, entry.adapted) for entry in entries]
+    offered = [entry.adapted for entry in entries]
     if knowledge is not None:
         search = knowledge.search_function(
             memory_search_available=_offers_function(entries, _MEMORY_SEARCH_TOOL_NAME),
@@ -1900,30 +1948,15 @@ def _agent_toolkits(
                 functions=(adapt_function(search),),
                 instructions=None,
             )
-            offered.append((None, search_toolkit))
+            offered.append(search_toolkit)
     if skills is not None and (visible_skills := _prune_toolkit_functions(skills, generated_visible)) is not None:
-        offered.append((None, adapt_toolkit(visible_skills)))
+        offered.append(adapt_toolkit(visible_skills))
     return tuple(offered)
 
 
-def _deferred_toolkits(entries: Sequence[_ToolkitEntry]) -> tuple[DeferredToolkit, ...]:
-    return tuple(entry.deferred for entry in entries if entry.deferred is not None)
-
-
-def _without_hidden_functions(entry: _ToolkitEntry) -> _ToolkitEntry:
-    """Offer only the adapted functions the Agno toolkit still holds once the steps across toolkits hid some."""
-    kept = entry.toolkit.get_async_functions()
-    functions = tuple(function for function in entry.adapted.functions if function.name in kept)
-    return replace(entry, adapted=replace(entry.adapted, functions=functions))
-
-
-def _offered_entries(toolkits: Sequence[_OfferedToolkit]) -> list[_OfferedFunction]:
-    """Return each function a run of ``toolkits`` offers with its entry, as ``first_of_each_name`` selects them.
-
-    A generated function has no entry, so it is absent, and so is any function a same-named earlier one shadows.
-    """
-    pairs = ((entry, function) for entry, toolkit in toolkits for function in toolkit.functions)
-    return [(entry, function) for entry, function in first_of_each_name(pairs) if entry is not None]
+def _offered_entries(entries: Sequence[_ToolkitEntry]) -> tuple[_OfferedFunction, ...]:
+    """Return each function a run of ``entries`` offers with its entry, as ``first_of_each_name`` selects them."""
+    return tuple(first_of_each_name((entry, function) for entry in entries for function in entry.adapted.functions))
 
 
 def _job_sources(offered: Sequence[_OfferedFunction]) -> dict[str, tuple[str, Toolkit]]:
@@ -2151,18 +2184,18 @@ def create_agent(
     )
     # Minimal mode presents skill contents as context documents instead of through skill functions.
     offered_skills = skills if agent_mode == "minimal" else prompt_skills
-    offered_toolkits = _agent_toolkits(
+    toolkits = _agent_toolkits(
         tool_assembly.entries,
         enabled_knowledge,
         offered_skills,
         partial(_generated_function_visible, config, tool_function_filter),
     )
-    # Owners and job sources come from the selection a run makes over these toolkits. The run walks them after the CLI
-    # shell window, which only swaps one function's entrypoint, so it offers the same names from the same owners.
-    offered = _offered_entries(offered_toolkits)
+    # Owners, job sources, and the deferred toolkits come from the selection a run makes over the configured toolkits.
+    # The run walks them after the CLI shell window, which only swaps one function's entrypoint, so it offers the same
+    # names from the same owners.
+    offered = tool_assembly.offered
     _log_toolkits_without_offered_functions(tool_assembly.entries, offered, agent_name=agent_name)
     tool_owners = {function.name: entry.owner for entry, function in offered}
-    toolkits = tuple(toolkit for _entry, toolkit in offered_toolkits)
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
     # A subagent runs inside its caller's response, whose CLI belongs to the caller, so its shell gets none.
     windowed_toolkits = (

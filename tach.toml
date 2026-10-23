@@ -7377,9 +7377,9 @@ from = ["mindroom.tool_system.skills"]
 [[interfaces]]
 expose = [
     "DeferredToolkit",
+    "ToolDeferral",
     "VisibleToolSurface",
     "defer_toolkit",
-    "drop_shadowed_deferred_functions",
     "visible_tool_surface",
 ]
 from = ["mindroom.tool_system.dynamic_toolkits"]
@@ -7388,7 +7388,7 @@ from = ["mindroom.tool_system.dynamic_toolkits"]
 expose = [
     "MindRoomMCPToolkit",
     "bind_mcp_server_manager",
-    "hide_mcp_function_collisions",
+    "mcp_function_collisions",
     "require_mcp_server_manager",
 ]
 from = ["mindroom.mcp.toolkit"]
