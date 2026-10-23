@@ -22,7 +22,6 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import TeamRunRecord
-from mindroom.teams.runtime import MemberRunEnded
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from tests.fakes.scripted_model import ScriptedModel
@@ -167,15 +166,21 @@ def approval(call_id: str, name: str, arguments: dict[str, Any], *, agent: str) 
 
 
 class Store:
-    """A persist callback that remembers every record it was handed, as a snapshot, in order."""
+    """A persist callback that remembers every record it was handed, as a snapshot, in order.
+
+    ``members`` keeps the member runs' terminal records themselves, in the order they were stored.
+    """
 
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
+        self.members: list[RunRecord] = []
 
     async def __call__(self, record: AnyRunRecord) -> None:
         """Store ``record`` after yielding once, as a store that writes off the loop would."""
         await asyncio.sleep(0)
         self.records.append(record.to_dict())
+        if not isinstance(record, TeamRunRecord):
+            self.members.append(record)
 
     @property
     def statuses(self) -> list[tuple[str, str]]:
@@ -190,11 +195,6 @@ async def collect(stream: AsyncIterator[TeamRunEvent]) -> tuple[list[TeamRunEven
     assert isinstance(finished, RunFinished)
     assert isinstance(finished.record, TeamRunRecord)
     return events, finished.record
-
-
-def member_records(events: Sequence[TeamRunEvent]) -> list[RunRecord]:
-    """Return every member run's terminal record, in the order the members ended."""
-    return [event.record for event in events if isinstance(event, MemberRunEnded)]
 
 
 def comparable(run: dict[str, Any]) -> dict[str, Any]:

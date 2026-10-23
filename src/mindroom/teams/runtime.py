@@ -70,16 +70,7 @@ class MemberEvent:
     event: MemberLoopEvent
 
 
-@dataclass(frozen=True, slots=True)
-class MemberRunEnded:
-    """A member run reached its terminal record, stored: ``COMPLETED``, ``PAUSED``, or ``ERROR``."""
-
-    member_id: str
-    member_name: str
-    record: RunRecord
-
-
-type TeamRunEvent = RunEvent | MemberEvent | MemberRunEnded
+type TeamRunEvent = RunEvent | MemberEvent
 type Emit = Callable[[TeamRunEvent], None]
 # One call a paused team waits for: the member whose run issued it, or None for the leader's own, and the call id.
 # Members' providers number their calls independently, so a call id alone does not name a call of the team.
@@ -97,10 +88,10 @@ def run_team(
 ) -> AsyncIterator[TeamRunEvent]:
     """Run one team turn: the leader's system message, then ``run_input`` as the history subsystem built it.
 
-    The stream yields the leader's events, every member's events as ``MemberEvent``, each member's terminal record
-    as ``MemberRunEnded``, and finally ``RunFinished`` with the ``COMPLETED`` or ``PAUSED`` team record after
-    ``persist`` stored it; ``persist`` also receives every member record as its run ends. The team record ends as
-    ``run_agent``'s does on cancellation and errors, and cancelling the stream cancels the members with the leader.
+    The stream yields the leader's events, every member's events as ``MemberEvent``, and finally ``RunFinished`` with
+    the ``COMPLETED`` or ``PAUSED`` team record after ``persist`` stored it; ``persist`` also receives every member
+    record as its run ends. The team record ends as ``run_agent``'s does on cancellation and errors, and cancelling
+    the stream cancels the members with the leader.
     """
     identity = spec.model.identity
     record = TeamRunRecord(
@@ -516,9 +507,7 @@ class _MemberRuns:
                 run_id=run_id,
                 error=str(error),
             )
-        record = ended[-1]
-        self.emit(MemberRunEnded(member.spec.id, member.spec.name, record))
-        return record
+        return ended[-1]
 
 
 async def _forward(stream: AsyncIterator[RunEvent], emit: Emit) -> None:
@@ -544,7 +533,6 @@ __all__ = [
     "Emit",
     "MemberEvent",
     "MemberLoopEvent",
-    "MemberRunEnded",
     "TeamCallKey",
     "TeamRunEvent",
     "continue_team",

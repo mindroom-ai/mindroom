@@ -35,7 +35,6 @@ from tests.team_runtime.squad import (
     comparable,
     golden_metadata,
     golden_run,
-    member_records,
     prompt,
     run_context,
     scripted,
@@ -43,9 +42,11 @@ from tests.team_runtime.squad import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.llm.usage import MessageMetrics
+    from mindroom.teams.runtime import TeamRunEvent
 
 pytestmark = pytest.mark.asyncio
 
@@ -101,11 +102,20 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
     checker = scripted("checker-model")
     ctx = run_context("team-completed", SQUAD, golden_metadata(team_row))
     store = Store()
+    stored_when_the_delegation_completed: list[list[tuple[str, str]]] = []
 
-    events, record = await collect(run_team(squad(leader, writer, checker), prompt(team_row), ctx=ctx, persist=store))
+    async def noting_the_store(stream: AsyncIterator[TeamRunEvent]) -> AsyncIterator[TeamRunEvent]:
+        async for event in stream:
+            if isinstance(event, ToolCompleted):
+                stored_when_the_delegation_completed.append(store.statuses)
+            yield event
+
+    events, record = await collect(
+        noting_the_store(run_team(squad(leader, writer, checker), prompt(team_row), ctx=ctx, persist=store)),
+    )
 
     assert comparable(record.to_dict()) == comparable(team_row)
-    [member] = member_records(events)
+    [member] = store.members
     assert comparable(member.to_dict()) == comparable(writer_row)
     assert (
         member.metadata is record.metadata is ctx.metadata
@@ -132,9 +142,8 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
     assert (completed.tool.tool_name, completed.parent_run_id) == ("add", "team-completed")
     leader_tools = [event.tool.tool_name for event in events if isinstance(event, ToolStarted | ToolCompleted)]
     assert leader_tools == ["delegate_task_to_member", "delegate_task_to_member"]
-    # The member's terminal record is announced before the leader's delegation completes, and the team ends last.
-    kinds = [type(event).__name__ for event in events]
-    assert kinds.index("MemberRunEnded") < kinds.index("ToolCompleted")
+    # The member's terminal record is stored before the leader's delegation completes, and the team ends last.
+    assert stored_when_the_delegation_completed == [[("writer", "COMPLETED")]]
     assert isinstance(events[-1], RunFinished)
 
 
@@ -152,12 +161,12 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
     store = Store()
 
     with capture_logs() as logs:
-        events, record = await collect(
+        _, record = await collect(
             run_team(squad(leader, scripted("writer-model"), checker), prompt(team_row), ctx=ctx, persist=store),
         )
 
     assert comparable(record.to_dict()) == comparable(team_row)
-    [member] = member_records(events)
+    [member] = store.members
     assert comparable(member.to_dict()) == comparable(checker_row)
     assert (member.status, member.content) == (RunStatus.error, "Checker overloaded")
     assert record.tools is not None
@@ -188,7 +197,7 @@ async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:
     )
     store = Store()
 
-    events, record = await collect(
+    _, record = await collect(
         run_team(
             team,
             prompt(team_row),
@@ -199,7 +208,7 @@ async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:
 
     assert record.status is RunStatus.paused
     assert comparable(record.to_dict()) == comparable(team_row)
-    [member] = member_records(events)
+    [member] = store.members
     assert comparable(member.to_dict()) == comparable(checker_row)
     assert record.member_responses == [member]
     assert record.requirements is not None
@@ -239,7 +248,7 @@ async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_te
     )
 
     assert comparable(record.to_dict()) == comparable(team_row)
-    members = member_records(events)
+    members = store.members
     assert [comparable(member.to_dict()) for member in members] == [comparable(writer_row), comparable(checker_row)]
     assert record.tools is not None
     assert record.tools[0].result == "Five is prime.Five is odd."
@@ -274,9 +283,15 @@ async def test_an_unknown_member_id_answers_the_leader_with_agno_s_roster_notice
     )
     writer, checker = scripted("writer-model"), scripted("checker-model")
     team = squad(leader, writer, checker)
+    store = Store()
 
-    events, record = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    _, record = await collect(
+        run_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            persist=store,
+        ),
     )
 
     assert record.tools is not None
@@ -288,7 +303,7 @@ async def test_an_unknown_member_id_answers_the_leader_with_agno_s_roster_notice
         '<member id="writer" name="Writer">\n  Role: Writer role.\n</member>\n'
         '<member id="checker" name="Checker">\n  Role: Checker role.\n</member>\n'
     )
-    assert (writer.requests, checker.requests, member_records(events)) == ([], [], [])
+    assert (writer.requests, checker.requests, store.members) == ([], [], [])
     assert record.status is RunStatus.completed
 
 
@@ -300,15 +315,21 @@ async def test_a_collaborate_member_that_pauses_adds_agno_s_notice_in_its_place_
     writer = scripted("writer-model", answer("Six times seven is 42."))
     checker = scripted("checker-model", calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)))
     team = squad(leader, writer, checker, mode=TeamMode.COLLABORATE)
+    store = Store()
 
-    events, record = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    _, record = await collect(
+        run_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            persist=store,
+        ),
     )
 
     assert record.status is RunStatus.paused
     assert record.tools is not None
     assert record.tools[0].result == "Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
-    writer_record, checker_record = member_records(events)
+    writer_record, checker_record = store.members
     assert (writer_record.status, checker_record.status) == (RunStatus.completed, RunStatus.paused)
     assert record.member_responses == [checker_record]  # Only the paused member rides along, as Agno stored it.
     assert record.requirements is not None
@@ -325,9 +346,15 @@ async def test_a_leader_level_confirmation_pauses_the_team_without_member_fields
         scripted("checker-model"),
         leader_toolkits=(gated(echo, name="job_controls"),),
     )
+    store = Store()
 
-    events, record = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    _, record = await collect(
+        run_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            persist=store,
+        ),
     )
 
     assert record.status is RunStatus.paused
@@ -336,7 +363,7 @@ async def test_a_leader_level_confirmation_pauses_the_team_without_member_fields
     assert (requirement.member_agent_id, requirement.member_run_id) == (None, None)
     assert requirement.tool_execution.tool_call_id == "call-echo"
     assert record.content == "Team run paused. The following require input:\n- team: echo requires confirmation"
-    assert (record.member_responses, member_records(events)) == ([], [])
+    assert (record.member_responses, store.members) == ([], [])
 
 
 async def test_a_member_s_external_call_pauses_the_team_with_the_member_s_raw_call_id() -> None:
@@ -357,13 +384,19 @@ async def test_a_member_s_external_call_pauses_the_team_with_the_member_s_raw_ca
         calls(tool_call("run_subagent", "call-sub", agent_name="helper", task="Multiply"), metrics=usage(5, 1)),
     )
     team = squad(leader, scripted("writer-model"), checker, checker_toolkits=(external(run_subagent),))
+    store = Store()
 
-    events, record = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    _, record = await collect(
+        run_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            persist=store,
+        ),
     )
 
     assert record.status is RunStatus.paused
-    [member] = member_records(events)
+    [member] = store.members
     assert record.requirements is not None
     [requirement] = record.requirements
     assert requirement.tool_execution.external_execution_required is True
@@ -494,13 +527,15 @@ async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_not
     writer = scripted("writer-model", answer("Six times seven is 42."))
     checker = scripted("checker-model", calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)))
     team = squad(leader, writer, checker, mode=TeamMode.COLLABORATE)
+    store = Store()
 
-    events, record = await collect(
+    _, record = await collect(
         run_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
             request_template=_BLOCKING,
+            persist=store,
         ),
     )
 
@@ -509,7 +544,7 @@ async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_not
     assert record.tools[0].result == (
         "Agent Writer: Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
     )
-    _, checker_record = member_records(events)
+    _, checker_record = store.members
     assert record.member_responses == [checker_record]
     assert record.requirements is not None
     [requirement] = record.requirements
@@ -609,19 +644,21 @@ async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_withou
     )
     writer = build_adapter(_OLLAMA_MEMBER, tmp_path, respond)
     team = squad(leader, writer, scripted("checker-model"), writer_toolkits=())
+    store = Store()
 
-    events, record = await collect(
+    _, record = await collect(
         run_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
             request_template=_BLOCKING,
+            persist=store,
         ),
     )
 
     assert leader.requests[1].messages[-1].content == "Five is prime."
     assert record.tools is not None
     assert record.tools[0].result == "Five is prime."
-    [member] = member_records(events)
+    [member] = store.members
     assert (member.content, member.messages[-1].reasoning_content) == ("Five is prime.", "Five has two divisors.")
     assert [body["stream"] for body in sent] == [False]

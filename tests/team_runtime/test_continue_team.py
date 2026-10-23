@@ -34,7 +34,6 @@ from tests.team_runtime.squad import (
     comparable,
     golden_metadata,
     golden_run,
-    member_records,
     pre_resume_runs,
     prompt,
     run_context,
@@ -84,7 +83,7 @@ async def test_an_approved_member_call_resumes_into_agno_s_team_approved_rows() 
     )
 
     assert comparable(record.to_dict()) == comparable(team_row)
-    [member] = member_records(events)
+    [member] = store.members
     expected_member = comparable(checker_row)
     # Agno recorded no timing for the call it ran on resume (``metrics: null``); the owned loop times every call it
     # runs, on the tool entry and on the requirement that shares it. Everything else is equal by value.
@@ -116,7 +115,7 @@ async def test_a_member_that_pauses_again_keeps_the_team_paused_without_a_leader
     checker = scripted("checker-model", calls(tool_call("multiply", "call-again", a=2, b=3), metrics=usage(10, 1)))
     store = Store()
 
-    events, record = await collect(
+    _, record = await collect(
         continue_team(
             squad(leader, scripted("writer-model"), checker),
             paused,
@@ -130,7 +129,7 @@ async def test_a_member_that_pauses_again_keeps_the_team_paused_without_a_leader
     )
 
     assert (record.status, leader.requests) == (RunStatus.paused, [])
-    [member] = member_records(events)
+    [member] = store.members
     assert member.status is RunStatus.paused
     assert record.member_responses == [member]
     assert record.requirements is not None
@@ -151,14 +150,16 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     paused = _paused_team_approved()
     leader = scripted("leader-model", answer("The checker did not multiply.", usage(1, 1)))
     checker = scripted("checker-model", answer("I did not multiply.", usage(1, 1)))
+    store = Store()
 
-    events, record = await collect(
+    _, record = await collect(
         continue_team(
             squad(leader, scripted("writer-model"), checker),
             paused,
             _resume_request(paused),
             denied={("checker", APPROVED_CALL): "Alice declined."},
             ctx=run_context("team-approved", SQUAD_APPROVED),
+            persist=store,
         ),
     )
 
@@ -167,7 +168,7 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     assert (
         record.tools[0].result == "Member results after human-in-the-loop resolution:\n[Checker]: I did not multiply."
     )
-    [member] = member_records(events)
+    [member] = store.members
     assert member.requirements is not None
     assert (member.requirements[0].confirmation, member.requirements[0].confirmation_note) == (
         False,
@@ -226,13 +227,15 @@ async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_re
     assert paused.tools is not None
     assert paused.tools[0].result == "Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
 
-    events, record = await collect(
+    store = Store()
+    _, record = await collect(
         continue_team(
             team,
             paused,
             _resume_request(paused),
             approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
             ctx=run_context("r", SQUAD),
+            persist=store,
         ),
     )
 
@@ -243,7 +246,7 @@ async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_re
     assert record.tools[0].result == resolved
     assert leader.requests[-1].messages[-1].content == resolved
     # Only the paused member resumes; the writer is neither re-run nor re-read.
-    assert [member.agent_id for member in member_records(events)] == ["checker"]
+    assert [member.agent_id for member in store.members] == ["checker"]
     assert len(writer.requests) == 1
 
 
@@ -318,6 +321,7 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
     )
     assert paused.status is RunStatus.paused
 
+    store = Store()
     events, record = await collect(
         continue_team(
             team,
@@ -325,6 +329,7 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
             _resume_request(paused),
             approved={(None, "call-echo"): approval("call-echo", "echo", {"text": "hello"}, agent="squad")},
             ctx=run_context("r", SQUAD),
+            persist=store,
         ),
     )
 
@@ -336,7 +341,7 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
         "ToolStarted",
         "ToolCompleted",
     ]
-    assert member_records(events) == []
+    assert store.members == []
     assert leader.requests[-1].messages[-1].content == "hello"
 
 
@@ -370,20 +375,22 @@ async def test_an_external_result_resumes_the_member_that_waits_for_it() -> None
         run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
 
-    events, record = await collect(
+    store = Store()
+    _, record = await collect(
         continue_team(
             team,
             paused,
             _resume_request(paused),
             external_results={("checker", "call-sub"): "Helper says 42"},
             ctx=run_context("r", SQUAD),
+            persist=store,
         ),
     )
 
     assert (record.status, record.content) == (RunStatus.completed, "The helper found 42.")
     assert record.tools is not None
     assert record.tools[0].result == "Member results after human-in-the-loop resolution:\n[Checker]: 42"
-    [member] = member_records(events)
+    [member] = store.members
     assert member.requirements is not None
     assert member.requirements[0].external_execution_result == "Helper says 42"
     assert checker.requests[-1].messages[-1].content == "Helper says 42"
@@ -494,7 +501,8 @@ async def test_a_collaborate_resume_routes_each_approval_to_the_member_that_wait
     ]
     assert [member.agent_id for member in paused.member_responses] == ["writer", "checker"]
 
-    events, record = await collect(
+    store = Store()
+    _, record = await collect(
         continue_team(
             team,
             paused,
@@ -504,11 +512,12 @@ async def test_a_collaborate_resume_routes_each_approval_to_the_member_that_wait
                 ("checker", "call-mul"): approval("call-mul", "multiply", {"a": 7, "b": 6}, agent="checker"),
             },
             ctx=run_context("r", SQUAD),
+            persist=store,
         ),
     )
 
     assert (record.status, record.content) == (RunStatus.completed, "Both say 42.")
-    resumed = member_records(events)
+    resumed = store.members
     assert [(member.agent_id, member.status) for member in resumed] == [
         ("writer", RunStatus.completed),
         ("checker", RunStatus.completed),
@@ -568,14 +577,20 @@ async def test_a_coordinate_resume_answers_each_waiting_delegation_with_the_resu
     if both_pause:
         approved[("writer", "call-mul")] = approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="writer")
 
-    events, record = await collect(
-        continue_team(team, paused, _resume_request(paused), approved=approved, ctx=run_context("r", SQUAD)),
+    store = Store()
+    _, record = await collect(
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved=approved,
+            ctx=run_context("r", SQUAD),
+            persist=store,
+        ),
     )
 
     assert (record.status, record.content) == (RunStatus.completed, "Both say 42.")
-    assert [member.agent_id for member in member_records(events)] == (
-        ["writer", "checker"] if both_pause else ["checker"]
-    )
+    assert [member.agent_id for member in store.members] == (["writer", "checker"] if both_pause else ["checker"])
     assert (len(writer.requests), len(checker.requests)) == ((2, 2) if both_pause else (1, 2))
     heading = "Member results after human-in-the-loop resolution:"
     resumed = (
@@ -628,18 +643,20 @@ async def test_a_member_approval_that_shares_an_id_with_a_leader_call_resumes_th
         ("call-c", MEMBER_PAUSED_RESULT.format(name="Checker")),
     ]
 
-    events, record = await collect(
+    store = Store()
+    _, record = await collect(
         continue_team(
             team,
             paused,
             _resume_request(paused),
             approved={("checker", "call-w"): approval("call-w", "multiply", {"a": 7, "b": 6}, agent="checker")},
             ctx=run_context("r", SQUAD),
+            persist=store,
         ),
     )
 
     assert (record.status, record.content) == (RunStatus.completed, "Both say 42.")
-    [member] = member_records(events)
+    [member] = store.members
     assert (member.agent_id, member.status) == ("checker", RunStatus.completed)
     assert checker.requests[-1].messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
     resumed = "Member results after human-in-the-loop resolution:\n[Checker]: Checker: 42"
