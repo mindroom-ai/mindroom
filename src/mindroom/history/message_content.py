@@ -107,6 +107,9 @@ def image_content_for_token_estimation(value: object) -> object:
 
 def render_message_content(message: Message) -> str:
     """Render one replayable string form of a message body."""
+    # TODO(simplify): A stored ``compressed_content``, which only the retired compress_tool_results wrote and no provider
+    # sends, replaces the content in estimates, summary input, and a replayed viewed-image omission notice. Read
+    # ``content`` only. Models and operators would notice only on runs stored while that option was on.
     content = message.compressed_content if message.compressed_content is not None else message.content
     if isinstance(content, str):
         return content

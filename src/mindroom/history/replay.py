@@ -129,6 +129,9 @@ def _estimate_messages_tokens(
         _without_image_transport(message, strip_content_blocks=provider_accounts_for_images)
         for message in history_messages
     ]
+    # TODO(simplify): Canonical text counts as total characters // 4 without a native route but as a per-message
+    # ceiling with one, so one history gets two estimates. Use one rounding rule. Operators would see compaction and
+    # replay trimming trigger a few tokens earlier or later.
     canonical_tokens = (
         _estimate_history_messages_tokens(canonical_messages)
         if native_route is None

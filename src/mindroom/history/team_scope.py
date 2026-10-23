@@ -27,6 +27,8 @@ def ad_hoc_team_scope_id(
     agent_configs: Mapping[str, AgentConfig],
     *,
     requester_user_id: str | None = None,
+    # TODO(simplify): Callers choose the missing-requester error text, so one failure reads "requester identity" or
+    # "requester_user_id" by path. Raise one message and drop the parameter. Operators reading errors would notice.
     missing_requester_message: str = "Private ad hoc team history scope requires requester identity",
 ) -> str | None:
     """Return the stable history scope id for one exact ad hoc team, partitioned by requester when a member is private."""
