@@ -88,6 +88,21 @@ app = typer.Typer(
 avatars_app = typer.Typer(help="Generate and sync agent, room, and space avatars.")
 threads_app = typer.Typer(help="Export Matrix threads to searchable files.")
 journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
+
+_CONFIG_PATH_OPTION: Path | None = typer.Option(
+    None,
+    "--config",
+    "-c",
+    help="Use this config file path.",
+)
+
+_STORAGE_PATH_OPTION: Path | None = typer.Option(
+    None,
+    "--storage-path",
+    "-s",
+    help="Base directory for persistent MindRoom data.",
+)
+
 config_app.command("migrate", rich_help_panel="Create and edit")(config_migrate)
 config_app.command("fingerprint", rich_help_panel="Deployment")(config_fingerprint)
 config_app.command("install-bundle", rich_help_panel="Deployment")(config_install_bundle)
@@ -462,18 +477,8 @@ def _threads_export_command(
         "--url",
         help="Running MindRoom URL; defaults to MINDROOM_URL or localhost:8765.",
     ),
-    config_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--config",
-        "-c",
-        help="Use this config file path.",
-    ),
-    storage_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--storage-path",
-        "-s",
-        help="Base directory for persistent MindRoom data.",
-    ),
+    config_path: Path | None = _CONFIG_PATH_OPTION,
+    storage_path: Path | None = _STORAGE_PATH_OPTION,
     output: Path | None = typer.Option(  # noqa: B008
         None,
         "--output",
@@ -576,18 +581,8 @@ async def _journal_adopt(
 
 @journal_app.command("adopt")
 def _journal_adopt_command(
-    config_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--config",
-        "-c",
-        help="Use this config file path.",
-    ),
-    storage_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--storage-path",
-        "-s",
-        help="Base directory for persistent MindRoom data.",
-    ),
+    config_path: Path | None = _CONFIG_PATH_OPTION,
+    storage_path: Path | None = _STORAGE_PATH_OPTION,
     yes: bool = typer.Option(
         False,
         "--yes",
