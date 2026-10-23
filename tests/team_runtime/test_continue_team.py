@@ -728,6 +728,39 @@ async def test_a_resume_with_member_and_leader_decisions_runs_both_and_hands_the
     ]
 
 
+async def test_a_member_whose_resumed_run_fails_reaches_the_leader_as_its_redacted_error() -> None:
+    """The leader reads why the resumed member failed, credentials redacted, not the member's paused notice."""
+    paused = _paused_team_approved()
+
+    async def lose_the_member_provider() -> None:
+        msg = "checker provider down: api_key=example-secret"
+        raise ProviderError(msg, provider=PROVIDER)
+
+    leader = scripted("leader-model", answer("The checker could not finish.", usage(1, 1)))
+    store = Store()
+
+    await collect(
+        continue_team(
+            squad(leader, scripted("writer-model"), scripted("checker-model", [Await(lose_the_member_provider)])),
+            paused,
+            _resume_request(paused),
+            approved={
+                ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
+            },
+            ctx=run_context("team-approved", SQUAD_APPROVED),
+            persist=store,
+        ),
+    )
+
+    assert store.statuses == [("checker", "ERROR"), ("squad", "COMPLETED")]
+    member_result = leader.requests[-1].messages[-1].content
+    assert isinstance(member_result, str)
+    assert member_result.startswith(
+        "Member results after human-in-the-loop resolution:\n[Checker]: checker provider down: api_key=",
+    )
+    assert "example-secret" not in member_result
+
+
 async def test_a_failed_resume_stores_its_error_over_the_paused_team_row_as_agno_did() -> None:
     """A leader request that fails after the member resumed ends the team run ``ERROR`` over its ``PAUSED`` row (D15).
 

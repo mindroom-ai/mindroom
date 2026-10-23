@@ -439,6 +439,45 @@ async def test_delegated_approval_preserves_redacted_provider_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("child_wrote_text", [False, True])
+async def test_a_fresh_child_s_provider_failure_reaches_its_parent_as_the_redacted_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    child_wrote_text: bool,
+) -> None:
+    """The parent reads why its fresh child failed, credentials redacted, even when the child wrote text before failing."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    identity = _leader_identity()
+    failure = "provider connection lost: api_key=example-secret"
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    earlier = (
+        [calls(tool_call("no_such_tool", "child-call"), content="I will look into it.")] if child_wrote_text else []
+    )
+    code = ScriptedModel([*earlier, [_provider_failure(failure)]])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    await respond("leader", "delegate", config=config, runtime_paths=paths, identity=identity, run_id="parent-run")
+
+    parent = _parent_record(config, paths, identity, "parent-run")
+    result = next(message.content for message in parent.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result, str)
+    assert result.startswith("Delegation to 'code' failed: provider connection lost: api_key=")
+    assert "example-secret" not in result
+    assert "I will look into it." not in result
+    [record] = _record_files(tmp_path)
+    assert record["status"] == "failed"
+    assert str(record["error"]).startswith("provider connection lost: api_key=")
+    assert "example-secret" not in json.dumps(record)
+
+
+@pytest.mark.asyncio
 async def test_failed_nested_resume_settles_descendants_and_visible_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -34,6 +34,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 
@@ -88,7 +89,8 @@ def run_agent(
     The returned stream yields the loop's events and finally ``RunFinished`` with the ``COMPLETED`` or ``PAUSED``
     record, after ``persist`` stored it. Cancellation stores a ``CANCELLED`` record and re-raises; closing the stream
     before it finished stores one before ``aclose`` returns; any other exception stores an ``ERROR`` record whose
-    content is the exception's text when the model had said nothing, then re-raises.
+    content is the exception's text when the model had said nothing, then re-raises. The ``ERROR`` record's
+    ``error`` holds the exception's text with credentials redacted.
     """
     identity = spec.model.identity
     record = RunRecord(
@@ -438,7 +440,8 @@ async def _store_interrupted[R: AnyRunRecord](
     """End a cancelled (``error`` None) or failed run and store it before its ending propagates.
 
     Cancellation wins over a pause: unresolved requirements leave and paused tool entries stop waiting. A failed
-    run whose model said nothing holds the error's text. The store finishes even if the waiter is cancelled again,
+    run records why in ``error``, redacted, which is what its caller reports; its stored content is the error's text
+    only when its model said nothing, as Agno stored it. The store finishes even if the waiter is cancelled again,
     so a record the caller writes for the same run afterwards is never overwritten by this one.
     """
     if error is None:
@@ -451,6 +454,7 @@ async def _store_interrupted[R: AnyRunRecord](
                 tool.external_execution_required = False
     else:
         _end(record, messages, started, RunStatus.error)
+        record.error = redact_sensitive_text(str(error))
         if not record.content:
             record.content = str(error)
     if persist is not None:

@@ -55,8 +55,10 @@ _TERMINAL = frozenset({"completed", "failed", "cancelled", "denied"})
 class _ChildRunObservation:
     """Exact terminal evidence collected while one child response envelope runs.
 
-    A child that fails or is cancelled leaves no record here: the loop stores its terminal row, which the
-    interruption reads, and the failure propagates to the driver.
+    ``response`` is the terminal record of the child's latest run: the record the run ended with when it ran in this
+    context, which also carries what storage never holds, such as a failure's ``error``, else the outcome the envelope
+    read back from storage. A child that is cancelled leaves no record here: the loop stores its terminal row, which
+    the interruption reads, and the cancellation propagates to the driver.
     """
 
     child: DelegationChild
@@ -64,6 +66,14 @@ class _ChildRunObservation:
     response: RunRecord | None = None
     # The tail of what the child said and which tools it called, reported as its caller's progress.
     activity: str = ""
+
+    def keep_outcome(self, record: RunRecord) -> None:
+        """Keep the outcome the envelope returned, unless this context already holds the record that run ended with.
+
+        The envelope reads a run it started back from storage, and the stored copy lacks what is never stored.
+        """
+        if self.response is None or self.response.run_id != record.run_id:
+            self.response = record
 
 
 _CHILD_RUN: ContextVar[_ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
@@ -167,9 +177,11 @@ async def settle_child_response(
     runtime_paths: RuntimePaths,
     decisions: Mapping[str, bool] | None = None,
     denial_reasons: Mapping[str, str | None] | None = None,
-    error_message: str | None = None,
 ) -> None:
-    """Derive operational state from one exact run, then publish its audit view."""
+    """Derive operational state from one exact run, then publish its audit view.
+
+    A failed run's result is its redacted ``error`` when it ran in this process, else its stored content.
+    """
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
@@ -181,7 +193,7 @@ async def settle_child_response(
         child.result = str(response.content or "Delegation cancelled.")
     elif response.status in {RunStatus.error, RunStatus.regenerated}:
         child.status = "failed"
-        child.result = error_message or str(response.content or response.status)
+        child.result = response.error or str(response.content or response.status)
     else:
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None

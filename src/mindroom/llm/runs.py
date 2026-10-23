@@ -244,6 +244,9 @@ class _RunRecordCommon:
     metrics: RunMetrics | None = None
     metadata: dict[str, Any] | None = None
     created_at: int = field(default_factory=_now)
+    # Why an ``ERROR`` run failed, credentials redacted, set by the loop that ended it. It is never stored, so a
+    # loaded record has none; ``content`` keeps Agno's stored rule (the error's text only when the model said nothing).
+    error: str | None = field(default=None, compare=False, repr=False)
 
     def _scalars_dict(self, identity: Mapping[str, str | None]) -> dict[str, Any]:
         """Return the scalar keys in Agno's order: the run, its agent or team, then the rest."""

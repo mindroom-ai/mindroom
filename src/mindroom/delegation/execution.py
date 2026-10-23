@@ -256,7 +256,7 @@ async def _run_child(
                     fresh=fresh,
                 ),
             )
-            observation.response = response.response
+            observation.keep_outcome(response.response)
             return response
     finally:
         _RUNNING_CHILD_ID.reset(token)

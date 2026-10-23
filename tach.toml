@@ -5939,6 +5939,7 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.llm",
     "mindroom.logging_config",
+    "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.tool_function",
