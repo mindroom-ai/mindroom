@@ -137,9 +137,10 @@ def finished_run_text(record: AnyRunRecord) -> str:
 def format_team_response(record: TeamRunRecord, members: Sequence[RunRecord]) -> str:
     """Return a finished team run's text as Agno's blocking team reply rendered it, without the header.
 
-    ``members`` are the member runs that ended, in the order they ended; each with text contributes it as written,
-    so a member delegated twice contributes twice and a member that failed before any text shows its error. The
-    leader's content is the consensus. A run in which nobody wrote anything renders as empty text.
+    ``members`` are the member runs that ended, in the order they ended; each contributes its ``finished_run_text``,
+    so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
+    credentials redacted, even when it wrote text first. The leader's content is the consensus. A run in which nobody
+    wrote anything renders as empty text.
     """
     contributions = [
         _format_member_contribution(member.agent_name or "Team Member", text)

@@ -346,7 +346,7 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
 
 
 async def test_a_leader_level_approval_whose_call_stops_the_run_sends_the_leader_no_request() -> None:
-    """An approved leader call that stops the run, such as a model switch, ends the team resume as a fresh batch does."""
+    """An approved leader call that stops the run, such as a model switch, ends the resume as a fresh batch does."""
     leader = scripted("leader-model", calls(tool_call("echo", "call-echo", text="hello"), metrics=usage(10, 2)))
     stopping = toolkit(
         echo,

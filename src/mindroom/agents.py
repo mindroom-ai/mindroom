@@ -174,8 +174,8 @@ class _AgentToolAssembly:
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
     cli_deferred: tuple[DeferredAgentToolkit, ...]
-    # The tool-call policy the loop runs around every call: the hook bridge, then each browser toolkit's
-    # computer announcement.
+    # The tool-call policy the loop runs around every call, the hook bridge; a browser's computer announcement is
+    # its functions' own.
     tool_middleware: tuple[ToolMiddleware, ...]
 
     @cached_property

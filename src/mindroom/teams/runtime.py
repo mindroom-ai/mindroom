@@ -237,7 +237,7 @@ def _keep_ended_member_run(ended: list[RunRecord], record: RunRecord) -> None:
 
 
 def team_usage_runs(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[tuple[AnyRunRecord, RunMetrics]]:
-    """Return the runs whose own metrics make up the turn's usage, each with its metrics: the leader's, then every member's.
+    """Return the runs whose own metrics make up the turn's usage, with those metrics: the leader's, then each member's.
 
     The team record's own metrics cover only the leader's requests; each member's usage is on its record, so
     nothing is counted twice. A run that reported no usage is left out.
