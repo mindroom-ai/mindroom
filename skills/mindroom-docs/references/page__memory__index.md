@@ -203,8 +203,8 @@ A team whose members all use `file` appends each message it answers to the team'
 Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
 An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies, its history is compacted, or MindRoom restarts; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
-Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and the newest entries, and withholds the oldest entries; a file without entries keeps its first lines.
-Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.
+Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
+Only whole lines are inlined, never part of a line.
 When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
 `memory.file.path` (default unset, relative to the config directory) is a fallback root for team file memory and never moves agent file memory out of the workspace.
 
