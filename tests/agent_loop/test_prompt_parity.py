@@ -14,6 +14,7 @@ import pytest
 from mindroom.agent_loop.prompt import PromptSpec, render_instructions, render_system_message
 from mindroom.llm.messages import Message
 from tests.agno_parity.prompt_scenarios import FIXTURE_DIR, SCENARIOS, Recorder, call_dict, load_golden, normalize
+from tests.providers.golden_support import ordered_json
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,13 +44,17 @@ async def test_recorded_requests_equal_the_goldens(name: str, tmp_path: Path) ->
     assert scenario.description == golden["description"]
     assert normalize(output.input, tmp_path) == golden["input"]
     # What a scenario hands a model outside MindRoom's loop, such as a realtime call's instructions and tools.
-    assert normalize(output.exported, tmp_path) == golden.get("exported")
+    exported = normalize(output.exported, tmp_path)
+    assert exported == golden.get("exported")
+    assert ordered_json(exported) == ordered_json(golden.get("exported"))
     # The realtime call's model is LiveKit's, so its golden pins only what the call exports to it.
     assert recorder.calls or output.exported is not None
     ordered = recorder.ordered_calls()
     # Every request, the compaction summary included, went through the provider registry rather than an Agno model.
     assert all(isinstance(message, Message) for call in ordered for message in call.messages)
-    assert normalize([call_dict(call) for call in ordered], tmp_path) == golden["requests"]
+    requests = normalize([call_dict(call) for call in ordered], tmp_path)
+    assert requests == golden["requests"]
+    assert ordered_json(requests) == ordered_json(golden["requests"])
 
 
 def test_instructions_render_as_bullets_unless_one_is_a_block() -> None:

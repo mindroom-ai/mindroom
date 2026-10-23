@@ -40,8 +40,11 @@ class SDKClients:
 
 
 def with_overrides(kwargs: dict[str, Any], overrides: RequestOverrides, *, temperature: bool) -> dict[str, Any]:
-    """Apply a request's temperature override to SDK call arguments; ``temperature=False`` leaves sampling to the provider."""
+    """Apply a request's temperature override to SDK call arguments; ``temperature=False`` leaves sampling to the provider.
+
+    The override replaces the configured temperature keyword, as a model's own temperature did under Agno.
+    """
     if not temperature or overrides.temperature is None:
         return kwargs
-    kwargs["extra_body"] = {**(kwargs.get("extra_body") or {}), "temperature": overrides.temperature}
+    kwargs["temperature"] = overrides.temperature
     return kwargs

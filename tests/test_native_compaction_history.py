@@ -88,7 +88,7 @@ def _sent(adapter: ResponsesAdapter, messages: Sequence[Message], native: Native
 
 def _continues(sent: dict[str, Any]) -> str | None:
     """Return the stored response a request continues, if any."""
-    return (sent.get("extra_body") or {}).get("previous_response_id")
+    return sent.get("previous_response_id")
 
 
 @pytest.mark.asyncio

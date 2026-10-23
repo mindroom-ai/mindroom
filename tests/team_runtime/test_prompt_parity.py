@@ -13,6 +13,7 @@ import pytest
 from mindroom.llm.messages import Message
 from mindroom.teams.delegate_tools import DELEGATE_TOOL_NAMES
 from tests.agno_parity.prompt_scenarios import SCENARIOS, call_dict, load_golden, normalize
+from tests.providers.golden_support import ordered_json
 from tests.team_runtime.parity_support import run_team_scenario
 
 if TYPE_CHECKING:
@@ -33,7 +34,9 @@ async def test_the_production_team_turn_sends_every_golden_request(name: str, tm
     assert normalize(run.input, tmp_path) == golden["input"]
     assert run.calls
     assert all(isinstance(message, Message) for call in run.calls for message in call.messages)
-    assert normalize([call_dict(call) for call in run.calls], tmp_path) == golden["requests"]
+    requests = normalize([call_dict(call) for call in run.calls], tmp_path)
+    assert requests == golden["requests"]
+    assert ordered_json(requests) == ordered_json(golden["requests"])
     # The leader's prompt is built once per turn and sent with both of its requests.
     leader_requests = [
         call for call in run.calls if any(tool["function"]["name"] in DELEGATE_TOOL_NAMES for tool in call.tools or ())

@@ -25,7 +25,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
 from mindroom.providers.errors import classify_provider_error
-from mindroom.providers.openai.chat_wire import function_definition, with_sdk_options
+from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
@@ -344,7 +344,7 @@ def responses_request_kwargs(
 ) -> dict[str, Any]:
     """Return the ``responses.create`` keyword arguments for one request.
 
-    ``model``, ``input``, and ``tools`` are SDK keywords; other body fields travel in ``extra_body``.
+    Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
     store = request_store(wire, request)
     params = _base_params(settings, request, store)
@@ -359,18 +359,15 @@ def responses_request_kwargs(
     params = disable_tool_selection(request_params_with_deferred_tool_search(params, request.deferred_tool_names))
     if wire.route == "codex":
         _codex_params(params, settings, wire)
-    kwargs: dict[str, Any] = {
-        "model": model_id,
-        "input": responses_input(
-            request.messages,
-            store=store,
-            portable_replay=request.portable_replay,
-            native_compaction=request.native_compaction,
-            cache_system_prompt=settings.cache_system_prompt,
-            explicit_breakpoint=wire.explicit_breakpoint,
-        ),
-    }
-    return with_sdk_options(kwargs, params, keywords=("tools",))
+    formatted_input = responses_input(
+        request.messages,
+        store=store,
+        portable_replay=request.portable_replay,
+        native_compaction=request.native_compaction,
+        cache_system_prompt=settings.cache_system_prompt,
+        explicit_breakpoint=wire.explicit_breakpoint,
+    )
+    return sdk_call_kwargs({"model": model_id, "input": formatted_input, **params}, "responses")
 
 
 # --- Responses ------------------------------------------------------------------------------------------------
