@@ -956,12 +956,10 @@ async def test_mid_turn_compaction_folds_into_the_scope_only_when_the_turn_repla
 
     assert "".join(streamed_text(chunks)) == "ok"
     assert bound["store"] is not None
-    if replays_history:
-        assert bound["session"] is not None
-        assert bound["scope"] == HistoryScope(kind="agent", scope_id="assistant")
-    else:
-        assert bound["session"] is None
-        assert bound["scope"] is None
+    assert bound["session"] is not None
+    assert bound["scope"] == HistoryScope(kind="agent", scope_id="assistant")
+    plan = bound["replay_plan"]
+    assert (plan is not None and plan.add_history_to_context) is replays_history
 
 
 @pytest.mark.asyncio
