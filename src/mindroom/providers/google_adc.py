@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -55,32 +54,19 @@ def load_google_application_credentials(credentials_path: str) -> GoogleCredenti
         raise _GoogleApplicationCredentialsError(msg)
 
     credentials_type = _google_adc_file_type(credentials_path)
+    scopes = [_GOOGLE_CLOUD_PLATFORM_SCOPE]
     try:
         if credentials_type == "service_account":
-            service_account = importlib.import_module("google.oauth2.service_account")
-            credentials_cls = service_account.Credentials
-            credentials = credentials_cls.from_service_account_file(
-                credentials_path,
-                scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
-            )
-            return cast("GoogleCredentials", credentials)
+            from google.oauth2.service_account import Credentials as ServiceAccount  # noqa: PLC0415 - Vertex only
 
+            return ServiceAccount.from_service_account_file(credentials_path, scopes=scopes)
         if credentials_type == "authorized_user":
-            oauth_credentials = importlib.import_module("google.oauth2.credentials")
-            credentials_cls = oauth_credentials.Credentials
-            credentials = credentials_cls.from_authorized_user_file(
-                credentials_path,
-                scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
-            )
-            return cast("GoogleCredentials", credentials)
+            from google.oauth2.credentials import Credentials as AuthorizedUser  # noqa: PLC0415 - Vertex only
 
-        google_auth = importlib.import_module("google.auth")
-        load_credentials_from_file = google_auth.load_credentials_from_file
-        credentials, _project_id = load_credentials_from_file(
-            credentials_path,
-            scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
-        )
-        return cast("GoogleCredentials", credentials)
+            return AuthorizedUser.from_authorized_user_file(credentials_path, scopes=scopes)
+        import google.auth  # noqa: PLC0415 - Vertex only
+
+        return google.auth.load_credentials_from_file(credentials_path, scopes=scopes)[0]
     except Exception as exc:
         msg = f"Failed to load GOOGLE_APPLICATION_CREDENTIALS at {credentials_path}: {exc}"
         raise _GoogleApplicationCredentialsError(msg) from exc
