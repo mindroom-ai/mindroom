@@ -106,7 +106,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.agno_toolkits import Function, Toolkit
-    from mindroom.tool_system.invocation import ToolMiddleware
+    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.skills import RefusedWorkspaceSkill, SkillsToolkit
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
@@ -1795,8 +1795,8 @@ def _job_controls(
 class LeaderJobs:
     """A team leader's job controls as the owned loop offers them, the tool-call policy they run under, and the team.
 
-    ``middleware`` runs outermost first, job admission before the hook bridge; ``actor`` is the team as tool jobs
-    see it, whose leader hears of the jobs that ended.
+    ``middleware`` runs outermost first, job admission before the hook bridge, which only the job controls' calls
+    pass; ``actor`` is the team as tool jobs see it, whose leader hears of the jobs that ended.
     """
 
     controls: AdaptedToolkit
@@ -1828,6 +1828,14 @@ def team_background_jobs(
         runtime_paths=runtime_paths,
     )
     adapted = adapt_toolkit(controls)
+    control_names = frozenset(function.name for function in adapted.functions)
+
+    async def control_hooks(call: ToolCall, call_next: ToolNext) -> object:
+        # The leader's delegations run without the tool-call policy, as they do with jobs off.
+        if call.function.name not in control_names:
+            return await call_next(call.arguments)
+        return await hooks(call, call_next)
+
     actor = JobActor(
         name=owner.recipient,
         team=True,
@@ -1840,7 +1848,7 @@ def team_background_jobs(
             {},
         ),
     )
-    return LeaderJobs(controls=adapted, middleware=with_job_admission(actor, (hooks,)), actor=actor)
+    return LeaderJobs(controls=adapted, middleware=with_job_admission(actor, (control_hooks,)), actor=actor)
 
 
 _MEMORY_SEARCH_TOOL_NAME = "search_memories"
