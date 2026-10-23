@@ -277,11 +277,16 @@ def test_untyped_text_names_the_credentials_as_the_provider_classifier_does(text
         ("rate_limit_exceeded: slow down", True),
         ("HTTP 429 Too Many Requests", True),
         ("Quota exceeded for this project", True),
+        # An error's name holds its keyword in one lowercase word.
+        ("RetryError[<Future state=finished raised RateLimitError>]", True),
+        ("The request ratelimited", True),
+        ("QuotaExceededError", True),
         # Words that only hold "rate", and a number that only holds "429".
         ("Failed to generate a response for this model", False),
         ("Could not separate the tool arguments", False),
         ("The retry strategy gave up", False),
         ("The summary input held 4290 tokens", False),
+        ("Unbalanced quotation mark in the tool arguments", False),
     ],
 )
 def test_untyped_text_reads_as_rate_limited_only_for_its_whole_words(text: str, *, rate_limited: bool) -> None:
