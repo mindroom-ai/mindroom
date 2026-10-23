@@ -39,23 +39,12 @@ if TYPE_CHECKING:
 
 
 def url_safe_member_id(input_string: str) -> str:
-    """Return Agno's ``url_safe_string`` of a member's config name, the member id of stored reply snapshots."""
-    # Replace spaces with dashes
-    safe_string = input_string.replace(" ", "-")
+    """Return Agno's ``url_safe_string`` of a member's config name, the member id of stored reply snapshots.
 
-    # Convert camelCase to kebab-case
-    safe_string = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", safe_string).lower()
-
-    # Convert snake_case to kebab-case
-    safe_string = safe_string.replace("_", "-")
-
-    # Remove special characters, keeping alphanumeric, dashes, and dots
-    safe_string = re.sub(r"[^\w\-.]", "", safe_string)
-
-    # Ensure no consecutive dashes
-    safe_string = re.sub(r"-+", "-", safe_string)
-
-    return safe_string  # noqa: RET504 - kept as Agno's ``url_safe_string`` reads, statement for statement.
+    Spaces, camelCase boundaries, and underscores become dashes, punctuation other than dots goes, dash runs collapse.
+    """
+    kebab = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", input_string.replace(" ", "-")).lower().replace("_", "-")
+    return re.sub(r"-+", "-", re.sub(r"[^\w\-.]", "", kebab))
 
 
 _TEAM_HEADER_PREFIX = "🤝 **Team Response** ("
@@ -65,15 +54,7 @@ NO_TEAM_RESPONSE = "No team response generated."
 
 
 def format_team_header(agent_names: list[str]) -> str:
-    """Format the team response header.
-
-    Args:
-        agent_names: List of agent names in the team
-
-    Returns:
-        Formatted header string
-
-    """
+    """Return the team reply's header naming ``agent_names``."""
     return f"{_TEAM_HEADER_PREFIX}{', '.join(agent_names)}{_TEAM_HEADER_END}"
 
 
@@ -186,11 +167,6 @@ class TeamStreamPresentation:
             if pending.scope_key is not None and self._slot_text(pending.scope_key)
         }
 
-    @property
-    def display_names(self) -> list[str]:
-        """Return immutable rendering labels in frozen member order."""
-        return [self.display_names_by_id[member_id] for member_id in self.member_ids]
-
     @classmethod
     def new(
         cls,
@@ -200,21 +176,14 @@ class TeamStreamPresentation:
         show_tool_calls: bool,
     ) -> TeamStreamPresentation:
         """Create an empty presentation for a new team run."""
-        frozen_config_names = list(config_names)
-        ids = [url_safe_member_id(config_name) for config_name in frozen_config_names]
-        names = list(display_names)
-        if (
-            len(ids) != len(names)
-            or len(ids) != len(frozen_config_names)
-            or len(ids) != len(set(ids))
-            or any(not member_id for member_id in ids)
-        ):
+        ids = [url_safe_member_id(config_name) for config_name in config_names]
+        if len(ids) != len(display_names) or len(ids) != len(set(ids)) or not all(ids):
             msg = "Team presentation member identities are invalid"
             raise RuntimeError(msg)
         return cls(
             member_ids=ids,
-            config_names_by_id=dict(zip(ids, frozen_config_names, strict=True)),
-            display_names_by_id=dict(zip(ids, names, strict=True)),
+            config_names_by_id=dict(zip(ids, config_names, strict=True)),
+            display_names_by_id=dict(zip(ids, display_names, strict=True)),
             show_tool_calls=show_tool_calls,
             per_member=dict.fromkeys(ids, ""),
         )
@@ -311,36 +280,23 @@ class TeamStreamPresentation:
 
         ``separate`` starts the content in a paragraph of its own when the slot already holds text.
         """
-        scope_key = f"agent:{member_id}"
-        self.per_member[member_id] = append_stream_text(
-            self.per_member[member_id],
-            content,
-            separate=separate or scope_key in self.separate_next_scopes,
-        )
-        if content:
-            self.separate_next_scopes.discard(scope_key)
+        self._append_text(f"agent:{member_id}", content, separate=separate)
 
     def append_consensus(self, content: object | None, *, separate: bool = False) -> None:
         """Append a coordinator content delta to the consensus slot; ``separate`` as for ``append_member``."""
-        self.consensus = append_stream_text(
-            self.consensus,
-            content,
-            separate=separate or "team" in self.separate_next_scopes,
-        )
-        if content:
-            self.separate_next_scopes.discard("team")
+        self._append_text("team", content, separate=separate)
 
-    def _append_tool_marker(self, scope_key: str, marker: str) -> None:
-        if scope_key == "team":
-            self.consensus += marker
-            return
-        member_id = scope_key.removeprefix("agent:")
-        self.per_member[member_id] += marker
+    def _append_text(self, scope_key: str, content: object | None, *, separate: bool) -> None:
+        """Append to a slot; text after a hidden tool call in that slot starts a paragraph of its own."""
+        separate = separate or scope_key in self.separate_next_scopes
+        self._set_slot_text(scope_key, append_stream_text(self._slot_text(scope_key), content, separate=separate))
+        if content:
+            self.separate_next_scopes.discard(scope_key)
 
     def _slot_text(self, scope_key: str) -> str:
         if scope_key == "team":
             return self.consensus
-        return self.per_member.get(scope_key.removeprefix("agent:"), "")
+        return self.per_member[scope_key.removeprefix("agent:")]
 
     def _set_slot_text(self, scope_key: str, text: str) -> None:
         if scope_key == "team":
@@ -376,7 +332,7 @@ class TeamStreamPresentation:
         trace_entry.scope_key = scope_key
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self._append_tool_marker(scope_key, marker)
+            self._set_slot_text(scope_key, self._slot_text(scope_key) + marker)
         elif self._slot_text(scope_key):
             self.separate_next_scopes.add(scope_key)
         self._align_tool_trace_with_document()
@@ -416,7 +372,8 @@ class TeamStreamPresentation:
             per_member=self.per_member,
             consensus=self.consensus,
         )
-        return format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
+        header = format_team_header([self.display_names_by_id[member_id] for member_id in self.member_ids])
+        return header + "\n\n".join(parts) if parts else ""
 
 
 def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) -> None:
