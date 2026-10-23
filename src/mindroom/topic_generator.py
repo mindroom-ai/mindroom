@@ -55,18 +55,7 @@ async def generate_room_topic_ai(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str | None:
-    """Generate a contextual topic for a room using AI based on its purpose and configured entities.
-
-    Args:
-        room_key: The room key/alias (e.g., 'dev', 'analysis', 'lobby')
-        room_name: Display name for the room
-        config: Configuration with agent settings
-        runtime_paths: Explicit runtime context for model selection and session scoping
-
-    Returns:
-        A contextual topic string for the room
-
-    """
+    """Generate a contextual topic for a room from its key, name, and configured agents and teams, or None on failure."""
     configured_entity_list = ", ".join(
         _configured_entity_display_names_for_room(room_key, config, runtime_paths),
     )
@@ -134,18 +123,8 @@ async def ensure_room_has_topic(
 ) -> bool:
     """Ensure a room has a topic, using the configured description or generating one if needed.
 
-    Args:
-        client: Matrix client
-        room_id: The room ID
-        room_key: The room key/alias
-        room_name: Display name for the room
-        config: Configuration with agent settings
-        runtime_paths: Explicit runtime context for topic generation
-        snapshot: Complete pass-local room state, if already read by reconciliation
-
-    Returns:
-        True if topic was set or already exists, False on error
-
+    ``snapshot`` is the complete pass-local room state when reconciliation already read it. Returns True when the
+    topic was set or already exists, and False on error.
     """
     response = await read_state_event(client, room_id, "m.room.topic", snapshot=snapshot)
     if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("topic"):

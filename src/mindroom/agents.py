@@ -1632,16 +1632,9 @@ def _build_agent_role_context(
     if not include_identity:
         return _AgentRoleContext(role=runtime_facts.lstrip(), context_documents=())
 
-    # Get model config for identity context
-    if model_name in config.models:
-        model_config = config.models[model_name]
-        model_provider = model_config.provider.title()  # Capitalize provider name
-        model_id = model_config.id
-    else:
-        # Fallback if model not found
-        model_provider = "AI"
-        model_id = model_name
-
+    model_config = config.models.get(model_name)
+    model_provider = model_config.provider.title() if model_config is not None else "AI"
+    model_id = model_config.id if model_config is not None else model_name
     with _agent_create_timing("identity_context"):
         identity_context = _render_agent_identity_context(
             agent_name,
@@ -1744,8 +1737,7 @@ def _build_agent_instructions(
     if file_mode_knowledge_instruction is not None:
         instructions.append(file_mode_knowledge_instruction)
 
-    show_tool_calls = show_tool_calls_for_agent(config, agent_name)
-    if not show_tool_calls:
+    if not show_tool_calls_for_agent(config, agent_name):
         instructions.append(config.get_prompt("HIDDEN_TOOL_CALLS_PROMPT"))
 
     if include_interactive_questions:

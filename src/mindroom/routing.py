@@ -44,23 +44,12 @@ async def suggest_responder(
     room_id: str | None = None,
     thread_id: str | None = None,
 ) -> ResponderSelection | None:
-    """Use AI to suggest which configured responder should answer a message.
+    """Use AI to suggest which of ``available_entity_names``, plain agent or team names, should answer a message.
 
-    This is the core routing logic, independent of any transport layer.
-
-    Args:
-        message: The user message to route.
-        available_entity_names: Plain agent or team names (e.g. ["code", "research", "ops"]).
-        config: Application configuration.
-        runtime_paths: Explicit runtime context for model and Matrix identity resolution.
-        thread_context: Optional recent messages for context.
-            Each message should expose visible sender/body fields.
-        room_id: Optional Matrix room whose runtime model default applies.
-        thread_id: Optional Matrix thread whose model override takes precedence.
-
-    Returns:
-        An accepted selection (entity_name=None means no fit), or None if routing fails.
-
+    This is the core routing logic, independent of any transport layer. ``thread_context`` holds recent messages by
+    their visible sender and body; ``room_id`` names the room whose runtime model default applies and ``thread_id``
+    the thread whose model override takes precedence. Returns an accepted selection (``entity_name=None`` means no
+    fit), or None if routing fails.
     """
     try:
         if config.router.judgment is not None:
