@@ -64,7 +64,7 @@ class ScopeSessionContext:
     def with_session(self) -> ScopeSessionContext:
         """Return this context holding the session its runs save into (``stored_or_first_session``).
 
-        A turn keeps the returned context, so its later runs load the session an earlier one was saved into.
+        A run that reads the returned context later loads the session an earlier run was saved into.
         """
         return replace(self, session=self.stored_or_first_session())
 

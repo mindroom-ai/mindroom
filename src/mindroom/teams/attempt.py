@@ -1,10 +1,10 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
 ``TeamReplyText`` is the reply's text without tool markers as the run's events build it, which a streamed turn records,
-also when it is interrupted, and which tells the attempt the runs that streamed text. Once a run ends, the attempt adds
-to both what a run hands over and its events did not show (``TeamAttempt.show_unshown_handover``). The attempt also
-collects the records the run hands over, which a blocking turn renders its reply from and records however it ends,
-and renders the run's metadata from them.
+also when it is interrupted, and which tells the attempt the runs that streamed text. When the team run ends, the
+attempt adds what a run hands over and its events did not show to the document and to that text alike
+(``TeamAttempt.show_unshown_handover``). The attempt also collects the records the run hands over, which a blocking
+turn renders its reply from and records however it ends, and renders the run's metadata from them.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ class TeamReplyText:
     member resolves to. A member's deltas join directly, so a hidden tool call between them leaves no gap, as the
     run's own content joins them. ``streamed_member_runs`` names the member runs whose deltas gave text, by run id,
     since a member's slot holds the text of each of its runs. What a run hands over and its events did not show
-    joins the text once the run ended (``TeamAttempt.show_unshown_handover``).
+    joins the text when the team run ends (``TeamAttempt.show_unshown_handover``).
     """
 
     presentation: TeamStreamPresentation
@@ -186,8 +186,8 @@ class TeamAttempt:
     def show_failure_reasons(self, record: TeamRunRecord) -> bool:
         """Add the reason each failed member run of ``record`` recorded, credentials redacted, that its deltas did not show.
 
-        A live streamed turn shows its runs' deltas, as Agno's did, and a failed member run's reason once the run has
-        ended, as a resumed reply shows it (``show_unshown_handover``). Return whether any reason was added.
+        A live streamed turn shows its runs' deltas, as Agno's did, and each failed member run's reason when the team
+        run ends, as a resumed reply shows it (``show_unshown_handover``). Return whether any reason was added.
         """
         shown = False
         for member in record.ended_member_runs:
