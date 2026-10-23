@@ -297,7 +297,7 @@ def test_run_requirement_confirmation_updates_match_agno(decision: str) -> None:
 
 @pytest.mark.parametrize("reason", [None, ""])
 def test_run_requirement_denied_without_a_reason_tells_the_model_it_was_not_approved(reason: str | None) -> None:
-    """Agno stored no note here, which left the model a tool message without content; the owned record always has one."""
+    """Agno stored no note here and its tool rejection made up its own text; the owned record always has the note."""
     owned = RunRequirement.from_dict(agno("run_requirement"))
 
     owned.reject(reason)
