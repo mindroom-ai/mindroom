@@ -12,11 +12,10 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
-    prompt_roles_for_history_storage,
 )
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
-from mindroom.history.request_messages import filter_tool_calls
+from mindroom.history.request_messages import filter_tool_calls, replayable_messages
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
@@ -215,11 +214,9 @@ def _compaction_replay_messages(
     run: AnyRunRecord,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    skip_roles = prompt_roles_for_history_storage(history_settings.system_message_role)
-    # A stored run can hold copies of the history its request replayed; replay skips them, and the runs they came
-    # from are summarized on their own.
     messages = [
-        deepcopy(message) for message in run.messages if message.role not in skip_roles and not message.from_history
+        deepcopy(message)
+        for message in replayable_messages([run], system_message_role=history_settings.system_message_role)
     ]
     if history_settings.max_tool_calls_from_history is not None:
         messages = filter_tool_calls(messages, history_settings.max_tool_calls_from_history)

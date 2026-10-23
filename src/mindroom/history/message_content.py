@@ -1,10 +1,10 @@
-"""Shared text and media projections for history serialization and estimation."""
+"""Shared message projections for history serialization, estimation, and replay: text, media, and narrowed tool calls."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, Audio, File, Image, Video
 from mindroom.token_budget import stable_serialize
@@ -119,3 +119,15 @@ def render_message_content(message: Message) -> str:
     if content is None:
         return ""
     return stable_serialize(content)
+
+
+def with_tool_calls(message: Message, calls: list[dict[str, Any]]) -> Message | None:
+    """Return a copy of an assistant ``message`` holding only ``calls``, or None when it then has no call and no content.
+
+    A message left with nothing would replay as an empty assistant turn that takes a message slot, so every step that
+    narrows a message's calls, the legacy repair and the tool-call window, drops it instead. A message that keeps its
+    content ends without calls as None, the shape of a message that never had any.
+    """
+    if not calls and not message.content:
+        return None
+    return replace(message, tool_calls=calls or None)

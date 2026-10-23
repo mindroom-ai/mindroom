@@ -33,8 +33,11 @@ _MISSING_PROVIDER_KEY_PATTERN = re.compile(
     r"|could not resolve authentication method",  # Anthropic SDK
 )
 # Wording of text without a provider payload, read as whole words: a 401 status, and a throttled request's rate,
-# 429, or quota. Lowercased, an error's name such as ``RateLimitError`` or ``QuotaExceeded`` is one word that holds
-# its keyword, so the rate and quota arms take those names as well.
+# 429, or quota. Lowercased, an error's name is one word, so only a name that starts with ``ratelimit`` or
+# ``quotaexceeded`` (``RateLimitError``, ``QuotaExceededError``) holds those words; ``RateError``, ``QuotaError``, and
+# ``OpenAIRateLimitError`` do not. Of the credential names, only the auth family's own (``AuthenticationError``,
+# ``AuthorizationError``, ``UnauthorizedError``) is read; ``AuthError``, ``GoogleAuthError``, and ``InvalidApiKeyError``
+# are not. Splitting CamelCase would also read a property name such as ``authToken`` as wording about the credentials.
 _UNAUTHORIZED_WORDING = whole_words("401")
 _RATE_LIMIT_WORDING = whole_words(r"rate(?:limit[a-z]*)?", "429", r"quotas?(?:exceeded[a-z]*)?")
 _PROVIDER_UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
