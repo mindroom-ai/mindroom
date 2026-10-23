@@ -61,9 +61,11 @@ def test_config_without_settings_renders_only_chart_options() -> None:
         "port",
         "database_path",
         "log",
+        "grant_admin_to_first_user",
         "mindroom_compact_edits_enabled",
         "well_known",
     }
+    assert config["grant_admin_to_first_user"] is False
 
 
 def test_settings_merge_across_values_files_into_valid_toml(tmp_path: Path) -> None:
@@ -177,3 +179,17 @@ def test_registration_option_is_free_without_a_registration_token() -> None:
     )
 
     assert config["allow_registration"] is False
+
+
+def test_first_user_admin_grant_stays_settable() -> None:
+    """The chart's first-user admin default yields to an explicit setting instead of rendering the key twice."""
+    config = _tuwunel_config(
+        _render_chart(
+            TUWUNEL_CHART,
+            "tuwunel.serverName=example.com",
+            "tuwunel.settings.grant_admin_to_first_user=true",
+            release_name="matrix",
+        ),
+    )
+
+    assert config["grant_admin_to_first_user"] is True
