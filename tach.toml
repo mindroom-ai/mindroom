@@ -1173,7 +1173,7 @@ depends_on = []
 # The request that proves a provider key valid, for doctor and the dashboard's provider setup.
 [[modules]]
 path = "mindroom.providers.key_checks"
-depends_on = []
+depends_on = ["mindroom.model_defaults"]
 visibility = ["mindroom.cli.doctor", "mindroom.api.provider_setup"]
 
 [[modules]]
