@@ -1495,7 +1495,10 @@ async def test_a_cli_login_refresh_failure_is_retried_only_when_it_is_transient(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An expired CLI login refreshes inside the request; a network failure or a transient status there is retried."""
+    """An expired CLI login refreshes inside the request; a network failure or a transient status there is retried.
+
+    The error carries the status the login server answered; a refresh that never reached it is a transport failure.
+    """
     attempts: list[str] = []
 
     def refresh(url: str, **_kwargs: object) -> httpx.Response:
@@ -1514,6 +1517,8 @@ async def test_a_cli_login_refresh_failure_is_retried_only_when_it_is_transient(
 
     assert (type(raised.value), len(attempts)) == (error, refreshes)
     assert get_user_friendly_error_message(raised.value).startswith(message)
+    status = refresh_reply.status_code if isinstance(refresh_reply, httpx.Response) else None
+    assert raised.value.status_code == status
 
 
 _CHAT_COMPLETION = {
