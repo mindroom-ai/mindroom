@@ -43,7 +43,11 @@ class ModelIdentity:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Capabilities:
-    """What a provider route supports, so policy code stops probing adapter classes."""
+    """What a provider route supports, so policy code stops probing adapter classes.
+
+    ``streams_only`` marks a route whose endpoint only streams, so a non-streaming request is streamed too and gets
+    the stream retry and idle limit.
+    """
 
     structured_output: Literal["native", "json_schema", "json_mode"] = "json_mode"
     omitted_media: frozenset[MediaKind] = frozenset()
@@ -52,6 +56,7 @@ class Capabilities:
     approval_receipt_after_response_id: bool = False
     provider_default_sampling: bool = False
     claude_family: bool = False
+    streams_only: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

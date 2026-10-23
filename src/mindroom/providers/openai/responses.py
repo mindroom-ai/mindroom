@@ -1,6 +1,7 @@
 """The Responses API adapter for the OpenAI and Codex routes.
 
-Codex only streams, so a non-streaming request on that route still streams and returns the drained turn.
+Codex only streams (its capabilities say ``streams_only``), so a non-streaming request on that route still streams
+and returns the drained turn.
 """
 
 from __future__ import annotations
@@ -177,7 +178,7 @@ class ResponsesAdapter:
         first_token: float | None = None
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
         client = await self.clients.client(request.overrides)
-        if request.stream or self.wire.route == "codex":
+        if request.stream or self.capabilities.streams_only:
             accumulator = ResponsesStream(
                 wire=self.wire,
                 store=request_store(self.wire, request),

@@ -495,6 +495,7 @@ def _build_responses(
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
         approval_receipt_after_response_id=True,
         provider_default_sampling=_provider_default_sampling(model_id),
+        streams_only=route_key == "codex",
     )
     wire = ResponsesWire(
         route=route_key,
