@@ -17,7 +17,11 @@ from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderE
 from mindroom.llm.provider import Capabilities, MediaKind, ModelIdentity
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import (
+    CEREBRAS_HOST_DEFAULT,
     CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
+    DEEPSEEK_BASE_URL_DEFAULT,
+    GROQ_HOST_DEFAULT,
+    OPENAI_BASE_URL_DEFAULT,
     OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
     OPENROUTER_BASE_URL_DEFAULT,
     ZAI_BASE_URL_DEFAULT,
@@ -68,11 +72,10 @@ __all__ = ["ENDPOINT_VARIABLES", "OPENAI_FAMILY_PROVIDERS", "ProviderRuntime", "
 
 logger = get_logger(__name__)
 
-_OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 # The runtime env variable that sets the ``openai`` endpoint, for Chat and Responses alike, when the config sets none.
 _OPENAI_BASE_URL_VARIABLE = "OPENAI_BASE_URL"
 # Routes whose public endpoint and model ids support Responses native compaction.
-_NATIVE_COMPACTION_ENDPOINTS = frozenset({_OPENAI_API_BASE_URL, CODEX_BASE_URL})
+_NATIVE_COMPACTION_ENDPOINTS = frozenset({OPENAI_BASE_URL_DEFAULT, CODEX_BASE_URL})
 _NATIVE_COMPACTION_MODEL_PREFIXES = ("gpt-5.3-codex", "gpt-5.4", "gpt-6")
 _NATIVE_COMPACTION_AUTHORED_KEYS = ("context_management", "previous_response_id", "background", "store")
 # Explicit prompt-cache breakpoints exist on the public API from GPT-5.6.
@@ -129,7 +132,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
     "deepseek": _ChatRoute(
         provider="DeepSeek",
         provider_name="DeepSeek",
-        base_url="https://api.deepseek.com",
+        base_url=DEEPSEEK_BASE_URL_DEFAULT,
         api_key_env="DEEPSEEK_API_KEY",
         dialect="openai",
         accepted=CHAT_FIELDS | {"use_thinking"},
@@ -294,12 +297,12 @@ def _chat_base_url(route_key: str, route: _ChatRoute, settings: ChatSettings, ru
         runtime.runtime_paths.env_value(route.base_url_variable) if route.base_url_variable else None
     )
     if route_key == "openai":
-        return configured or _OPENAI_API_BASE_URL
+        return configured or OPENAI_BASE_URL_DEFAULT
     if route_key == "groq":
         # The Groq SDK's base URL was a host; its paths start with /openai/v1.
-        return f"{(configured or 'https://api.groq.com').rstrip('/')}/openai/v1"
+        return f"{(configured or GROQ_HOST_DEFAULT).rstrip('/')}/openai/v1"
     if route_key == "cerebras":
-        return f"{(configured or 'https://api.cerebras.ai').rstrip('/')}/v1"
+        return f"{(configured or CEREBRAS_HOST_DEFAULT).rstrip('/')}/v1"
     return configured or route.base_url or ""
 
 
@@ -456,7 +459,7 @@ def _supports_explicit_breakpoint(model_id: str, endpoint: str) -> bool:
     version = _BREAKPOINT_MODEL.match(model_id)
     if version is None or (int(version[1]), int(version[2] or 0)) < (5, 6):
         return False
-    return endpoint == _OPENAI_API_BASE_URL
+    return endpoint == OPENAI_BASE_URL_DEFAULT
 
 
 def _native_compaction_supported(model_id: str, endpoint: str, store: bool | None, settings: ResponsesSettings) -> bool:
@@ -506,7 +509,7 @@ def _build_responses(
         provider, provider_name = "OpenAI Codex", "OpenAI Codex Responses"
     else:
         base_url = (
-            authored_base_url or runtime.runtime_paths.env_value(_OPENAI_BASE_URL_VARIABLE) or _OPENAI_API_BASE_URL
+            authored_base_url or runtime.runtime_paths.env_value(_OPENAI_BASE_URL_VARIABLE) or OPENAI_BASE_URL_DEFAULT
         )
         provider, provider_name = "OpenAI", "OpenAI Responses"
     endpoint = base_url.rstrip("/")

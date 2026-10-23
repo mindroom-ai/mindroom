@@ -10,9 +10,11 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = (
+    "ANTHROPIC_BASE_URL_DEFAULT",
     "AWS_BEDROCK_CLAUDE_OPUS",
     "AZURE_OPENAI_DEFAULT_DEPLOYMENT",
     "CARTESIA_TTS",
+    "CEREBRAS_HOST_DEFAULT",
     "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
     "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
     "CODEX_GPT",
@@ -22,12 +24,14 @@ __all__ = (
     "CONFIG_INIT_HELPER_MODELS",
     "CONFIG_INIT_MODEL_ALTERNATIVES",
     "CONFIG_INIT_MODEL_PRESETS",
+    "DEEPSEEK_BASE_URL_DEFAULT",
     "DEEPSEEK_V4_PRO",
     "ELEVENLABS_TTS",
     "FAL_VIDEO",
     "GOOGLE_IMAGE",
     "GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
     "GOOGLE_VEO",
+    "GROQ_HOST_DEFAULT",
     "GROQ_TRANSCRIPTION",
     "GROQ_TTS",
     "KIMI_K3",
@@ -43,6 +47,7 @@ __all__ = (
     "OLLAMA_QWEN",
     "OPENAI_AVATAR_IMAGE",
     "OPENAI_AVATAR_PROMPT",
+    "OPENAI_BASE_URL_DEFAULT",
     "OPENAI_DECISIONS_MODEL",
     "OPENAI_EMBEDDING_DIMENSIONS",
     "OPENAI_EMBEDDING_LARGE",
@@ -191,6 +196,12 @@ _OPENROUTER_GLM = "z-ai/glm-5.3"
 _OPENROUTER_KIMI = "moonshotai/kimi-k3"
 _OPENROUTER_TENCENT_HY4 = "tencent/hy4-preview"
 
+# The public endpoints of the hosted providers; Groq's and Cerebras's are hosts their routes append an API path to.
+OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1"
+ANTHROPIC_BASE_URL_DEFAULT = "https://api.anthropic.com"
+DEEPSEEK_BASE_URL_DEFAULT = "https://api.deepseek.com"
+GROQ_HOST_DEFAULT = "https://api.groq.com"
+CEREBRAS_HOST_DEFAULT = "https://api.cerebras.ai"
 ZAI_BASE_URL_DEFAULT = "https://api.z.ai/api/paas/v4"
 OPENROUTER_BASE_URL_DEFAULT = "https://openrouter.ai/api/v1"
 

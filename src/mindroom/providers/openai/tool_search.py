@@ -12,13 +12,12 @@ from __future__ import annotations
 import re
 from typing import Any, cast
 
-from mindroom.model_defaults import OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
+from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT, OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
 from mindroom.providers.names import canonical_provider
 
 __all__ = ["openai_native_tool_search_supported", "request_params_with_deferred_tool_search"]
 
 _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"codex", "openai", "openai_codex"})
-_OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 # LLM-plugin-style ``openai-codex/gpt-N.M`` ids match the same way as bare or ``-codex``-suffixed ids, so no
 # prefix normalization is needed before the search. A missing minor version counts as .0, so a major-only future
 # release gates native while ``gpt-5`` stays on portable tool search.
@@ -38,7 +37,7 @@ def openai_native_tool_search_supported(provider: str, model_id: str, *, base_ur
     if (
         canonical == "openai"
         and base_url not in (None, "")
-        and (not isinstance(base_url, str) or base_url.rstrip("/") != _OPENAI_API_BASE_URL)
+        and (not isinstance(base_url, str) or base_url.rstrip("/") != OPENAI_BASE_URL_DEFAULT)
     ):
         return False
     version_match = _GPT_VERSION_PATTERN.search(model_id)

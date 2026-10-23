@@ -52,7 +52,7 @@ from mindroom.llm.provider import (
     hosted_tool_started,
 )
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.anthropic.native_compaction import (
     COMPACTION_BETA,
@@ -121,7 +121,6 @@ PROVIDER_NAMES: dict[ClaudeRouteKind, str] = {
     "bedrock_claude": "AwsBedrock",
 }
 STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
-_DEFAULT_ANTHROPIC_ENDPOINT = "https://api.anthropic.com"
 _VERTEX_ENDPOINTS = {
     "global": "https://aiplatform.googleapis.com/v1",
     "us": "https://aiplatform.us.rep.googleapis.com/v1",
@@ -138,7 +137,7 @@ def native_compaction_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings)
     """
     client_params = settings.client_params or {}
     if route == "anthropic":
-        base_url = client_params.get("base_url") or os.environ.get("ANTHROPIC_BASE_URL") or _DEFAULT_ANTHROPIC_ENDPOINT
+        base_url = client_params.get("base_url") or os.environ.get("ANTHROPIC_BASE_URL") or ANTHROPIC_BASE_URL_DEFAULT
         return str(base_url).rstrip("/")
     if route == "vertexai_claude":
         region = settings.region or os.environ.get(VERTEXAI_CLAUDE_ENV_BY_KEY["region"])

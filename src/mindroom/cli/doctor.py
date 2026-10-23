@@ -35,7 +35,15 @@ from mindroom.matrix.provisioning_env import (
     provisioning_url_from_env,
     registration_token_from_env,
 )
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
+from mindroom.model_defaults import (
+    ANTHROPIC_BASE_URL_DEFAULT,
+    CEREBRAS_HOST_DEFAULT,
+    DEEPSEEK_BASE_URL_DEFAULT,
+    GROQ_HOST_DEFAULT,
+    OLLAMA_HOST_DEFAULT,
+    OPENAI_BASE_URL_DEFAULT,
+    OPENROUTER_BASE_URL_DEFAULT,
+)
 from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.providers.model_loading import model_uses_own_credential
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
@@ -206,13 +214,13 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
 
 
 _PROVIDER_VALIDATE_URLS: dict[str, str] = {
-    "anthropic": "https://api.anthropic.com/v1/models",
-    "openai": "https://api.openai.com/v1/models",
+    "anthropic": f"{ANTHROPIC_BASE_URL_DEFAULT}/v1/models",
+    "openai": f"{OPENAI_BASE_URL_DEFAULT}/models",
     "google": "https://generativelanguage.googleapis.com/v1beta/models",
     "openrouter": f"{OPENROUTER_BASE_URL_DEFAULT}/models",
-    "deepseek": "https://api.deepseek.com/v1/models",
-    "cerebras": "https://api.cerebras.ai/v1/models",
-    "groq": "https://api.groq.com/openai/v1/models",
+    "deepseek": f"{DEEPSEEK_BASE_URL_DEFAULT}/v1/models",
+    "cerebras": f"{CEREBRAS_HOST_DEFAULT}/v1/models",
+    "groq": f"{GROQ_HOST_DEFAULT}/openai/v1/models",
     # No "zai" entry: Z.ai's paas/v4 OpenAPI spec exposes no GET /models
     # listing endpoint, so a URL probe would misreport valid keys as broken.
 }
