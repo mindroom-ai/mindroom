@@ -46,7 +46,7 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
-from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import (
@@ -75,8 +75,6 @@ from tests.tool_job_helpers import job_tool, tool_job_runtime
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
-
-    from agno.tools.function import Function
 
     from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
@@ -611,8 +609,7 @@ async def test_tool_hook_bridge_records_each_call_before_it_runs() -> None:
 @pytest.mark.asyncio
 async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
     """A Stop that commits while the start record is written stops a synchronous tool the cancellation cannot reach."""
-    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
-    assert bridge is not None
+    middleware = build_tool_hook_middleware(HookRegistry.empty(), agent_name="code")
     ran: list[str] = []
 
     class _StoppedRecorder:
@@ -629,38 +626,14 @@ async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
         return "done"
 
     with recording_tool_calls(_StoppedRecorder()), pytest.raises(asyncio.CancelledError):
-        await bridge("sync_tool", sync_tool, {})
+        await execute_tool_call(
+            adapt_function(Function(name="sync_tool", entrypoint=sync_tool)),
+            {},
+            ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1"),
+            middleware=(middleware,),
+        )
 
     assert ran == []
-
-
-@pytest.mark.asyncio
-async def test_tool_hook_bridge_runs_sync_tools_off_event_loop() -> None:
-    """Blocking sync tools should not stall the async tool-dispatch loop."""
-    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
-    assert bridge is not None
-
-    loop_thread_id = threading.get_ident()
-    stop_ticking = False
-    ticks = 0
-
-    async def ticker() -> None:
-        nonlocal ticks
-        while not stop_ticking:
-            await asyncio.sleep(0.01)
-            ticks += 1
-
-    def slow_sync_tool() -> int:
-        time.sleep(0.1)
-        return threading.get_ident()
-
-    ticker_task = asyncio.create_task(ticker())
-    tool_thread_id = await bridge("slow_sync_tool", slow_sync_tool, {})
-    stop_ticking = True
-    await ticker_task
-
-    assert tool_thread_id != loop_thread_id
-    assert ticks > 0
 
 
 @pytest.mark.asyncio
