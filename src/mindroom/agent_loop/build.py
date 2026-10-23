@@ -101,20 +101,25 @@ def prompt_for_turn(build: AgentBuild, *context: str) -> Message:
     """
     additional_context = build.prompt.additional_context
     for block in context:
-        additional_context = _appended(additional_context, block)
+        additional_context = appended_context(additional_context, block)
     return render_system_message(replace(build.prompt, additional_context=additional_context))
 
 
-def _appended(existing: str | None, block: str) -> str | None:
+def appended_context[Context: (str, str | None)](existing: Context, block: str) -> Context:
+    """Return ``existing``, stripped, then ``block`` after one blank line; an empty block adds nothing.
+
+    A context that is None stays None until a block is appended.
+    """
     if not block:
         return existing
-    stripped = existing.strip() if existing else ""
+    stripped = (existing or "").strip()
     return f"{stripped}\n\n{block}" if stripped else block
 
 
 __all__ = [
     "AgentBuild",
     "AgentSurface",
+    "appended_context",
     "prompt_for_turn",
     "tool_owners_by_agent",
 ]
