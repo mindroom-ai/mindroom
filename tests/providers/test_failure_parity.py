@@ -11,6 +11,7 @@ unavailability, and a request that no longer fits the context window says so.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -31,10 +32,10 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.retry import STREAM_STALLED
-from tests.providers.anthropic_family_support import ROUTE_CONFIGS, provider_for
+from tests.providers.anthropic_family_support import ROUTE_CONFIGS, claude_message, provider_for
 from tests.providers.family_support import scrub_provider_env
 from tests.providers.gemini_ollama_support import build_adapter
-from tests.providers.golden_support import ndjson_response, pipeline_provider, sse_response
+from tests.providers.golden_support import PacedBytes, ndjson_response, pipeline_provider, sse_response
 from tests.providers.openai_family_support import openai_family_adapter
 
 if TYPE_CHECKING:
@@ -391,6 +392,14 @@ _CLAUDE_CASES = [
     ),
     _Case("http_400", _claude_status(400, "invalid_request_error", "messages: bad"), InvalidRequest, ERROR, 1, 1),
     _Case(
+        "http_422",
+        _claude_status(422, "invalid_request_error", "messages.0.content: Input should be a valid list"),
+        InvalidRequest,
+        ERROR,
+        1,
+        1,
+    ),
+    _Case(
         "http_400_context_window",
         _claude_status(400, "invalid_request_error", "prompt is too long: 210000 tokens > 200000 maximum"),
         ContextWindowExceeded,
@@ -527,7 +536,6 @@ _CLAUDE_CASES = [
         code=INCOMPLETE_STREAM,
     ),
 ]
-_CLAUDE_SHARED = [case for case in _CLAUDE_CASES if case.failure in {"http_529", "event_api_error", "connect_error"}]
 
 _OPENAI_HTTP_CASES = [
     _Case(
@@ -568,6 +576,14 @@ _OPENAI_HTTP_CASES = [
         _SDK,
     ),
     _Case(
+        "http_529",
+        _openai_status(529, "The service is overloaded.", "server_error"),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        _SDK_AND_PIPELINE,
+        _SDK,
+    ),
+    _Case(
         "http_400",
         _openai_status(400, "Invalid value for 'messages'.", "invalid_request_error"),
         InvalidRequest,
@@ -591,6 +607,14 @@ _OPENAI_HTTP_CASES = [
     _Case(
         "http_413",
         _openai_status(413, "Request Entity Too Large", "invalid_request_error"),
+        InvalidRequest,
+        ERROR,
+        1,
+        1,
+    ),
+    _Case(
+        "http_422",
+        _openai_status(422, "Unprocessable Entity: the request body failed validation.", "invalid_request_error"),
         InvalidRequest,
         ERROR,
         1,
@@ -850,6 +874,14 @@ _GEMINI_CASES = [
         1,
     ),
     _Case(
+        "http_529",
+        _gemini_status(529, "The model is overloaded.", "UNAVAILABLE"),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        _PIPELINE,
+        1,
+    ),
+    _Case(
         "http_400",
         _gemini_status(400, "Invalid JSON payload received.", "INVALID_ARGUMENT"),
         InvalidRequest,
@@ -886,6 +918,14 @@ _GEMINI_CASES = [
         1,
     ),
     _Case("http_404", _gemini_status(404, "models/gemini-x is not found.", "NOT_FOUND"), InvalidRequest, ERROR, 1, 1),
+    _Case(
+        "http_422",
+        _gemini_status(422, "Unprocessable entity.", "INVALID_ARGUMENT"),
+        InvalidRequest,
+        ERROR,
+        1,
+        1,
+    ),
     _Case("connect_error", _connect_error, ProviderUnavailable, UNAVAILABLE, _PIPELINE, 1, code="connection_error"),
     _Case("read_timeout", _read_timeout, ProviderUnavailable, UNAVAILABLE, _PIPELINE, 1, code="timeout"),
     _Case(
@@ -944,7 +984,6 @@ _GEMINI_CASES = [
         code=MALFORMED_TOOL_CALL,
     ),
 ]
-_GEMINI_SHARED = [case for case in _GEMINI_CASES if case.failure in {"http_503", "http_400", "event_status_503"}]
 
 # The Agno-backed runtime never retried an Ollama request: Agno's Ollama adapter let the SDK's errors escape
 # unclassified. Ollama now retries transient failures as every other route does.
@@ -966,6 +1005,7 @@ _OLLAMA_CASES = [
         1,
     ),
     _Case("http_400", _json(400, {"error": "invalid options"}), InvalidRequest, ERROR, 1, 1),
+    _Case("http_422", _json(422, {"error": "unprocessable request"}), InvalidRequest, ERROR, 1, 1),
     _Case(
         "http_400_context_window",
         _json(400, {"error": "input length exceeds the context length"}),
@@ -1024,10 +1064,12 @@ _OLLAMA_CASES = [
     ),
 ]
 
+# Vertex AI Claude, Bedrock Claude, and Vertex AI Gemini failed exactly as their family's direct route did on the
+# Agno-backed runtime, so they run every row of that family; the other OpenAI-compatible Chat routes run three.
 ROWS = [
     *_rows("anthropic", _CLAUDE_CASES),
-    *_rows("vertexai_claude", _CLAUDE_SHARED),
-    *_rows("bedrock_claude", _CLAUDE_SHARED),
+    *_rows("vertexai_claude", _CLAUDE_CASES),
+    *_rows("bedrock_claude", _CLAUDE_CASES),
     *_rows("openai_chat", _CHAT_CASES),
     *(
         row
@@ -1037,7 +1079,7 @@ ROWS = [
     *_rows("openai_responses", _RESPONSES_CASES),
     *_rows("codex", _RESPONSES_CASES, streams_only=True),
     *_rows("gemini", _GEMINI_CASES),
-    *_rows("gemini_vertexai", _GEMINI_SHARED),
+    *_rows("gemini_vertexai", _GEMINI_CASES),
     *_rows("ollama", _OLLAMA_CASES),
 ]
 
@@ -1065,3 +1107,40 @@ async def test_a_failed_request_is_retried_and_reported_as_the_parity_table_says
     assert get_user_friendly_error_message(raised.value).startswith(row.message)
     if row.code is not None:
         assert raised.value.code == row.code
+
+
+_CHAT_COMPLETION = {
+    "id": "chatcmpl-1",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "m",
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+    "usage": {"prompt_tokens": 40, "completion_tokens": 9, "total_tokens": 49},
+}
+# The whole reply of every route that answers a blocking request without streaming; Codex always streams.
+_WHOLE_REPLIES: dict[str, dict[str, Any]] = {
+    "anthropic": claude_message([{"type": "text", "text": "ok"}]),
+    "openai_chat": _CHAT_COMPLETION,
+    "openai_responses": _RESPONSE_COMPLETED["response"],
+    "gemini": _gemini_chunk({"text": "ok"}, finish="STOP"),
+    "ollama": _ollama_chunk("ok", done=True),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", _WHOLE_REPLIES)
+async def test_a_blocking_reply_slower_than_the_idle_limit_is_waited_for(route: str, tmp_path: Path) -> None:
+    """Only a stream has an idle limit: a blocking request waits for a slow reply, as the Agno-backed runtime did."""
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        body = json.dumps(_WHOLE_REPLIES[route]).encode()
+        stream = PacedBytes([body], pause_seconds=_STALL_SECONDS)
+        return httpx.Response(200, headers={"content-type": "application/json"}, stream=stream)
+
+    provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+
+    turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=False))
+
+    assert (turn.content, len(sent)) == ("ok", 1)
