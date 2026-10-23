@@ -15,7 +15,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, SAFEGUARD_REFUSAL, ContextWindowExceeded, ProviderError
-from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
 from mindroom.logging_config import get_logger
 from mindroom.providers.pipeline.wrapped import Retry, attempts
 from mindroom.redaction import redact_sensitive_text
@@ -110,6 +109,7 @@ def _without_media(messages: Sequence[Message], removed: frozenset[MediaKind], f
     for message in messages:
         content = message.content
         if "image" in removed:
+            # Every ready view receipt, also one whose image follows its tool results as a separate message.
             content = _mark_view_unsupported(content)
         lost_media = bool(removed & _media_kinds([message]))
         stripped.append(
@@ -122,15 +122,6 @@ def _without_media(messages: Sequence[Message], removed: frozenset[MediaKind], f
                 content=_with_note(content, note) if lost_media else content,
             ),
         )
-    if "image" in removed:
-        # A viewed image arrives as a follow-up message after its tool results; mark those receipts too.
-        for index, message in enumerate(messages):
-            if not any(image.id.startswith(VIEWED_IMAGE_ID_PREFIX) for image in message.images or ()):
-                continue
-            preceding = index - 1
-            while preceding >= 0 and messages[preceding].role == "tool":
-                stripped[preceding].content = _mark_view_unsupported(stripped[preceding].content)
-                preceding -= 1
     return stripped
 
 
