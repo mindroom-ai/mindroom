@@ -234,8 +234,8 @@ def _session_databases(session_root: Path) -> list[Path]:
     from mindroom.session_storage.schema import TableNames  # noqa: PLC0415
 
     # A wildcard storage name matches the database of every storage name.
-    anything = TableNames("*")
-    patterns = (str(anything.database_path(Path(state_root))) for state_root in _STATE_ROOT_GLOBS)
+    wildcard = TableNames("*")
+    patterns = (str(wildcard.database_path(Path(state_root))) for state_root in _STATE_ROOT_GLOBS)
     return sorted({database for pattern in patterns for database in session_root.glob(pattern)})
 
 
