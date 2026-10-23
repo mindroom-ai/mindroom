@@ -1,10 +1,7 @@
-"""Static prompt-token estimation: what the model sees before any history replay.
+"""Static prompt-token estimation: the rendered system message, the offered tool definitions, and the prompt text.
 
-Estimates the non-history cost of one prepared request — the rendered system message, the offered tool
-definitions, and the current prompt text. ``build_static_token_estimator`` sizes an owned build's rendered system
-message and tool definitions as the request sends them; the team path sizes the leader's prompt and every tool it
-offers through the same estimator. Nothing here touches history scopes, sessions, or summaries; compaction consumes
-these numbers through the resolved execution plan.
+Compaction consumes these numbers through the resolved execution plan; an agent and a team leader size their
+requests through the same estimator.
 """
 
 from __future__ import annotations
@@ -19,8 +16,6 @@ if TYPE_CHECKING:
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ToolSpec
-
-type _ToolDefinition = dict[str, object]
 
 
 @dataclass(slots=True)
@@ -57,10 +52,7 @@ def build_static_token_estimator(
             for tool in tools
             if tool.name not in deferred_tool_names
         ]
-        return estimate_text_tokens(str(system_message.content or "")) + _definition_tokens(payloads)
+        tool_tokens = estimate_text_tokens(stable_serialize(payloads))
+        return estimate_text_tokens(str(system_message.content or "")) + tool_tokens
 
     return _StaticTokenEstimator(non_prompt_tokens)
-
-
-def _definition_tokens(payloads: Sequence[_ToolDefinition]) -> int:
-    return len(stable_serialize(list(payloads))) // 4 if payloads else 0

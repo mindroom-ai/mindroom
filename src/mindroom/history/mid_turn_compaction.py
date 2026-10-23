@@ -471,18 +471,16 @@ def _tool_tokens(binding: _MidTurnCompaction, tools: Sequence[ToolSpec], message
     Claude expands a search's tool references into definitions; OpenAI replays them inside the search output, and
     portable tool search returns them as an ordinary tool result, both of which the message estimate already counts.
     """
-    if not tools:
-        return 0
     deferred = binding.deferred_tool_names
     if deferred:
         deferred -= claude_loaded_tool_names(messages)
-    sent = [tool for tool in tools if tool.name not in deferred]
-    if not sent:
-        return 0
-    # The wire shape of each definition, as Agno's ``Function.to_dict()`` sent it.
+    # TODO(simplify): this sizes each definition inside a Chat ``function`` envelope while the static estimate
+    # (``prompt_tokens.py``) sizes the bare fields, so one tool costs two amounts. Size both through one helper.
+    # Operators would see compaction trigger, and models see replay trimmed, a few tokens per tool differently.
     payloads = [
         {"type": "function", "function": {key: value for key, value in asdict(tool).items() if value is not None}}
-        for tool in sent
+        for tool in tools
+        if tool.name not in deferred
     ]
     return estimate_text_tokens(stable_serialize(payloads))
 
