@@ -470,23 +470,25 @@ async def collect_streamed_response_content(
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Collect a stream into its presentation owner, retaining pending text and tool state.
 
-    ``on_update`` runs after each chunk has been applied to ``presentation``.
+    ``on_update`` runs after each chunk has been applied to ``presentation``. The stream is closed before any failure
+    propagates, so its producer stops then.
     """
     try:
-        async for chunk in response_stream:
-            if isinstance(chunk, str):
-                presentation.append_text(chunk)
-            elif isinstance(chunk, ContentDelta):
-                presentation.append_text(chunk.text)
-            elif isinstance(chunk, RunFinished):
-                if chunk.record.content is not None:
-                    presentation.canonical_final_body_candidate = str(chunk.record.content)
-            elif isinstance(chunk, ToolStarted):
-                presentation.start_tool(chunk.tool)
-            elif isinstance(chunk, ToolCompleted):
-                presentation.complete_tool(chunk.tool)
-            if on_update is not None:
-                await on_update()
+        async with closing_async_stream(response_stream):
+            async for chunk in response_stream:
+                if isinstance(chunk, str):
+                    presentation.append_text(chunk)
+                elif isinstance(chunk, ContentDelta):
+                    presentation.append_text(chunk.text)
+                elif isinstance(chunk, RunFinished):
+                    if chunk.record.content is not None:
+                        presentation.canonical_final_body_candidate = str(chunk.record.content)
+                elif isinstance(chunk, ToolStarted):
+                    presentation.start_tool(chunk.tool)
+                elif isinstance(chunk, ToolCompleted):
+                    presentation.complete_tool(chunk.tool)
+                if on_update is not None:
+                    await on_update()
     except ResponsePausedForApproval as error:
         error.capture_collected_presentation(
             response_text=presentation.final_text().rstrip(),

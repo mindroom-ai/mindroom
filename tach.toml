@@ -1254,6 +1254,7 @@ depends_on = [
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.settings",
+    "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
@@ -5135,6 +5136,7 @@ depends_on = [
     "mindroom.background_tasks",
 ]
 visibility = [
+    "mindroom.approval.execution",
     "mindroom.approval.resume",
     "mindroom.agent_loop",
     "mindroom.teams",

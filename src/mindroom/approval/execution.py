@@ -46,6 +46,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
@@ -94,28 +95,30 @@ async def _collect_agent_continuation(
 ) -> _CollectedAgentContinuation:
     """Collect ordered events while leaving terminal fallback text for lifecycle settlement.
 
-    A failure of the resumed run propagates as its exception once the stream has reported it.
+    A failure of the resumed run propagates as its exception once the stream has reported it, and a failure while
+    the events are presented closes the stream before it propagates.
     """
     response: RunRecord | None = None
     saw_content_delta = False
     current_tools: list[ToolExecution] = []
     await presentation.publish(progress)
-    async for event in events:
-        if isinstance(event, RunFinished):
-            assert isinstance(event.record, RunRecord)
-            response = event.record
-        elif isinstance(event, ContentDelta):
-            presentation.append_text(event.text)
-            saw_content_delta = saw_content_delta or bool(event.text)
-            await presentation.publish(progress)
-        elif isinstance(event, ToolStarted):
-            presentation.start_tool(event.tool)
-            await presentation.publish(progress)
-        elif isinstance(event, ToolCompleted):
-            presentation.complete_tool(event.tool)
-            if event.parent_run_id is None:
-                current_tools.append(event.tool)
-            await presentation.publish(progress)
+    async with closing_async_stream(events):
+        async for event in events:
+            if isinstance(event, RunFinished):
+                assert isinstance(event.record, RunRecord)
+                response = event.record
+            elif isinstance(event, ContentDelta):
+                presentation.append_text(event.text)
+                saw_content_delta = saw_content_delta or bool(event.text)
+                await presentation.publish(progress)
+            elif isinstance(event, ToolStarted):
+                presentation.start_tool(event.tool)
+                await presentation.publish(progress)
+            elif isinstance(event, ToolCompleted):
+                presentation.complete_tool(event.tool)
+                if event.parent_run_id is None:
+                    current_tools.append(event.tool)
+                await presentation.publish(progress)
     if response is None:
         msg = "Agent continuation did not yield its final run"
         raise RuntimeError(msg)
