@@ -312,15 +312,15 @@ def _filter_team_request_members(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Keep only actual teamable agents while preserving the requested order."""
-    filtered: list[MatrixID] = []
-    for agent_id in agent_ids:
-        agent_name = entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
+    return [
+        agent_id
+        for agent_id in agent_ids
+        if entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
             agent_id.full_id,
             include_router=False,
         )
-        if agent_name is not None and agent_name in config.agents:
-            filtered.append(agent_id)
-    return filtered
+        in config.agents
+    ]
 
 
 def _normalize_team_request_members(
@@ -329,14 +329,10 @@ def _normalize_team_request_members(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Deduplicate ad hoc candidates after filtering out non-teamable agents."""
-    normalized: list[MatrixID] = []
-    seen_ids: set[str] = set()
+    unique: dict[str, MatrixID] = {}
     for agent_id in _filter_team_request_members(agent_ids, config, runtime_paths):
-        if agent_id.full_id in seen_ids:
-            continue
-        normalized.append(agent_id)
-        seen_ids.add(agent_id.full_id)
-    return normalized
+        unique.setdefault(agent_id.full_id, agent_id)
+    return list(unique.values())
 
 
 def _select_team_request(
