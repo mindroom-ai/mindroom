@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.call_tool import CALL_TOOL_NAME
 from mindroom.providers.stored_tool_calls import call_arguments
-from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -55,11 +54,8 @@ def _projected_request(request: ModelRequest) -> ModelRequest:
     )
 
 
-async def portable_tool_search_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+def portable_tool_search_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with deferred tools hidden behind ``call_tool`` unless the route searches natively."""
     if request.deferred_tool_names and not inner.capabilities.native_tool_search:
         request = _projected_request(request)
-    events = inner.stream(request)
-    async with closing_async_stream(events):
-        async for event in events:
-            yield event
+    return inner.stream(request)
