@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from contextlib import closing
 from typing import TYPE_CHECKING, Any, cast
@@ -20,16 +19,19 @@ from mindroom.session_storage.legacy_agno2_runs import (
     renumber_runs,
 )
 from mindroom.session_storage.schema import run_log_sql
-from mindroom.session_storage.store import delete_run_subtrees_in_transaction
+from mindroom.session_storage.store import (
+    connect_conversation_database,
+    delete_run_subtrees_in_transaction,
+    table_names,
+)
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
+    import sqlite3
     from collections.abc import Collection
     from pathlib import Path
 
     from mindroom.session_storage.schema import TableNames
-
-_BUSY_TIMEOUT_SECONDS = 30.0
 
 # LEGACY_COMPAT: Destructive compaction state without an archive.
 # Legacy format: A v2 ``mindroom_compaction`` scope state holding ``compacted_run_ids``
@@ -54,10 +56,9 @@ _SEEN_STATE_KEYS = frozenset({"seen_event_ids"})
 
 def migrate_to_summary_rows(path: Path, names: TableNames) -> None:
     """Create the summary-row tables once, first giving every stored run a position and adopting older state."""
-    with closing(sqlite3.connect(path, timeout=_BUSY_TIMEOUT_SECONDS, isolation_level=None)) as connection:
+    with closing(connect_conversation_database(path)) as connection:
         if not _needs_summary_rows(connection, names):
             return
-        connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")
         # Another startup may have finished while this connection waited for its write lock.
         if _needs_summary_rows(connection, names):
@@ -68,7 +69,7 @@ def migrate_to_summary_rows(path: Path, names: TableNames) -> None:
             number_unindexed_runs(connection, names)
             for statement in summary_rows_schema_sql(names.sessions):
                 connection.execute(statement)
-            if f"{names.sessions}_compactions" in _tables(connection):
+            if f"{names.sessions}_compactions" in table_names(connection):
                 _convert_archive(connection, names)
             else:
                 _adopt_legacy_sessions(connection, names)
@@ -77,12 +78,8 @@ def migrate_to_summary_rows(path: Path, names: TableNames) -> None:
 
 
 def _needs_summary_rows(connection: sqlite3.Connection, names: TableNames) -> bool:
-    tables = _tables(connection)
+    tables = table_names(connection)
     return names.sessions in tables and names.summaries not in tables
-
-
-def _tables(connection: sqlite3.Connection) -> set[str]:
-    return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
 def _adopt_legacy_sessions(connection: sqlite3.Connection, names: TableNames) -> None:

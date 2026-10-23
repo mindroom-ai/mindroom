@@ -34,7 +34,7 @@ from mindroom.constants import (
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.history.summary_rows_schema import NON_VISIBLE_RUN_STATUS_VALUES, loads_sql, run_scope_key_sql
-from mindroom.session_storage.store import delete_run_subtrees_in_transaction
+from mindroom.session_storage.store import delete_run_subtrees_in_transaction, table_names
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
@@ -588,5 +588,4 @@ def _read_transaction(storage: ConversationStore) -> Iterator[tuple[sqlite3.Conn
 
 
 def _has_log(connection: sqlite3.Connection, names: TableNames) -> bool:
-    stored = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    return {names.runs, names.summaries, names.removed_runs} <= stored
+    return {names.runs, names.summaries, names.removed_runs} <= table_names(connection)

@@ -41,13 +41,15 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import Refusal, SaveOutcome, SessionField, SessionKind
     from mindroom.usage.storage import IndependentUsageKind
 
-_BUSY_TIMEOUT_SECONDS = 30.0
+# How long an operation waits for another connection's write lock on the database, its migrations included.
+BUSY_TIMEOUT_SECONDS = 30.0
 _NON_VISIBLE_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
 
 
-def _connect(path: Path) -> sqlite3.Connection:
+def connect_conversation_database(path: Path) -> sqlite3.Connection:
+    """Open a connection to the conversation database at ``path``, for the store and the migrations that open it."""
     # No implicit transactions: every operation begins its own, so its reads cannot straddle a commit.
-    connection = sqlite3.connect(path, timeout=_BUSY_TIMEOUT_SECONDS, isolation_level=None)
+    connection = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
     # Deleting a session row cascades to its runs, summary rows, and usage.
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
@@ -65,7 +67,7 @@ def open_conversation_store(
     Tables are created by the first write. Migrations that recognize an older database by a missing summary-row
     or usage table must run before that write.
     """
-    with closing(_connect(path)) as connection:
+    with closing(connect_conversation_database(path)) as connection:
         if has_blob_runs(connection, names):
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -97,7 +99,7 @@ class ConversationStore:
         A write takes the write lock first, so rules that read the log before writing see what they change,
         and creates any missing table. A read is one snapshot.
         """
-        with closing(_connect(self.path)) as connection:
+        with closing(connect_conversation_database(self.path)) as connection:
             connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             try:
                 if write:
@@ -125,7 +127,7 @@ class ConversationStore:
         """
         names = self.names
         with self.transaction(write=False) as connection:
-            tables = _tables(connection)
+            tables = table_names(connection)
             row = self._session_row(connection, session_id)
             if row is None or row[0] != kind:
                 return None
@@ -163,7 +165,7 @@ class ConversationStore:
         )
 
     def _session_row(self, connection: sqlite3.Connection, session_id: str) -> tuple[Any, ...] | None:
-        if self.names.sessions not in _tables(connection):
+        if self.names.sessions not in table_names(connection):
             return None
         return connection.execute(
             "SELECT session_type, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at "  # noqa: S608
@@ -297,7 +299,7 @@ class ConversationStore:
     def get_run(self, run_id: str) -> AnyRunRecord | None:
         """Return one stored run, in whatever session, as stored."""
         with self.transaction(write=False) as connection:
-            if self.names.runs not in _tables(connection):
+            if self.names.runs not in table_names(connection):
                 return None
             row = connection.execute(
                 f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} WHERE run_id = ?",  # noqa: S608
@@ -308,7 +310,7 @@ class ConversationStore:
     def list_runs(self, session_id: str) -> list[AnyRunRecord]:
         """Return the session's whole run log as stored, member runs included, in log order."""
         with self.transaction(write=False) as connection:
-            if self.names.runs not in _tables(connection):
+            if self.names.runs not in table_names(connection):
                 return []
             rows = connection.execute(
                 f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} "  # noqa: S608
@@ -324,7 +326,7 @@ class ConversationStore:
         """
         owner_column = "team_id" if kind == "team" else "agent_id"
         with self.transaction(write=False) as connection:
-            if self.names.sessions not in _tables(connection):
+            if self.names.sessions not in table_names(connection):
                 return []
             return connection.execute(
                 "SELECT session_id, COALESCE(updated_at, created_at) AS updated "  # noqa: S608
@@ -487,7 +489,8 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     return persist
 
 
-def _tables(connection: sqlite3.Connection) -> set[str]:
+def table_names(connection: sqlite3.Connection) -> set[str]:
+    """Return the names of the database's tables; an older database lacks the ones its migrations add."""
     return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
@@ -805,9 +808,12 @@ def _replay_summary(
 
 
 __all__ = [
+    "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
+    "connect_conversation_database",
     "delete_run_subtrees_in_transaction",
     "open_conversation_store",
     "persist_to",
     "runs_without",
+    "table_names",
 ]

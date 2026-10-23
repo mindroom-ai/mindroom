@@ -733,14 +733,14 @@ def test_a_run_folded_mid_turn_loads_without_the_messages_its_segment_holds(stor
 def traced(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Callable[[str], None]]]:
     """Statement hooks called as each store connection starts executing a statement."""
     hooks: list[Callable[[str], None]] = []
-    connect = store_module._connect
+    connect = store_module.connect_conversation_database
 
     def traced_connect(path: Path) -> sqlite3.Connection:
         connection = connect(path)
         connection.set_trace_callback(lambda statement: [hook(statement) for hook in hooks])
         return connection
 
-    monkeypatch.setattr(store_module, "_connect", traced_connect)
+    monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
     return hooks
 
 
