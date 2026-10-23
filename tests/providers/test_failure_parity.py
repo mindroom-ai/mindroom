@@ -936,7 +936,8 @@ _RESPONSES_CASES = [
     ),
     # The stream ends before response.completed.
     *_early_ends(_responses_stream(), _responses_stream(_response_text(_PARTIAL))),
-    # A retry would run the hosted tool again, so a failure after it started is final, a stall included.
+    # A retry would run the hosted tool again, so a failure after it started is final, a stall included; the
+    # Agno-backed runtime retried a stall once.
     *(
         _Case(
             f"{failure}_after_{tool}",
@@ -952,7 +953,8 @@ _RESPONSES_CASES = [
             ("stall", _then_silent(_responses_stream(started)), STREAM_STALLED),
         )
     ),
-    # Rerunning a tool search or a compaction repeats no work, so their items keep the retry budget.
+    # Rerunning a tool search or a compaction repeats no work, so their items keep the retry budget; the Agno-backed
+    # runtime ended the request at once when an error event followed one.
     *(
         _Case(f"{failure}_after_{name}", reply, ProviderUnavailable, UNAVAILABLE, requests, code=code)
         for name, started in (("tool_search", _TOOL_SEARCH_STARTED), ("compaction", _COMPACTION_STARTED))
