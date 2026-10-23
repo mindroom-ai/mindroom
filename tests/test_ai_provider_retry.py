@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.provider import TextDelta
-from mindroom.providers.pipeline import retry as provider_stream_retry
+from mindroom.providers.pipeline import wrapped as provider_attempts
 from mindroom.providers.pipeline.compose import wrap_provider
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
@@ -116,7 +116,8 @@ async def test_post_tool_backoff_preserves_turn_history_and_followup(
         waiting.set()
         await release.wait()
 
-    monkeypatch.setattr(provider_stream_retry, "asyncio", SimpleNamespace(sleep=wait, timeout=asyncio.timeout))
+    # The attempt runner waits out the stream retry's backoff.
+    monkeypatch.setattr(provider_attempts, "asyncio", SimpleNamespace(sleep=wait))
     turns: list[list[ScriptStep]] = [
         calls(tool_call("record_step", "call_step_1", step=1)),
         calls(tool_call("record_step", "call_step_2", step=2)),
