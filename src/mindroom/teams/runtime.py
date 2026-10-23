@@ -37,7 +37,7 @@ from mindroom.llm.provider import ReasoningDelta
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
-from mindroom.teams.delegate_tools import DELEGATE_TOOL_NAMES, delegate_functions, propagate_member_pause
+from mindroom.teams.delegate_tools import delegate_functions, propagate_member_pause, waited_on_member
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 
 if TYPE_CHECKING:
@@ -186,7 +186,7 @@ def continue_team(
                     content = handover_content(resumed) or MEMBER_TASK_COMPLETED
                     results.append(MEMBER_RESULT_LINE.format(name=plan.member.spec.name, content=content))
             if plans and not any(not r.is_resolved() for r in record.requirements or ()):
-                _answer_delegations(record, messages, results)
+                _answer_delegations(record, messages, [plan.member for plan in plans], results)
 
         await _forward(
             drive_run(
@@ -354,18 +354,25 @@ def _plan_member_resumes(
     return plans
 
 
-def _answer_delegations(record: TeamRunRecord, messages: list[Message], results: Sequence[str]) -> None:
+def _answer_delegations(
+    record: TeamRunRecord,
+    messages: list[Message],
+    resumed: Sequence[TeamMember],
+    results: Sequence[str],
+) -> None:
     """Replace every delegation result that waited on a member with the members' results, as Agno's continuation did.
 
-    The replacement lands on the run's tool entries and on the leader's request, so the leader reads the members'
-    results where it read the pause notice. ``results`` holds only the members resumed in this call, so a collaborate
-    sibling's text that completed earlier, or a member completed in an earlier chained resume, no longer reaches the
-    leader; Agno 3.0.9 lost it the same way, and the request-body parity contract keeps that.
+    A result waited on one of the ``resumed`` members when it is the notice the delegation gave for that member's
+    pause (``waited_on_member``). The replacement lands on the run's tool entries and on the leader's request, so the
+    leader reads the members' results where it read the pause notice. ``results`` holds only the members resumed in
+    this call, so a collaborate sibling's text that completed earlier, or a member completed in an earlier chained
+    resume, no longer reaches the leader; Agno 3.0.9 lost it the same way, and the request-body parity contract keeps
+    that.
     """
     text = "\n".join([MEMBER_RESULTS_HEADING, *results])
     answered: set[str | None] = set()
     for tool in record.tools or ():
-        if tool.tool_name in DELEGATE_TOOL_NAMES and "requires human input" in (tool.result or "").lower():
+        if any(waited_on_member(tool, member) for member in resumed):
             tool.result = text
             answered.add(tool.tool_call_id)
     for index, message in enumerate(messages):

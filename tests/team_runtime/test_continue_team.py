@@ -705,6 +705,52 @@ async def test_a_member_approval_that_shares_an_id_with_a_leader_call_resumes_th
     assert record.requirements == []
 
 
+@pytest.mark.parametrize("mode", [TeamMode.COORDINATE, TeamMode.COLLABORATE])
+async def test_a_finished_member_whose_answer_mentions_human_input_keeps_its_answer_on_resume(mode: TeamMode) -> None:
+    """Only the delegation that waited on the paused member gets the members' results; a finished one keeps its own.
+
+    The writer finishes with text that mentions human input, the checker pauses on its gated call; once approved,
+    a coordinate leader still reads the writer's answer, while a collaborate call, which waited on the checker, is
+    answered with the members' results as Agno answered it.
+    """
+    writer_text = "Step 3 requires human input from the operator; steps 1-2 are fine."
+    if mode is TeamMode.COORDINATE:
+        delegations = calls(
+            tool_call("delegate_task_to_member", "call-w", member_id="writer", task="Review the steps."),
+            tool_call("delegate_task_to_member", "call-c", member_id="checker", task="Multiply 6 by 7."),
+            metrics=usage(10, 2),
+        )
+    else:
+        delegations = calls(tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7."))
+    leader = scripted("leader-model", delegations, answer("Done.", usage(10, 2)))
+    writer = scripted("writer-model", answer(writer_text, usage(5, 1)))
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)),
+        answer("Checker: 42", usage(5, 1)),
+    )
+    team = squad(leader, writer, checker, mode=mode)
+    _, paused = await collect(
+        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    assert paused.status is RunStatus.paused
+
+    _, record = await collect(
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
+            ctx=run_context("r", SQUAD),
+        ),
+    )
+
+    resumed = "Member results after human-in-the-loop resolution:\n[Checker]: Checker: 42"
+    expected = [writer_text, resumed] if mode is TeamMode.COORDINATE else [resumed]
+    assert record.status is RunStatus.completed
+    assert [message.content for message in leader.requests[-1].messages if message.role == "tool"] == expected
+
+
 async def test_a_resume_with_member_and_leader_decisions_runs_both_and_hands_the_leader_the_member_s_result() -> None:
     """A mixed resume answers the delegation with the member's result and runs the leader's own approved call.
 

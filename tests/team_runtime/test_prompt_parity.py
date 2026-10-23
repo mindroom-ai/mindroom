@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.llm.messages import Message
-from mindroom.teams.delegate_tools import DELEGATE_TOOL_NAMES
 from tests.agno_parity.prompt_scenarios import SCENARIOS, call_dict, load_golden, normalize
 from tests.team_runtime.parity_support import run_team_scenario
 
@@ -36,7 +35,9 @@ async def test_the_production_team_turn_sends_every_golden_request(name: str, tm
     assert normalize([call_dict(call) for call in run.calls], tmp_path) == golden["requests"]
     # The leader's prompt is built once per turn and sent with both of its requests.
     leader_requests = [
-        call for call in run.calls if any(tool["function"]["name"] in DELEGATE_TOOL_NAMES for tool in call.tools or ())
+        call
+        for call in run.calls
+        if any(tool["function"]["name"].startswith("delegate_task_to_") for tool in call.tools or ())
     ]
     assert len(leader_requests) == 2
     assert len({request.messages[0].content for request in leader_requests}) == 1
