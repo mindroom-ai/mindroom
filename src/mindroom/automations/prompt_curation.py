@@ -49,9 +49,10 @@ class _CurationPlan:
     # Every memory/ topic file the scan read at fire time, so verify can tell detail moved from detail deleted.
     memory_tokens: int
     curated: Mapping[str, int]
-    # MEMORY.md lines at fire time; the preload withholds lines beyond memory.file.max_entrypoint_lines.
+    # MEMORY.md lines at fire time; the preload withholds lines beyond either memory.file.max_entrypoint_* cap.
     memory_lines: int
     max_entrypoint_lines: int
+    max_entrypoint_tokens: int
     upper_tokens: int
     floor_tokens: int
 
@@ -127,6 +128,7 @@ def _plan_curation(
         curated=curated,
         memory_lines=memory_lines,
         max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
+        max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
         floor_tokens=round(measured * (1 - settings.max_reduction)),
     )
@@ -139,7 +141,9 @@ def _curation_prompt(config: Config, plan: _CurationPlan) -> str:
         measured_tokens=plan.measured_tokens,
         trigger_tokens=plan.settings.trigger_tokens,
         memory_lines=plan.memory_lines,
+        entrypoint_tokens=plan.curated.get(_ENTRYPOINT, 0),
         max_entrypoint_lines=plan.max_entrypoint_lines,
+        max_entrypoint_tokens=plan.max_entrypoint_tokens,
         file_sizes=", ".join(f"{path} ({tokens} tokens)" for path, tokens in plan.curated.items()),
         upper_tokens=plan.upper_tokens,
         floor_tokens=plan.floor_tokens,

@@ -103,8 +103,10 @@ def test_memory_past_the_preload_line_cap_asks_for_a_cut_under_the_token_trigger
     assert (plan.measured_tokens, plan.memory_lines) == (1292, 17)
     assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
     prompt = _curation_prompt(config, plan)
-    assert "total 1292 tokens (limit 10000), and MEMORY.md has 17 lines (limit 16;" in prompt
-    assert "If MEMORY.md is over 16 lines" in prompt
+    assert (
+        "total 1292 tokens (limit 10000), and MEMORY.md has 17 lines and 1286 tokens (preload limits 16 lines" in prompt
+    )
+    assert "If MEMORY.md is over either preload limit" in prompt
 
 
 def test_memory_past_the_preload_token_cap_asks_for_a_cut_under_the_token_trigger(tmp_path: Path) -> None:
@@ -118,6 +120,9 @@ def test_memory_past_the_preload_token_cap_asks_for_a_cut_under_the_token_trigge
 
     assert plan is not None
     assert plan.measured_tokens == 1292
+    prompt = _curation_prompt(config, plan)
+    assert "MEMORY.md has 17 lines and 1286 tokens (preload limits 200 lines and 1000 tokens;" in prompt
+    assert "If MEMORY.md is over either preload limit, take lines out of it first" in prompt
 
 
 def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:
@@ -126,7 +131,9 @@ def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) ->
 
     prompt = _curation_prompt(config, plan)
 
-    assert "total 1292 tokens (limit 1000), and MEMORY.md has 17 lines (limit 200;" in prompt
+    assert (
+        "total 1292 tokens (limit 1000), and MEMORY.md has 17 lines and 1286 tokens (preload limits 200 lines" in prompt
+    )
     assert "MEMORY.md (1286 tokens), SOUL.md (4 tokens), USER.md (2 tokens)" in prompt
     assert "at most 1163 tokens in total, but not below 1098" in prompt
     assert "shrink by more than 25%" in prompt
