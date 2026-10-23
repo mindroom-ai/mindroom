@@ -1242,6 +1242,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
+    "mindroom.approval.receipt",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.execution",
@@ -1264,6 +1265,7 @@ visibility = ["mindroom.response_runner"]
 path = "mindroom.approval.resume"
 depends_on = [
     "mindroom.agent_loop",
+    "mindroom.approval.receipt",
     "mindroom.history.native",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
@@ -1322,8 +1324,11 @@ depends_on = [
     "mindroom.llm",
 ]
 visibility = [
+    "mindroom.approval.execution",
+    "mindroom.approval.resume",
     "mindroom.loop_hooks",
     "mindroom.response_runner",
+    "mindroom.teams",
 ]
 
 [[modules]]
@@ -3257,6 +3262,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
+    "mindroom.approval.receipt",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.authorization",

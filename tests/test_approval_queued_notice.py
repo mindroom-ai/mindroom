@@ -89,24 +89,25 @@ async def test_approved_batch_notifies_next_real_model_request(*, stream: bool) 
         for item in (1, 2)
     ]
 
-    with queued_message_signal_context(state), approval_receipt_context("Trusted approval receipt."):
+    with queued_message_signal_context(state):
         _events, paused = await collect(
             run_agent(agent, [Message(role="user", content="Read both items.")], ctx=context(), hooks=_hooks()),
         )
         assert paused.status is RunStatus.paused
         assert len(paused.requirements or []) == 2
         assert not executed
-        _events, resumed = await collect(
-            resume_agent(
-                agent,
-                paused,
-                build_resume_request(paused=paused.messages, summary=None, history=[]),
-                approved=approved,
-                ctx=context(),
-                hooks=_hooks(),
-                request_template=ModelRequest(messages=(), stream=stream),
-            ),
-        )
+        with approval_receipt_context("Trusted approval receipt.", run_id=paused.run_id):
+            _events, resumed = await collect(
+                resume_agent(
+                    agent,
+                    paused,
+                    build_resume_request(paused=paused.messages, summary=None, history=[]),
+                    approved=approved,
+                    ctx=context(),
+                    hooks=_hooks(),
+                    request_template=ModelRequest(messages=(), stream=stream),
+                ),
+            )
 
     assert resumed.status is RunStatus.completed
     assert executed == [1, 2]

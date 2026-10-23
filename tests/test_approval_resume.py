@@ -105,7 +105,7 @@ class _Resume:
         decision = ApprovalDecision.APPROVED if approve else ApprovalDecision.DENIED
         reason = None if approve else "Alice declined the multiplication."
         decided = tuple(replace(call, decision=decision, reason=reason) for call in calls)
-        with approval_receipt_context(build_approval_receipt(decided)):
+        with approval_receipt_context(build_approval_receipt(decided), run_id=self.paused.run_id):
             return await resume(
                 approval_executor(self.config, self.paths),
                 self.attempt,

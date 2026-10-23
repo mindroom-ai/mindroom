@@ -6,7 +6,7 @@ import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.model_loop import SendRequest
@@ -62,7 +62,11 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
 
 @dataclass(frozen=True)
 class _ApprovalReceiptContext:
+    """One approval continuation's receipt and, by run id, the runs that read it and those that already did."""
+
     receipt_text: str
+    readers: set[str]
+    sent: set[str] = field(default_factory=set)
 
 
 _context: ContextVar[_ApprovalReceiptContext | None] = ContextVar(
@@ -72,13 +76,26 @@ _context: ContextVar[_ApprovalReceiptContext | None] = ContextVar(
 
 
 @contextmanager
-def approval_receipt_context(receipt_text: str) -> Generator[None, None, None]:
-    """Bind one trusted approval receipt to the exact resumed model call."""
-    token = _context.set(_ApprovalReceiptContext(receipt_text=receipt_text))
+def approval_receipt_context(receipt_text: str, *, run_id: str) -> Generator[None, None, None]:
+    """Bind one approval's trusted receipt around its continuation, for the paused run ``run_id`` it resumes.
+
+    That run reads the receipt, and so does every run that ``add_approval_receipt_reader`` names: one whose own
+    paused calls the approval decided, or a recovered CLI call's follow-up. Each reads it once, in its first request
+    as a reader. No other run reads it, such as a run the continuation starts or a member it continues with the
+    result of that member's own delegation.
+    """
+    token = _context.set(_ApprovalReceiptContext(receipt_text=receipt_text, readers={run_id}))
     try:
         yield
     finally:
         _context.reset(token)
+
+
+def add_approval_receipt_reader(run_id: str) -> None:
+    """Have run ``run_id`` read the bound approval receipt; outside an approval continuation nothing is bound."""
+    receipt = _context.get()
+    if receipt is not None:
+        receipt.readers.add(run_id)
 
 
 def _is_response_chain_boundary(message: Message) -> bool:
@@ -140,19 +157,18 @@ def messages_with_approval_receipt(
 
 
 def approval_receipt_hook(capabilities: Capabilities) -> BeforeRequestHook:
-    """Return the pre-request hook that sends the trusted receipt with a resumed run's first request.
+    """Return the pre-request hook that sends the bound receipt with a reader run's first request, once per run.
 
-    The receipt is bound by ``approval_receipt_context`` around the continuation; the hook projects it into that
-    run's first request only, so the run's own history never holds it.
+    The hook goes on every run; ``approval_receipt_context`` decides which runs read the receipt. It is projected
+    into the request only, so no run's history holds it.
     """
-    fired = False
 
     async def hook(state: LoopState) -> RequestDecision:
-        nonlocal fired
         receipt = _context.get()
-        if receipt is None or fired:
+        run_id = state.run.run_id
+        if receipt is None or run_id not in receipt.readers or run_id in receipt.sent:
             return SendRequest()
-        fired = True
+        receipt.sent.add(run_id)
         return SendRequest(
             messages=messages_with_approval_receipt(
                 state.messages,
@@ -165,6 +181,7 @@ def approval_receipt_hook(capabilities: Capabilities) -> BeforeRequestHook:
 
 
 __all__ = [
+    "add_approval_receipt_reader",
     "approval_receipt_context",
     "approval_receipt_hook",
     "build_approval_receipt",

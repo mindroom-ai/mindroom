@@ -16,6 +16,7 @@ from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import collect_streamed_response_content, run_delegated_child_response, stream_agent_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
+from mindroom.approval.receipt import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner, approval_decisions
 from mindroom.approval.tool_owners import (
     authorize_prepared_tool_call,
@@ -331,9 +332,13 @@ async def _stream_continuation_turn(
 ) -> CompletedApprovalRun | PausedAttempt:
     """Stream resumed work and any fresh attempts into the continued reply through the shared response driver.
 
-    A recovered CLI call runs without a model request, so its follow-up, the turn with no ``resumed_attempt``, sends
-    the approval receipt with its first request; a resumed run already sent it.
+    A recovered CLI call runs without a model request, so its follow-up, the turn with no ``resumed_attempt``, reads
+    the approval receipt in its first attempt's run; a resumed run already read it.
     """
+    if resumed_attempt is None:
+        run_id = str(uuid4())
+        ctx = replace(ctx, run_id=run_id)
+        add_approval_receipt_reader(run_id)
     tool_context = runtime_context_from_dispatch_context(tool_dispatch)
     run_metadata: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
@@ -354,7 +359,6 @@ async def _stream_continuation_turn(
         reusable_build=reusable_build,
         resumed_attempt=resumed_attempt,
         initial_continuation_count=initial_continuation_count,
-        approval_receipt=resumed_attempt is None,
         delegation_depth=delegation_depth,
         media=media,
         on_completed=completed.append,

@@ -437,7 +437,7 @@ class _MemberRuns:
             member.spec,
             [Message(role="user", content=task)],
             ctx=ctx,
-            hooks=member.hooks(False),
+            hooks=member.hooks(),
             persist=self._capture(ended),
             request_template=self._request_template(member),
         )
@@ -451,7 +451,7 @@ class _MemberRuns:
             plan,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
             ctx=self._member_context(paused.run_id),
-            hooks=member.hooks(True),
+            hooks=member.hooks(),
             persist=self._capture(ended),
             request_template=self._request_template(member),
         )

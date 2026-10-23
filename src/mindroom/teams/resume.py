@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.ai import run_delegated_child_response
+from mindroom.approval.receipt import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, forward_resume, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
@@ -211,9 +212,15 @@ class TeamResume:
         """Resume ``paused`` with ``decisions`` routed to the calls the team waits for; the stream ends with ``RunFinished``.
 
         Routing and the loop's own coverage check run here, before the stream starts, so a resume that no longer fits
-        is refused before anything runs.
+        is refused before anything runs. A member run whose own paused call an approval decided reads that approval's
+        receipt.
         """
         routed = _route_decisions(paused, decisions, toolkit_owners=self.toolkit_owners)
+        decided = {*routed.approved, *routed.denied}
+        for requirement in paused.requirements or ():
+            key = (requirement.member_agent_id, requirement.tool_execution.tool_call_id)
+            if requirement.member_run_id is not None and key in decided:
+                add_approval_receipt_reader(requirement.member_run_id)
         session = self.storage.session
         events = continue_team(
             self.spec,
@@ -567,7 +574,6 @@ async def continue_paused_team_run(
                     history_settings=settings,
                     tool_middleware=built.leader_middleware,
                     jobs=built.leader_jobs,
-                    approval_receipt=True,
                 ),
                 request_template=ModelRequest(
                     messages=(),

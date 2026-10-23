@@ -324,11 +324,10 @@ def _team_member(
     """Return one member as the team runs it: this turn's system message, the roster role, and its loop hooks.
 
     A member runs under the agent hook policy: its own tool-call policy, output-limit policy, portable tool search,
-    and mid-turn compaction, and a resume adds the approval receipt; its tools run under its own identity. It
-    replays no history, so its compaction stays within the run, and the leader owns the queued-message notices of
-    the turn. ``model_name`` is the member's configured model for this turn, whose window its compaction sizes
-    against. The compaction and receipt hooks hold the state of the run they serve, so each run or resume builds
-    its own.
+    mid-turn compaction, and the approval receipt hook; its tools run under its own identity. It replays no history,
+    so its compaction stays within the run, and the leader owns the queued-message notices of the turn.
+    ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against. The
+    compaction hook holds the state of the run it serves, so each run or resume builds its own hooks.
     """
     # The binding joins the policy a managed job runs again, so a member's call that becomes a job runs as the member.
     as_member = replace(build, tool_policy=(*build.tool_policy, _as_member(build.spec.id, model_name)))
@@ -344,14 +343,8 @@ def _team_member(
         prompt_id=None,
     )
 
-    def hooks(resumed: bool) -> LoopHooks:
-        return agent_loop_hooks(
-            as_member,
-            turn,
-            agent_name=build.spec.id,
-            queued_notices=False,
-            approval_receipt=resumed,
-        )
+    def hooks() -> LoopHooks:
+        return agent_loop_hooks(as_member, turn, agent_name=build.spec.id, queued_notices=False)
 
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),

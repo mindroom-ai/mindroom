@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.run import resume_agent
 from mindroom.agent_loop.spec import RunContext
+from mindroom.approval.receipt import add_approval_receipt_reader
 from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
@@ -165,22 +166,14 @@ async def forward_resume[R: AnyRunRecord](
     return record
 
 
-@dataclass(slots=True)
-class _RunHooks:
-    """The hooks of the run a ``ResumeRunner`` resumes: built on its first resume, kept for the continuations."""
-
-    hooks: LoopHooks | None = None
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResumeRunner:
     """Resumes one paused run of a rebuilt agent against its store, with the hooks an agent turn installs.
 
     A resume replays the history the configured policy selects from ``session`` now, not a turn's narrowed plan; the
     run's native history settings come from the paused request's last response. Every resume streams its requests,
-    as Agno's continuation did. The first resume builds the run's hooks and each continuation after a delegation
-    reuses them, as a team's resume reuses its leader's, so what a hook keeps for the run spans them: the approval
-    receipt goes with the run's first resumed request only.
+    as Agno's continuation did. A resume that answers the run's own paused calls with an approval's decisions makes
+    the run a reader of that approval's receipt.
     """
 
     build: AgentBuild
@@ -192,7 +185,6 @@ class ResumeRunner:
     session: ConversationSession
     scope: HistoryScope
     user_id: str | None
-    _run_hooks: _RunHooks = field(default_factory=_RunHooks, init=False, repr=False, compare=False)
 
     def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
         """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` as ``resume_agent``'s does."""
@@ -200,25 +192,23 @@ class ResumeRunner:
         plan = configured_replay_plan(history_settings=build.history_settings, estimated_tokens=0)
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
         native_compaction = native.native_compaction if native is not None else None
-        hooks = self._run_hooks.hooks
-        if hooks is None:
-            hooks = agent_loop_hooks(
-                build,
-                HookTurn(
-                    config=self.config,
-                    runtime_paths=self.runtime_paths,
-                    model_name=self.model_name,
-                    store=self.store,
-                    session=self.session,
-                    scope=self.scope,
-                    scoped=plan.add_history_to_context,
-                    native_compaction=native_compaction,
-                    prompt_id=None,
-                ),
-                agent_name=self.agent_name,
-                approval_receipt=True,
-            )
-            self._run_hooks.hooks = hooks
+        hooks = agent_loop_hooks(
+            build,
+            HookTurn(
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                model_name=self.model_name,
+                store=self.store,
+                session=self.session,
+                scope=self.scope,
+                scoped=plan.add_history_to_context,
+                native_compaction=native_compaction,
+                prompt_id=None,
+            ),
+            agent_name=self.agent_name,
+        )
+        if decisions.approved or decisions.denied:
+            add_approval_receipt_reader(paused.run_id)
         events = resume_from_session(
             build.spec,
             paused,
