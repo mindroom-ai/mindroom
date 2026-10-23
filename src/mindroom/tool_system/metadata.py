@@ -1058,15 +1058,7 @@ def _compute_resolved_tool_state_for_runtime(
         candidate_active_plugins: list[tuple[str, str]] = []
         tool_namespace_complete = plugin_base.tools_module_path is None
         try:
-            if plugin_base.tools_module_path is None:
-                if plugin_base.hooks_module_path is not None:
-                    _execute_validation_plugin_module(
-                        plugin_base.name,
-                        plugin_base.root,
-                        plugin_base.hooks_module_path,
-                        candidate_registrations,
-                    )
-            else:
+            if plugin_base.tools_module_path is not None:
                 tools_module_name = _execute_validation_plugin_module(
                     plugin_base.name,
                     plugin_base.root,
@@ -1075,16 +1067,13 @@ def _compute_resolved_tool_state_for_runtime(
                 )
                 candidate_active_plugins.append((plugin_base.name, tools_module_name))
                 tool_namespace_complete = True
-                if (
-                    plugin_base.hooks_module_path is not None
-                    and plugin_base.hooks_module_path != plugin_base.tools_module_path
-                ):
-                    _execute_validation_plugin_module(
-                        plugin_base.name,
-                        plugin_base.root,
-                        plugin_base.hooks_module_path,
-                        candidate_registrations,
-                    )
+            if plugin_base.hooks_module_path not in (None, plugin_base.tools_module_path):
+                _execute_validation_plugin_module(
+                    plugin_base.name,
+                    plugin_base.root,
+                    plugin_base.hooks_module_path,
+                    candidate_registrations,
+                )
         except Exception as exc:
             if not tolerate_plugin_load_errors:
                 raise
