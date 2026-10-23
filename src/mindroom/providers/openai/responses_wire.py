@@ -255,6 +255,8 @@ def _tool_dicts(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
     functions: list[dict[str, Any]] = []
     for tool in tools:
         definition: dict[str, Any] = {**function_definition(tool), "type": "function"}
+        # TODO(simplify): A top-level parameter's list `type` keeps only its first entry, so ["string", "null"] loses
+        # null, while nested schemas and Chat routes send the list. Send the schema unchanged. Models.
         for property_schema in definition.get("parameters", {}).get("properties", {}).values():
             if isinstance(property_schema, dict) and isinstance(property_schema.get("type"), list):
                 property_schema["type"] = property_schema["type"][0]
@@ -634,6 +636,8 @@ def parse_response(
                 },
             )
     parts.reasoning = _reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
+    # TODO(simplify): Only a blocking response stores response_status and incomplete_reason in provider_data, and
+    # nothing reads them. Store them on neither path. Stored data.
     parts.provider_data["response_status"] = response.status
     parts.provider_data["incomplete_reason"] = _incomplete_reason(response)
     _record_tool_search_items(parts, response.output)

@@ -205,6 +205,8 @@ def function_definition(tool: ToolSpec) -> dict[str, Any]:
         "description": tool.description,
         "parameters": deepcopy(dict(tool.parameters)),
         "strict": tool.strict,
+        # TODO(simplify): Tool definitions still send Agno's approval flags, which no OpenAI-family API reads. Send
+        # only the name, description, parameters, and strict. Provider request bodies and prompt caches (#3075).
         "requires_confirmation": tool.requires_confirmation,
         "external_execution": tool.external_execution,
         "approval_type": tool.approval_type,
@@ -661,5 +663,7 @@ def parse_chat_completion(completion: ChatCompletion, wire: ChatWire, *, provide
     parts.provider_data = _reply_metadata(completion)
     if wire.route == "openrouter" and (details := message_extra.get("reasoning_details")):
         parts.provider_data["reasoning_details"] = details
+    # TODO(simplify): Only a blocking reply stores its finish_reason in provider_data, and nothing reads it.
+    # Store it on neither path. Stored data.
     parts.provider_data["finish_reason"] = choice.finish_reason
     return parts
