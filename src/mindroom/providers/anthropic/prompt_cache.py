@@ -20,6 +20,7 @@ from mindroom.providers.anthropic.repairs import (
     with_replay_safe_tool_search_results,
     with_supported_inline_media,
     without_replayed_citations,
+    without_unavailable_tool_references,
 )
 from mindroom.providers.cache_ladder import (
     MAX_CACHE_MARKERS,
@@ -145,69 +146,6 @@ def _with_deferred_tool_search(body: dict[str, Any], deferred_tool_names: frozen
     return {**body, "tools": [{"type": TOOL_SEARCH_TOOL_TYPE, "name": TOOL_SEARCH_TOOL_NAME}, *kept, *deferred]}
 
 
-def _request_tool_names(body: dict[str, Any]) -> frozenset[str]:
-    return frozenset(
-        name
-        for tool in body.get("tools") or []
-        if (tool_dict := as_dict(tool)) is not None and isinstance(name := tool_dict.get("name"), str)
-    )
-
-
-def _search_result_with_available_references(
-    block: dict[str, Any],
-    available: frozenset[str],
-) -> dict[str, Any] | None:
-    """Return one search result without references to unavailable tools, or None when all are available."""
-    result = as_dict(block.get("content"))
-    references = result.get("tool_references") if result is not None else None
-    if result is None or not isinstance(references, list):
-        return None
-    kept = [
-        reference
-        for reference in references
-        if (reference_dict := as_dict(reference)) is not None and reference_dict.get("tool_name") in available
-    ]
-    if len(kept) == len(references):
-        return None
-    return {**block, "content": {**result, "tool_references": kept}}
-
-
-def _content_without_unavailable_references(content: list[Any], available: frozenset[str]) -> list[Any] | None:
-    """Return one turn's blocks with stale search references removed, or None when nothing changed."""
-    prepared: list[Any] | None = None
-    for index, block in enumerate(content):
-        block_dict = as_dict(block)
-        if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
-            continue
-        filtered = _search_result_with_available_references(block_dict, available)
-        if filtered is None:
-            continue
-        if prepared is None:
-            prepared = list(content)
-        prepared[index] = filtered
-    return prepared
-
-
-def _without_unavailable_tool_references(body: dict[str, Any]) -> dict[str, Any]:
-    """Drop replayed tool-search references to tools absent from this request.
-
-    A search result can reference tools a later request no longer offers, which Claude rejects. A search left
-    without references stays as an empty result, like a search that matched nothing, so the signed thinking
-    around it is not moved.
-    """
-    messages = body["messages"]
-    available = _request_tool_names(body)
-    prepared_messages: list[Any] | None = None
-    for message_index, message in enumerate(messages):
-        prepared_content = _content_without_unavailable_references(message["content"], available)
-        if prepared_content is None:
-            continue
-        if prepared_messages is None:
-            prepared_messages = list(messages)
-        prepared_messages[message_index] = {**message, "content": prepared_content}
-    return body if prepared_messages is None else {**body, "messages": prepared_messages}
-
-
 def _with_tool_choice(body: dict[str, Any], tool_choice: ToolChoice | None) -> dict[str, Any]:
     """Turn tool selection off for a ``"none"`` request that offers tools; the API rejects a choice without them.
 
@@ -239,7 +177,7 @@ def prepare_request_body(
     The input body is never mutated.
     """
     prepared = with_replay_safe_tool_search_results(body)
-    prepared = _without_unavailable_tool_references(prepared)
+    prepared = without_unavailable_tool_references(prepared)
     prepared = without_replayed_citations(prepared)
     prepared = with_leading_tool_results(prepared)
     prepared = with_supported_inline_media(
