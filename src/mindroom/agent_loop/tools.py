@@ -19,7 +19,6 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
     ToolArgumentError,
-    ToolCallContext,
     execute_tool_call,
     parse_tool_arguments,
 )
@@ -94,10 +93,6 @@ class PlannedCall:
     function: ToolFunction
     arguments: dict[str, Any] | None
     execution: ToolExecution
-
-    def context(self, run: RunContext) -> ToolCallContext:
-        """Return the call's execution context for ``run``."""
-        return ToolCallContext.of_run(run, self.call_id)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -217,7 +212,12 @@ async def dispatch_tool_calls(
 
 async def _timed(call: PlannedCall, run: RunContext, middleware: Sequence[ToolMiddleware]) -> tuple[ToolOutcome, float]:
     started = time.perf_counter()
-    outcome = await execute_tool_call(call.function, call.arguments, call.context(run), middleware=middleware)
+    outcome = await execute_tool_call(
+        call.function,
+        call.arguments,
+        run.call_context(call.call_id),
+        middleware=middleware,
+    )
     return outcome, time.perf_counter() - started
 
 
