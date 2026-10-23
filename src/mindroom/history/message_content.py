@@ -44,16 +44,16 @@ def _retained_viewed_images(messages: Sequence[Message]) -> set[tuple[int, int]]
     for message_index in reversed(range(len(messages))):
         images = messages[message_index].images or []
         for image_index in reversed(range(len(images))):
-            content = images[image_index].content
-            if not _is_viewed_image(images[image_index]) or not content:
+            image = images[image_index]
+            if not _is_viewed_image(image) or not image.content:
                 continue
             if (
                 len(retained) >= _MAX_HISTORY_VIEWED_IMAGES
-                or len(content) > _MAX_HISTORY_VIEWED_IMAGE_BYTES - retained_bytes
+                or len(image.content) > _MAX_HISTORY_VIEWED_IMAGE_BYTES - retained_bytes
             ):
                 continue
             retained.add((message_index, image_index))
-            retained_bytes += len(content)
+            retained_bytes += len(image.content)
     return retained
 
 
