@@ -49,7 +49,7 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 
 Use kind to spin up a throwaway local K8s cluster and install the platform chart for smoke testing and development.
 
-The `just cluster-kind-*` recipes require `just`, Nix (`nix-shell`), and a running Docker daemon.
+The `just cluster-kind-*` recipes require `just`, Nix (`nix-shell`), and a running Docker 28 or newer daemon.
 Each recipe enters `cluster/k8s/kind/shell.nix`, which supplies `kind`, `kubectl`, Helm, and the Docker client.
 
 - Quickstart with Nix:
@@ -61,7 +61,7 @@ Each recipe enters `cluster/k8s/kind/shell.nix`, which supplies `kind`, `kubectl
     - Backend: `just cluster-kind-port-backend` -> http://localhost:8000
     - Frontend: `just cluster-kind-port-frontend` -> http://localhost:3000
 
-With `kind`, `kubectl`, Helm, and Docker already installed, use the direct script from the repository root:
+With `kind`, `kubectl`, Helm, and Docker 28 or newer already installed, use the direct script from the repository root:
 
 ```bash
 bash cluster/k8s/kind/start-fresh.sh

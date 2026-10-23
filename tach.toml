@@ -1203,6 +1203,7 @@ visibility = [
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.approval.tool_approval",
+    "mindroom.commands.auto_approve_commands",
     "mindroom.tool_jobs.approvals",
 ]
 
@@ -1358,11 +1359,24 @@ depends_on = [
     "mindroom.message_target",
     "mindroom.reply_lifecycle",
     "mindroom.approval.tool_approval",
+    "mindroom.approval.auto_approve_windows",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.events",
 ]
 visibility = ["mindroom.response_runner", "mindroom.tool_jobs.approvals", "mindroom.delegation.job_approvals"]
+
+[[modules]]
+path = "mindroom.approval.auto_approve_windows"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.durable_write",
+]
+visibility = [
+    "mindroom.approval.response",
+    "mindroom.commands.auto_approve_commands",
+    "mindroom.orchestration.script_runtime",
+]
 
 [[modules]]
 path = "mindroom.approval.inbound"
@@ -1374,6 +1388,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
+    "mindroom.commands.auto_approve_commands",
     "mindroom.reaction_dispatch",
 ]
 
@@ -1394,6 +1409,7 @@ visibility = [
     "mindroom.approval.response",
     "mindroom.approval.transport",
     "mindroom.bot",
+    "mindroom.commands.auto_approve_commands",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.orchestration.script_runtime",
@@ -3050,6 +3066,7 @@ depends_on = [
     "mindroom.script_runs.store",
     "mindroom.script_runs.worker_client",
     "mindroom.approval.tool_approval",
+    "mindroom.approval.auto_approve_windows",
     "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.orchestrator"]
@@ -5055,6 +5072,17 @@ depends_on = [
 visibility = ["mindroom.commands.handler"]
 
 [[modules]]
+path = "mindroom.commands.auto_approve_commands"
+depends_on = [
+    "mindroom.approval.inbound",
+    "mindroom.approval.manager",
+    "mindroom.approval.tool_approval",
+    "mindroom.approval.auto_approve_windows",
+    "mindroom.matrix.event_types",
+]
+visibility = ["mindroom.commands.handler"]
+
+[[modules]]
 path = "mindroom.commands.encryption_commands"
 depends_on = [
     "mindroom.matrix.client_room_admin",
@@ -5087,6 +5115,7 @@ depends_on = [
     "mindroom.commands.parsing",
     "mindroom.commands.room_model_commands",
     "mindroom.commands.thread_mode_commands",
+    "mindroom.commands.auto_approve_commands",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.handled_turns",

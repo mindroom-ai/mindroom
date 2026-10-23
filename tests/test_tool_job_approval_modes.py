@@ -7,11 +7,13 @@ import json
 import time
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field, replace
+from datetime import timedelta
 from typing import TYPE_CHECKING, Literal
 
 import pytest
 
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ToolApprovalConfig
@@ -459,6 +461,39 @@ async def test_a_call_its_policy_approves_waits_like_any_call(tmp_path: Path, mo
                 run.gate.set()
                 response = await asyncio.wait_for(reply, JOB_TEST_TIMEOUT)
         assert (_tool_result(response), run.cards.requested) == ("wrote q3", [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window_thread", ["reply", "other"])
+async def test_a_job_call_skips_its_card_only_inside_the_requesters_auto_approve_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    window_thread: str,
+) -> None:
+    """A gated call that asks as its job runs unasked inside the window of the conversation its reply answers."""
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run:
+        threaded = replace(run.owner, thread_id="$thread", resolved_thread_id="$thread")
+        run.context = _delegate_runtime_context(run.config, run.paths, execution_identity=threaded)
+        assert threaded.requester_id is not None
+        start_auto_approve(
+            run.paths,
+            room_id=run.context.room_id,
+            thread_id="$thread" if window_thread == "reply" else "$other",
+            requester_id=threaded.requester_id,
+            duration=timedelta(minutes=5),
+        )
+        async with execution_resources():
+            with tool_runtime_context(run.context):
+                reply = asyncio.create_task(run.turn())
+                if window_thread == "other":
+                    await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+                    run.decide("denied")
+                response = await asyncio.wait_for(reply, JOB_TEST_TIMEOUT)
+        if window_thread == "reply":
+            assert (_tool_result(response), run.cards.requested, run.effects) == ("wrote q3", [], ["q3"])
+        else:
+            assert len(run.cards.requested) == 1
+            assert run.effects == []
 
 
 @pytest.mark.asyncio

@@ -494,6 +494,8 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
                 runtime_paths=coordinator.runtime_paths,
                 requester_id="@user:localhost",
                 toolkit_owners=origins,
+                room_id="!room:test",
+                thread_id="$thread",
             )
     else:
         plan = await plan_approval_calls(
@@ -502,5 +504,7 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
             runtime_paths=coordinator.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners=origins,
+            room_id="!room:test",
+            thread_id="$thread",
         )
         assert plan.calls[0].toolkit_name == "calculator"

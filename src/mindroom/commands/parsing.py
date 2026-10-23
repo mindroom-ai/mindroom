@@ -30,6 +30,7 @@ class CommandType(Enum):
     MODEL = "model"  # Per-thread model override command
     ROOM_MODEL = "room_model"  # Room-level model override command
     THREAD_MODE = "thread_mode"  # Room-level thread mode override command
+    AUTO_APPROVE = "auto_approve"  # Per-thread window that skips tool approval
     ENCRYPT = "encrypt"  # Room encryption enablement command
     E2EE = "e2ee"  # Encryption diagnostics command
     HI = "hi"  # Welcome message command
@@ -60,6 +61,10 @@ _COMMAND_DOCS = {
     CommandType.THREAD_MODE: (
         "!thread_mode [room|thread|reset|show]",
         "Show or switch the thread mode used in the current room (room admin only)",
+    ),
+    CommandType.AUTO_APPROVE: (
+        "!auto_approve [<minutes>|<hours>h|off]",
+        "Run your tool calls in this thread without approval for a while, or show or end that window",
     ),
     CommandType.ENCRYPT: (
         "!encrypt [confirm]",
@@ -140,6 +145,7 @@ class _CommandParser:
     MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
     ROOM_MODEL_PATTERN = re.compile(r"^!room[_-]?model(?:\s+(.+))?$", re.IGNORECASE)
     THREAD_MODE_PATTERN = re.compile(r"^!thread[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
+    AUTO_APPROVE_PATTERN = re.compile(r"^!auto[_-]?approve(?:\s+(.+))?$", re.IGNORECASE)
     ENCRYPT_PATTERN = re.compile(r"^!encrypt(?:\s+(.+))?$", re.IGNORECASE)
     E2EE_PATTERN = re.compile(r"^!e2ee$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
@@ -273,6 +279,14 @@ class _CommandParser:
             return Command(
                 type=CommandType.THREAD_MODE,
                 args={"args_text": args_text},
+                raw_text=message,
+            )
+
+        match = self.AUTO_APPROVE_PATTERN.match(message)
+        if match:
+            return Command(
+                type=CommandType.AUTO_APPROVE,
+                args={"args_text": (match.group(1) or "").strip()},
                 raw_text=message,
             )
 
@@ -519,6 +533,24 @@ How it works:
 - The override applies to future agent replies in the current Matrix room
 - The override is stored in MindRoom runtime state, not config.yaml
 - Only Matrix room admins can set or reset the override"""
+
+    if topic in {"auto_approve", "auto-approve", "autoapprove"}:
+        return """**Auto-Approve Command**
+
+Usage: `!auto_approve [<minutes>|<hours>h|off]` - Run your tool calls in this thread without approval for a while
+
+**Examples:**
+- `!auto_approve 30` - Skip approval cards for your tool calls in this thread for 30 minutes
+- `!auto_approve 2h` - Do the same for 2 hours (at most 24 hours)
+- `!auto_approve` - Show when the current window ends
+- `!auto_approve off` - End the window now
+
+How it works:
+- Every tool call you request in this thread runs without an approval card until the window ends
+- In a room without threads, the window covers the whole room
+- Approval cards already waiting for you in this thread are approved when you turn it on
+- Other people in the thread still approve their own calls
+- `!auto_approve off` does not stop auto-approval started from an approval card; stop that on the card"""
 
     # General help - dynamically generated from COMMAND_DOCS
     commands_text = "\n".join(_get_command_entries(format_code=True))

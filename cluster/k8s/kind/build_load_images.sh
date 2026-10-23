@@ -58,11 +58,25 @@ fi
 echo "[images] Pulling Tuwunel image..."
 docker pull "${TUWUNEL_IMAGE}"
 
-echo "[images] Loading images into kind cluster '${CLUSTER_NAME}'..."
-kind load docker-image "${PLATFORM_FRONTEND_IMAGE}" --name "${CLUSTER_NAME}"
-kind load docker-image "${PLATFORM_BACKEND_IMAGE}" --name "${CLUSTER_NAME}"
-kind load docker-image "${MINDROOM_IMAGE}" --name "${CLUSTER_NAME}"
-kind load docker-image "${TUWUNEL_IMAGE}" --name "${CLUSTER_NAME}"
+# Docker's containerd image store keeps a pulled image's multi-platform index without the other platforms' layers.
+# `kind load docker-image` imports every platform in that index and fails with "content digest ... not found" (kubernetes-sigs/kind#3795).
+# Exporting only the Docker host's platform gives kind a complete archive with either image store.
+DOCKER_PLATFORM="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')"
+IMAGE_ARCHIVE_DIR="$(mktemp -d)"
+trap 'rm -rf "${IMAGE_ARCHIVE_DIR}"' EXIT
+
+load_image() {
+  local archive="${IMAGE_ARCHIVE_DIR}/image.tar"
+  docker image save --platform "${DOCKER_PLATFORM}" --output "${archive}" "$1"
+  kind load image-archive "${archive}" --name "${CLUSTER_NAME}"
+  rm -f "${archive}"
+}
+
+echo "[images] Loading ${DOCKER_PLATFORM} images into kind cluster '${CLUSTER_NAME}'..."
+load_image "${PLATFORM_FRONTEND_IMAGE}"
+load_image "${PLATFORM_BACKEND_IMAGE}"
+load_image "${MINDROOM_IMAGE}"
+load_image "${TUWUNEL_IMAGE}"
 
 echo "[images] Done. Helm will use these images with imagePullPolicy=IfNotPresent."
 

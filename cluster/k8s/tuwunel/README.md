@@ -88,6 +88,13 @@ The callback URL defaults to `<clientBaseUrl>/_matrix/client/unstable/login/sso/
 `tuwunel.oidc.extraConfig` appends raw TOML inside the `[[global.identity_provider]]` block for less common options such as `userid_claims`, `trusted`, or `unique_id_fallbacks`.
 For multiple identity providers, use a fully custom config through `config.existingConfigMap`.
 
+## Server Admins
+
+The chart-rendered config turns off Tuwunel's `grant_admin_to_first_user`, so the first account to register or sign in does not become a server admin.
+To make your own account admin on a fresh install, set `tuwunel.settings.grant_admin_to_first_user: true`, register or sign in before any other account exists, including the agent accounts a token-paired runtime registers when it first starts, and remove the setting once you are admin.
+While it is on, the next account created while the server has no other admin becomes admin, and existing accounts are not promoted.
+Admins grant further admins with Tuwunel's `users make-user-admin` command.
+
 ## Structured Settings
 
 `tuwunel.settings` renders Tuwunel options into the `[global]` section of the chart-rendered `tuwunel.toml`.

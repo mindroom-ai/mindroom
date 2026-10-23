@@ -14,6 +14,7 @@ import inspect
 import json
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from functools import partial
 from itertools import count
 from types import SimpleNamespace
@@ -35,6 +36,7 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt_readers as approval_receipt
+from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.receipt import messages_with_approval_receipt
 from mindroom.approval.response import plan_approval_calls, require_ordered_pause_presentation
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
@@ -2803,6 +2805,8 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     continuation = approval_continuation(
@@ -2871,6 +2875,8 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     assert plan.calls[0].decision is response_runner.ContinuationDecision.DENIED
@@ -2904,6 +2910,8 @@ async def test_pause_plan_keeps_each_calls_approval_provenance(tmp_path: Path) -
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "publish_report"): "test_toolkit", ("general", "read_report"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     assert [call.human_approval_required for call in plan.calls] == [True, False]
@@ -2938,6 +2946,8 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
                 ("general", "conditional_read"): "test_toolkit",
                 ("general", "conditional_write"): "test_toolkit",
             },
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     continuation = approval_continuation(
@@ -2994,6 +3004,8 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous_one"): "test_toolkit", ("general", "dangerous_two"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     continuation = approval_continuation(
@@ -3090,6 +3102,74 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
     assert outcome.final_visible_body == paused.response_text
     assert outcome.delivery_kind == "edited"
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("window_thread_id", "card_expected"), [("$thread", False), ("$other", True)])
+async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_window_of_the_reply_thread(
+    tmp_path: Path,
+    window_thread_id: str,
+    card_expected: bool,
+) -> None:
+    """A reply's gated call runs unasked only when the window names the thread that reply answers in."""
+    bot = _bot(tmp_path)
+    bot.config.tool_approval = bot.config.tool_approval.model_copy(
+        update={"rules": [ApprovalRuleConfig(match="dangerous", action="require_approval")]},
+    )
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    start_auto_approve(
+        runner.deps.runtime_paths,
+        room_id="!room:localhost",
+        thread_id=window_thread_id,
+        requester_id="@user:localhost",
+        duration=timedelta(minutes=5),
+    )
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={}),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
+        ),
+    )
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+    retry_sources = Mock()
+    runner._approval_responses.retry_sources = retry_sources
+    approval_store = MagicMock(
+        prepare_detached_approval=AsyncMock(return_value=object()),
+        reserve_and_publish=AsyncMock(return_value=True),
+    )
+
+    with (
+        patch(
+            "mindroom.approval.response.resolve_tool_approval_approver",
+            return_value="@user:localhost",
+        ),
+        patch("mindroom.approval.response.approval_manager.get_approval_store", return_value=approval_store),
+    ):
+        async with _in_reply_span(runner, request):
+            outcome = await runner._suspend_for_approval(
+                paused,
+                request=request,
+                target=request.response_envelope.target,
+                execution_identity=identity,
+                entity_kind="agent",
+                history_scope=runner.deps.state_writer.history_scope(),
+                show_tool_calls=True,
+            )
+
+    if card_expected:
+        approval_store.prepare_detached_approval.assert_awaited_once()
+        assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING}
+    else:
+        approval_store.prepare_detached_approval.assert_not_awaited()
+        retry_sources.assert_called_once_with(request.room_id, ("$source",))
+        assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
 
 @pytest.mark.asyncio
@@ -3869,30 +3949,48 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
 
 
 @pytest.mark.parametrize(
-    ("gated_tools", "expected_text", "expected_state", "expected_cards"),
+    ("gated_tools", "window_thread_id", "expected_text", "expected_state", "expected_cards"),
     [
-        (set(), None, "ready", []),
-        ({"conditional_write"}, "Waiting for approval: `conditional_write`", "waiting", ["conditional_write"]),
+        (set(), None, None, "ready", []),
+        ({"conditional_write"}, None, "Waiting for approval: `conditional_write`", "waiting", ["conditional_write"]),
         (
             {"conditional_read", "conditional_write"},
+            None,
+            "Waiting for approval: `conditional_read`, `conditional_write`",
+            "waiting",
+            ["conditional_read", "conditional_write"],
+        ),
+        ({"conditional_read", "conditional_write"}, "$thread", None, "ready", []),
+        (
+            {"conditional_read", "conditional_write"},
+            "$other",
             "Waiting for approval: `conditional_read`, `conditional_write`",
             "waiting",
             ["conditional_read", "conditional_write"],
         ),
     ],
-    ids=["automatic", "mixed", "human"],
+    ids=["automatic", "mixed", "human", "auto-approve", "auto-approve-elsewhere"],
 )
 @pytest.mark.asyncio
 async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     tmp_path: Path,
     gated_tools: set[str],
+    window_thread_id: str | None,
     expected_text: str | None,
     expected_state: str,
     expected_cards: list[str],
 ) -> None:
-    """Every chained generation must durably expose only its unresolved calls."""
+    """Every chained generation must durably expose only its unresolved calls; the reply thread's window has none."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
+    if window_thread_id is not None:
+        start_auto_approve(
+            runner.deps.runtime_paths,
+            room_id="!room:localhost",
+            thread_id=window_thread_id,
+            requester_id="@user:localhost",
+            duration=timedelta(minutes=5),
+        )
     store = runner.deps.approval_store
     await _admit_approval_source(store)
     continuation = approval_continuation(
@@ -4073,6 +4171,8 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "native_confirmation"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     assert plan.calls[0].decision is None
@@ -4110,6 +4210,8 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", function.name): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     assert plan.calls[0].decision is ApprovalDecision.APPROVED
@@ -4161,6 +4263,8 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", function.name): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     assert plan.calls[0].decision is ApprovalDecision.APPROVED

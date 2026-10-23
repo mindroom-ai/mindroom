@@ -53,6 +53,8 @@ async def request_child_approvals(
         runtime_paths=runtime_paths,
         requester_id=owner.requester_id,
         toolkit_owners=paused.toolkit_owners,
+        room_id=owner.room_id,
+        thread_id=owner.resolved_thread_id,
     )
     runtime = get_background_runtime(runtime_paths)
     if runtime is None:

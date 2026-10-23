@@ -108,6 +108,8 @@ async def ask_tool_call_approval(
         runtime_paths=runtime_paths,
         requester_id=owner.requester_id or "",
         toolkit_owners={(owner.agent_name, name): call.tool.toolkit_name},
+        room_id=owner.room_id,
+        thread_id=owner.resolved_thread_id,
     )
     [decision] = await ask_job_approvals(
         runtime,

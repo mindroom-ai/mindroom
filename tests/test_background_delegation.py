@@ -11,13 +11,17 @@ import asyncio
 import json
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from mindroom import ai
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import RunContext
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -28,11 +32,13 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import delegation_child
+from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import prepare_child_turn, start_child_turn
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_recovery_lock
 from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import BackgroundApprovalDecision
+from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.tool_jobs.approvals import _approval_run_id
 from mindroom.tool_jobs.control import (
@@ -53,6 +59,7 @@ from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
+from tests.agent_loop.helpers import collect, spec, toolkit
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.scripted_agent_helpers import registered_toolkit
@@ -522,6 +529,77 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
             assert reports.effects == []
         finally:
             await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window_thread", ["$thread", "$other"])
+async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_auto_approve_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    window_thread: str,
+) -> None:
+    """A delegated child asks in its job's conversation, so the requester's window there approves its call."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        "@alice:example.org",
+        "!room:example.org",
+        "$thread",
+        "$thread",
+        "p",
+    )
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
+    cards.decision.set_result(BackgroundApprovalDecision("denied", "No."))
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+    start_auto_approve(
+        paths,
+        room_id="!room:example.org",
+        thread_id=window_thread,
+        requester_id="@alice:example.org",
+        duration=timedelta(minutes=5),
+    )
+
+    def write_report() -> str:
+        """Write the report."""
+        return "Report written"
+
+    child = job_child()
+    model = ScriptedModel([calls(tool_call("write_report", "w"))])
+    _, response = await collect(
+        run_agent(
+            spec(model, toolkit(write_report, name="file", requires_confirmation=True)),
+            [Message(role="user", content="Report")],
+            ctx=RunContext(run_id=child.run_id, session_id=child.session_id),
+        ),
+    )
+    finish = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await finish.wait()
+        return BackgroundOutcome("completed", "done")
+
+    await start_delegation_job(runtime, child, owner=identity, operation=operation)
+    try:
+        decisions, _reasons, _calls = await request_child_approvals(
+            child,
+            response,
+            {(child.child_agent_name, "write_report"): "file"},
+            owner=identity,
+            config=config,
+            runtime_paths=paths,
+        )
+    finally:
+        finish.set()
+        await runtime.shutdown()
+
+    inside = window_thread == "$thread"
+    assert decisions == {"w": inside}
+    assert len(cards.requested) == (0 if inside else 1)
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,7 @@ This page lists every command and fully covers `!help`, `!hi`, and `!config`; th
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
 | `!room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#thread_mode) |
+| `!auto_approve [<minutes>\|<hours>h\|off]` | Run your tool calls in this thread without approval for a while, or show or end that window | [Tool Approval](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) |
 | `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) | [Matrix](https://docs.mindroom.chat/matrix/#encrypt) |
 | `!e2ee` | Show encryption diagnostics for this room | [Matrix](https://docs.mindroom.chat/matrix/#e2ee) |
 | `!config <operation>` | View and modify configuration (disabled by default, platform administrators only) | [`!config`](#config) |
@@ -52,7 +53,7 @@ Any other command sent by an agent for you is refused with `❌ Agents cannot ru
 !help config
 ```
 
-**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
+**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `auto_approve`, `auto-approve`, `autoapprove`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 Any other topic shows the general command list.
 

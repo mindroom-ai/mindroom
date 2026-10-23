@@ -107,6 +107,7 @@ The homeserver can still see:
 
 - Metadata: room membership, timestamps, event IDs, sender IDs, and traffic patterns.
 - Plaintext of any room that is not encrypted.
+- Room state, which Matrix never encrypts: room names and topics, and MindRoom's scheduled tasks with their prompts, thread tags, and background job lists.
 
 Model and tool providers see whatever prompts and data you send them.
 See the [Matrix E2EE guide](https://matrix.org/docs/matrix-concepts/end-to-end-encryption/) for device discovery and verification.
