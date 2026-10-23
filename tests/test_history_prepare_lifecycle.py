@@ -840,11 +840,7 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     summary = SessionSummary(summary="critical work detail " * 500, updated_at=datetime.now(UTC))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    summary_tokens = estimate_prompt_visible_history_tokens(
-        session=_session("session-1", runs=[], summary=summary),
-        scope=scope,
-        history_settings=_ALL_HISTORY_SETTINGS,
-    )
+    summary_tokens = estimate_summary_tokens(_session("session-1", runs=[], summary=summary))
     session = _session(
         "session-1",
         runs=[
@@ -856,7 +852,8 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
         summary=summary,
     )
     seed_session(storage, session)
-    trigger_budget = summary_tokens - 1
+    # A summary exactly at the trigger already leaves no room for anything compaction keeps.
+    trigger_budget = summary_tokens
     execution_plan = ResolvedHistoryExecutionPlan(
         authored_compaction_enabled=True,
         text_compaction_available=True,
@@ -897,7 +894,7 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
         )
 
     assert prepared.compaction_decision.mode == "none"
-    assert prepared.compaction_decision.reason == "summary_over_trigger"
+    assert prepared.compaction_decision.reason == "trigger_unreachable"
     summary_mock.assert_not_awaited()
 
 
