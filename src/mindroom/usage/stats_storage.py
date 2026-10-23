@@ -194,7 +194,7 @@ def discover_self_usage_sources(
     if resolved.execution.is_private:
         worker_key = resolved.execution.worker_key
         if worker_key is None:
-            return (_diagnostic("self", "partial", "source discovery unavailable"),)
+            return (_discovery_unavailable("self"),)
         relative = names.database_path(Path("private_instances") / worker_dir_name(worker_key) / agent_name)
         scope: _UsageStorageScope = "private_agent"
     else:
@@ -202,7 +202,7 @@ def discover_self_usage_sources(
         scope = "shared_agent"
     candidate = _safe_candidate(session_root, relative)
     if candidate is None or candidate != database.expanduser().resolve():
-        return (_diagnostic("self", "partial", "source discovery unavailable"),)
+        return (_discovery_unavailable("self"),)
     return (
         _source(
             path=candidate,
@@ -242,7 +242,7 @@ def discover_private_usage_sources(
                     execution_identity=identity,
                 )
             except (OSError, ValueError):
-                agent_sources = (_diagnostic("self", "partial", "source discovery unavailable"),)
+                agent_sources = (_discovery_unavailable("self"),)
             for source in agent_sources:
                 if isinstance(source, UsageStorageDiagnostic):
                     diagnostic = replace(
@@ -299,9 +299,7 @@ def _shared_agent_sources(
         relative = TableNames(agent_name).database_path(Path("agents") / agent_name)
         candidate = _safe_candidate(root, relative)
         if candidate is None:
-            sources.append(
-                _diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="shared_agent"),
-            )
+            sources.append(_discovery_unavailable(relative.as_posix(), "shared_agent"))
             continue
         sources.append(
             _source(
@@ -321,11 +319,9 @@ def _private_agent_sources(
     config: Config,
     state_root: Path,
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
-    private_root = root / "private_instances"
-    directory_entries = _directory_entries(private_root)
-    if isinstance(directory_entries, UsageStorageDiagnostic):
-        return [replace(directory_entries, scope="private_agent")]
-    entries = directory_entries
+    entries = _directory_entries(root / "private_instances")
+    if isinstance(entries, UsageStorageDiagnostic):
+        return [replace(entries, scope="private_agent")]
     private_agents = tuple(name for name, agent in config.agents.items() if agent.private is not None)
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     for worker_directory in entries:
@@ -334,14 +330,7 @@ def _private_agent_sources(
         if worker_directory.is_symlink() and is_verified_private_instance_alias(state_root, worker_directory):
             continue  # Its canonical directory is scanned separately.
         if worker_directory.is_symlink() or not worker_directory.is_dir():
-            sources.append(
-                _diagnostic(
-                    worker_directory.relative_to(root).as_posix(),
-                    "partial",
-                    "source discovery unavailable",
-                    scope="private_agent",
-                ),
-            )
+            sources.append(_discovery_unavailable(worker_directory.relative_to(root).as_posix(), "private_agent"))
             continue
         # Ownership lives with runtime state, even when sessions use a separate root.
         try:
@@ -357,9 +346,7 @@ def _private_agent_sources(
             )
             candidate = _safe_candidate(root, relative)
             if candidate is None:
-                sources.append(
-                    _diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="private_agent"),
-                )
+                sources.append(_discovery_unavailable(relative.as_posix(), "private_agent"))
                 continue
             if not candidate.is_file():
                 continue
@@ -381,10 +368,9 @@ def _team_sources(
     root: Path,
     config: Config,
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
-    directory_entries = _directory_entries(root / "teams")
-    if isinstance(directory_entries, UsageStorageDiagnostic):
-        return [directory_entries]
-    entries = directory_entries
+    entries = _directory_entries(root / "teams")
+    if isinstance(entries, UsageStorageDiagnostic):
+        return [entries]
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     for directory in entries:
         storage_name = directory.name
@@ -393,7 +379,7 @@ def _team_sources(
         relative = TableNames(storage_name).database_path(Path("teams") / storage_name)
         candidate = _safe_candidate(root, relative)
         if candidate is None:
-            sources.append(_diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="team"))
+            sources.append(_discovery_unavailable(relative.as_posix(), "team"))
             continue
         if not directory.is_dir() or not candidate.is_file():
             continue
@@ -416,13 +402,13 @@ def _directory_entries(path: Path) -> tuple[Path, ...] | UsageStorageDiagnostic:
     except FileNotFoundError:
         return ()
     except OSError:
-        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
+        return _discovery_unavailable("admin discovery")
     if path.is_symlink() or not path.is_dir():
-        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
+        return _discovery_unavailable("admin discovery")
     try:
         entries = tuple(path.iterdir())
     except OSError:
-        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
+        return _discovery_unavailable("admin discovery")
     return tuple(sorted(entries, key=lambda entry: entry.name))
 
 
@@ -793,14 +779,8 @@ def _bounded_string(value: str) -> str:
     return value
 
 
-def _diagnostic(
-    path_label: str,
-    status: Literal["partial"],
-    detail: str,
-    *,
-    scope: _UsageStorageScope | None = None,
-) -> UsageStorageDiagnostic:
-    return UsageStorageDiagnostic(path_label=path_label, status=status, detail=detail, scope=scope)
+def _discovery_unavailable(path_label: str, scope: _UsageStorageScope | None = None) -> UsageStorageDiagnostic:
+    return UsageStorageDiagnostic(path_label, "partial", "source discovery unavailable", scope)
 
 
 def _source_diagnostic(
