@@ -197,6 +197,14 @@ def native_checkpoint_id(message: Message) -> str | None:
     return message.id
 
 
+def checkpoint_summary(message: Message) -> str | None:
+    """Return the readable text of the message's checkpoint, whatever its route; encrypted checkpoints have none."""
+    state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
+    items = checkpoint_items(message, state.get("route")) if isinstance(state, dict) else []
+    content = items[0].get("content") if items else None
+    return content if isinstance(content, str) else None
+
+
 def native_replay_messages(messages: Sequence[Message], route: str | None) -> list[Message]:
     """Project the latest checkpoint plus tail, retaining current system messages."""
     last = next(

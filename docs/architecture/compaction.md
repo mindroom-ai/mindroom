@@ -37,6 +37,9 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 - The fold's in-memory effects (the request rewrite, the recorder's folded tool calls, the folded requests' usage in run metadata, and the live session summary) and its success notice happen together with its commit, even when the turn is cancelled meanwhile, so a stopped reply never reports a stored fold as failed.
   An interrupted record therefore leaves out exactly the calls the stored summary holds; its write also reads that set from the run's summary rows, so paths without a turn recorder and a restarted CLI approval recovery leave them out too.
 - A fold survives a crash of its turn: the restarted attempt replays its summary and knows which tool calls already ran and what they returned, and an edit or redaction of the turn's message still removes it through its segment.
+- Text compaction starts from the latest readable native checkpoint, because the provider already summarized everything its request replayed, and re-summarizing that history after a model switch took a local model over an hour.
+  The checkpoint's text also covers its own run's prompt, so the summary built on it always folds that run; an edit or redaction of the prompt then removes that summary with the run.
+- A summary input that shrank after a failure keeps that size for the compaction's later chunks, because they would otherwise repeat the failure, and a slow model spends its whole timeout on each one; a chunk still grows to hold its first run whole.
 - A request without persisted replay (team members, workflow participants, scheduled tasks with `history_limit: 0`) compacts run-locally: its summary is an ordinary message of its own run and is stored with it.
 
 ## Limitations

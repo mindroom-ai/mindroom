@@ -160,6 +160,22 @@ def minimum_summary_input_tokens(
     return token_estimator(_compose_summary_input(summary_block, minimal_excerpt)) + _WRAPPER_OVERHEAD_TOKENS
 
 
+def whole_run_input_tokens(
+    *,
+    previous_summary: str | None,
+    first_run: RunOutput | TeamRunOutput,
+    history_settings: ResolvedHistorySettings,
+    token_estimator: Callable[[str], int],
+) -> int:
+    """Return the smallest budget at which ``build_summary_input`` holds ``first_run`` whole after the prior summary."""
+    empty_input = _compose_summary_input(_previous_summary_block(previous_summary), "")
+    return (
+        token_estimator(empty_input)
+        + _WRAPPER_OVERHEAD_TOKENS
+        + token_estimator(_serialize_run(first_run, 0, history_settings))
+    )
+
+
 def _serialize_oversized_run_excerpt(
     run: RunOutput | TeamRunOutput,
     *,

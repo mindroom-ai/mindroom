@@ -2582,6 +2582,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.logging_config",
+    "mindroom.native_compaction",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
@@ -2633,6 +2634,7 @@ visibility = [
     "mindroom.providers.openai_response_replay",
     "mindroom.providers.vertex_claude_compat",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.compaction",
 ]
 
 [[modules]]
