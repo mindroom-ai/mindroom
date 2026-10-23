@@ -1099,20 +1099,10 @@ def _user_breakdown(usage: _ModelUsageAccumulator) -> tuple[UsageUserBreakdownRo
     return tuple(sorted(rows, key=lambda row: (-row.totals.total_tokens, row.user_id or "")))
 
 
-def _model_breakdown(
-    buckets: Mapping[tuple[str, str], _Aggregate],
-) -> tuple[UsageModelBreakdownRow, ...]:
+def _model_breakdown(buckets: Mapping[tuple[str, str], _Aggregate]) -> tuple[UsageModelBreakdownRow, ...]:
     return tuple(
-        UsageModelBreakdownRow(
-            model_provider=key[0],
-            model=key[1],
-            totals=aggregate.totals,
-            run_count=aggregate.count,
-        )
-        for key, aggregate in sorted(
-            buckets.items(),
-            key=lambda item: (-item[1].totals.total_tokens, item[0]),
-        )
+        UsageModelBreakdownRow(provider, model, aggregate.totals, aggregate.count)
+        for (provider, model), aggregate in _largest_first(buckets)
     )
 
 
@@ -1120,17 +1110,13 @@ def _cumulative_model_breakdown(
     buckets: Mapping[tuple[str, str], _Aggregate],
 ) -> tuple[UsageCumulativeModelBreakdownRow, ...]:
     return tuple(
-        UsageCumulativeModelBreakdownRow(
-            model_provider=key[0],
-            model=key[1],
-            totals=aggregate.totals,
-            session_count=aggregate.count,
-        )
-        for key, aggregate in sorted(
-            buckets.items(),
-            key=lambda item: (-item[1].totals.total_tokens, item[0]),
-        )
+        UsageCumulativeModelBreakdownRow(provider, model, aggregate.totals, aggregate.count)
+        for (provider, model), aggregate in _largest_first(buckets)
     )
+
+
+def _largest_first(buckets: Mapping[tuple[str, str], _Aggregate]) -> list[tuple[tuple[str, str], _Aggregate]]:
+    return sorted(buckets.items(), key=lambda item: (-item[1].totals.total_tokens, item[0]))
 
 
 def _add_model_totals(
