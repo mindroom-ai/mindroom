@@ -1364,20 +1364,16 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
         required_tool_names=required_tool_names,
     )
-    hidden_toolkits = _context_hidden_toolkits(execution_identity)
-    resolved_tool_configs = {entry.name: entry for entry in dynamic_tool_selection.runtime_tool_configs}
-    if disable_runtime_capabilities:
-        resolved_tool_configs = {}
-    elif disabled_tool_names:
-        resolved_tool_configs = {
-            tool_name: entry
-            for tool_name, entry in resolved_tool_configs.items()
-            if tool_name not in disabled_tool_names
+    excluded_tool_names = disabled_tool_names | _context_hidden_toolkits(execution_identity)
+    resolved_tool_configs = (
+        {}
+        if disable_runtime_capabilities
+        else {
+            entry.name: entry
+            for entry in dynamic_tool_selection.runtime_tool_configs
+            if entry.name not in excluded_tool_names
         }
-    if hidden_toolkits:
-        resolved_tool_configs = {
-            tool_name: entry for tool_name, entry in resolved_tool_configs.items() if tool_name not in hidden_toolkits
-        }
+    )
     deferred_configs = {}
     if minimal_mode:
         complete = visible_tool_surface(
@@ -1389,9 +1385,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         deferred_configs = {
             entry.name: entry
             for entry in complete.runtime_tool_configs
-            if entry.name not in resolved_tool_configs
-            and entry.name not in hidden_toolkits
-            and entry.name not in disabled_tool_names
+            if entry.name not in resolved_tool_configs and entry.name not in excluded_tool_names
         }
     with _agent_create_timing("resolve_worker_tools"):
         worker_tools = resolve_runtime_worker_tools(
