@@ -26,7 +26,7 @@ from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.errors import RateLimited
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelIdentity, TextDelta, UsageReported
+from mindroom.llm.provider import ModelIdentity, ModelRequest, TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -491,6 +491,27 @@ async def test_an_approved_call_resumes_into_agno_s_approved_row() -> None:
     # The resume request repeats the paused request, system message first.
     assert [message.role for message in model.requests[0].messages] == ["system", "user", "assistant", "tool"]
     assert model.requests[0].messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking-template", "streaming-template"])
+async def test_a_resume_streams_its_requests_even_when_its_template_does_not(stream: bool) -> None:
+    """Every resume streams its requests, as every continuation of the Agno-backed runtime did."""
+    paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
+    model = _model("code-model", answer("6 x 7 = 42."))
+
+    await collect(
+        resume_agent(
+            _agent(model, [_gated_calculator()]),
+            paused,
+            build_resume_request(paused=paused.messages, summary=None, history=[]),
+            approved=[_approval("call-multiply", "multiply", {"a": 6, "b": 7})],
+            ctx=context(run_id=paused.run_id, session_id=paused.session_id or "session"),
+            request_template=ModelRequest(messages=(), stream=stream),
+        ),
+    )
+
+    assert [request.stream for request in model.requests] == [True]
 
 
 @pytest.mark.asyncio

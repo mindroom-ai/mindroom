@@ -22,7 +22,7 @@ from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelRequest
+from mindroom.llm.provider import Capabilities
 from mindroom.llm.runs import RunStatus
 from mindroom.mid_turn import QueuedMessage
 from tests.agent_loop.helpers import collect, context, gated, spec
@@ -58,9 +58,8 @@ def _hooks() -> LoopHooks:
     )
 
 
-@pytest.mark.parametrize("stream", [False, True], ids=["response", "stream"])
 @pytest.mark.asyncio
-async def test_approved_batch_notifies_next_real_model_request(*, stream: bool) -> None:
+async def test_approved_batch_notifies_next_real_model_request() -> None:
     """A queued follow-up reaches the model once, after every resumed tool result and the receipt."""
     state = _QueuedState()
     executed: list[int] = []
@@ -106,15 +105,12 @@ async def test_approved_batch_notifies_next_real_model_request(*, stream: bool) 
                     approved=approved,
                     ctx=context(),
                     hooks=_hooks(),
-                    request_template=ModelRequest(messages=(), stream=stream),
                 ),
             )
 
     assert resumed.status is RunStatus.completed
     assert executed == [1, 2]
-    [first, request] = model.requests
-    assert first.stream is True
-    assert request.stream is stream
+    [_, request] = model.requests
     messages = request.messages
     assert any(message.role == "system" and "Trusted approval receipt." in str(message.content) for message in messages)
     assert [message.tool_call_id for message in messages if message.role == "tool"] == ["call-1", "call-2"]

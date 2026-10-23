@@ -1038,6 +1038,60 @@ async def test_an_approved_resume_shows_a_failed_member_s_redacted_reason(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("leader", "checker", "writer", "body"),
+    [
+        pytest.param(
+            [answer("Done.")],
+            [[TextDelta("Touched it, now checking"), Await(_checker_leaks_its_key)]],
+            [],
+            "**Checker**: Touched it, now checking\n\nChecker unavailable: api_key=***redacted***\n\n\n"
+            "**Team Consensus**:\n\nDone.",
+            id="failed-after-writing",
+        ),
+        pytest.param(
+            [
+                delegate("call-draft", "writer", "Draft it"),
+                delegate("call-revise", "writer", "Revise it"),
+                answer("Done."),
+            ],
+            [answer("Touched.")],
+            [answer("Draft."), [Await(_writer_leaks_its_key)]],
+            "**Writer**: Draft.\n\nWriter unavailable: api_key=***redacted***\n\n**Checker**: Touched.\n\n\n"
+            "**Team Consensus**:\n\nDone.",
+            id="failed-after-an-earlier-run-wrote",
+        ),
+    ],
+)
+async def test_an_approved_resume_shows_a_failed_run_s_reason_after_the_text_its_member_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leader: list[list[ScriptStep]],
+    checker: list[list[ScriptStep]],
+    writer: list[list[ScriptStep]],
+    body: str,
+) -> None:
+    """A member run that fails in an approval resume shows why in its own paragraph, after the text its slot holds.
+
+    The approved checker streams part of an answer before its request fails. The writer the resumed leader hands two
+    tasks answers the first and fails the second before writing anything; the first run's answer stays.
+    """
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel(leader)
+    team.models["checker-model"] = ScriptedModel(checker)
+    team.models["writer-model"] = ScriptedModel(writer)
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert ProbeToolkit.calls == ["dangerous"]
+    assert result.response_text == HEADER + body
+
+
+@pytest.mark.asyncio
 async def test_an_approved_resume_shows_once_the_text_its_runs_wrote_before_the_pause(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

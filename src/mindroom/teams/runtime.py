@@ -24,6 +24,7 @@ from mindroom.agent_loop.run import (
     plan_resume,
     prepare_resume_tools,
     resume_planned,
+    resume_request_template,
     resumed_record,
     run_agent,
 )
@@ -149,7 +150,8 @@ def continue_team(
     must name a waiting call, else ``ValueError`` here before anything runs.
     A member that completes hands the leader its text in Agno's member-results message, which replaces every
     delegation result that waited on a member; a member that pauses again keeps the team paused, with its new
-    requirements on the team run, and the leader sends no request.
+    requirements on the team run, and the leader sends no request. The leader's and the members' requests stream
+    (``resume_request_template``).
     """
     record = resumed_record(paused)
     record.member_responses = []
@@ -168,9 +170,10 @@ def continue_team(
     )
     prepare_resume_tools(_base_leader_spec(spec), leader.approved)
     decisions.require_consumed()
+    template = resume_request_template(request_template)
 
     async def produce(emit: Emit) -> None:
-        stream = request_template.stream
+        stream = template.stream
         members = _MemberRuns(spec, record, ctx, emit, persist, stream=stream)
         leader = _leader_spec(spec, record, members.run, stream=stream)
         prepared = prepare_run_tools(leader)
@@ -196,7 +199,7 @@ def continue_team(
                 ctx=ctx,
                 hooks=hooks,
                 persist=persist,
-                template=request_template,
+                template=template,
                 entry=entry,
                 resumed=decided,
                 pause_content=team_paused_content,

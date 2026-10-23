@@ -178,9 +178,9 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     assert checker_request.messages[-1].content == "Alice declined."
 
 
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streaming"])
-async def test_a_resumed_member_s_requests_stream_exactly_when_the_resume_does(stream: bool) -> None:
-    # Agno continued each paused member with the team continuation's own ``stream``.
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking-template", "streaming-template"])
+async def test_a_team_resume_streams_the_leader_s_and_the_resumed_member_s_requests(stream: bool) -> None:
+    # Every continuation of the Agno-backed runtime streamed, and Agno continued each paused member with its team's.
     paused = _paused_team_approved()
     leader = scripted("leader-model", answer("The checker found 42.", usage(1, 1)))
     checker = scripted("checker-model", answer("42", usage(1, 1)))
@@ -199,7 +199,7 @@ async def test_a_resumed_member_s_requests_stream_exactly_when_the_resume_does(s
     )
 
     assert record.status is RunStatus.completed
-    assert [request.stream for request in (*checker.requests, *leader.requests)] == [stream, stream]
+    assert [request.stream for request in (*checker.requests, *leader.requests)] == [True, True]
 
 
 async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_results_as_agno_did() -> None:

@@ -61,5 +61,4 @@ class CompactContextTools(Toolkit):
             active_model_name=runtime_context.active_model_name if runtime_context is not None else None,
             room_id=runtime_context.room_id if runtime_context is not None else None,
             session_state=run_context.session_state if run_context is not None else None,
-            record_pending_scope_in_session_state=run_context is not None,
         )

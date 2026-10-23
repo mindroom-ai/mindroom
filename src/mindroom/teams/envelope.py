@@ -677,8 +677,7 @@ class _TeamTurn:
                     storage=storage,
                     records=attempt.records,
                     hooks=leader.hooks,
-                    # A delegation continuation streams its requests even in a blocking turn, as Agno's did.
-                    request_template=replace(leader.request_template, stream=True),
+                    request_template=leader.request_template,
                     settings=team_history_settings(config, self.configured_team_name),
                     plan=prepared.prepared_history.replay_plan,
                     user_id=self.user_id,

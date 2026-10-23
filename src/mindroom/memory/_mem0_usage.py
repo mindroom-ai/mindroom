@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message, model_provenance
+from mindroom.llm.messages import Message, model_provenance, read_model_provenance
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 
@@ -110,15 +110,16 @@ def mem0_usage_run(calls: list[Message]) -> RunRecord | None:
     """Return the calls as one run to record, or None when none reported tokens."""
     if not calls:
         return None
-    # One memory write runs every call on the configured memory model.
-    model = cast("dict[str, dict[str, str]]", calls[0].provider_data)[MODEL_PROVENANCE_KEY]
+    # One memory write runs every call on the configured memory model, which each call's message records.
+    model = read_model_provenance(calls[0].provider_data)
+    assert model is not None
     metrics = RunMetrics()
     for call in calls:
-        metrics.add(call.metrics, model_id=model["id"], provider=model["provider"])
+        metrics.add(call.metrics, model_id=model.model_id, provider=model.provider)
     return RunRecord(
         run_id=uuid4().hex,
-        model=model["id"],
-        model_provider=model["provider"],
+        model=model.model_id,
+        model_provider=model.provider,
         created_at=calls[0].created_at,
         metrics=metrics,
         messages=calls,

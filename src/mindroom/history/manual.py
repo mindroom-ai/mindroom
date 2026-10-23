@@ -33,12 +33,11 @@ def request_compaction_before_next_reply(
     active_model_name: str | None = None,
     room_id: str | None = None,
     session_state: dict[str, object] | None = None,
-    record_pending_scope_in_session_state: bool = False,
 ) -> str:
     """Schedule text compaction before the next reply in ``scope``, the history scope the running entity stores to.
 
-    Return the message the caller reports. ``record_pending_scope_in_session_state`` also records the request in
-    ``session_state``, the dict the run's tools share, in place.
+    Return the message the caller reports. When ``session_state``, the dict the run's tools share, is given, the
+    request is also recorded in it, in place.
     """
     with open_resolved_scope_session_context(
         scope=scope,
@@ -82,7 +81,7 @@ def request_compaction_before_next_reply(
             update=lambda latest: replace(latest, force_compact_before_next_run=True),
         )
 
-        if record_pending_scope_in_session_state:
+        if session_state is not None:
             add_pending_force_compaction_scope(session_state, scope_context.scope)
         logger.info(
             "Manual compaction scheduled",

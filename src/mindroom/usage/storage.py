@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY, read_model_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -184,10 +184,10 @@ def project_requests(messages: object) -> list[dict[str, object]] | None:
                 "metrics": request_metrics,
             }
             if isinstance(provider_data, dict) and MODEL_PROVENANCE_KEY in provider_data:
-                model = cast("dict[str, object]", provider_data)[MODEL_PROVENANCE_KEY]
-                for source, target in (("id", "model"), ("provider", "model_provider")):
-                    value = cast("dict[str, object]", model).get(source) if isinstance(model, dict) else None
-                    request[target] = value if isinstance(value, str) else False
+                # A recorded model of another shape stays visible to the reporter as invalid attribution.
+                model = read_model_provenance(cast("dict[str, object]", provider_data))
+                request["model"] = model.model_id if model is not None else False
+                request["model_provider"] = model.provider if model is not None else False
             requests.append(request)
     return requests
 
