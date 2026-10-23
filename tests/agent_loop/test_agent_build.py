@@ -369,11 +369,11 @@ def test_owners_follow_the_run_selection_in_any_offer_order(*, generated_first: 
     if not generated_first:
         offered.reverse()
 
-    owners = agents_module._offered_entries(offered)
+    owned = agents_module._offered_entries(offered)
     functions = prepare_run_tools(spec(ScriptedModel([]), *(adapted for _entry, adapted in offered))).functions
 
     assert (functions["search_knowledge_base"] is generated.functions[0]) is generated_first
-    assert owners == ({} if generated_first else {"search_knowledge_base": entry})
+    assert owned == ([] if generated_first else [(entry, entry.adapted.functions[0])])
 
 
 def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp_path: Path) -> None:

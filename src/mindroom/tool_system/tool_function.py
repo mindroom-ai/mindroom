@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.llm.provider import ToolSpec
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Mapping
+    from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.tool_system.invocation import ToolMiddleware
@@ -84,6 +84,24 @@ class AdaptedToolkit:
     instructions: str | None
     guidance: str | None = None
     connect: ToolkitConnect | None = None
+
+
+def first_of_each_name[T](
+    pairs: Iterable[tuple[T, ToolFunction]],
+    on_dropped: Callable[[T, ToolFunction], None] | None = None,
+) -> Iterator[tuple[T, ToolFunction]]:
+    """Yield the pairs whose function is the first of its name, in order, the selection a run offers.
+
+    Each later pair of a taken name is dropped, as Agno dropped it, and passed to ``on_dropped``.
+    """
+    names: set[str] = set()
+    for source, function in pairs:
+        if function.name in names:
+            if on_dropped is not None:
+                on_dropped(source, function)
+            continue
+        names.add(function.name)
+        yield source, function
 
 
 async def connect_toolkits(toolkits: Iterable[AdaptedToolkit], closes: list[ToolkitClose]) -> None:

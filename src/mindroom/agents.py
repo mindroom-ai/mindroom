@@ -15,7 +15,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import PromptSpec, model_note_for
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.agent_loop.tools import first_of_each_name, prepare_run_tools
+from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.approval.tool_approval import (
     JOB_APPROVAL_TYPE,
     POLICY_CONFIRMATION_APPROVAL_TYPE,
@@ -78,7 +78,7 @@ from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
-from mindroom.tool_system.tool_function import AdaptedToolkit
+from mindroom.tool_system.tool_function import AdaptedToolkit, first_of_each_name
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.toolkit_connections import is_unconnected_mcp_toolkit, run_connection
 from mindroom.tool_system.worker_routing import (
@@ -91,7 +91,7 @@ from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from contextlib import AbstractContextManager
 
     from mindroom.agent_modes import AgentMode
@@ -160,6 +160,8 @@ class _ToolkitEntry:
 
 # A toolkit a run offers, with its entry, or None for one generated beside the assembled toolkits.
 type _OfferedToolkit = tuple[_ToolkitEntry | None, AdaptedToolkit]
+# One function a run offers from a configured toolkit, with that toolkit's entry.
+type _OfferedFunction = tuple[_ToolkitEntry, ToolFunction]
 
 
 @dataclass(frozen=True)
@@ -631,14 +633,15 @@ def _build_registered_agent_tool(
 
 def _log_toolkits_without_offered_functions(
     entries: Sequence[_ToolkitEntry],
-    offered: Mapping[str, _ToolkitEntry],
+    offered: Sequence[_OfferedFunction],
     *,
     agent_name: str,
 ) -> None:
     """Warn when a run offers no function of a configured toolkit because earlier toolkits took every name."""
+    offering = {id(entry) for entry, _function in offered}
     for entry in entries:
         function_names = sorted(function.name for function in entry.adapted.functions)
-        if function_names and all(offered.get(name) is not entry for name in function_names):
+        if function_names and id(entry) not in offering:
             logger.warning(
                 "Configured toolkit exposes no unique model functions because function names collide",
                 agent=agent_name,
@@ -1847,10 +1850,8 @@ def team_background_jobs(
     )
     entry = _job_controls_entry(controls)
     # The job tools come from the selection a run of the controls makes: one function and one source per name.
-    functions = {
-        function.name: function
-        for _entry, function in first_of_each_name((entry, function) for function in entry.adapted.functions)
-    }
+    offered = _offered_entries(((entry, entry.adapted),))
+    functions = {function.name: function for _entry, function in offered}
     control_names = frozenset(functions)
 
     async def control_hooks(call: ToolCall, call_next: ToolNext) -> object:
@@ -1864,7 +1865,7 @@ def team_background_jobs(
         team=True,
         depth=0,
         # A team has no execution scope of its own, so its calls run under the grants of the work around them.
-        tools=assembled_job_tools(functions, _job_sources(dict.fromkeys(functions, entry)), {}),
+        tools=assembled_job_tools(functions, _job_sources(offered), {}),
     )
     return LeaderJobs(controls=entry.adapted, middleware=with_job_admission(actor, (control_hooks,)), actor=actor)
 
@@ -1916,18 +1917,18 @@ def _without_hidden_functions(entry: _ToolkitEntry) -> _ToolkitEntry:
     return replace(entry, adapted=replace(entry.adapted, functions=functions))
 
 
-def _offered_entries(toolkits: Sequence[_OfferedToolkit]) -> dict[str, _ToolkitEntry]:
-    """Map each function a run of ``toolkits`` offers to its entry, as ``first_of_each_name`` selects the run's functions.
+def _offered_entries(toolkits: Sequence[_OfferedToolkit]) -> list[_OfferedFunction]:
+    """Return each function a run of ``toolkits`` offers with its entry, as ``first_of_each_name`` selects them.
 
     A generated function has no entry, so it is absent, and so is any function a same-named earlier one shadows.
     """
     pairs = ((entry, function) for entry, toolkit in toolkits for function in toolkit.functions)
-    return {function.name: entry for entry, function in first_of_each_name(pairs) if entry is not None}
+    return [(entry, function) for entry, function in first_of_each_name(pairs) if entry is not None]
 
 
-def _job_sources(offered: Mapping[str, _ToolkitEntry]) -> dict[str, tuple[str, Toolkit]]:
+def _job_sources(offered: Sequence[_OfferedFunction]) -> dict[str, tuple[str, Toolkit]]:
     """Return the owner and concrete toolkit of each offered function, as tool jobs describe its calls."""
-    return {name: (entry.owner, entry.toolkit) for name, entry in offered.items()}
+    return {function.name: (entry.owner, entry.toolkit) for entry, function in offered}
 
 
 @timed("system_prompt_assembly.agent_create")
@@ -2160,7 +2161,7 @@ def create_agent(
     # shell window, which only swaps one function's entrypoint, so it offers the same names from the same owners.
     offered = _offered_entries(offered_toolkits)
     _log_toolkits_without_offered_functions(tool_assembly.entries, offered, agent_name=agent_name)
-    tool_owners = {name: entry.owner for name, entry in offered.items()}
+    tool_owners = {function.name: entry.owner for entry, function in offered}
     toolkits = tuple(toolkit for _entry, toolkit in offered_toolkits)
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
     # A subagent runs inside its caller's response, whose CLI belongs to the caller, so its shell gets none.
