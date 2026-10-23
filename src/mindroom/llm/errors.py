@@ -71,6 +71,12 @@ class ProviderUnavailable(ProviderError):  # noqa: N818
     retryable = True
 
 
+def incomplete_stream_error(*, provider: str) -> ProviderError:
+    """Return the error of a provider stream that ended without completing its turn; ``provider`` names the route."""
+    msg = "The provider stream ended without completing the turn"
+    return ProviderError(msg, provider=provider, code=INCOMPLETE_STREAM)
+
+
 class ModelOutputLimitError(RuntimeError):
     """A run's model responses kept stopping at the output limit before their tool calls were complete."""
 
@@ -101,4 +107,5 @@ __all__ = [
     "ProviderError",
     "ProviderUnavailable",
     "RateLimited",
+    "incomplete_stream_error",
 ]

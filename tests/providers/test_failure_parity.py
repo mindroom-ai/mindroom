@@ -48,9 +48,10 @@ if TYPE_CHECKING:
 
 type Reply = Callable[[], httpx.Response | Exception]
 
-# The idle limit every row runs with; a stalled reply pauses past it before its first event.
-_IDLE_LIMIT_SECONDS = 0.3
-_STALL_SECONDS = 0.6
+# The idle limit every row runs with; a stalled reply pauses past it before its first event. The limit also covers
+# a request's preparation, such as borrowing a CLI login in a thread, so it outlasts that on a loaded machine.
+_IDLE_LIMIT_SECONDS = 0.5
+_STALL_SECONDS = 1.0
 _PARTIAL = "partial"
 
 RATE_LIMITED = "⏱️ Rate limited."

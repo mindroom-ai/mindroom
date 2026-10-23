@@ -26,6 +26,7 @@ from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.errors import provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.model_loading import uses_alternative_auth
 from mindroom.providers.names import canonical_provider
 from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
@@ -199,11 +200,7 @@ class ProviderRuntime:
 def _configured_key(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> str | None:
     """Return the configured key, else the provider's shared key."""
     key = model_config.configured_api_key()
-    extra_kwargs = model_config.extra_kwargs or {}
-    alternative_auth = route_key == "azure" and any(
-        extra_kwargs.get(name) for name in ("azure_ad_token", "azure_ad_token_provider")
-    )
-    if key or alternative_auth or route_key in _NO_SHARED_KEY:
+    if key or uses_alternative_auth(model_config) or route_key in _NO_SHARED_KEY:
         return key or None
     shared = get_api_key_for_provider(route_key, runtime_paths=runtime.runtime_paths)
     # Azure and Z.ai keys may also come straight from their variables, including the ``_FILE`` forms.
@@ -303,9 +300,11 @@ def _chat_client_factory(
     settings: ChatSettings,
     *,
     api_key: str | None,
+    alternative_auth: bool,
     base_url: str,
     runtime: ProviderRuntime,
 ) -> Callable[[], AsyncOpenAI]:
+    """Return the SDK client factory of one Chat route; ``alternative_auth`` says it authenticates without a key."""
     http_client = runtime.http_client
     process_env = runtime.runtime_paths.process_env
     options = _client_options(settings, base_url=base_url, organization=route.dialect == "openai")
@@ -325,7 +324,7 @@ def _chat_client_factory(
             from openai import AsyncAzureOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
             key = api_key or process_env.get(AZURE_OPENAI_ENV_BY_KEY["api_key"])
-            if not (key or settings.azure_ad_token or settings.azure_ad_token_provider):
+            if not (key or alternative_auth):
                 msg = (
                     "Azure OpenAI authentication not configured. Please provide one of: "
                     "AZURE_OPENAI_API_KEY environment variable, azure_ad_token, or azure_ad_token_provider"
@@ -430,7 +429,15 @@ def _build_chat(route_key: str, model_id: str, model_config: ModelConfig, runtim
         wire=wire,
         settings=settings,
         clients=SDKClients(
-            _chat_client_factory(route_key, route, settings, api_key=api_key, base_url=base_url, runtime=runtime),
+            _chat_client_factory(
+                route_key,
+                route,
+                settings,
+                api_key=api_key,
+                alternative_auth=uses_alternative_auth(model_config),
+                base_url=base_url,
+                runtime=runtime,
+            ),
             per_request=route_key == "kimi",
         ),
     )

@@ -21,6 +21,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
+from mindroom.llm.media import IMAGE_HEADER_BYTES, image_mime_type
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
@@ -45,8 +46,6 @@ logger = get_logger(__name__)
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
 # Gemini rejects requests above 20 MB, so larger local media goes through the Files API, which Vertex AI lacks.
 _INLINE_MEDIA_LIMIT_BYTES = 20 * 1024 * 1024
-# The leading bytes that identify an image format.
-_HEADER_BYTES = 12
 _FORMAT_TO_MIME = {
     "png": "image/png",
     "jpeg": "image/jpeg",
@@ -201,7 +200,7 @@ def _read_local_media(path: Path, kind: str, provider: str, inline_limit: int) -
             raise FileNotFoundError(path)
         with path.open("rb") as stream:
             size = os.fstat(stream.fileno()).st_size
-            return size, stream.read() if size <= inline_limit else stream.read(_HEADER_BYTES)
+            return size, stream.read() if size <= inline_limit else stream.read(IMAGE_HEADER_BYTES)
     except OSError as error:
         logger.warning("gemini_media_file_unreadable", kind=kind, path=str(path), error=str(error))
         msg = f"The {kind} attachment could not be read"
@@ -251,42 +250,13 @@ def _media_mime_type(media: Audio | Video, default: str) -> str:
     return default
 
 
-def _image_format(data: bytes) -> str | None:  # noqa: PLR0911 - one return per magic-byte signature
-    """Return the image format from the magic bytes in the file header."""
-    if len(data) < _HEADER_BYTES:
-        return None
-    if data[0:8] == b"\x89PNG\r\n\x1a\n":
-        return "png"
-    if data[0:4] == b"GIF8" and data[5:6] == b"a":
-        return "gif"
-    if data[0:3] == b"\xff\xd8\xff":
-        return "jpeg"
-    if data[4:8] == b"ftyp":
-        return "heic"
-    if data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "webp"
-    return None
-
-
-def _image_mime_type(image: Image, data: bytes) -> str:
-    if image.mime_type:
-        return image.mime_type
-    if image.format:
-        return f"image/{image.format.lower()}"
-    if image.filepath and (guessed := mimetypes.guess_type(image.filepath)[0]):
-        return guessed
-    if detected := _image_format(data):
-        return f"image/{detected}"
-    return "image/jpeg"
-
-
 async def _image_part(image: Image, route: MediaRoute) -> dict[str, Any] | None:
     if image.url is not None:
         data, _ = await _downloaded(image.url, "image", route)
-        return _inline(data, _image_mime_type(image, data))
+        return _inline(data, image_mime_type(image, data))
     if image.filepath is not None:
-        return await _local_part(image.filepath, "image", route, partial(_image_mime_type, image))
-    return _inline(image.content, _image_mime_type(image, image.content)) if image.content else None
+        return await _local_part(image.filepath, "image", route, partial(image_mime_type, image))
+    return _inline(image.content, image_mime_type(image, image.content)) if image.content else None
 
 
 async def _audio_part(audio: Audio, route: MediaRoute) -> dict[str, Any] | None:

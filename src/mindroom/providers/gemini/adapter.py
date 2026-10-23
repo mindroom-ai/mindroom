@@ -38,6 +38,7 @@ from mindroom.providers.gemini.wire import (
     tool_config,
     without_tool_selection,
 )
+from mindroom.providers.model_loading import uses_alternative_auth
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -282,7 +283,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
         extra_kwargs["api_key"] = model_config.api_key
     settings = settings_from_extra_kwargs(GeminiSettings, extra_kwargs, provider=model_config.provider)
     # Vertex AI authenticates with Google Cloud credentials, so it never takes the shared key.
-    if settings.api_key is None and not settings.vertexai:
+    if settings.api_key is None and not uses_alternative_auth(model_config):
         settings = replace(settings, api_key=get_api_key_for_provider("google", runtime_paths=runtime_paths))
     return GeminiProvider(
         identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),

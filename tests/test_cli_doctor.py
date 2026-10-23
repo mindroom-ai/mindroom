@@ -16,6 +16,7 @@ from mindroom.cli.doctor import (
     _check_pairing,
     _check_single_provider,
     _classify_vertexai_claude_error,
+    _validate_vertexai_claude_connection,
     doctor,
 )
 from mindroom.config.main import Config
@@ -24,6 +25,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.credentials.sync import get_embedder_api_key
 from mindroom.llm.errors import ProviderError
+from mindroom.providers.anthropic import messages as claude_messages
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,6 +35,28 @@ if TYPE_CHECKING:
 
 def _api_status_error(status_code: int, message: str) -> ProviderError:
     return ProviderError(message, provider="VertexAI", status_code=status_code)
+
+
+def test_the_vertex_claude_probe_asks_for_one_output_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The probe caps its reply through the model's own ``max_tokens``, over any value the model authored."""
+    built: list[ModelConfig] = []
+
+    def build_provider(model_config: ModelConfig, _runtime_paths: RuntimePaths) -> None:
+        built.append(model_config)
+        msg = "probe stopped here"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(claude_messages, "build_provider", build_provider)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    authored = {"project_id": "test-project", "region": "us-east5", "max_tokens": 4096}
+    model = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5", extra_kwargs=authored)
+
+    assert _validate_vertexai_claude_connection(model, runtime_paths) == (None, "probe stopped here")
+    assert [config.extra_kwargs for config in built] == [{"timeout": 10, **authored, "max_tokens": 1}]
 
 
 def test_publisher_model_not_found_explains_model_garden() -> None:

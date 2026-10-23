@@ -88,6 +88,7 @@ from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.model_loading import uses_alternative_auth
 from mindroom.providers.names import canonical_provider
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
@@ -337,9 +338,8 @@ class ClaudeProvider:
         """Return the model's authored request parameters with the request's overrides applied."""
         settings, overrides = self.settings, request.overrides
         params: dict[str, Any] = {}
-        max_tokens = settings.max_tokens if overrides.max_output_tokens is None else overrides.max_output_tokens
-        if max_tokens:
-            params["max_tokens"] = max_tokens
+        if settings.max_tokens:
+            params["max_tokens"] = settings.max_tokens
         if settings.thinking and not overrides.disable_thinking:
             params["thinking"] = dict(settings.thinking)
         if settings.output_config:
@@ -722,7 +722,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     authored = dict(model_config.extra_kwargs or {})
     if route == "anthropic":
         api_key = model_config.configured_api_key()
-        if api_key is None and not authored.get("auth_token"):
+        if api_key is None and not uses_alternative_auth(model_config):
             api_key = get_api_key_for_provider("anthropic", runtime_paths=runtime_paths)
         if api_key:
             authored["api_key"] = api_key

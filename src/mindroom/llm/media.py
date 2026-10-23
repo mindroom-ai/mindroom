@@ -10,6 +10,7 @@ content as UTF-8 text.
 from __future__ import annotations
 
 import base64
+import mimetypes
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -20,6 +21,13 @@ if TYPE_CHECKING:
 # Images that ``get_attachment(view=True)`` produced carry ids with this prefix, so a route that rejects image
 # input can mark their tool receipts as unsupported.
 VIEWED_IMAGE_ID_PREFIX = "mindroom_viewed_"
+# How many header bytes identify an image format, and the formats by their header: (offset, signature, format).
+IMAGE_HEADER_BYTES = 12
+_IMAGE_SIGNATURES = (
+    (0, b"\x89PNG\r\n\x1a\n", "png"),
+    (0, b"\xff\xd8\xff", "jpeg"),
+    (4, b"ftyp", "heic"),
+)
 
 
 def _new_id() -> str:
@@ -242,6 +250,32 @@ class Video:
         )
 
 
+def _image_format(data: bytes) -> str | None:
+    """Return the image format named by the file header's magic bytes."""
+    if len(data) < IMAGE_HEADER_BYTES:
+        return None
+    if data[0:4] == b"GIF8" and data[5:6] == b"a":
+        return "gif"
+    if data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return next((name for offset, signature, name in _IMAGE_SIGNATURES if data[offset:].startswith(signature)), None)
+
+
+def image_mime_type(image: Image, data: bytes) -> str:
+    """Return an image's MIME type: its own, else its format, path extension, or header bytes, else JPEG.
+
+    ``data`` holds the image's bytes, or at least its first ``IMAGE_HEADER_BYTES``.
+    """
+    if image.mime_type:
+        return image.mime_type
+    if image.format:
+        return f"image/{image.format.lower()}"
+    if image.filepath and (guessed := mimetypes.guess_type(image.filepath)[0]):
+        return guessed
+    detected = _image_format(data)
+    return f"image/{detected}" if detected else "image/jpeg"
+
+
 def _is_text(mime_type: str | None) -> bool:
     return mime_type is not None and mime_type.startswith("text/")
 
@@ -320,9 +354,11 @@ class File:
 
 
 __all__ = [
+    "IMAGE_HEADER_BYTES",
     "VIEWED_IMAGE_ID_PREFIX",
     "Audio",
     "File",
     "Image",
     "Video",
+    "image_mime_type",
 ]

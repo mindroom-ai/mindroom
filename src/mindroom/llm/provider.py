@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError
+from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.usage import add_usage
 
 if TYPE_CHECKING:
@@ -80,13 +80,9 @@ class ToolSpec:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestOverrides:
-    """Per-request knobs that override the adapter's configured defaults; None leaves a default untouched.
-
-    Only the Claude routes honor ``max_output_tokens``; its one caller is the ``mindroom doctor`` Vertex Claude probe.
-    """
+    """Per-request knobs that override the adapter's configured defaults; None leaves a default untouched."""
 
     temperature: float | None = None
-    max_output_tokens: int | None = None
     sdk_max_retries: int | None = None
     prompt_cache: bool | None = None
     disable_thinking: bool = False
@@ -332,8 +328,7 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
         if isinstance(event, TurnCompleted):
             completed = event
     if completed is None:
-        msg = "The provider stream ended without completing the turn"
-        raise ProviderError(msg, provider=provider.identity.provider_name, code=INCOMPLETE_STREAM)
+        raise incomplete_stream_error(provider=provider.identity.provider_name)
     return ModelTurn(message=completed.message, stop_reason=completed.stop_reason)
 
 

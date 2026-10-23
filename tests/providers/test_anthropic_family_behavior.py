@@ -460,10 +460,11 @@ async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(
         extra_kwargs={
             "thinking": {"type": "enabled", "budget_tokens": 1024},
             "temperature": 0.7,
+            "max_tokens": 512,
             "request_params": {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 2048}, "top_k": 4}},
         },
     )
-    overrides = RequestOverrides(temperature=0.1, max_output_tokens=512, prompt_cache=False, disable_thinking=True)
+    overrides = RequestOverrides(temperature=0.1, prompt_cache=False, disable_thinking=True)
     messages = [*_user("Summarize."), Message(role="assistant", content="Earlier answer.")]
     await claude_turn(provider, ModelRequest(messages=messages, overrides=overrides))
     body = wire.body()

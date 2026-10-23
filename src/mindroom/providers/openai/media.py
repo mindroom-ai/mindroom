@@ -12,6 +12,7 @@ import mimetypes
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mindroom.llm.media import image_mime_type
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -36,37 +37,6 @@ _RESPONSES_FILE_MIME_TYPES = {
 }
 
 
-# Image formats by their header bytes: (offset, signature, format).
-_IMAGE_SIGNATURES = (
-    (0, b"\x89PNG\r\n\x1a\n", "png"),
-    (0, b"\xff\xd8\xff", "jpeg"),
-    (4, b"ftyp", "heic"),
-)
-
-
-def _image_type(data: bytes) -> str | None:
-    """Return the image format named by the file header's magic bytes."""
-    if len(data) < 12:
-        return None
-    if data[0:4] == b"GIF8" and data[5:6] == b"a":
-        return "gif"
-    if data[0:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "webp"
-    return next((name for offset, signature, name in _IMAGE_SIGNATURES if data[offset:].startswith(signature)), None)
-
-
-def _image_mime_type(image: Image, data: bytes) -> str:
-    """Resolve an image MIME type: explicit type, then format, then path extension, then magic bytes."""
-    if image.mime_type:
-        return image.mime_type
-    if image.format:
-        return f"image/{image.format.lower()}"
-    if image.filepath and (guessed := mimetypes.guess_type(image.filepath)[0]):
-        return guessed
-    detected = _image_type(data)
-    return f"image/{detected}" if detected else "image/jpeg"
-
-
 def _file_bytes(path: str) -> bytes | None:
     file_path = Path(path)
     if not file_path.is_file():
@@ -84,7 +54,7 @@ def _image_url(image: Image) -> str | None:
     data = _file_bytes(image.filepath) if image.filepath is not None else image.content
     if data is None:
         return None
-    return f"data:{_image_mime_type(image, data)};base64,{base64.b64encode(data).decode('utf-8')}"
+    return f"data:{image_mime_type(image, data)};base64,{base64.b64encode(data).decode('utf-8')}"
 
 
 def chat_image_part(image: Image) -> dict[str, Any] | None:
