@@ -148,6 +148,9 @@ async def test_background_shell_leaves_a_process_running_after_the_call_returns(
         pid = int(pid_file.read_text())
         os.kill(pid, 0)  # Raises ProcessLookupError when the shell call's return took the process with it.
     finally:
+        # A timed-out wait still leaves the detached process to clean up.
+        if pid is None and pid_file.exists():
+            pid = int(pid_file.read_text())
         if pid is not None:
             with suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
