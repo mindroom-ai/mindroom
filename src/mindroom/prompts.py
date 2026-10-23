@@ -311,7 +311,7 @@ Files: {file_sizes}.
 6. Never invent facts or change their meaning, names, dates, or numbers, except to apply a correction as in step 3.
 
 Delete only true duplicates and folded corrections; move everything else.
-When you finish, MindRoom measures the files again and asks you to re-check if a file shrank too much, the total fell below {floor_tokens} tokens or did not shrink, or detail was deleted instead of moved.
+When you finish, MindRoom measures the files again and asks you to re-check if a file shrank too much, the total fell below {floor_tokens} tokens or did not shrink, MEMORY.md kept all its lines while over {max_entrypoint_lines}, or detail was deleted instead of moved.
 Reply with one line saying what you changed."""
 PROMPT_CURATION_RECHECK_TEMPLATE = """⚠️ Prompt maintenance needs a re-check: {findings}.
 Compare your change with the commit you made before it, fix what is listed, and reply with one line saying what you fixed."""

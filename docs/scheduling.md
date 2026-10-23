@@ -321,6 +321,7 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
     - a file can no longer be read safely;
     - a file shrank by more than 25%;
     - the files total less than the floor, or did not shrink;
+    - `MEMORY.md` was over the line cap and still has as many lines;
     - a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 

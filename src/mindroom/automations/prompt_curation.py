@@ -51,6 +51,7 @@ class _CurationPlan:
     curated: Mapping[str, int]
     # MEMORY.md lines at fire time; the preload withholds lines beyond memory.file.max_entrypoint_lines.
     memory_lines: int
+    max_entrypoint_lines: int
     upper_tokens: int
     floor_tokens: int
 
@@ -125,6 +126,7 @@ def _plan_curation(
         memory_tokens=_memory_dir_tokens(root, exclude=curated_payloads),
         curated=curated,
         memory_lines=memory_lines,
+        max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
         floor_tokens=round(measured * (1 - settings.max_reduction)),
     )
@@ -137,7 +139,7 @@ def _curation_prompt(config: Config, plan: _CurationPlan) -> str:
         measured_tokens=plan.measured_tokens,
         trigger_tokens=plan.settings.trigger_tokens,
         memory_lines=plan.memory_lines,
-        max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
+        max_entrypoint_lines=plan.max_entrypoint_lines,
         file_sizes=", ".join(f"{path} ({tokens} tokens)" for path, tokens in plan.curated.items()),
         upper_tokens=plan.upper_tokens,
         floor_tokens=plan.floor_tokens,
@@ -183,6 +185,13 @@ def _findings(
         findings.append(f"the files total {total} tokens, below the floor of {plan.floor_tokens}")
     if total >= plan.measured_tokens:
         findings.append(f"the files did not shrink ({total} tokens)")
+    memory_after = after_run.get(_ENTRYPOINT)
+    lines_after = len(memory_after.decode("utf-8").splitlines()) if isinstance(memory_after, bytes) else 0
+    # Shorter lines alone keep the same lines out of the prompt, so a pass over the line cap must remove some.
+    if plan.memory_lines > plan.max_entrypoint_lines and lines_after >= plan.memory_lines:
+        findings.append(
+            f"MEMORY.md still has {lines_after} lines, more than the {plan.max_entrypoint_lines} that reach your prompt",
+        )
     if loss := _content_loss(plan, total):
         findings.append(loss)
     return total, findings

@@ -168,6 +168,31 @@ def test_moving_a_section_into_memory_within_bounds_is_accepted(tmp_path: Path) 
     assert _curation_notice(config, plan, result) == "✅ Prompt files condensed from 1292 to 1139 tokens."
 
 
+@pytest.mark.parametrize(
+    ("pointer", "findings"),
+    [
+        (POINTER, ("MEMORY.md still has 17 lines, more than the 16 that reach your prompt",)),
+        ("## Topic 3: see memory/topics.md\n", ()),
+    ],
+)
+def test_a_pass_over_the_line_cap_must_take_lines_out_of_memory(
+    tmp_path: Path,
+    pointer: str,
+    findings: tuple[str, ...],
+) -> None:
+    """A cut within the token bounds that keeps every MEMORY.md line leaves the same lines out of the prompt."""
+    config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
+    config.memory.file.max_entrypoint_lines = 16
+    plan = _plan_curation(config, root, "mind", automation)
+    assert plan is not None
+    (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], pointer), encoding="utf-8")
+
+    result = _verify_curation(plan)
+
+    assert (result.changed, result.findings) == (True, findings)
+
+
 def _over_cut(root: Path) -> None:
     (root / "MEMORY.md").write_text("# Memory\n" + SECTIONS[0], encoding="utf-8")
 
