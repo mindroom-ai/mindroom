@@ -39,7 +39,6 @@ __all__ = [
     "discard_empty_completed_run",
     "finalize_queued_notice_response_turn_async",
     "is_empty_completed_run",
-    "next_retry_run_id",
     "note_attempt_run_id",
     "queued_message_signal_context",
     "queued_notice_after_tool_batch",
@@ -183,26 +182,11 @@ def _is_queued_notice_message(
     return _queued_notice_response_turn_id(message) == response_turn_id
 
 
-def _strip_queued_notice_messages(
-    messages: list[Message] | None,
-    *,
-    response_turn_id: str | None = None,
-) -> bool:
-    """Remove queued-message notices from one mutable message list."""
-    if not messages:
-        return False
-    filtered_messages = [
-        message
-        for message in messages
-        if not _is_queued_notice_message(
-            message,
-            response_turn_id=response_turn_id,
-        )
+def _strip_queued_notice_messages(messages: list[Message], *, response_turn_id: str) -> None:
+    """Remove one response's queued-message notices from a mutable message list."""
+    messages[:] = [
+        message for message in messages if not _is_queued_notice_message(message, response_turn_id=response_turn_id)
     ]
-    if len(filtered_messages) == len(messages):
-        return False
-    messages[:] = filtered_messages
-    return True
 
 
 def _append_queued_notice_if_needed(
@@ -269,15 +253,6 @@ def _ends_with_completed_tool_batch(
     return False
 
 
-def _append_queued_notice_after_resumed_tools(messages: list[Message], *, notice_text: str) -> None:
-    """Notify at response entry only after a complete trailing tool batch."""
-    context = _queued_message_notice_context.get()
-    if context is None or context.state is None or not context.state.has_pending_human_messages():
-        return
-    if _ends_with_completed_tool_batch(messages, context.response_turn_id):
-        _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
-
-
 async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> None:
     context = _queued_message_notice_context.get()
     if context is None or context.mid_turn_gate is None or context.state is None:
@@ -292,14 +267,6 @@ async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> 
     ):
         return
     _append_queued_notice_if_needed(messages=messages, notice_text=notice_text, judged=True)
-
-
-async def _judge_resumed_tool_notice(messages: list[Message], *, notice_text: str) -> None:
-    context = _queued_message_notice_context.get()
-    if context is None or context.mid_turn_gate is None:
-        return
-    if _ends_with_completed_tool_batch(messages, context.response_turn_id):
-        await _judge_queued_notice(messages, notice_text=notice_text)
 
 
 def queued_notice_after_tool_batch(notice_text: str) -> AfterToolBatchHook:
@@ -326,62 +293,37 @@ def queued_notice_on_resume_entry(notice_text: str) -> AfterToolBatchHook:
     """Return the loop hook that notifies a resumed run of a queued message after its completed tool batch."""
 
     async def on_resume_entry(messages: list[Message], _results: Sequence[Message]) -> None:
-        _append_queued_notice_after_resumed_tools(messages, notice_text=notice_text)
-        await _judge_resumed_tool_notice(messages, notice_text=notice_text)
+        context = _queued_message_notice_context.get()
+        if context is None or not _ends_with_completed_tool_batch(messages, context.response_turn_id):
+            return
+        if context.mid_turn_gate is not None:
+            await _judge_queued_notice(messages, notice_text=notice_text)
+        elif context.state is not None and context.state.has_pending_human_messages():
+            _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
 
     return on_resume_entry
 
 
-def _strip_response_turn_notice_from_run(run: AnyRunRecord, *, response_turn_id: str) -> bool:
+def _strip_response_turn_notice_from_run(run: AnyRunRecord, *, response_turn_id: str) -> None:
     """Remove one response's notice from a top-level or nested run."""
-    changed = _strip_queued_notice_messages(
-        run.messages,
-        response_turn_id=response_turn_id,
-    )
+    _strip_queued_notice_messages(run.messages, response_turn_id=response_turn_id)
     if isinstance(run, TeamRunRecord):
         for member_response in run.member_responses:
-            changed = (
-                _strip_response_turn_notice_from_run(
-                    member_response,
-                    response_turn_id=response_turn_id,
-                )
-                or changed
-            )
-    return changed
+            _strip_response_turn_notice_from_run(member_response, response_turn_id=response_turn_id)
 
 
-def _run_notice_messages(
-    run: AnyRunRecord,
-    *,
-    response_turn_id: str,
-) -> list[Message]:
-    matches = _top_level_queued_notice_messages(
-        run,
-        response_turn_id=response_turn_id,
-    )
+def _run_notice_messages(run: AnyRunRecord, *, response_turn_id: str | None) -> list[Message]:
+    """Return the notices of one response, or of any response when ``response_turn_id`` is None, in a run and its members."""
+    matches = _top_level_queued_notice_messages(run, response_turn_id=response_turn_id)
     if isinstance(run, TeamRunRecord):
         for member_response in run.member_responses:
-            matches.extend(
-                _run_notice_messages(
-                    member_response,
-                    response_turn_id=response_turn_id,
-                ),
-            )
+            matches.extend(_run_notice_messages(member_response, response_turn_id=response_turn_id))
     return matches
 
 
-def _top_level_queued_notice_messages(
-    run: AnyRunRecord,
-    *,
-    response_turn_id: str,
-) -> list[Message]:
+def _top_level_queued_notice_messages(run: AnyRunRecord, *, response_turn_id: str | None) -> list[Message]:
     return [
-        message
-        for message in run.messages
-        if _is_queued_notice_message(
-            message,
-            response_turn_id=response_turn_id,
-        )
+        message for message in run.messages if _is_queued_notice_message(message, response_turn_id=response_turn_id)
     ]
 
 
@@ -528,22 +470,19 @@ def register_queued_notice_storage(
     session_kind: SessionKind,
     entity_name: str,
 ) -> None:
-    """Register storage touched by one response for queued-notice finalization."""
+    """Register storage touched by one response for queued-notice finalization; the first registration wins."""
     notice_context = _queued_message_notice_context.get()
-    if notice_context is None:
+    if notice_context is None or storage_factory is None or not session_id:
         return
-    if storage_factory is None or not session_id:
-        return
-    target_key = (entity_name, session_id, session_kind)
-    target = notice_context.storage_targets.get(target_key)
-    if target is None:
-        target = _QueuedNoticeStorageTarget(
+    notice_context.storage_targets.setdefault(
+        (entity_name, session_id, session_kind),
+        _QueuedNoticeStorageTarget(
             storage_factory=storage_factory,
             session_id=session_id,
             session_kind=session_kind,
             entity_name=entity_name,
-        )
-        notice_context.storage_targets[target_key] = target
+        ),
+    )
 
 
 def register_scope_notice_storage(*, scope_context: ScopeSessionContext | None, entity_name: str) -> None:
@@ -612,17 +551,9 @@ def _queued_notice_response_turn_ids(
     return {
         response_turn_id
         for run in runs
-        for message in _run_notice_messages_for_any_response(run)
+        for message in _run_notice_messages(run, response_turn_id=None)
         if (response_turn_id := _queued_notice_response_turn_id(message)) is not None
     }
-
-
-def _run_notice_messages_for_any_response(run: AnyRunRecord) -> list[Message]:
-    matches = [message for message in run.messages if is_queued_notice_message(message)]
-    if isinstance(run, TeamRunRecord):
-        for member_response in run.member_responses:
-            matches.extend(_run_notice_messages_for_any_response(member_response))
-    return matches
 
 
 def _has_notice_marker_for_response(
@@ -738,13 +669,6 @@ def discard_empty_completed_run(
             session_id=session_id,
             run_id=run_id,
         )
-
-
-def next_retry_run_id(run_id: str | None) -> str | None:
-    """Return a fresh run identifier for a retry attempt."""
-    if run_id is None:
-        return None
-    return str(uuid4())
 
 
 def note_attempt_run_id(run_id_callback: Callable[[str], None] | None, run_id: str | None) -> None:

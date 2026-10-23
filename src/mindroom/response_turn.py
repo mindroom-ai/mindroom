@@ -310,7 +310,7 @@ class TurnContinuationRunState:
             active_current_timestamp_ms=None,
             active_current_prompt_is_structured=False,
             active_current_event_id=None,
-            active_run_id=ai_runtime.next_retry_run_id(previous_run_id),
+            active_run_id=None if previous_run_id is None else str(uuid4()),
             active_model_name=active_model_name,
             apply_model_to_team_members=apply_model_to_team_members,
         )
