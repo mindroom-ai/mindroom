@@ -229,10 +229,10 @@ class CompactionLifecycleProgress:
         """Format a human-readable in-progress compaction notice."""
         body = (
             f"Compacting history... saved {self.compacted_run_count}/{self.runs_before} runs: "
-            f"{_format_exact_tokens(self.before_tokens)} -> {_format_exact_tokens(self.after_tokens)}"
+            f"{self.before_tokens:,} -> {self.after_tokens:,}"
         )
         if self.history_budget_tokens is not None:
-            body += f" / {_format_exact_tokens(self.history_budget_tokens)} history budget"
+            body += f" / {self.history_budget_tokens:,} history budget"
         if self.runs_remaining:
             body += f"\n   {self.runs_remaining} runs remaining"
         return body
@@ -267,11 +267,6 @@ class CompactionLifecycle(Protocol):
 
     async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
         """Edit the lifecycle notice after failed compaction."""
-
-
-def _format_exact_tokens(tokens: int) -> str:
-    """Format token counts exactly with thousands separators."""
-    return f"{tokens:,}"
 
 
 @dataclass(frozen=True)
@@ -325,11 +320,10 @@ class CompactionOutcome:
     def format_notice(self) -> str:
         """Format a human-readable compaction notice."""
         line1 = (
-            f"\U0001f4e6 Compacted {self.compacted_run_count} runs: "
-            f"{_format_exact_tokens(self.before_tokens)} \u2192 {_format_exact_tokens(self.after_tokens)}"
+            f"\U0001f4e6 Compacted {self.compacted_run_count} runs: {self.before_tokens:,} \u2192 {self.after_tokens:,}"
         )
         if self.history_budget_tokens is not None:
-            line1 += f" / {_format_exact_tokens(self.history_budget_tokens)} history budget"
+            line1 += f" / {self.history_budget_tokens:,} history budget"
         return line1
 
 
