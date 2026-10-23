@@ -32,6 +32,7 @@ __all__ = [
     "is_context_window_error",
     "is_credential_error",
     "provider_failure",
+    "whole_words",
 ]
 
 _RATE_LIMIT_STATUS = 429
@@ -60,15 +61,27 @@ _TRANSIENT_NAMES = frozenset(
         "vector_store_timeout",
     },
 )
+
+
+def whole_words(*words: str) -> re.Pattern[str]:
+    """Return a pattern that finds any of ``words``, expressions over lowercase text, as a whole word.
+
+    A word is not part of a longer run of letters or digits, so ``_``, ``-``, spaces, and punctuation separate
+    words: ``invalid_auth`` holds ``auth`` and ``HTTP 429`` holds ``429``, while ``author`` holds no ``auth`` and
+    ``generate`` no ``rate``.
+    """
+    return re.compile(rf"(?<![a-z0-9])(?:{'|'.join(words)})(?![a-z0-9])")
+
+
 # Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid",
-# Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, or a whole word of
-# the auth family, so text that names an ``author`` property, an ``authority``, or ``oauth`` is not one.
-_CREDENTIAL_WORDING = re.compile(r"\b(?:un)?auth(?:enticat\w*|oriz\w*)?\b|api[ _]?key")
+# Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, or a word of the
+# auth family in either spelling, so text that names an ``author`` property, an ``authority``, or ``oauth`` is not one.
+_CREDENTIAL_WORDING = whole_words(r"(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?", r"api[ _]?keys?")
 
 # Wording providers use when a request does not fit the model's context window (Agno's
 # ``ModelProviderError.CONTEXT_WINDOW_PATTERNS`` without its over-broad ``max_tokens``, plus the
 # payload-size wording OpenAI-compatible servers and Anthropic use, older Claude models' "input length and
-# `max_tokens` exceed context limit", and llama.cpp's "exceeds the available context size").
+# `max_tokens` exceed context limit", and llama.cpp's "the request exceeds the available context size").
 _CONTEXT_WINDOW_MARKERS = (
     "context_length_exceeded",
     "context window",
@@ -85,7 +98,7 @@ _CONTEXT_WINDOW_MARKERS = (
     "prompt is too long",
     "prompt too long",
     "exceeds the model",
-    "context size",
+    "available context size",
 )
 # A timeout as the HTTP client raises it, or as aiohttp and the socket layer raise it.
 _TRANSPORT_TIMEOUTS = (httpx.TimeoutException, TimeoutError)
@@ -103,7 +116,7 @@ class CliLoginError(ValueError):
 
 
 def is_credential_error(message: str) -> bool:
-    """Return whether an error's wording names the credentials: an API key, or a whole word of the auth family."""
+    """Return whether an error's wording names the credentials: an API key, or a word of the auth family."""
     return _CREDENTIAL_WORDING.search(message.casefold()) is not None
 
 

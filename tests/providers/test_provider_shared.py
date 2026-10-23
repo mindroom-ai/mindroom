@@ -92,6 +92,8 @@ def test_statuses_and_wording_classify_the_same_for_every_family(
         ("'author' is not of type 'string'", None, "invalid_request_error", ProviderError),
         ("The oauth2 scope list is empty", None, "invalid_request_error", ProviderError),
         ("The token authority is unknown", None, "invalid_request_error", ProviderError),
+        ("invalid_auth: the access token was revoked", None, "invalid_request_error", AuthenticationFailed),
+        ("Unauthorised to invoke this model", None, "invalid_request_error", AuthenticationFailed),
     ],
 )
 def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
@@ -115,6 +117,7 @@ def test_context_window_detection_reads_the_code_and_the_wording() -> None:
     assert is_context_window_error("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000")
     assert is_context_window_error("the request exceeds the available context size, try increasing it")
     assert not is_context_window_error("max_tokens must be positive")
+    assert not is_context_window_error("The context size of a slot must be a positive number")
 
 
 def test_transport_failures_are_retryable_connection_errors() -> None:

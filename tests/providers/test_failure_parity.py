@@ -719,6 +719,24 @@ _OPENAI_HTTP_CASES = [
         1,
         1,
     ),
+    # A word of the auth family names the credentials beside an underscore and in British spelling, as the
+    # Agno-backed runtime's reply read them.
+    _Case(
+        "http_403_invalid_auth",
+        _openai_status(403, "invalid_auth: the access token was revoked", "invalid_request_error"),
+        AuthenticationFailed,
+        AUTHENTICATION,
+        1,
+        1,
+    ),
+    _Case(
+        "http_403_unauthorised",
+        _openai_status(403, "Unauthorised to use this model", "invalid_request_error"),
+        AuthenticationFailed,
+        AUTHENTICATION,
+        1,
+        1,
+    ),
     _Case(
         "http_413",
         _openai_status(413, "Request Entity Too Large", "invalid_request_error"),
