@@ -8430,10 +8430,9 @@ depends_on = [
     "mindroom.tool_system.agent_tool_calls",
 ]
 visibility = [
-    # Agent and team assembly admit their actors' calls as jobs, and the loop hooks offer their wait budget.
+    # Agent assembly admits the calls of agents and team leaders as jobs, and the loop hooks offer their wait budget.
     "mindroom.agents",
     "mindroom.loop_hooks",
-    "mindroom.teams",
     # The CLI catalogs and a voice call's realtime tools run an agent's calls as its loop does.
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.agent_cli.minimal_agent",
