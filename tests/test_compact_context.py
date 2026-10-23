@@ -271,6 +271,28 @@ def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Pa
     assert result == COMPACT_CONTEXT_SUCCESS
 
 
+def test_a_manual_compaction_request_is_recorded_in_the_session_state_it_is_given(tmp_path: Path) -> None:
+    """The dict the run's tools share records the request in place, so the run's own save keeps it."""
+    config, runtime_paths = _make_config(tmp_path)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
+    session_state: dict[str, object] = {}
+
+    result = request_compaction_before_next_reply(
+        scope=_AGENT_SCOPE,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=identity,
+        session_state=session_state,
+    )
+
+    assert result == COMPACT_CONTEXT_SUCCESS
+    assert session_state == add_pending_force_compaction_scope(None, _AGENT_SCOPE)
+
+
 @pytest.mark.asyncio
 async def test_compact_context_requires_compaction_window(tmp_path: Path) -> None:
     """Manual compaction should fail fast when no usable model window is configured."""
