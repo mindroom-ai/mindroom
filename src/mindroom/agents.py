@@ -1956,17 +1956,17 @@ def _deferred_entries_as_offered(entries: Sequence[_ToolkitEntry]) -> tuple[_Too
     """Return ``entries`` with each deferred toolkit holding only the functions a run offers of it.
 
     A deferred function that a same-named function of an earlier toolkit shadows is never offered, so tool search,
-    the request's deferred names, and the run leave it out, and the earlier function keeps its name, as the build
-    under Agno dropped it. A shadowed eager function stays, and each run drops it, as Agno's run did; a deferred
-    toolkit's instructions travel with the search results, so leaving functions out of it changes no prompt.
+    the request's deferred names, and the run leave it out, and the earlier function keeps its name. A shadowed
+    eager function stays, and each run drops it and warns, as Agno's run did; a deferred toolkit's instructions
+    travel with the search results, so leaving functions out of it changes no prompt.
     """
     offered = _offered_entries(entries)
-    return tuple(
-        entry
-        if entry.deferral is None
-        else replace(entry, adapted=replace(entry.adapted, functions=tuple(f for e, f in offered if e is entry)))
-        for entry in entries
-    )
+
+    def as_offered(entry: _ToolkitEntry) -> _ToolkitEntry:
+        functions = tuple(function for owner, function in offered if owner is entry)
+        return replace(entry, adapted=replace(entry.adapted, functions=functions))
+
+    return tuple(entry if entry.deferral is None else as_offered(entry) for entry in entries)
 
 
 def _offered_entries(entries: Sequence[_ToolkitEntry]) -> tuple[_OfferedFunction, ...]:
