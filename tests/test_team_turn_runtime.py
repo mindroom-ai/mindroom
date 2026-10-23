@@ -1383,7 +1383,11 @@ async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_t
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Members number their calls independently, so two can delegate under one call id; each child runs once."""
+    """Members number their calls independently, so two can delegate under one call id; each child runs once.
+
+    The members run concurrently, so either child may ask the shared helper first; each member's call finishes with
+    the answer of the child its delegation state records for it.
+    """
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -1404,15 +1408,6 @@ async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_t
     chunks = await team.stream()
 
     assert len(team.models["helper-model"].requests) == 2
-    # The driver's events about each member's call land in that member's slot, each call finished with its child.
-    assert [
-        (entry.type, entry.scope_key, (entry.result_preview or "").partition("\n")[0])
-        for entry in chunks[-1].tool_trace or []
-        if entry.tool_name == "run_subagent"
-    ] == [
-        ("tool_call_completed", "agent:writer", "Helper one."),
-        ("tool_call_completed", "agent:checker", "Helper two."),
-    ]
     record, members = team.stored_runs()
     assert (record.status, record.content) == (RunStatus.completed, "Consensus.")
     assert sorted((member.agent_id or "", member.status) for member in members) == [
@@ -1423,6 +1418,22 @@ async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_t
     assert sorted((child.caller_agent_name, child.status) for child in state.children) == [
         ("checker", "completed"),
         ("writer", "completed"),
+    ]
+    answers: dict[str, str] = {}
+    for child in state.children:
+        identity = child_execution_identity(child)
+        helper_run = create_session_storage("helper", team.config, team.runtime_paths, identity).get_run(child.run_id)
+        assert helper_run is not None
+        answers[f"agent:{child.caller_agent_name}"] = str(helper_run.content)
+    assert sorted(answers.values()) == ["Helper one.", "Helper two."]
+    # The driver's events about each member's call land in that member's slot, each call finished with its child.
+    assert sorted(
+        (entry.scope_key or "", entry.type, (entry.result_preview or "").partition("\n")[0])
+        for entry in chunks[-1].tool_trace or []
+        if entry.tool_name == "run_subagent"
+    ) == [
+        ("agent:checker", "tool_call_completed", answers["agent:checker"]),
+        ("agent:writer", "tool_call_completed", answers["agent:writer"]),
     ]
 
 
