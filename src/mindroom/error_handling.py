@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Statuses the final user message reports as temporary provider trouble. Status 200 is
-# the mid-stream SSE case: the HTTP response was already committed before a
-# Claude error event or an early Responses end without visible output.
+# the mid-stream SSE case: the HTTP response was already committed before an early
+# Responses end without visible output.
 _TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
 
 # A provider error with this status reports rejected credentials, whatever its wording.
