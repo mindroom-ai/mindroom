@@ -1296,6 +1296,79 @@ async def test_responses_reasoning_summary_and_verbosity_reach_the_body(tmp_path
     assert (body["reasoning"], body["text"]) == ({"effort": "high", "summary": "auto"}, {"verbosity": "low"})
 
 
+_PACK = "Pack light."
+_PACK_MESSAGE = {
+    "id": "msg_1",
+    "type": "message",
+    "role": "assistant",
+    "status": "completed",
+    "content": [{"type": "output_text", "text": _PACK, "annotations": []}],
+}
+_PACK_REASONING = {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Think. "}]}
+_PACK_SUMMARY_DELTA = {
+    "type": "response.reasoning_summary_text.delta",
+    "sequence_number": 1,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 0,
+    "delta": "Think. ",
+}
+
+
+def _reasoning_reply(*, stream: bool, summary: bool) -> dict[str, Any]:
+    output = [_PACK_REASONING, _PACK_MESSAGE] if summary else [_PACK_MESSAGE]
+    if not stream:
+        return _json_reply(_response(output=output))
+    created, text = _text_events(_PACK)
+    return _responses_reply(created, *([_PACK_SUMMARY_DELTA] if summary else []), text, _completed(output))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stream", "extra_kwargs", "summary", "stored"),
+    [
+        (True, {}, False, None),
+        (True, {"reasoning": {"effort": "low"}}, False, _PACK),
+        (True, {"reasoning": {"effort": "low", "summary": "auto"}}, True, f"Think. {_PACK}"),
+        (True, {"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
+        (False, {}, False, None),
+        (False, {"reasoning": {"effort": "low"}}, False, _PACK),
+        (False, {"reasoning": {"effort": "low"}, "reasoning_summary": "auto"}, True, "Think. "),
+    ],
+    ids=[
+        "streamed-unset",
+        "streamed-authored",
+        "streamed-authored-summary-in-reasoning",
+        "streamed-reasoning-summary",
+        "blocking-unset",
+        "blocking-authored",
+        "blocking-with-summary",
+    ],
+)
+async def test_authored_reasoning_stores_the_output_text_as_agno_did(
+    tmp_path: Path,
+    *,
+    stream: bool,
+    extra_kwargs: dict[str, Any],
+    summary: bool,
+    stored: str | None,
+) -> None:
+    """With ``reasoning`` authored, Agno stored the output text as reasoning unless a summary took its place.
+
+    A stream copied every text delta, after any summary text, unless ``reasoning_summary`` was set; a blocking
+    response stored its summary when it had one and its output text otherwise.
+    """
+    built = _Built(
+        tmp_path,
+        {**_OPENAI_RESPONSES, "extra_kwargs": extra_kwargs},
+        _reasoning_reply(stream=stream, summary=summary),
+    )
+
+    turn = await _turn(built, ModelRequest(messages=[_user()], stream=stream))
+
+    assert (turn.content, turn.message.reasoning_content) == (_PACK, stored)
+
+
 @pytest.mark.asyncio
 async def test_responses_tool_parameters_send_the_first_of_several_types(tmp_path: Path) -> None:
     """An MCP tool may declare a nullable parameter as a list of types; Responses receives the first one."""

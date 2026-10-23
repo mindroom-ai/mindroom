@@ -196,6 +196,30 @@ async def test_a_whole_reply_yields_the_output_its_stream_would_before_the_turn(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "blocking"])
+async def test_stored_reasoning_is_what_agno_stored_for_the_stream_mode(tmp_path: Path, *, stream: bool) -> None:
+    """A streamed reply stores its thinking blocks joined, a blocking reply only the last, as Agno did.
+
+    Agno summed a stream's thinking and redacted thinking deltas, and its response parser kept the last block of each.
+    """
+    blocks = [
+        {"type": "thinking", "thinking": "First. ", "signature": "sig-1"},
+        {"type": "redacted_thinking", "data": "redacted-1"},
+        {"type": "thinking", "thinking": "Second.", "signature": "sig-2"},
+        {"type": "redacted_thinking", "data": "redacted-2"},
+        {"type": "text", "text": "Done."},
+    ]
+    reply = sse_reply(blocks) if stream else json_reply(blocks)
+    provider = route_provider("anthropic", tmp_path, Wire(reply), extra_kwargs={"thinking": {"type": "adaptive"}})
+
+    message = (await claude_turn(provider, ModelRequest(messages=_user(), stream=stream))).message
+
+    expected = ("First. Second.", "redacted-1redacted-2") if stream else ("Second.", "redacted-2")
+    assert (message.reasoning_content, message.redacted_reasoning_content) == expected
+    assert (message.provider_data or {})["signature"] == "sig-2"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cumulative", [False, True], ids=["output_only", "cumulative"])
 async def test_a_completed_stream_counts_its_usage_once(tmp_path: Path, *, cumulative: bool) -> None:
     """Input usage reported at the start is not counted again when the final delta repeats it."""
@@ -540,6 +564,25 @@ async def test_authored_output_config_and_stop_sequences_reach_the_request(tmp_p
     assert body["output_config"]["effort"] == "low"
     assert body["output_config"]["format"]["type"] == "json_schema"
     assert provider.settings.output_config == {"effort": "low"}, "the format never leaks into the authored setting"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("structured", [False, True], ids=["plain", "structured-output"])
+async def test_documents_ask_for_citations_except_under_structured_output(tmp_path: Path, *, structured: bool) -> None:
+    """The API rejects citations beside an output format, so a structured answer sends its documents without them."""
+    wire = Wire(json_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
+    provider = route_provider("anthropic", tmp_path, wire)
+    document = File(content=b"Paris is in France.", mime_type="text/plain")
+    messages = [Message(role="user", content="Where is Paris?", files=[document])]
+    request = ModelRequest(messages=messages, response_format=_Answer if structured else None, stream=False)
+
+    await claude_turn(provider, request)
+
+    body = wire.body()
+    (block,) = [block for block in body["messages"][-1]["content"] if block["type"] == "document"]
+    assert ("citations" in block, "output_config" in body) == (not structured, structured)
+    if not structured:
+        assert block["citations"] == {"enabled": True}
 
 
 @pytest.mark.asyncio

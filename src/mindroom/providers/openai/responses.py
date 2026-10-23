@@ -170,6 +170,7 @@ class ResponsesAdapter:
             store=request_store(self.wire, request),
             portable_replay=request.portable_replay,
             native_compaction=request.native_compaction,
+            text_as_reasoning=self.settings.reasoning is not None,
         )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
@@ -184,6 +185,7 @@ class ResponsesAdapter:
                 store=request_store(self.wire, request),
                 portable_replay=request.portable_replay,
                 native_compaction=request.native_compaction,
+                text_as_reasoning=self.settings.reasoning is not None and self.settings.reasoning_summary is None,
             )
             try:
                 events = self._streamed(client, kwargs, accumulator)

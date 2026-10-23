@@ -253,7 +253,14 @@ class ClaudeProvider:
                 response = await (
                     client.beta.messages.create(**kwargs) if prepared.beta else client.messages.create(**kwargs)
                 )
-                message, stop_reason = self._finish(response, request, prepared, started, first_output_at)
+                message, stop_reason = self._finish(
+                    response,
+                    request,
+                    prepared,
+                    started,
+                    first_output_at,
+                    streamed=False,
+                )
                 for output in whole_turn_deltas(
                     reasoning=message.reasoning_content,
                     content=message.get_content_string(),
@@ -269,7 +276,14 @@ class ClaudeProvider:
                     if isinstance(event, (RawMessageStartEvent, BetaRawMessageStartEvent)):
                         yield UsageReported(parse_claude_usage(event.message.usage), final=False)
                     elif isinstance(event, (ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
-                        message, stop_reason = self._finish(event.message, request, prepared, started, first_output_at)
+                        message, stop_reason = self._finish(
+                            event.message,
+                            request,
+                            prepared,
+                            started,
+                            first_output_at,
+                            streamed=True,
+                        )
                         yield UsageReported(message.metrics)
                         yield TurnCompleted(message=message, stop_reason=stop_reason)
                     elif (output := _output_event(event)) is not None:
@@ -290,11 +304,14 @@ class ClaudeProvider:
         prepared: _PreparedRequest,
         started: float,
         first_output_at: float | None,
+        *,
+        streamed: bool,
     ) -> tuple[Message, StopReason | None]:
         """Build the finished assistant message with MindRoom's provenance keys and timings."""
         message = assistant_message_from_response(
             response,
             record_context_management=self.settings.context_management is not None,
+            streamed=streamed,
         )
         stamp_finished_turn(message, self.identity, started=started, first_output_at=first_output_at)
         record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=prepared.checkpoint_prefix)
@@ -402,6 +419,7 @@ class ClaudeProvider:
         conversation = format_claude_messages(
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or thinking_enabled,
+            citations=output_format is None,
         )
         # Vertex rejects the tool-level strict field.
         strict_allowed = self.route != "vertexai_claude"
