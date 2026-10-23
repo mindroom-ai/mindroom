@@ -999,12 +999,7 @@ async def _run_non_streaming_agent_attempts(
         logger.exception("Error generating AI response", agent=run_context.agent_name)
         return _NonStreamingAttemptResult(record=terminal.record, attempt=attempt, user_error=e)
     finally:
-        ai_runtime.register_queued_notice_storage(
-            storage_factory=scope_context.storage_factory if scope_context is not None else None,
-            session_id=run_context.session_id,
-            session_kind="agent",
-            entity_name=run_context.agent_name,
-        )
+        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=run_context.agent_name)
 
 
 def _failed_agent_attempt(
@@ -2122,12 +2117,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         if not holder.attempt_started:
             return
         holder.attempt_started = False
-        ai_runtime.register_queued_notice_storage(
-            storage_factory=scope_context.storage_factory if scope_context is not None else None,
-            session_id=session_id,
-            session_kind="agent",
-            entity_name=agent_name,
-        )
+        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=agent_name)
 
     async def _run_streaming_attempt(  # noqa: C901
         run: TurnRunState,

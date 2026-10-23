@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
+from mindroom import ai_runtime
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.ai import run_delegated_child_response
@@ -51,7 +52,6 @@ from mindroom.teams.runtime import MemberEvent, continue_team
 from mindroom.teams.storage import (
     configured_team,
     persist_into,
-    register_team_notice_storage,
     scope_storage,
     team_history_settings,
 )
@@ -574,7 +574,7 @@ async def continue_paused_team_run(
             try:
                 await finalize_consumption()
             finally:
-                register_team_notice_storage(scope_context=scope, entity_name=entity_name)
+                ai_runtime.register_scope_notice_storage(scope_context=scope, entity_name=entity_name)
 
 
 __all__ = [

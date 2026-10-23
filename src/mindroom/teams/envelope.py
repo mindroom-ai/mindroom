@@ -93,7 +93,6 @@ from mindroom.teams.runtime import leader_tool_specs, run_team
 from mindroom.teams.spec import TeamMode
 from mindroom.teams.storage import (
     persist_into,
-    register_team_notice_storage,
     scope_storage,
     team_history_settings,
 )
@@ -783,7 +782,7 @@ class _TeamTurn:
         if not self.holder.attempt_started:
             return
         self.holder.attempt_started = False
-        self.register_notice_storage(scope_context)
+        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=self.entity_name)
 
     def sync_live_turn_recorder(self, run: TurnRunState, attempt: TeamAttempt) -> None:
         """Refresh the live turn state from the attempt, so an interruption records its text and its tool calls."""
@@ -899,9 +898,6 @@ class _TeamTurn:
 
     def error_text(self, error: Exception) -> str:
         return get_user_friendly_error_message(error, self.ctx.entity_label, runtime_paths=self.runtime_paths)
-
-    def register_notice_storage(self, scope_context: ScopeSessionContext | None) -> None:
-        register_team_notice_storage(scope_context=scope_context, entity_name=self.entity_name)
 
     def discard_empty_run(self, scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
         ai_runtime.discard_empty_completed_run(
