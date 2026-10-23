@@ -947,27 +947,26 @@ def test_keys_no_agno_class_of_the_provider_took_still_fail_at_build(
         build_model_provider(config, _runtime_paths(tmp_path))
 
 
-def _accepted_keys(provider: str) -> frozenset[str]:
-    """Return every ``extra_kwargs`` key some route of ``provider`` accepts, from the settings its adapter parses."""
-    if provider in ACCEPTED_KEYS:
-        return ACCEPTED_KEYS[provider]
-    if provider in {"codex", "openai_codex"}:
+def _accepted_keys(route: str) -> frozenset[str]:
+    """Return every ``extra_kwargs`` key ``route`` accepts, from the settings its adapter parses."""
+    if route in ACCEPTED_KEYS:
+        return ACCEPTED_KEYS[route]
+    if route == "codex":
         return CODEX_FIELDS
     settings_types = {
         "google": [GeminiSettings],
-        "gemini": [GeminiSettings],
         "ollama": [OllamaSettings],
         "synthetic": [SyntheticSettings],
-    }.get(provider, [ChatSettings, ResponsesSettings])
+    }.get(route, [ChatSettings, ResponsesSettings])
     return frozenset(field.name for settings_type in settings_types for field in fields(settings_type))
 
 
 def test_no_route_accepts_a_retired_agno_field_of_its_provider() -> None:
     """Config load drops a retired field only where no route would take it, so no accepted setting is lost."""
-    providers = frozenset(ACCEPTED_KEYS) | OPENAI_FAMILY_PROVIDERS | {"google", "gemini", "ollama", "synthetic"}
+    routes = frozenset(ACCEPTED_KEYS) | OPENAI_FAMILY_PROVIDERS | {"google", "ollama", "synthetic"}
 
     for retired in legacy_fields._RETIRED_MODEL_SETTINGS:
-        scope = providers if retired.providers is None else retired.providers
-        assert scope <= providers
-        for provider in scope:
-            assert not retired.fields & _accepted_keys(provider), provider
+        scope = routes if retired.providers is None else retired.providers
+        assert scope <= routes
+        for route in scope:
+            assert not retired.fields & _accepted_keys(route), route
