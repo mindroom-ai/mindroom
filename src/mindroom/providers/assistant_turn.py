@@ -79,6 +79,7 @@ def whole_turn_deltas(
 
     A caller that reads a reply from its deltas, such as a blocking team turn keeping the text its members
     already returned when the attempt fails, then gets the same reply whether the request streamed or not.
+    ``reasoning`` is the reasoning the reply carried, not the copy a route stores for Agno parity.
     """
     events: list[StreamEvent] = []
     if reasoning:

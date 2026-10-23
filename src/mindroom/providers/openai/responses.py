@@ -27,6 +27,7 @@ from mindroom.providers.openai.responses_wire import (
     ResponsesTurnParts,
     ResponsesWire,
     parse_response,
+    reasoning_summary,
     request_store,
     responses_request_kwargs,
     responses_stop_reason,
@@ -158,12 +159,16 @@ class ResponsesAdapter:
         client: AsyncOpenAI,
         kwargs: dict[str, Any],
         request: ModelRequest,
-    ) -> ResponsesTurnParts:
+    ) -> tuple[ResponsesTurnParts, list[StreamEvent]]:
+        """Send one request without streaming; return its turn and the deltas a stream of the reply would have yielded.
+
+        The reasoning deltas carry the reply's reasoning summary, not the reasoning the turn stores.
+        """
         try:
             response = await client.responses.create(**kwargs)
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
-        return parse_response(
+        parts = parse_response(
             response,
             wire=self.wire,
             store=request_store(self.wire, request),
@@ -171,6 +176,12 @@ class ResponsesAdapter:
             native_compaction=request.native_compaction,
             text_as_reasoning=self.settings.reasoning is not None,
         )
+        deltas = whole_turn_deltas(
+            reasoning=reasoning_summary(response),
+            content=parts.content,
+            tool_calls=parts.tool_calls,
+        )
+        return parts, deltas
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one Responses request and yield its deltas, usage, and finished turn."""
@@ -200,13 +211,9 @@ class ResponsesAdapter:
                 raise
             parts = accumulator.finish()
         else:
-            parts = await self._completed(client, kwargs, request)
+            parts, deltas = await self._completed(client, kwargs, request)
             first_token = time.monotonic()
-            for event in whole_turn_deltas(
-                reasoning=parts.reasoning,
-                content=parts.content,
-                tool_calls=parts.tool_calls,
-            ):
+            for event in deltas:
                 yield event
         message = finished_assistant_message(
             self.identity,

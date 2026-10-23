@@ -24,7 +24,9 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelRequest,
     NativeCompactionReplay,
+    ReasoningDelta,
     RequestOverrides,
+    TextDelta,
     ToolSpec,
     UsageReported,
     complete,
@@ -1329,6 +1331,28 @@ async def test_authored_reasoning_stores_the_output_text_as_agno_did(
     turn = await _turn(built, ModelRequest(messages=[_user()], stream=stream))
 
     assert (turn.content, turn.message.reasoning_content) == (_PACK, stored)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summary", [False, True], ids=["without-summary", "with-summary"])
+async def test_a_whole_reply_with_authored_reasoning_yields_the_reasoning_deltas_its_stream_would(
+    tmp_path: Path,
+    *,
+    summary: bool,
+) -> None:
+    """The stored copy of the output text stays out of the deltas: only a reasoning summary is reasoning."""
+    config = {**_OPENAI_RESPONSES, "extra_kwargs": {"reasoning": {"effort": "low"}}}
+    deltas = {}
+    for stream in (True, False):
+        root = tmp_path / ("streamed" if stream else "blocking")
+        root.mkdir()
+        built = _Built(root, config, _reasoning_reply(stream=stream, summary=summary))
+        events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()], stream=stream))]
+        deltas[stream] = [event for event in events if isinstance(event, (ReasoningDelta, TextDelta))]
+
+    expected = [TextDelta(_PACK)]
+    assert deltas[True] == ([ReasoningDelta("Think. "), *expected] if summary else expected)
+    assert deltas[False] == deltas[True]
 
 
 @pytest.mark.asyncio

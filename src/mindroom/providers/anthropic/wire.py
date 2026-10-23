@@ -644,6 +644,15 @@ def _stored_reasoning(blocks: list[str], *, streamed: bool) -> str | None:
     return "".join(blocks) if streamed else blocks[-1]
 
 
+def thinking_text(response: AnthropicMessage | BetaMessage) -> str:
+    """Return the text of every thinking block of a response, as a stream's thinking deltas add up."""
+    return "".join(
+        block.thinking
+        for block in response.content
+        if block.type == "thinking" and isinstance(block, (ThinkingBlock, BetaThinkingBlock))
+    )
+
+
 __all__ = [
     "OUTPUT_LIMIT_STOP_REASONS",
     "TRAILING_USER_MESSAGE",
@@ -658,5 +667,6 @@ __all__ = [
     "stop_reason_of",
     "supports_prefill",
     "supports_structured_outputs",
+    "thinking_text",
     "tool_call_from_block",
 ]

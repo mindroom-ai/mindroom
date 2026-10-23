@@ -48,6 +48,7 @@ __all__ = [
     "ResponsesTurnParts",
     "ResponsesWire",
     "parse_response",
+    "reasoning_summary",
     "request_store",
     "responses_input",
     "responses_request_kwargs",
@@ -572,6 +573,17 @@ class ResponsesStream:
         return self.parts
 
 
+def reasoning_summary(response: Response) -> str:
+    """Return the reasoning summary text a response carries, which a stream delivers as reasoning deltas."""
+    return "".join(
+        item.text
+        for output in cast("list[Any]", response.output)
+        if output.type == "reasoning"
+        for item in output.summary
+        if item.text
+    )
+
+
 def parse_response(
     response: Response,
     *,
@@ -593,7 +605,6 @@ def parse_response(
         status=response.status,
         incomplete_reason=response.incomplete_details.reason if response.incomplete_details is not None else None,
     )
-    summary: list[str] = []
     # The SDK's output union does not narrow on ``type``.
     for output in cast("list[Any]", response.output):
         if output.type == "message":
@@ -607,11 +618,9 @@ def parse_response(
                     "function": {"name": output.name, "arguments": output.arguments},
                 },
             )
-        elif output.type == "reasoning":
-            if store is False:
-                parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
-            summary.extend(item.text for item in output.summary if item.text)
-    parts.reasoning = "".join(summary) if summary else (response.output_text if text_as_reasoning else None)
+        elif output.type == "reasoning" and store is False:
+            parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
+    parts.reasoning = reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
     if response.usage is not None:
         parts.usage = _usage(response.usage)
     parts.provider_data[_STORED_KEY] = store is not False

@@ -220,6 +220,25 @@ async def test_stored_reasoning_is_what_agno_stored_for_the_stream_mode(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_a_whole_reply_yields_the_reasoning_of_every_thinking_block_though_it_stores_the_last(
+    tmp_path: Path,
+) -> None:
+    """The stored copy keeps Agno's last block; the reasoning deltas add up to all blocks, as the stream's do."""
+    blocks = [
+        {"type": "thinking", "thinking": "First. ", "signature": "sig-1"},
+        {"type": "thinking", "thinking": "Second.", "signature": "sig-2"},
+        {"type": "text", "text": "Done."},
+    ]
+    reasoning = {}
+    for stream, reply in ((True, sse_reply(blocks)), (False, json_reply(blocks))):
+        provider = route_provider("anthropic", tmp_path, Wire(reply), extra_kwargs={"thinking": {"type": "adaptive"}})
+        events = await claude_events(provider, ModelRequest(messages=_user(), stream=stream))
+        reasoning[stream] = "".join(event.text for event in events if isinstance(event, ReasoningDelta))
+
+    assert reasoning == {True: "First. Second.", False: "First. Second."}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cumulative", [False, True], ids=["output_only", "cumulative"])
 async def test_a_completed_stream_counts_its_usage_once(tmp_path: Path, *, cumulative: bool) -> None:
     """Input usage reported at the start is not counted again when the final delta repeats it."""

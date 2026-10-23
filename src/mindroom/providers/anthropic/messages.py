@@ -80,6 +80,7 @@ from mindroom.providers.anthropic.wire import (
     stop_reason_of,
     supports_prefill,
     supports_structured_outputs,
+    thinking_text,
     tool_call_from_block,
 )
 from mindroom.providers.assistant_turn import stamp_finished_turn, whole_turn_deltas
@@ -262,7 +263,7 @@ class ClaudeProvider:
                     streamed=False,
                 )
                 for output in whole_turn_deltas(
-                    reasoning=message.reasoning_content,
+                    reasoning=thinking_text(response),
                     content=message.get_content_string(),
                     tool_calls=message.tool_calls or (),
                 ):
