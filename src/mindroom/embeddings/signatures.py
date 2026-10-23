@@ -16,11 +16,6 @@ _SENTENCE_TRANSFORMERS_DEPENDENCIES = ["sentence-transformers", "torchvision"]
 _SENTENCE_TRANSFORMERS_EXTRA = "sentence_transformers"
 
 
-def _default_dimensions(model: str) -> int | None:
-    """Return the default dimensions for models that support the parameter."""
-    return OPENAI_EMBEDDING_DIMENSIONS.get(model)
-
-
 def effective_knowledge_embedder_signature(
     provider: str,
     model: str,
@@ -66,7 +61,7 @@ def effective_mem0_embedder_signature(
     effective_host = host if provider in {"openai", "ollama"} else ""
     effective_dimensions = dimensions
     if provider == "openai" and effective_dimensions is None:
-        effective_dimensions = _default_dimensions(model)
+        effective_dimensions = OPENAI_EMBEDDING_DIMENSIONS.get(model)
     elif provider in {"ollama", "sentence_transformers"}:
         effective_dimensions = None
     if provider == "openai" and (query_prefix or document_prefix):
