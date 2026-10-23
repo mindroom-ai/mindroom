@@ -22,7 +22,6 @@ import pytest
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
-    INCOMPLETE_STREAM,
     MALFORMED_TOOL_CALL,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -405,8 +404,8 @@ _STALLED = 2
 def _early_ends(before_output: Reply, after_output: Reply) -> list[_Case]:
     """Return the early end before any output and the early end after visible output of one route's wire."""
     return [
-        _Case("end_before_output", before_output, ProviderUnavailable, UNAVAILABLE, _PIPELINE, code=INCOMPLETE_STREAM),
-        _Case("end_after_visible_output", after_output, ProviderUnavailable, UNAVAILABLE, 1, code=INCOMPLETE_STREAM),
+        _Case("end_before_output", before_output, ProviderUnavailable, UNAVAILABLE, _PIPELINE),
+        _Case("end_after_visible_output", after_output, ProviderUnavailable, UNAVAILABLE, 1),
     ]
 
 

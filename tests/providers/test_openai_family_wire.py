@@ -789,10 +789,10 @@ async def test_responses_stream_without_completion_fails(
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, _responses_reply(*events))
 
-    with pytest.raises(ProviderUnavailable, match="without completing the turn") as info:
+    with pytest.raises(ProviderUnavailable, match="without completing the turn"):
         await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.code, len(built.requests)) == ("incomplete_stream", requests)
+    assert len(built.requests) == requests
 
 
 _SEARCH_CALL = {"id": "ws_1", "type": "web_search_call", "status": "in_progress", "action": {"type": "search"}}

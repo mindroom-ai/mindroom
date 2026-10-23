@@ -10,8 +10,6 @@ from mindroom.llm.usage import MessageMetrics
 # Gemini's MALFORMED_FUNCTION_CALL; the request pipeline answers it with one guidance retry, and the media fallback
 # never strips media for it.
 MALFORMED_TOOL_CALL = "malformed_tool_call"
-# The ``ProviderError.code`` of a stream that ended before the provider finished its turn.
-INCOMPLETE_STREAM = "incomplete_stream"
 # The ``ProviderError.code`` of a transport failure that timed out, such as an HTTP connect or read timeout, so callers
 # that report timeouts need not read the error's text; other transport failures carry ``connection_error``.
 TRANSPORT_TIMEOUT = "timeout"
@@ -77,7 +75,7 @@ def incomplete_stream_error(*, provider: str) -> ProviderUnavailable:
     It is retryable like a dropped connection, since the next attempt may finish the turn.
     """
     msg = "The provider stream ended without completing the turn"
-    return ProviderUnavailable(msg, provider=provider, code=INCOMPLETE_STREAM)
+    return ProviderUnavailable(msg, provider=provider)
 
 
 class ModelOutputLimitError(RuntimeError):
@@ -96,7 +94,6 @@ class ModelSafeguardRefusal(ProviderError):  # noqa: N818
 
 
 __all__ = [
-    "INCOMPLETE_STREAM",
     "MALFORMED_TOOL_CALL",
     "MISSING_API_KEY",
     "MODEL_SAFEGUARD_REFUSAL_MESSAGE",

@@ -12,7 +12,7 @@ from structlog.testing import capture_logs
 from mindroom.agent_loop.helper import complete_once, complete_prompt
 from mindroom.agent_loop.prompt import PromptSpec, render_system_message
 from mindroom.agent_loop.structured import select_response_format
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     Capabilities,
@@ -196,7 +196,5 @@ async def test_a_stream_that_never_finishes_its_turn_raises() -> None:
     """A provider stream that ends without a finished turn is a provider error, not an empty answer."""
     provider = _RecordingProvider(answer="partial", finish=False)
 
-    with pytest.raises(ProviderError) as raised:
+    with pytest.raises(ProviderUnavailable, match="without completing the turn"):
         await complete_once(provider, _messages(PromptSpec(role="Summarize."), "Thread: ..."))
-
-    assert raised.value.code == "incomplete_stream"

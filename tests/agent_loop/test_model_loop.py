@@ -157,7 +157,7 @@ async def test_a_stream_that_never_completes_raises_a_provider_error() -> None:
     with pytest.raises(ProviderError, match="without completing the turn") as info:
         await _run(spec(model), _prompt())
 
-    assert (info.value.provider, info.value.code) == ("Synthetic", "incomplete_stream")
+    assert info.value.provider == "Synthetic"
 
 
 # --- tool loop -------------------------------------------------------------------------------------------------------
