@@ -420,23 +420,6 @@ class _ProviderDataRecord:
     provider_data: dict[str, Any] | None
 
 
-def _record_completed_output(
-    parts: ResponsesTurnParts,
-    items: list[dict[str, Any]],
-    *,
-    store: bool | None,
-    portable_replay: bool,
-    native_compaction: NativeCompactionReplay | None,
-) -> None:
-    """Record the replay mode, the native checkpoint, and ordered output when replay will need it."""
-    parts.provider_data[_PORTABLE_KEY] = portable_replay
-    record = _ProviderDataRecord(provider_data=parts.provider_data)
-    record_native_checkpoint(record, items, native_compaction)
-    parts.provider_data = record.provider_data or {}
-    if (store is False or portable_replay) and any(item.get("type") == "reasoning" for item in items):
-        parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
-
-
 def _record_tool_search_items(parts: ResponsesTurnParts, output_items: Sequence[Any]) -> None:
     items = [item.model_dump(exclude_none=True) for item in output_items if item.type in _TOOL_SEARCH_ITEM_TYPES]
     if items:
@@ -473,14 +456,14 @@ def _read_ended_response(
             if output.type == "reasoning":
                 parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
     parts.provider_data[_STORED_KEY] = store is not False
-    if response.status == "completed":
-        _record_completed_output(
-            parts,
-            items,
-            store=store,
-            portable_replay=portable_replay,
-            native_compaction=native_compaction,
-        )
+    if response.status != "completed":
+        return
+    parts.provider_data[_PORTABLE_KEY] = portable_replay
+    record = _ProviderDataRecord(provider_data=parts.provider_data)
+    record_native_checkpoint(record, items, native_compaction)
+    parts.provider_data = record.provider_data or {}
+    if (store is False or portable_replay) and any(item.get("type") == "reasoning" for item in items):
+        parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
 
 
 def responses_stop_reason(status: str | None, incomplete_reason: str | None, *, tool_calls: bool) -> StopReason | None:
