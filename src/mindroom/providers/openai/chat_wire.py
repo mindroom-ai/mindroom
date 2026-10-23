@@ -70,13 +70,14 @@ _CHAT_STOP_REASONS: dict[str, StopReason] = {
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChatWire:
-    """How one route shapes Chat Completions requests and reads responses."""
+    """How one route shapes Chat Completions requests and reads responses.
+
+    Besides its dialect, a route keeps rules of its own: ``openai`` sends the system prompt as ``developer``,
+    ``deepseek`` replays ``reasoning_content``, and ``openrouter`` replays ``reasoning_details``.
+    """
 
     route: str
     dialect: ChatDialect
-    developer_system_role: bool = False
-    replay_reasoning_content: bool = False
-    replay_reasoning_details: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -118,7 +119,7 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
         "tool_call_id": message.tool_call_id,
         "tool_calls": message.tool_calls,
     }
-    if wire.replay_reasoning_content:
+    if wire.route == "deepseek":
         values["reasoning_content"] = message.reasoning_content
     formatted = {key: value for key, value in values.items() if value is not None}
     if (message.images or message.audio) and isinstance(message.content, str):
@@ -134,7 +135,7 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
     if message.content is None:
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None
-    if wire.replay_reasoning_details and reasoning_details:
+    if wire.route == "openrouter" and reasoning_details:
         formatted["reasoning_details"] = reasoning_details
     return formatted
 
@@ -190,7 +191,7 @@ def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSe
     if wire.dialect == "cerebras":
         return [_cerebras_message(message) for message in messages]
     role_map = settings.role_map or {
-        "system": "developer" if wire.developer_system_role else "system",
+        "system": "developer" if wire.route == "openai" else "system",
         "model": "assistant",
     }
     canonical = reformat_tool_call_ids(messages, "chat")
@@ -585,7 +586,7 @@ class ChatStream:
         return [TextDelta(content)] if content else []
 
     def _add_reasoning(self, fields: Mapping[str, Any]) -> list[StreamEvent]:
-        if self.wire.replay_reasoning_details and (details := fields.get("reasoning_details")):
+        if self.wire.route == "openrouter" and (details := fields.get("reasoning_details")):
             _merge_provider_data(self.parts.provider_data, {"reasoning_details": list(details)})
         reasoning = _reasoning_field(fields)
         if not isinstance(reasoning, str):
@@ -682,7 +683,7 @@ def parse_chat_completion(completion: ChatCompletion, wire: ChatWire, *, provide
     if isinstance(reasoning_field := _reasoning_field(message_extra), str):
         parts.reasoning = reasoning_field
     parts.provider_data = _reply_metadata(completion)
-    if wire.replay_reasoning_details and (details := message_extra.get("reasoning_details")):
+    if wire.route == "openrouter" and (details := message_extra.get("reasoning_details")):
         parts.provider_data["reasoning_details"] = details
     parts.provider_data["finish_reason"] = choice.finish_reason
     return parts

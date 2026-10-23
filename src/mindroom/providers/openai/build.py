@@ -96,7 +96,6 @@ class _ChatRoute:
     accepted: frozenset[str]
     structured_output: Literal["native", "json_schema", "json_mode"] = "native"
     omitted_media: frozenset[MediaKind] = _CHAT_OMITTED_MEDIA
-    developer_system_role: bool = False
     # The runtime env variable that sets the endpoint when the config sets none.
     base_url_variable: str | None = None
 
@@ -109,7 +108,6 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         api_key_env="OPENAI_API_KEY",
         dialect="openai",
         accepted=CHAT_FIELDS,
-        developer_system_role=True,
         base_url_variable=_OPENAI_BASE_URL_VARIABLE,
     ),
     "azure": _ChatRoute(
@@ -428,17 +426,10 @@ def _build_chat(route_key: str, model_id: str, model_config: ModelConfig, runtim
         omitted_media=route.omitted_media,
         provider_default_sampling=_provider_default_sampling(model_id),
     )
-    wire = ChatWire(
-        route=route_key,
-        dialect=route.dialect,
-        developer_system_role=route.developer_system_role,
-        replay_reasoning_content=route_key == "deepseek",
-        replay_reasoning_details=route_key == "openrouter",
-    )
     return ChatAdapter(
         identity=identity,
         capabilities=capabilities,
-        wire=wire,
+        wire=ChatWire(route=route_key, dialect=route.dialect),
         settings=settings,
         clients=SDKClients(
             _chat_client_factory(
