@@ -855,6 +855,23 @@ async def test_usage_seen_before_a_stream_is_abandoned_is_still_recorded(tmp_pat
     assert response_record["usage"]["cache_read_tokens"] == 42
 
 
+@pytest.mark.asyncio
+async def test_a_partial_usage_report_of_an_abandoned_stream_is_recorded(tmp_path: Path) -> None:
+    """A request cut off after only a partial report logs that usage, as every other consumer settles it."""
+    usage = MessageMetrics(input_tokens=3, output_tokens=1, cache_read_tokens=42)
+    inner = _ScriptedProvider([[UsageReported(usage, final=False), TextDelta("ok"), TextDelta("never read"), _turn()]])
+    stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
+
+    with capture_logs() as logs:
+        assert isinstance(await anext(stream), UsageReported)
+        await stream.aclose()
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    assert (usage_log["usage_available"], usage_log["cache_read_tokens"]) == (True, 42)
+    _, response_record = _log_records(tmp_path)
+    assert response_record["usage"]["cache_read_tokens"] == 42
+
+
 def _request() -> ModelRequest:
     return ModelRequest(messages=[_user()])
 

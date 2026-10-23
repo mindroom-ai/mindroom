@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "finished_assistant_message",
+    "output_started",
     "split_thinking",
     "stamp_finished_turn",
     "whole_turn_deltas",
@@ -43,6 +44,16 @@ def stamp_finished_turn(
     if first_output_at is not None:
         message.metrics.time_to_first_token = first_output_at - started
     return message
+
+
+def output_started(first_output_at: float | None, event: StreamEvent) -> float | None:
+    """Return when the turn's first output arrived: ``first_output_at``, or now when ``event`` is that output.
+
+    Text, reasoning, and complete tool calls are output; usage reports and stream progress are not.
+    """
+    if first_output_at is None and isinstance(event, TextDelta | ReasoningDelta | ToolCallReady):
+        return time.monotonic()
+    return first_output_at
 
 
 def finished_assistant_message(

@@ -683,10 +683,15 @@ async def test_the_usage_of_a_malformed_tool_call_counts_toward_the_retried_turn
 
     events = [event async for event in provider.stream(request)]
 
-    reports = [event.usage for event in events if isinstance(event, UsageReported)]
+    reports = [
+        (event.usage.input_tokens, event.usage.output_tokens, event.final)
+        for event in events
+        if isinstance(event, UsageReported)
+    ]
     turn = events[-1]
     assert isinstance(turn, TurnCompleted)
-    assert [(usage.input_tokens, usage.output_tokens) for usage in reports] == [(30, 5), (40, 9)]
+    # Each attempt reports its usage as it arrives; the guidance retry settles the malformed attempt's report first.
+    assert reports == [(30, 5, False), (30, 5, True), (40, 9, False), (40, 9, True)]
     assert (turn.message.metrics.input_tokens, turn.message.metrics.output_tokens) == (70, 14)
     assert (turn.message.provider_data or {})[AGGREGATE_USAGE_KEY] is True
     assert len(wire.requests) == 2

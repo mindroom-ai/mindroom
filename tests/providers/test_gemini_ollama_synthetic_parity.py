@@ -70,7 +70,10 @@ async def test_stream_events_match_the_finished_message(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Deltas add up to the finished message, usage is reported once as the message's own metrics."""
+    """Deltas add up to the finished message, and usage is final once, as the message's own metrics.
+
+    The chunk that carries the usage reports it as a partial report first, which the final report replaces.
+    """
     hide_provider_environment(monkeypatch)
 
     result = await replay(golden, tmp_path)
@@ -81,16 +84,20 @@ async def test_stream_events_match_the_finished_message(
     text = "".join(event.text for event in result.events if isinstance(event, TextDelta))
     reasoning = "".join(event.text for event in result.events if isinstance(event, ReasoningDelta))
     calls = [event.call for event in result.events if isinstance(event, ToolCallReady)]
-    usage = [event.usage for event in result.events if isinstance(event, UsageReported)]
+    reports = [event for event in result.events if isinstance(event, UsageReported)]
+    final = [report.usage for report in reports if report.final]
     assert text == (message.content or "")
     assert reasoning == (message.reasoning_content or "")
     assert calls == (message.tool_calls or [])
-    assert len(usage) == 1
-    assert usage[0] is message.metrics
-    assert comparable_metrics(usage[0]) == golden.data["parsed"]["metrics"]
-    # Only a chunk without output (such as Ollama's final usage-only chunk) shows up as provider activity.
-    silent = [event for event in result.events if isinstance(event, StreamProgress)]
-    assert len(silent) <= (1 if golden.family == "ollama" and golden.data["input"]["stream"] else 0)
+    assert len(final) == 1
+    assert final[0] is message.metrics
+    assert comparable_metrics(final[0]) == golden.data["parsed"]["metrics"]
+    assert [comparable_metrics(report.usage) for report in reports if not report.final] in (
+        [],
+        [comparable_metrics(final[0])],
+    )
+    # Every chunk carries output or usage, so none shows up as bare provider activity.
+    assert not [event for event in result.events if isinstance(event, StreamProgress)]
 
 
 # ---------------------------------------------------------------------------

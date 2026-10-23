@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom.llm.provider import TurnCompleted, UsageReported
+from mindroom.llm.provider import ReportedUsage, TurnCompleted
 from mindroom.llm.request_context import REQUEST_ATTRIBUTION_FIELDS, current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
@@ -201,18 +201,18 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
         except Exception:
             logger.exception("Failed to persist LLM request log", agent_name=log.model_name, model_id=inner.identity.id)
             log_path = None
-    usage: MessageMetrics | None = None
+    reported = ReportedUsage()
     served_provider: str | None = None
     try:
         events = inner.stream(request)
         async with closing_async_stream(events):
             async for event in events:
-                if isinstance(event, UsageReported) and event.final:
-                    usage = event.usage
-                elif isinstance(event, TurnCompleted):
+                reported.observe(event)
+                if isinstance(event, TurnCompleted):
                     served_provider = _served_provider(event.message.provider_data)
                 yield event
     finally:
+        usage = reported.received
         try:
             _log_usage(inner, log, usage, served_provider, context)
             if log_path is not None and usage is not None:

@@ -262,6 +262,44 @@ async def test_composed_pipeline_serves_the_synthetic_family(tmp_path: Path) -> 
     assert records[1]["messages"][-1]["tool_call_id"] == call["id"]
 
 
+# --- Timings ------------------------------------------------------------------------------------------------------
+
+
+_REPLIES_WITHOUT_OUTPUT: dict[str, Callable[[], httpx.Response]] = {
+    "openai_chat": lambda: sse_response(
+        [
+            {
+                "id": "c",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "m",
+                "choices": [],
+                "usage": {"prompt_tokens": 40, "completion_tokens": 0, "total_tokens": 40},
+            },
+            "[DONE]",
+        ],
+    ),
+    "gemini": lambda: sse_response([gemini_chunk(finish=True)]),
+    "ollama": lambda: ndjson_response([ollama_chunk(done=True)]),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", _REPLIES_WITHOUT_OUTPUT)
+async def test_a_reply_without_output_records_no_time_to_first_token(family: str, tmp_path: Path) -> None:
+    """Only text, reasoning, or a tool call is output; a chunk that carries only usage starts no first-token time."""
+    spec = FAMILIES[family]
+    wire = Wire(_REPLIES_WITHOUT_OUTPUT[family]())
+
+    turn = await complete(
+        _pipeline(spec.adapter(tmp_path, wire)),
+        ModelRequest(messages=[Message(role="user", content="Hi")]),
+    )
+
+    assert turn.content == ""
+    assert turn.usage.time_to_first_token is None
+
+
 # --- Stream activity and server tools ----------------------------------------------------------------------------
 
 

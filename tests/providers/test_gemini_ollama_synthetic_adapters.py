@@ -570,7 +570,12 @@ async def test_gemini_non_streaming_requests_use_generate_content(tmp_path: Path
 
     assert request["url"].endswith(":generateContent")
     completed = _completed(events)
-    assert [type(event).__name__ for event in events] == ["TextDelta", "UsageReported", "TurnCompleted"]
+    assert [type(event).__name__ for event in events] == [
+        "TextDelta",
+        "UsageReported",
+        "UsageReported",
+        "TurnCompleted",
+    ]
     assert completed.message.content == "Whole."
     assert completed.message.metrics.input_tokens == 10
 
@@ -588,6 +593,7 @@ async def test_gemini_chunks_without_output_are_reported_as_progress(tmp_path: P
     assert [type(event).__name__ for event in events] == [
         "StreamProgress",
         "TextDelta",
+        "UsageReported",
         "UsageReported",
         "TurnCompleted",
     ]
@@ -618,8 +624,8 @@ async def test_gemini_non_streamed_blocked_prompt_reports_its_prompt_usage(tmp_p
     _, events = await run_adapter(GEMINI, _request(stream=False), tmp_path, reply)
 
     completed = _completed(events)
-    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
-    usage = [event.usage for event in events if isinstance(event, UsageReported)]
+    assert [type(event).__name__ for event in events] == ["UsageReported", "UsageReported", "TurnCompleted"]
+    usage = [event.usage for event in events if isinstance(event, UsageReported) and event.final]
     assert [(metrics.input_tokens, metrics.output_tokens, metrics.total_tokens) for metrics in usage] == [(9, 0, 9)]
     assert completed.message.metrics.input_tokens == 9
     assert (completed.message.content, completed.message.tool_calls, completed.stop_reason) == (None, None, None)
@@ -640,7 +646,7 @@ async def test_gemini_empty_text_parts_add_no_deltas_but_keep_their_signature(tm
     assert [type(event).__name__ for event in events] == [
         "StreamProgress",
         "TextDelta",
-        "StreamProgress",
+        "UsageReported",
         "UsageReported",
         "TurnCompleted",
     ]

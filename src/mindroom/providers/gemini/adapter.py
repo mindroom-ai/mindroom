@@ -23,7 +23,7 @@ from mindroom.credentials.sync import get_api_key_for_provider
 from mindroom.llm.errors import INCOMPLETE_STREAM, InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
-from mindroom.providers.assistant_turn import finished_assistant_message
+from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.errors import classify_provider_error, google_auth_error, transport_error
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
@@ -32,6 +32,7 @@ from mindroom.providers.gemini.wire import (
     MediaRoute,
     format_contents,
     function_declarations,
+    malformed_tool_call_error,
     read_chunk,
     response_schema,
     stop_reason,
@@ -110,8 +111,9 @@ class GeminiProvider:
         """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.
 
         Media uploads and downloads happen first, so their SDK and transport errors are normalized too; a
-        failure after a native tool ran is final, because a retry would run the tool again. Usage a failed attempt
-        already reported, such as a malformed tool call's, is yielded before its error.
+        failure after a native tool ran is final, because a retry would run the tool again. Usage is reported as the
+        reply's finished candidate carries it, so an attempt that fails or is cut off afterwards, such as one that
+        ended in a malformed tool call, still settles it.
         """
         started = time.monotonic()
         reply = GeminiReply()
@@ -127,27 +129,19 @@ class GeminiProvider:
                 chunks = await client.aio.models.generate_content_stream(**call)
                 async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
                     async for chunk in responses:
-                        events = read_chunk(reply, chunk, provider=self.identity.provider_name)
-                        if not events:
-                            # A chunk without output, such as grounding or code-execution progress, is still activity.
-                            yield StreamProgress()
-                        for event in events:
-                            first_output_at = first_output_at or time.monotonic()
+                        # A chunk without output, such as grounding or code-execution progress, is still activity.
+                        for event in read_chunk(reply, chunk) or [StreamProgress()]:
+                            first_output_at = output_started(first_output_at, event)
                             yield event
             else:
-                events = read_chunk(
-                    reply,
-                    await client.aio.models.generate_content(**call),
-                    provider=self.identity.provider_name,
-                    whole_response=True,
-                )
+                events = read_chunk(reply, await client.aio.models.generate_content(**call), whole_response=True)
                 first_output_at = time.monotonic()
                 for event in events:
                     yield event
         except Exception as error:
-            if reply.usage is not None:
-                yield UsageReported(reply.usage)
             self._raise_provider_error(error, hosted_tool_ran=reply.hosted_tool_ran)
+        if (malformed := malformed_tool_call_error(reply, provider=self.identity.provider_name)) is not None:
+            raise malformed
         provider_data: dict[str, Any] = {}
         if reply.thought_signature is not None:
             provider_data["thought_signature"] = reply.thought_signature

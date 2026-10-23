@@ -17,7 +17,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.providers.assistant_turn import finished_assistant_message, whole_turn_deltas
+from mindroom.providers.assistant_turn import finished_assistant_message, output_started, whole_turn_deltas
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.chat_wire import (
@@ -92,13 +92,9 @@ class ChatAdapter:
                 sdk_stream = await client.chat.completions.create(**kwargs)
                 try:
                     async for chunk in sdk_stream:
-                        events = accumulator.add(chunk)
-                        if not events:
-                            # A chunk without deltas, such as a tool-call argument piece, is still activity.
-                            yield StreamProgress()
-                            continue
-                        first_token = first_token or time.monotonic()
-                        for event in events:
+                        # A chunk without deltas or usage, such as a tool-call argument piece, is still activity.
+                        for event in accumulator.add(chunk) or [StreamProgress()]:
+                            first_token = output_started(first_token, event)
                             yield event
                 finally:
                     await sdk_stream.close()

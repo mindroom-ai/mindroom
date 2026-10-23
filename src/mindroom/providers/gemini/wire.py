@@ -21,7 +21,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady
+from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.providers.remote_media import download_media
@@ -66,6 +66,8 @@ _FORMAT_TO_MIME = {
     "webm": "video/webm",
     "pdf": "application/pdf",
 }
+# The finish reason of a candidate whose tool call the model malformed.
+_MALFORMED_FUNCTION_CALL = "MALFORMED_FUNCTION_CALL"
 _FILTERED_FINISH_REASONS = frozenset(
     {
         "SAFETY",
@@ -596,37 +598,46 @@ def read_chunk(
     reply: GeminiReply,
     chunk: GenerateContentResponse,
     *,
-    provider: str,
     whole_response: bool = False,
 ) -> list[StreamEvent]:
     """Add one streamed chunk (or one ``whole_response`` from a non-streamed call) to ``reply`` and return its events.
 
-    Gemini repeats cumulative usage on every streamed chunk, so only usage on a finished candidate counts.
-    A whole response without candidates, such as a blocked prompt, still counts its prompt usage, as Agno's
-    non-streaming parser did; Agno's streaming parser dropped it, so a streamed one does not. A malformed tool
-    call raises after its usage is recorded, so the attempt the guidance retry replaces still counts.
+    Gemini repeats cumulative usage on every streamed chunk, so only usage on a finished candidate counts, and it is
+    returned as a partial report of the reply's usage so far. A whole response without candidates, such as a blocked
+    prompt, still counts its prompt usage, as Agno's non-streaming parser did; Agno's streaming parser dropped it, so
+    a streamed one does not. A candidate that ended in a malformed tool call reports its usage and nothing else;
+    ``malformed_tool_call_error`` then ends the reply.
     """
     if not chunk.candidates:
-        if whole_response and chunk.usage_metadata is not None:
-            reply.usage = _usage_metrics(chunk.usage_metadata)
-        return []
+        if not whole_response or chunk.usage_metadata is None:
+            return []
+        reply.usage = _usage_metrics(chunk.usage_metadata)
+        return [UsageReported(reply.usage, final=False)]
     candidate = chunk.candidates[0]
+    events: list[StreamEvent] = []
     finish_reason = None if candidate.finish_reason is None else candidate.finish_reason.value
-    if finish_reason is not None and chunk.usage_metadata is not None:
-        usage = _usage_metrics(chunk.usage_metadata)
-        reply.usage = usage if reply.usage is None else reply.usage + usage
-    if finish_reason == "MALFORMED_FUNCTION_CALL":
-        msg = f"Generation ended with finish reason: {finish_reason}"
-        raise ProviderError(msg, provider=provider, code=MALFORMED_TOOL_CALL)
-    parts = candidate.content.parts if candidate.content is not None else None
-    if candidate.grounding_metadata is not None or any(
-        part.executable_code is not None or part.code_execution_result is not None for part in parts or ()
-    ):
-        reply.hosted_tool_ran = True
-    events = [event for part in parts or () for event in _read_part(reply, part)]
+    if finish_reason != _MALFORMED_FUNCTION_CALL:
+        parts = candidate.content.parts if candidate.content is not None else None
+        if candidate.grounding_metadata is not None or any(
+            part.executable_code is not None or part.code_execution_result is not None for part in parts or ()
+        ):
+            reply.hosted_tool_ran = True
+        events.extend(event for part in parts or () for event in _read_part(reply, part))
     if finish_reason is not None:
         reply.finish_reason = finish_reason
+        if chunk.usage_metadata is not None:
+            usage = _usage_metrics(chunk.usage_metadata)
+            reply.usage = usage if reply.usage is None else reply.usage + usage
+            events.append(UsageReported(reply.usage, final=False))
     return events
+
+
+def malformed_tool_call_error(reply: GeminiReply, *, provider: str) -> ProviderError | None:
+    """Return the error of a reply that ended in a tool call the model malformed, or None for any other reply."""
+    if reply.finish_reason != _MALFORMED_FUNCTION_CALL:
+        return None
+    msg = f"Generation ended with finish reason: {_MALFORMED_FUNCTION_CALL}"
+    return ProviderError(msg, provider=provider, code=MALFORMED_TOOL_CALL)
 
 
 def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
@@ -692,6 +703,7 @@ __all__ = [
     "convert_schema",
     "format_contents",
     "function_declarations",
+    "malformed_tool_call_error",
     "read_chunk",
     "response_schema",
     "stop_reason",

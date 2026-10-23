@@ -110,7 +110,7 @@ def test_identity_and_capabilities_per_route(
 
 @pytest.mark.asyncio
 async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_message(tmp_path: Path) -> None:
-    """The partial usage comes first, output events follow the blocks, and the turn ends with the parsed message."""
+    """Partial usage comes first and again with the message delta, and the turn ends with the parsed message."""
     wire = Wire(
         sse_reply(
             [
@@ -140,7 +140,9 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
     assert events[3] == ToolCallReady(
         {"id": "toolu_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}},
     )
-    final_usage, completed = events[4], events[5]
+    delta_usage, final_usage, completed = events[4], events[5], events[6]
+    assert isinstance(delta_usage, UsageReported)
+    assert (delta_usage.final, delta_usage.usage.input_tokens, delta_usage.usage.output_tokens) == (False, 40, 9)
     assert isinstance(final_usage, UsageReported)
     assert final_usage.final is True
     assert isinstance(completed, TurnCompleted)

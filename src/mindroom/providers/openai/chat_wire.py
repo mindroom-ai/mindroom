@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta
+from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.assistant_turn import split_thinking
 from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay
@@ -602,7 +602,7 @@ class ChatStream:
     _calls: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     def add(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
-        """Fold one chunk and return the deltas it carried."""
+        """Fold one chunk and return the events it carried: its deltas, and a partial report of usage it carried."""
         events: list[StreamEvent] = []
         if chunk.choices:
             choice = chunk.choices[0]
@@ -614,7 +614,7 @@ class ChatStream:
                     self._add_call_delta(call, position)
                 if self.wire.dialect == "openai":
                     events.extend(self._add_reasoning(_extra(delta)))
-        self._add_usage(chunk)
+        events.extend(self._add_usage(chunk))
         return events
 
     def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
@@ -661,7 +661,7 @@ class ChatStream:
         if call.type:
             entry["type"] = call.type
 
-    def _add_usage(self, chunk: ChatCompletionChunk) -> None:
+    def _add_usage(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
         if self.wire.dialect == "groq":
             # Groq streams its usage in its own chunk extension.
             groq = _extra(chunk).get("x_groq")
@@ -669,8 +669,10 @@ class ChatStream:
             metrics = _groq_usage(usage) if isinstance(usage, Mapping) else None
         else:
             metrics = _usage_metrics(chunk.usage, self.wire) if chunk.usage is not None else None
-        if metrics is not None:
-            self.parts.usage = metrics if self.parts.usage is None else self.parts.usage + metrics
+        if metrics is None:
+            return []
+        self.parts.usage = metrics if self.parts.usage is None else self.parts.usage + metrics
+        return [UsageReported(self.parts.usage, final=False)]
 
     def finish(self) -> ChatTurnParts:
         """Return the finished turn; the stream must be fully consumed first."""

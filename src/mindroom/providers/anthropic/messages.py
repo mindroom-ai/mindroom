@@ -24,12 +24,11 @@ from anthropic.lib.streaming import (
     ParsedContentBlockStopEvent,
     ParsedMessageStopEvent,
 )
-from anthropic.types import RawContentBlockDeltaEvent, RawMessageStartEvent, ToolUseBlock
+from anthropic.types import RawContentBlockDeltaEvent, ToolUseBlock
 from anthropic.types import TextDelta as AnthropicTextDelta
 from anthropic.types import ThinkingDelta as AnthropicThinkingDelta
 from anthropic.types.beta import (
     BetaRawContentBlockDeltaEvent,
-    BetaRawMessageStartEvent,
     BetaTextDelta,
     BetaThinkingDelta,
     BetaToolUseBlock,
@@ -237,8 +236,8 @@ class ClaudeProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one request and yield its events; the SDK's message stream accumulates the final message.
 
-        ``message_start`` reports the input and cache usage as a partial ``UsageReported`` so a stream that
-        stops early still settles what Anthropic bills. A request with ``stream=False`` is sent without
+        ``message_start`` and ``message_delta`` report the usage so far, as a partial ``UsageReported``, so a stream
+        that stops early still settles what Anthropic bills. A request with ``stream=False`` is sent without
         streaming and yields its output, usage, and finished turn once the response arrives.
         """
         started = time.monotonic()
@@ -274,8 +273,9 @@ class ClaudeProvider:
             manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
             async with manager as events:
                 async for event in events:
-                    if isinstance(event, (RawMessageStartEvent, BetaRawMessageStartEvent)):
-                        yield UsageReported(parse_claude_usage(event.message.usage), final=False)
+                    if event.type in _USAGE_EVENT_TYPES:
+                        # The SDK has already added the event's usage to its accumulated message.
+                        yield UsageReported(parse_claude_usage(events.current_message_snapshot.usage), final=False)
                     elif isinstance(event, (ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
                         message, stop_reason = self._finish(
                             event.message,
@@ -541,8 +541,10 @@ class ClaudeProvider:
         raise mapped from error
 
 
+# The raw API events that report the request's usage so far.
+_USAGE_EVENT_TYPES = frozenset({"message_start", "message_delta"})
 # Raw API events the SDK forwards; its convenience events (text, thinking, input_json, ...) repeat them.
-_PROVIDER_EVENT_TYPES = frozenset({"content_block_start", "content_block_delta", "content_block_stop", "message_delta"})
+_PROVIDER_EVENT_TYPES = frozenset({"content_block_start", "content_block_delta", "content_block_stop"})
 # The HTTP status the SDK reports for an ``error`` event that arrives after the stream started.
 _COMMITTED_STREAM_STATUS = 200
 # Blocks a retry may produce again: the model's own, a tool search, which only looks up deferred tool definitions, and

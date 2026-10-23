@@ -11,6 +11,7 @@ unavailability, and a request that no longer fits the context window says so.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -29,7 +30,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, complete
+from mindroom.llm.provider import ModelRequest, ReportedUsage, complete
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.retry import STREAM_STALLED
 from tests.providers.anthropic_family_support import ROUTE_CONFIGS, claude_message, provider_for
@@ -39,7 +40,7 @@ from tests.providers.golden_support import PacedBytes, ndjson_response, pipeline
 from tests.providers.openai_family_support import openai_family_adapter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.llm.provider import ModelProvider
@@ -1144,3 +1145,103 @@ async def test_a_blocking_reply_slower_than_the_idle_limit_is_waited_for(route: 
     turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=False))
 
     assert (turn.content, len(sent)) == ("ok", 1)
+
+
+# --- Usage of a cut-off stream ------------------------------------------------------------------------------------
+
+
+class _OpenAfter(httpx.AsyncByteStream):
+    """A response body sent at once, after which the connection stays open without sending more."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+        self.sent = asyncio.Event()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Send the body, mark it sent once the reader asks for more, then wait forever."""
+        yield self._body
+        self.sent.set()
+        await asyncio.get_running_loop().create_future()
+
+
+_CLAUDE_USAGE_DELTA = {
+    "type": "message_delta",
+    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+    "usage": {"output_tokens": 9},
+}
+_CHAT_USAGE = {
+    "id": "chatcmpl-1",
+    "object": "chat.completion.chunk",
+    "created": 1,
+    "model": "m",
+    "choices": [],
+    "usage": {"prompt_tokens": 40, "completion_tokens": 9, "total_tokens": 49},
+}
+# Each route's reply up to and including the event that reports the request's usage, without the stream's end.
+_USAGE_THEN_SILENCE: dict[str, Reply] = {
+    "anthropic": _claude_stream(
+        *_claude_text(0, "ok"),
+        {"type": "content_block_stop", "index": 0},
+        _CLAUDE_USAGE_DELTA,
+    ),
+    "openai_chat": _chat_stream(_chat_chunk({"content": "ok"}), _CHAT_USAGE),
+    "openai_responses": _responses_stream(_response_text("ok"), _RESPONSE_COMPLETED),
+    "gemini": _gemini_stream(_gemini_chunk({"text": "ok"}, finish="STOP")),
+    "ollama": _ollama_stream(_ollama_chunk("ok"), _ollama_chunk(done=True)),
+}
+
+
+def _silent_after_usage(route: str) -> tuple[_OpenAfter, Callable[[httpx.Request], httpx.Response]]:
+    reply = _USAGE_THEN_SILENCE[route]()
+    assert isinstance(reply, httpx.Response)
+    body = _OpenAfter(reply.content)
+    headers = {"content-type": reply.headers["content-type"]}
+    return body, lambda _request: httpx.Response(200, headers=headers, stream=body)
+
+
+def _billed(usage: ReportedUsage) -> tuple[int, int] | None:
+    received = usage.received
+    return None if received is None else (received.input_tokens, received.output_tokens)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", _USAGE_THEN_SILENCE)
+async def test_usage_the_provider_reported_is_kept_when_the_reply_is_cancelled_after_it(
+    route: str,
+    tmp_path: Path,
+) -> None:
+    """A reply cancelled after the provider reported its usage, before the stream ended, still settles that usage."""
+    body, respond = _silent_after_usage(route)
+    provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=None)
+    usage = ReportedUsage()
+
+    async def consume() -> None:
+        async for event in provider.stream(ModelRequest(messages=[Message(role="user", content="Hi")])):
+            usage.observe(event)
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(body.sent.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _billed(usage) == (40, 9)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", _USAGE_THEN_SILENCE)
+async def test_usage_the_provider_reported_is_kept_when_the_stream_stalls_after_it(route: str, tmp_path: Path) -> None:
+    """A stream that stalls after the provider reported its usage fails at the idle limit and still settles that usage."""
+    _, respond = _silent_after_usage(route)
+    provider = pipeline_provider(_adapter(route, tmp_path, respond), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+    usage = ReportedUsage()
+
+    async def consume() -> None:
+        async for event in provider.stream(ModelRequest(messages=[Message(role="user", content="Hi")])):
+            usage.observe(event)
+
+    with pytest.raises(ProviderUnavailable) as raised:
+        await consume()
+
+    assert raised.value.code == STREAM_STALLED
+    assert _billed(usage) == (40, 9)

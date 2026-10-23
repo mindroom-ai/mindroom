@@ -34,7 +34,12 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import finished_assistant_message, split_thinking, whole_turn_deltas
+from mindroom.providers.assistant_turn import (
+    finished_assistant_message,
+    output_started,
+    split_thinking,
+    whole_turn_deltas,
+)
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.remote_media import download_media
@@ -121,11 +126,8 @@ class OllamaProvider:
                 )
                 async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
                     async for chunk in responses:
-                        events = _read_chunk(reply, chunk)
-                        if not events:
-                            yield StreamProgress()
-                        for event in events:
-                            first_output_at = first_output_at or time.monotonic()
+                        for event in _read_chunk(reply, chunk) or [StreamProgress()]:
+                            first_output_at = output_started(first_output_at, event)
                             yield event
             else:
                 response = await self._sdk_client().chat(
@@ -287,6 +289,7 @@ def _whole_reply_events(reply: _OllamaReply, response: ChatResponse) -> list[Str
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
+    """Add one chunk to ``reply`` and return its events: its text, its tool calls, and the done chunk's usage."""
     events: list[StreamEvent] = []
     message = chunk.message
     if message.content:
@@ -304,6 +307,7 @@ def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
         reply.done = True
         reply.done_reason = chunk.done_reason
         reply.usage = _usage(chunk)
+        events.append(UsageReported(reply.usage, final=False))
     return events
 
 

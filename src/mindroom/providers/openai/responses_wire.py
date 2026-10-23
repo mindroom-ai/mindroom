@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from pydantic import BaseModel
 
 from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError, ProviderUnavailable
-from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, ToolCallReady
+from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
 from mindroom.providers.openai.chat_wire import function_definition, with_sdk_options
@@ -53,9 +53,12 @@ __all__ = [
     "responses_input",
     "responses_request_kwargs",
     "responses_stop_reason",
+    "usage_report",
 ]
 
 _ENCRYPTED_REASONING = "reasoning.encrypted_content"
+# The events that end a response; each carries the response with its usage.
+_TERMINAL_EVENT_TYPES = frozenset({"response.completed", "response.incomplete", "response.failed"})
 _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 _STORED_KEY = "mindroom_response_stored"
 _PORTABLE_KEY = "mindroom_portable_replay"
@@ -466,7 +469,6 @@ class ResponsesStream:
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
     completed: bool = False
     exposed: bool = False
-    terminal_usage: MessageMetrics | None = None
     _content: list[str] = field(default_factory=list)
     _reasoning: list[str] = field(default_factory=list)
     _tool_use: dict[str, Any] = field(default_factory=dict)
@@ -485,8 +487,6 @@ class ResponsesStream:
     def add(self, event: ResponseStreamEvent) -> list[StreamEvent]:  # noqa: C901 - one branch per event type
         """Fold one event and return the deltas it carried; failure events raise."""
         current = cast("Any", event)
-        if event.type in {"response.completed", "response.incomplete", "response.failed"} and current.response.usage:
-            self.terminal_usage = _usage(current.response.usage)
         if event.type in {"error", "response.failed"}:
             raise self.attempt_error(self._failure(event))
         self.exposed = self.exposed or not (_exposes_no_output(event) and not self._tool_use)
@@ -571,6 +571,17 @@ class ResponsesStream:
         self.parts.content = "".join(self._content) or None
         self.parts.reasoning = "".join(self._reasoning) or None
         return self.parts
+
+
+def usage_report(event: ResponseStreamEvent) -> UsageReported | None:
+    """Return the usage a response's terminal event reports, as a partial report to publish when it arrives.
+
+    The finished turn's final report replaces it; a stream cut off after it, such as a reply cancelled or stalled
+    before the stream ends, or a failed response, still settles what the provider billed.
+    """
+    if event.type not in _TERMINAL_EVENT_TYPES or not (usage := cast("Any", event).response.usage):
+        return None
+    return UsageReported(_usage(usage), final=False)
 
 
 def reasoning_summary(response: Response) -> str:
