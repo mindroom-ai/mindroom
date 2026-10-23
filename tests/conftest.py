@@ -3461,12 +3461,13 @@ def squad_probe() -> Iterator[type["ProbeToolkit"]]:
 
 
 def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":
-    """Persist a session row with its fields and every run it holds, in order, and return the session.
+    """Create the session's row from its fields, then persist every run it holds, in order, and return the session.
 
     Production code writes runs one at a time as they finish; tests seed whole histories with this instead. Each
-    run is saved with its usage, as the run's own save would.
+    run is saved with its usage, as the run's own save would. A row that already exists keeps its fields; change
+    them through the store's field writers.
     """
-    storage.save_session_fields(session, "metadata", "session_state")
+    storage.ensure_session_row(session)
     for run in session.runs:
         storage.save_run(session, run, record_usage=True)
     return session

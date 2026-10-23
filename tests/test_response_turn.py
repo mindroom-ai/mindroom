@@ -742,7 +742,7 @@ async def test_history_cleanup_repeats_until_a_pass_removes_nothing_new(monkeypa
     def read_history(*_args: object) -> set[str]:
         return next(histories)
 
-    def remove(*_args: object, event_id: str, legacy_source_event_id: str | None) -> bool:
+    def remove(*_args: object, event_id: str, legacy_source_event_id: str | None, **_kwargs: object) -> bool:
         assert legacy_source_event_id is None
         removed.append(event_id)
         return True

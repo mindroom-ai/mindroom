@@ -403,11 +403,8 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
 class _ReleaseIndex:
     """A published index that answers every search with one chunk naming the query."""
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
-        return [SearchHit(content=f"knowledge:{query}")]
-
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        return self.search(query, limit=limit)
+        return [SearchHit(content=f"knowledge:{query}")]
 
 
 @pytest.mark.asyncio

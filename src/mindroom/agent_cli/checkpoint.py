@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.tools import tool_result_message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
@@ -139,7 +139,6 @@ class BatchCheckpoint:
         await save_cli_session(
             catalog.store,
             catalog.session,
-            catalog.run.session_state,
             lambda store, session: store.save_run(session, run, record_usage=False),
         )
 
@@ -147,22 +146,20 @@ class BatchCheckpoint:
 async def save_cli_session(
     store: ConversationStore | None,
     session: ConversationSession,
-    session_state: dict[str, Any],
     write: Callable[[ConversationStore, ConversationSession], object],
 ) -> None:
     """Save the session's current state, then ``write``'s runs, in the store's lane; failures propagate.
 
-    The store records the state it writes as ``session.stored_session_state``; ``write`` saves through a copy of
-    the session that holds its own copy of the state, so no later change to either aliases the other.
+    The store records the state it writes as ``session.stored_session_state``, and ``write`` saves through the
+    session, which then holds its runs as the store does.
     """
     if store is None:
         msg = "CLI history requires persisted session storage"
         raise RuntimeError(msg)
-    state = session_state_snapshot(session_state)
-    saved = replace(session, session_state=deepcopy(state))
+    state = session_state_snapshot(session.session_state)
 
     def operation(opened: ConversationStore) -> None:
         opened.save_session_state(session, state)
-        write(opened, saved)
+        write(opened, session)
 
     await run_session_storage_operation(lambda: store, operation)

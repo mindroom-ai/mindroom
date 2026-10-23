@@ -52,6 +52,7 @@ from mindroom.response_turn import (
     apply_exact_approval_decisions,
 )
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
@@ -165,12 +166,9 @@ class _Index:
     def __init__(self, searches: list[str]) -> None:
         self.searches = searches
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         self.searches.append(query)
         return [SearchHit(content="saved generated memory")]
-
-    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        return self.search(query, limit=limit)
 
 
 def _knowledge(searches: list[str]) -> AgentKnowledge:
@@ -487,6 +485,104 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     assert saved.metadata["mindroom_replay_state"] == "interrupted"
     assert all(not message.tool_calls for message in saved.messages)
     assert "turn stopped before completion" in saved.messages[-1].get_content_string()
+
+
+@pytest.mark.asyncio
+async def test_a_later_save_of_the_recovered_session_keeps_the_state_the_recovered_call_wrote(tmp_path: Path) -> None:
+    """The recovered call changes the session's own state, so a later run save of that session stores it too."""
+
+    def action(value: str, run_context: AgnoRunContext) -> str:
+        assert run_context.session_state is not None
+        run_context.session_state["recovered"] = value
+        return "action result"
+
+    runtime = _helper_runtime(tmp_path, tools=["shell"])
+    persist_entity_accounts(runtime.config, runtime.runtime_paths)
+    build = _with_toolkit(_minimal_build(runtime), _actions("action", action, requires_confirmation=True))
+    store = create_state_storage("helper", tmp_path, session_table="sessions")
+    persisted, session = _saved(
+        store,
+        "session",
+        RunRecord(
+            run_id="run",
+            session_id="session",
+            agent_id="helper",
+            status=RunStatus.cancelled,
+            messages=[
+                Message(
+                    role="assistant",
+                    tool_calls=[
+                        {
+                            "id": "bash-parent",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": '{"command":"never replay"}'},
+                        },
+                    ],
+                ),
+            ],
+        ),
+    )
+    requirement = RunRequirement(
+        ToolExecution(tool_call_id="hidden", tool_name="action", tool_args={"value": "v"}, requires_confirmation=True),
+    )
+    continuation = approval_continuation(
+        run_id="run",
+        session_id="session",
+        entity_name="helper",
+        room_id=runtime.room_id,
+        requester_id=runtime.requester_id,
+        response_event_id="$response",
+        state="claimed",
+        calls=(
+            ApprovalCall(
+                "hidden",
+                "action",
+                "helper",
+                100,
+                decision=ApprovalDecision.APPROVED,
+                toolkit_name="actions",
+                arguments_digest=approval_arguments_digest({"value": "v"}),
+            ),
+        ),
+        cli_call={
+            "kind": "agent_cli",
+            "delegation_depth": 0,
+            "toolkit": "actions",
+            "function": "action",
+            "arguments": {"value": "v"},
+            "call_id": "hidden",
+            "parent_bash_call_id": "bash-parent",
+            "requirements": [requirement.to_dict()],
+        },
+    )
+
+    async def authorize(binding) -> None:
+        assert binding.key.function == "action"
+
+    with tool_runtime_context(runtime):
+        follow_up = await cli_approval_recovery.continue_cli_approval(
+            build,
+            continuation,
+            CliApprovalCall.from_dict(continuation.cli_call),
+            persisted,
+            session,
+            store,
+            paused_answer=PausedAnswer(text="", tool_trace=()),
+            runtime_context=runtime,
+            decisions={"hidden": True},
+            denial_reasons={"hidden": None},
+            tool_trace_collector=[],
+            refresh_scheduler=None,
+            authorize=authorize,
+            progress=None,
+        )
+    assert isinstance(follow_up, cli_approval_recovery.CliFollowUpTurn)
+
+    await persist_to(store, session)(RunRecord(run_id="later", session_id="session", agent_id="helper"))
+
+    fields = store.read_session_fields("session")
+    assert fields is not None
+    assert fields.session_state == {"recovered": "v"}
 
 
 def _outer_bash_approval(arguments: dict[str, object]) -> RunRequirement:

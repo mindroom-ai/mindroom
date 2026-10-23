@@ -129,7 +129,7 @@ def _loaded(storage: ConversationStore) -> ConversationSession:
 
 
 def _redact(storage: ConversationStore, event_id: str) -> bool:
-    return _remove_redacted_event_from_history(storage, _loaded(storage), _SCOPE, event_id=event_id)
+    return _remove_redacted_event_from_history(storage, session=_loaded(storage), scope=_SCOPE, event_id=event_id)
 
 
 def test_a_fold_sorts_after_the_runs_it_covers_and_its_run_after_it(storage: ConversationStore) -> None:
@@ -430,7 +430,7 @@ def test_redacting_a_team_turn_that_folded_removes_its_member_runs(storage: Conv
     session = storage.load_session("session", "team")
     assert session is not None
 
-    assert _remove_redacted_event_from_history(storage, session, _TEAM_SCOPE, event_id="$team")
+    assert _remove_redacted_event_from_history(storage, session=session, scope=_TEAM_SCOPE, event_id="$team")
 
     assert log_of(storage, _TEAM_SCOPE.key, "session") == ["run:t0"]
     reloaded = storage.load_session("session", "team")

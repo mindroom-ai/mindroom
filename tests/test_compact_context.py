@@ -22,7 +22,14 @@ from mindroom.history.session_context import (
     ScopeSessionContext,
     open_resolved_scope_session_context,
 )
-from mindroom.history.storage import has_queued_force_compaction, read_scope_state, set_force_compaction_state
+from mindroom.history.storage import (
+    _with_scope_state,
+    add_pending_force_compaction_scope,
+    has_queued_force_compaction,
+    read_scope_seen_event_ids,
+    read_scope_state,
+    update_scope_seen_event_ids,
+)
 from mindroom.history.types import (
     CompactionLifecycleStart,
     CompactionOutcome,
@@ -313,7 +320,7 @@ async def test_compact_context_saves_nothing_after_budget_error(tmp_path: Path) 
     assert result == (
         "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
     )
-    storage.save_session_fields.assert_not_called()
+    assert storage.method_calls == []
 
 
 @pytest.mark.asyncio
@@ -340,7 +347,15 @@ async def test_compact_context_saves_only_the_scope_metadata(tmp_path: Path) -> 
         result = await tool.compact_context()
 
     assert result == COMPACT_CONTEXT_SUCCESS
-    storage.save_session_fields.assert_called_once_with(scope_context.session, "metadata")
+    assert [call[0] for call in storage.method_calls] == ["update_metadata"]
+    ((session, update), _) = storage.update_metadata.call_args
+    assert session is scope_context.session
+    forced = update({"other": "kept"})
+    assert forced == _with_scope_state(
+        {"other": "kept"},
+        scope_context.scope,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
 
 
 @pytest.mark.asyncio
@@ -617,7 +632,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
     session = _session("session-1")
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
     summary_mock = AsyncMock()
@@ -663,7 +678,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
     with (
@@ -769,6 +784,73 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
     assert prepared.compaction_reply_outcome == "success"
     # The request was consumed, so the reply after this one does not compact again.
     assert not has_queued_force_compaction(storage, "session-1", HistoryScope(kind="agent", scope_id="test_agent"))
+
+
+@pytest.mark.asyncio
+async def test_a_consumed_compaction_request_keeps_metadata_another_writer_stored_meanwhile(tmp_path: Path) -> None:
+    """A reply that consumes a queued request stores the flag over the row's metadata, not the copy it loaded."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    seeded = _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")])
+    seeded.session_state = add_pending_force_compaction_scope(None, scope)
+    seed_session(storage, seeded)
+    session = storage.load_session("session-1", "agent")
+    assert session is not None
+    # A team turn records the events it consumed on the row after this reply loaded it.
+    other = storage.load_session("session-1", "agent")
+    assert other is not None
+    team_scope = HistoryScope(kind="team", scope_id="squad")
+    update_scope_seen_event_ids(storage, other, team_scope, ["$consumed"])
+
+    with (
+        patch("mindroom.history.compaction.build_model_provider", return_value=summary_model()),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")),
+    ):
+        await prepare_history_for_run_for_test(
+            agent_name="test_agent",
+            full_prompt="Current question",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    stored = storage.load_session("session-1", "agent")
+    assert stored is not None
+    assert read_scope_seen_event_ids(storage, stored, team_scope) == {"$consumed"}
+    assert not has_queued_force_compaction(storage, "session-1", scope)
+
+
+def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_after_the_copy_loaded(tmp_path: Path) -> None:
+    """A team turn's consumed ids merge into the row's metadata, not its loaded copy's, so a later request stays."""
+    config, runtime_paths = _make_config(tmp_path)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
+    team_copy = storage.load_session("session-1", "agent")
+    assert team_copy is not None
+    # The user asks for compaction after the team turn loaded its copy of the session.
+    result = request_compaction_before_next_reply(
+        scope=_AGENT_SCOPE,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=identity,
+    )
+    assert result.message == COMPACT_CONTEXT_SUCCESS
+    team_scope = HistoryScope(kind="team", scope_id="squad")
+
+    update_scope_seen_event_ids(storage, team_copy, team_scope, ["$consumed"])
+
+    stored = storage.load_session("session-1", "agent")
+    assert stored is not None
+    assert read_scope_state(stored, _AGENT_SCOPE).force_compact_before_next_run is True
+    assert read_scope_seen_event_ids(storage, stored, team_scope) == {"$consumed"}
+    assert team_copy.metadata == stored.metadata
 
 
 @pytest.mark.asyncio

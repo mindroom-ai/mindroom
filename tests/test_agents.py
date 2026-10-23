@@ -244,12 +244,9 @@ class _EmptyIndex:
     def exists(self) -> bool:
         return True
 
-    def search(self, query: str, *, limit: int) -> list[object]:
+    async def asearch(self, query: str, *, limit: int) -> list[object]:
         _ = (query, limit)
         return []
-
-    async def asearch(self, query: str, *, limit: int) -> list[object]:
-        return self.search(query, limit=limit)
 
 
 def _queryable_knowledge_handle() -> _EmptyIndex:

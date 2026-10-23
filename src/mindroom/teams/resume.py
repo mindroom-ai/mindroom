@@ -545,6 +545,7 @@ async def continue_paused_team_run(
                 prepared_history=None,
             )
             settings = team_history_settings(config, team_name)
+            plan = configured_replay_plan(history_settings=settings, estimated_tokens=0)
             resume = TeamResume(
                 spec=built.spec,
                 storage=storage,
@@ -557,8 +558,7 @@ async def continue_paused_team_run(
                         store=storage.store,
                         session=storage.session,
                         scope=storage.scope,
-                        scoped=True,
-                        native_compaction=native.native_compaction if native is not None else None,
+                        replay_plan=plan,
                         prompt_id=None,
                     ),
                     entity_name=team_name,
@@ -575,7 +575,7 @@ async def continue_paused_team_run(
                     portable_replay=native.portable_replay if native is not None else False,
                 ),
                 settings=settings,
-                plan=configured_replay_plan(history_settings=settings, estimated_tokens=0),
+                plan=plan,
                 user_id=user_id,
                 toolkit_owners=toolkit_owners,
             )

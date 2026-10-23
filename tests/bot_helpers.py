@@ -848,12 +848,9 @@ class _StubIndex:
     hits: list[SearchHit]
     calls: list[tuple[str, int]] = field(default_factory=list)
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         self.calls.append((query, limit))
         return self.hits[:limit]
-
-    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        return self.search(query, limit=limit)
 
 
 @dataclass
@@ -862,12 +859,9 @@ class _FailingStubIndex:
 
     error_message: str = "search failed"
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         _ = (query, limit)
         raise RuntimeError(self.error_message)
-
-    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        return self.search(query, limit=limit)
 
 
 class AgentBotTestBase:

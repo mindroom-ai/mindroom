@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -40,7 +39,7 @@ from mindroom.history.summary_message import (
     mark_summary_follows,
 )
 from mindroom.history.summary_rows import Segment, folded_tool_call_ids
-from mindroom.history.types import HistoryScope, ScopeSummary
+from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
@@ -48,7 +47,6 @@ from mindroom.native_compaction import checkpoint_items, native_replay_messages
 from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.store import runs_without
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests
 
@@ -61,9 +59,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.runtime import HistoryPreparationInputs
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.history.types import CompactionLifecycle, ResolvedHistorySettings
+    from mindroom.history.types import CompactionLifecycle, ResolvedHistorySettings, ResolvedReplayPlan
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelIdentity, ModelProvider, NativeCompactionReplay, ToolSpec
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
@@ -78,9 +76,10 @@ _PROMPT_ROLES = frozenset({"system", "developer"})
 class _MidTurnCompaction:
     """One run's mid-turn compaction policy and the state it keeps across that run's requests.
 
-    ``scope`` and ``session`` are set when the run replays persisted history, so a fold appends a summary row to the
-    scope; a run without them keeps its summary as a message of its own. ``prompt_id`` names the turn's prompt, which
-    every fold keeps in place.
+    ``store``, ``session``, and ``scope`` are where the run's scope stores, and ``replay_plan`` is the plan its
+    requests replay stored history under: a fold appends a summary row to the scope when they replay some, and a run
+    that replays none keeps its summary as a message of its own. ``prompt_id`` names the turn's prompt, which every
+    fold keeps in place. Whether the provider compacts natively is read from each request, which a fallback changes.
     """
 
     config: Config
@@ -94,7 +93,7 @@ class _MidTurnCompaction:
     store: ConversationStore | None
     session: ConversationSession | None
     scope: HistoryScope | None
-    native_compaction: NativeCompactionReplay | None
+    replay_plan: ResolvedReplayPlan | None
     deferred_tool_names: frozenset[str]
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None
@@ -104,6 +103,12 @@ class _MidTurnCompaction:
     stopped: bool = False
     # Member runs an earlier fold of this run already stored in its segment.
     folded_member_ids: set[str] = field(default_factory=set)
+
+    @property
+    def scoped_session(self) -> ConversationSession | None:
+        """Return the session a fold appends its summary row to, or None when the run's requests replay no history."""
+        replays_history = self.replay_plan is not None and self.replay_plan.add_history_to_context
+        return self.session if replays_history and self.store is not None and self.scope is not None else None
 
     def resolved_inputs(self) -> HistoryPreparationInputs:
         return resolve_entity_preparation_inputs(
@@ -143,7 +148,7 @@ def mid_turn_compaction_hook(
     store: ConversationStore | None,
     session: ConversationSession | None,
     scope: HistoryScope | None,
-    native_compaction: NativeCompactionReplay | None,
+    replay_plan: ResolvedReplayPlan | None,
     deferred_tool_names: frozenset[str],
     prompt_id: str | None,
     lifecycle: CompactionLifecycle | None = None,
@@ -151,8 +156,9 @@ def mid_turn_compaction_hook(
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 
-    ``scope`` and ``session`` are given when the run replays persisted history; ``lifecycle`` shows the fold through
-    the reply's notices and ``turn_recorder`` records the folded calls for an interrupted record.
+    A fold lands in ``scope`` when the run's requests replay its stored history under ``replay_plan``; ``lifecycle``
+    shows the fold through the reply's notices and ``turn_recorder`` records the folded calls for an interrupted
+    record.
     """
     binding = _MidTurnCompaction(
         config=config,
@@ -166,7 +172,7 @@ def mid_turn_compaction_hook(
         store=store,
         session=session,
         scope=scope,
-        native_compaction=native_compaction,
+        replay_plan=replay_plan,
         deferred_tool_names=deferred_tool_names,
         prompt_id=prompt_id,
         lifecycle=lifecycle,
@@ -195,14 +201,14 @@ class _Policy:
     limit: int
     # The model's own window minus the reserve; a rewritten request over it would fail at the provider.
     fit_limit: int
-    # Set while the provider compacts natively; the hook then only falls back to text when a request cannot fit.
+    # Set while the request asks the provider to compact; the hook then only falls back to text when it cannot fit.
     native_route: str | None
 
 
 async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> None:
     if binding.stopped:
         return
-    policy = _policy(binding)
+    policy = _policy(binding, state)
     if policy is None:
         return
     messages = state.messages
@@ -217,7 +223,7 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
     )
     if request_tokens <= policy.limit:
         return
-    session = binding.session if binding.scope is not None and binding.store is not None else None
+    session = binding.scoped_session
     layout = _layout(messages, binding.prompt_id, scoped=session is not None)
     if not layout.folded and all(is_compaction_summary(message) for message in layout.history):
         # Nothing but an earlier summary would fold, so compacting again cannot shrink the request.
@@ -232,7 +238,7 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
             "Native compaction left the request over its limit; compacted as text",
             run_id=state.record.run_id,
         )
-        _stop_native_compaction(binding, state)
+        _stop_native_compaction(state)
     rewritten_tokens = await asyncio.to_thread(_estimated_request_tokens, binding, messages, state.tools)
     _require_fit(policy, rewritten_tokens, summary_message)
     if rewritten_tokens > policy.limit:
@@ -245,13 +251,12 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
         binding.stopped = True
 
 
-def _stop_native_compaction(binding: _MidTurnCompaction, state: LoopState) -> None:
-    """Turn the provider's compaction off for the rest of this run; the fold replaced the checkpoints it replayed.
+def _stop_native_compaction(state: LoopState) -> None:
+    """Turn the provider's compaction off for the rest of this loop; the fold replaced the checkpoints it replayed.
 
-    Later requests of the run carry no native settings, so each route sends them as plain requests (Responses with
-    its storage setting restored), and the hook sizes and compacts them as text itself.
+    Later requests of the loop carry no native settings, so each route sends them as plain requests (Responses with
+    its storage setting restored), and the hook, which reads them from the request, sizes and compacts them as text.
     """
-    binding.native_compaction = None
     state.request_template = replace(state.request_template, native_compaction=None)
 
 
@@ -300,7 +305,8 @@ async def _compact_scope(
 ) -> Message | None:
     """Append one summary row covering the scope's stored runs after the latest row and this run's exchanges.
 
-    The row holds the run's folded part as its segment; once it is stored, the run's in-memory state follows.
+    The row holds the run's folded part as its segment; the append leaves the turn's session as the store holds it,
+    and once the row is stored, the run's request and record follow.
     """
     storage = binding.store
     scope = binding.scope
@@ -323,10 +329,6 @@ async def _compact_scope(
         )
         if binding.turn_recorder is not None:
             binding.turn_recorder.record_folded_tool_calls(folded_calls)
-        # The turn's session then holds what a fresh load does, so a request rebuilt from it within the turn, as a
-        # delegation continuation is, replays only what the summary does not cover.
-        session.summary = ScopeSummary(text=summary, updated_at=datetime.now(UTC))
-        session.runs = runs_without(session.runs, [run.run_id for run in basis.covered])
         _finish(messages, layout, summary_message, record)
 
     outcome = await compact_scope_mid_turn(
@@ -373,7 +375,7 @@ def _segment(record: AnyRunRecord, layout: _Layout, folded_member_ids: set[str])
     )
 
 
-def _policy(binding: _MidTurnCompaction) -> _Policy | None:
+def _policy(binding: _MidTurnCompaction, state: LoopState) -> _Policy | None:
     """Return the limit text compaction keeps requests under, or None when it cannot run for this request."""
     inputs = binding.resolved_inputs()
     plan = inputs.execution_plan
@@ -381,7 +383,7 @@ def _policy(binding: _MidTurnCompaction) -> _Policy | None:
         return None
     configured = binding.config.models.get(binding.model_name)
     model_window = configured.context_window if configured is not None else None
-    native = binding.native_compaction
+    native = state.request_template.native_compaction
     return _Policy(
         inputs=inputs,
         limit=context_budget_after_reserve(plan.replay_window_tokens, plan.reserve_tokens),

@@ -39,7 +39,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.types import ConversationSession
+from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from tests.conftest import seed_session
 from tests.history_helpers import folded_run_ids, stored_run_ids
 
@@ -369,10 +369,10 @@ class _Runner:
         self._snapshots.append(self._load())
 
     def _stale_write(self, action: Action) -> None:
-        """Write an older snapshot's session fields back, as a concurrent run's end would."""
+        """Write an older snapshot's session state back, as a concurrent run's end would."""
         if self._snapshots:
             snapshot = self._snapshots[action.index % len(self._snapshots)]
-            self._storage.save_session_fields(snapshot, "metadata", "session_state")
+            self._storage.save_session_state(snapshot, session_state_snapshot(snapshot.session_state))
 
     def _resurrect(self, action: Action) -> None:
         """Save an old copy of a run that no longer loads, as a late run save would."""
@@ -404,7 +404,7 @@ class _Runner:
             floor = None
         segment_rows = self._segment_rows()
         barrier = self._latest_barrier()
-        _remove_redacted_event_from_history(self._storage, self._load(), _SCOPE, event_id=event_id)
+        _remove_redacted_event_from_history(self._storage, session=self._load(), scope=_SCOPE, event_id=event_id)
         # A run goes whole, so a cut that removed one of its fold rows starts right after that row.
         remaining = self._segment_rows()
         for row_id, (after_run_index, owner) in segment_rows.items():

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.history.runtime import _compact_before_reply, resolve_entity_preparation_inputs
-from mindroom.history.storage import read_scope_state, set_force_compaction_state
+from mindroom.history.storage import _with_scope_state, read_scope_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -68,7 +68,7 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
         owner_id=turn.agent_name,
         runs=[_first_turn_run(golden)],
     )
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     storage = create_session_storage(turn.agent_name, turn.config, turn.runtime_paths, execution_identity=None)
     seed_session(storage, session)
     inputs = resolve_entity_preparation_inputs(

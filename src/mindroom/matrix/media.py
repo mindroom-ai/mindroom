@@ -332,7 +332,8 @@ def _sniff_image_mime_type(media_bytes: bytes | None) -> str | None:
     return mime_type
 
 
-def _normalize_mime_type(mime_type: str | None) -> str | None:
+def canonical_mime_type(mime_type: str | None) -> str | None:
+    """Return ``mime_type`` as a lowercase ``type/subtype`` without parameters, or None when it names no type."""
     if not isinstance(mime_type, str):
         return None
     normalized = mime_type.split(";", 1)[0].strip().lower()
@@ -341,7 +342,7 @@ def _normalize_mime_type(mime_type: str | None) -> str | None:
 
 def resolve_image_mime_type(media_bytes: bytes | None, declared_mime_type: str | None) -> _ImageMimeResolution:
     """Resolve effective image MIME type with byte-signature fallback."""
-    normalized_declared = _normalize_mime_type(declared_mime_type)
+    normalized_declared = canonical_mime_type(declared_mime_type)
     detected_mime_type = _sniff_image_mime_type(media_bytes)
     is_mismatch = (
         detected_mime_type is not None and normalized_declared is not None and detected_mime_type != normalized_declared

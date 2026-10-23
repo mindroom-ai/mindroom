@@ -21,7 +21,6 @@ from mindroom.history.storage import (
     ensure_scope_session_row,
     read_chunk_basis,
     record_summary_usage,
-    reload_session,
     save_working_run_changes,
     update_scope_state_on_latest,
 )
@@ -41,6 +40,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
 from mindroom.providers.names import canonical_provider
 from mindroom.providers.registry import build_model_provider
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import runs_without
 from mindroom.timing import timed
 from mindroom.token_budget import (
@@ -240,14 +240,16 @@ async def _persist_cleared_force_state_if_needed(
 ) -> None:
     if not state.force_compact_before_next_run:
         return
-    await run_blocking_until_complete(
-        update_scope_state_on_latest,
-        storage,
-        session,
-        scope,
-        # Only clear when the durable row still matches the state this run read;
-        # a concurrent write (for example a fresh manual request) wins otherwise.
-        lambda latest: replace(latest, force_compact_before_next_run=False) if latest == state else latest,
+    await run_session_storage_operation(
+        lambda: storage,
+        partial(
+            update_scope_state_on_latest,
+            session=session,
+            scope=scope,
+            # Only clear when the durable row still matches the state this run read;
+            # a concurrent write (for example a fresh manual request) wins otherwise.
+            update=lambda latest: replace(latest, force_compact_before_next_run=False) if latest == state else latest,
+        ),
     )
 
 
@@ -393,14 +395,17 @@ async def compact_scope_history(
         )
     except ConversationChangedError:
         # The reply replays what the conversation holds now; a manual request stays for the next reply.
-        await run_blocking_until_complete(reload_session, storage, session)
+        await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
     if rewrite_result is None:
         await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
         return None
 
     compacted_at = _iso_utc_now()
-    await run_blocking_until_complete(save_working_run_changes, storage, session, loaded_runs, working_session)
+    await run_session_storage_operation(
+        lambda: storage,
+        partial(save_working_run_changes, session=session, loaded_runs=loaded_runs, working_session=working_session),
+    )
     await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
     logger.info(
         "Compaction summary generated",
@@ -483,10 +488,10 @@ async def _rewrite_working_session_for_compaction(
             break
         await before_persist(chunk.included_runs)
         compacted_run_ids = tuple(run.run_id for run in chunk.included_runs if run.run_id)
-        appended = await run_blocking_until_complete(
+        appended = await run_session_storage_operation(
+            lambda: storage,
             partial(
                 append_compaction_chunk,
-                storage=storage,
                 session=persisted_session,
                 scope=scope,
                 basis=basis,
@@ -581,10 +586,10 @@ async def compact_running_turn(
 ) -> CompactionOutcome:
     """Summarize the basis's stored runs and the running turn's ``snapshots``, then append one row with ``segment``.
 
-    Nothing is written until every chunk has been summarized. Once the append starts, ``on_commit`` receives the
-    stored summary and the compaction is reported even when the turn is cancelled meanwhile, so the turn's
-    in-memory state always matches the log and a stored fold never reads as failed.
-    Raises when the conversation changed since ``basis`` was read.
+    Nothing is written until every chunk has been summarized. The append leaves ``session`` holding what the store
+    does; once it starts, ``on_commit`` receives the stored summary and the compaction is reported even when the turn
+    is cancelled meanwhile, so the turn's in-memory state always matches the log and a stored fold never reads as
+    failed. Raises when the conversation changed since ``basis`` was read.
     """
     runs = [*basis.runs, *snapshots]
     # The summary's usage row and summary row reference the session row, which a first turn has not written yet.
@@ -607,15 +612,19 @@ async def compact_running_turn(
     summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
 
     async def commit_and_report() -> CompactionOutcome:
-        appended = await asyncio.to_thread(
-            append_fold,
-            storage,
-            session=session,
-            scope=scope,
-            basis=basis,
-            summary=summary,
-            summary_model=summarizer.model.model.identity.id,
-            segment=segment,
+        # The append runs in the database's lane behind the session's other writes, and leaves the turn's session
+        # holding what the store does.
+        appended = await run_session_storage_operation(
+            lambda: storage,
+            partial(
+                append_fold,
+                session=session,
+                scope=scope,
+                basis=basis,
+                summary=summary,
+                summary_model=summarizer.model.model.identity.id,
+                segment=segment,
+            ),
         )
         if not appended:
             raise ConversationChangedError

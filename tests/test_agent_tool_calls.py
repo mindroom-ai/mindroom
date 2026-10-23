@@ -72,11 +72,13 @@ async def _catalog(
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
+    session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
     catalog = agent_tool_calls.PreparedAgentToolCatalog(
         agent_name="helper",
-        run=RunContext(run_id="run", session_id="session", user_id="@alice:test"),
+        # The run's tools share the session's state, as every turn hands it to them.
+        run=RunContext(run_id="run", session_id="session", user_id="@alice:test", session_state=session.session_state),
         runtime_context=runtime,
-        session=ConversationSession(session_id="session", kind="agent", owner_id="helper"),
+        session=session,
         middleware=middleware,
         tool_call_limit=tool_call_limit,
     )

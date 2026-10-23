@@ -89,25 +89,24 @@ def _publish(space: CollectionSpace, key: registry.PublishedIndexKey, content: s
     return name
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.asyncio
 async def test_retained_reader_follows_refresh(
     publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
-    asynchronous: bool,
 ) -> None:
     """An agent created before multiple swaps queries the current publication."""
     space, key, proxy = publication
     _publish(space, key, "replacement")
     _publish(space, key, "latest")
-    documents = await proxy.asearch("alpha", limit=5) if asynchronous else proxy.search("alpha", limit=5)
+    documents = await proxy.asearch("alpha", limit=5)
     assert [document.content for document in documents] == ["latest"]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "field",
     ["embedder_model", "embedder_dimensions", "knowledge_path", "storage_root", "base_id", "include_patterns"],
 )
-def test_retained_reader_rejects_changed_scope_or_embeddings(
+async def test_retained_reader_rejects_changed_scope_or_embeddings(
     publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
     field: str,
 ) -> None:
@@ -126,20 +125,22 @@ def test_retained_reader_rejects_changed_scope_or_embeddings(
         ),
     )
     with pytest.raises(RuntimeError, match="Knowledge read failed \\(ValueError\\)"):
-        proxy.search("alpha", limit=5)
+        await proxy.asearch("alpha", limit=5)
 
 
-def test_retained_reader_accepts_new_chunk_settings(
+@pytest.mark.asyncio
+async def test_retained_reader_accepts_new_chunk_settings(
     publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
 ) -> None:
     """Chunk boundaries do not change vector or requester compatibility."""
     space, key, proxy = publication
     _publish(space, replace(key, indexing_settings=replace(key.indexing_settings, chunk_size="2000")), "replacement")
-    assert [document.content for document in proxy.search("alpha", limit=5)] == ["replacement"]
+    assert [document.content for document in await proxy.asearch("alpha", limit=5)] == ["replacement"]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("metadata", [None, "corrupt", "indexing"])
-def test_retained_reader_does_not_hide_unavailable_publication(
+async def test_retained_reader_does_not_hide_unavailable_publication(
     publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
     metadata: str | None,
 ) -> None:
@@ -155,7 +156,7 @@ def test_retained_reader_does_not_hide_unavailable_publication(
         assert state is not None
         save_published_index_state(path, replace(state, status="indexing"))
     with pytest.raises(RuntimeError, match="Knowledge read failed \\(ValueError\\)"):
-        proxy.search("alpha", limit=5)
+        await proxy.asearch("alpha", limit=5)
 
 
 _GATED_READER = """
@@ -254,9 +255,7 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
         # The warm replacement runs the gated reader; serve the follow-up read from a real one.
         monkeypatch.setattr(read_process, "_spawn_reader", spawn_reader)
         read_process._discard_warm_reader()
-        assert [document.content for document in await asyncio.to_thread(proxy.search, "alpha", limit=5)] == [
-            "replacement",
-        ]
+        assert [document.content for document in await proxy.asearch("alpha", limit=5)] == ["replacement"]
     finally:
         read_task.cancel()
         await asyncio.gather(read_task, return_exceptions=True)
@@ -264,7 +263,8 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
             await asyncio.wait_for(refresh_task, 10)
 
 
-def test_refresh_resolution_stays_in_requester_storage(
+@pytest.mark.asyncio
+async def test_refresh_resolution_stays_in_requester_storage(
     publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
     tmp_path: Path,
 ) -> None:
@@ -279,10 +279,11 @@ def test_refresh_resolution_stays_in_requester_storage(
     other_space = replace(space, storage_path=registry.published_index_storage_path(other_key))
     _publish(space, key, "own-replacement")
     _publish(other_space, other_key, "other-private-content")
-    assert [document.content for document in proxy.search("alpha", limit=5)] == ["own-replacement"]
+    assert [document.content for document in await proxy.asearch("alpha", limit=5)] == ["own-replacement"]
 
 
-def test_knowledge_initialization_follows_refresh(
+@pytest.mark.asyncio
+async def test_knowledge_initialization_follows_refresh(
     publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
 ) -> None:
     """An agent's knowledge handle follows the same publication as its reader's searches."""
@@ -290,10 +291,11 @@ def test_knowledge_initialization_follows_refresh(
     _publish(space, key, "replacement")
     source = KnowledgeSource(description=KnowledgeSourceDescription(base_id="docs", description=""), index=proxy)
     knowledge = AgentKnowledge(sources=(source,))
-    assert [hit.content for hit in knowledge.search("alpha")] == ["replacement"]
+    assert [hit.content for hit in await knowledge.asearch("alpha")] == ["replacement"]
 
 
-def test_registry_initialization_accepts_superseded_state_snapshot(
+@pytest.mark.asyncio
+async def test_registry_initialization_accepts_superseded_state_snapshot(
     publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
     tmp_path: Path,
 ) -> None:
@@ -310,7 +312,7 @@ def test_registry_initialization_accepts_superseded_state_snapshot(
         runtime_paths=runtime_paths_for(config),
     )
     assert reader is not None
-    assert [hit.content for hit in reader.search("alpha", limit=5)] == ["replacement"]
+    assert [hit.content for hit in await reader.asearch("alpha", limit=5)] == ["replacement"]
 
 
 @pytest.mark.parametrize("orphan", [False, True])
@@ -335,14 +337,17 @@ if len(sys.argv) > 1 and sys.argv[1] == "worker":
     read_worker.KnowledgeCollection = BlockedNative
     read_worker._main()
 elif len(sys.argv) > 1 and sys.argv[1] == "parent":
+    import asyncio
     from mindroom.knowledge import read_process
     from mindroom.knowledge.read_protocol import ReadRequest
     def launch():
         return subprocess.Popen(
             [sys.executable, __file__, "worker"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         )
+    async def request():
+        return ReadRequest(str(root), "published", "query", [1.0])
     read_process._spawn_reader = launch
-    read_process.read_chroma(ReadRequest(str(root), "published", "query", [1.0]), timeout=2)
+    asyncio.run(read_process.read_chroma_async(request, timeout=2))
 else:
     assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
     orphan = sys.argv[1] == "orphan"

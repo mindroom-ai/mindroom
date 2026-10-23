@@ -115,21 +115,12 @@ def _reader() -> Iterator[subprocess.Popen[bytes]]:
                 _warm_reader = _spawn_reader()
 
 
-def _exchange(
-    reader: subprocess.Popen[bytes],
-    payload: bytes | None,
-    timeout: float | None = None,
-) -> tuple[bytes, int]:
+def _exchange(reader: subprocess.Popen[bytes], payload: bytes | None) -> tuple[bytes, int]:
     """Send one framed request, or none to discard the child; return only after reaping it."""
     with reader:
         if payload is None:
             reader.kill()
-        try:
-            output, _ = reader.communicate(payload, timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            reader.kill()
-            message = "Knowledge read timed out"
-            raise TimeoutError(message) from exc
+        output, _ = reader.communicate(payload)
     return output, reader.returncode
 
 
@@ -142,28 +133,9 @@ def _discard_warm_reader() -> None:
         _exchange(reader, None)
 
 
-@contextmanager
-def _read_slot() -> Iterator[None]:
-    # Waiting here would occupy the shared executor and starve unrelated I/O.
-    if not _read_slots.acquire(blocking=False):
-        message = "Knowledge reader is busy; try again shortly"
-        raise RuntimeError(message)
-    try:
-        yield
-    finally:
-        _read_slots.release()
-
-
-def read_chroma(request: ReadRequest, *, timeout: float = 30.0) -> ReadResult:
-    """Run off the event loop; a child that outlives the deadline is killed and reaped."""
-    payload = _encode_request(request, timeout)
-    with _read_slot(), _reader() as reader:
-        return _decode_result(*_exchange(reader, payload, timeout))
-
-
 @asynccontextmanager
 async def _read_slot_async() -> AsyncIterator[None]:
-    # Share sync capacity without parking an executor worker or binding to one loop.
+    # Share capacity across event loops without parking an executor worker or binding to one loop.
     while not _read_slots.acquire(blocking=False):  # noqa: ASYNC110 - Capacity is shared across threads/loops.
         await asyncio.sleep(0.01)
     try:

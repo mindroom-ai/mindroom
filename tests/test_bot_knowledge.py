@@ -162,7 +162,7 @@ class TestAgentBot(AgentBotTestBase):
         combined_knowledge = resolution.knowledge
         assert combined_knowledge is not None
 
-        hits = combined_knowledge.search("knowledge query", 4)
+        hits = await combined_knowledge.asearch("knowledge query", 4)
         assert [hit.content for hit in hits] == [
             "research content 1",
             "legal content 1",
@@ -171,16 +171,6 @@ class TestAgentBot(AgentBotTestBase):
         ]
         assert readers["research"].calls == [("knowledge query", 4)]
         assert readers["legal"].calls == [("knowledge query", 4)]
-
-    def test_merged_knowledge_interleaves_sync_results(self) -> None:
-        """Round-robin merge should include top results from each knowledge base."""
-        knowledge = _knowledge(
-            _StubIndex(hits=_hits("research 1", "research 2", "research 3")),
-            _StubIndex(hits=_hits("legal 1", "legal 2", "legal 3")),
-        )
-
-        hits = knowledge.search("knowledge query", 4)
-        assert [hit.content for hit in hits] == ["research 1", "legal 1", "research 2", "legal 2"]
 
     def test_merged_knowledge_runtime_identity_tracks_underlying_handles(self) -> None:
         """Fresh merged views over unchanged indexes keep the same runtime identity."""
@@ -191,12 +181,6 @@ class TestAgentBot(AgentBotTestBase):
 
         assert knowledge_runtime_identity(first) == knowledge_runtime_identity(second)
         assert knowledge_runtime_identity(first) != knowledge_runtime_identity(changed)
-
-    def test_merged_knowledge_sync_ignores_failing_source(self) -> None:
-        """A failing knowledge source should not suppress healthy source results."""
-        knowledge = _knowledge(_StubIndex(hits=_hits("research 1", "research 2")), _FailingStubIndex("boom"))
-
-        assert [hit.content for hit in knowledge.search("knowledge query", 3)] == ["research 1", "research 2"]
 
     @pytest.mark.asyncio
     async def test_merged_knowledge_interleaves_async_results(self) -> None:
@@ -216,13 +200,6 @@ class TestAgentBot(AgentBotTestBase):
 
         hits = await knowledge.asearch("knowledge query", 3)
         assert [hit.content for hit in hits] == ["research 1", "research 2"]
-
-    def test_merged_knowledge_sync_raises_when_all_sources_fail(self) -> None:
-        """When every knowledge source fails, the first error surfaces instead of empty results."""
-        knowledge = _knowledge(_FailingStubIndex("first boom"), _FailingStubIndex("second boom"))
-
-        with pytest.raises(RuntimeError, match="first boom"):
-            knowledge.search("knowledge query", 3)
 
     @pytest.mark.asyncio
     async def test_merged_knowledge_async_raises_when_all_sources_fail(self) -> None:

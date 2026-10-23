@@ -91,11 +91,6 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
 
     The fresh model turn that reports the result is returned for the caller to
     stream through the same continuation driver as standard approvals.
-
-    The recovery runs on a copy of ``session.session_state``, and its saves record that copy as
-    ``session.stored_session_state`` while ``session.session_state`` stays as loaded. No later
-    ``persist_to`` may therefore run on this ``session`` object: it would compare the stale state with
-    the recovered one and write the stale state back.
     """
     if continuation.state != "claimed":
         msg = "CLI recovery requires its native claimed continuation"
@@ -130,7 +125,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         run_id=continuation.run_id,
         session_id=continuation.session_id,
         user_id=continuation.requester_id,
-        session_state=deepcopy(session.session_state),
+        session_state=session.session_state,
         metadata=deepcopy(persisted.metadata),
     )
     turn = ResponseTurnContext(
@@ -341,7 +336,6 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     await save_cli_session(
         store,
         session,
-        run.session_state,
         lambda opened, saved: persist_interrupted_replay_snapshot(
             storage=opened,
             session=saved,

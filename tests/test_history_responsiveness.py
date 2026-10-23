@@ -22,7 +22,7 @@ from mindroom.history.runtime import (
     resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.storage import append_compaction_chunk, read_chunk_basis, set_force_compaction_state
+from mindroom.history.storage import _with_scope_state, append_compaction_chunk, read_chunk_basis
 from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.llm.errors import ModelSafeguardRefusal
@@ -234,7 +234,7 @@ async def test_forced_compaction_reuses_canonical_history_count(
     model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     storage = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
     seed_session(storage, session)
     resolved = _agent_inputs(config)

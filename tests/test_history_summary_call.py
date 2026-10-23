@@ -23,8 +23,8 @@ from mindroom.constants import (
 )
 from mindroom.history.runtime import _compaction_failure_status
 from mindroom.history.storage import (
+    _with_scope_state,
     read_scope_state,
-    set_force_compaction_state,
 )
 from mindroom.history.summary_call import (
     SummaryRetryPolicy,
@@ -347,7 +347,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
     with (

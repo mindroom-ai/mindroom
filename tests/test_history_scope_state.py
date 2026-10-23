@@ -14,11 +14,11 @@ from mindroom.constants import (
 )
 from mindroom.history.replay import scope_visible_runs
 from mindroom.history.storage import (
+    _with_scope_state,
     add_pending_force_compaction_scope,
     has_queued_force_compaction,
     read_scope_seen_event_ids,
     read_scope_state,
-    set_force_compaction_state,
     update_scope_seen_event_ids,
 )
 from mindroom.history.types import (
@@ -75,27 +75,24 @@ def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path, storage
     scope = HistoryScope(kind="team", scope_id="team-123")
     session = _session("session-1")
 
-    assert update_scope_seen_event_ids(session, scope, ["event-1"]) is True
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    update_scope_seen_event_ids(storage, session, scope, ["event-1"])
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
 
     assert read_scope_seen_event_ids(storage, session, scope) == {"event-1"}
 
 
-def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:
+def test_with_scope_state_updates_only_force_flag(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session = _session("session-1")
+    forced = HistoryScopeState(force_compact_before_next_run=True)
 
-    forced_state = set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    forced_metadata = _with_scope_state({}, scope, forced)
 
-    assert forced_state == HistoryScopeState(force_compact_before_next_run=True)
-    assert read_scope_state(session, scope) == forced_state
-
-    cleared_state = set_force_compaction_state(session, scope, forced_state, force=False)
-
-    assert cleared_state == HistoryScopeState()
-    assert read_scope_state(session, scope) == cleared_state
-    assert session.metadata == {}
+    assert read_scope_state(_session("session-1", metadata=forced_metadata), scope) == forced
+    cleared_metadata = _with_scope_state(forced_metadata, scope, HistoryScopeState())
+    assert read_scope_state(_session("session-1", metadata=cleared_metadata), scope) == HistoryScopeState()
+    assert cleared_metadata == {}
+    assert read_scope_state(_session("session-1", metadata=forced_metadata), scope) == forced
 
 
 def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path, storage: ConversationStore) -> None:
@@ -161,7 +158,7 @@ def test_seen_event_ids_match_model_history_visibility(storage: ConversationStor
             created_at=1,
             updated_at=1,
         )
-    update_scope_seen_event_ids(session, scope, ["preserved-event"])
+    update_scope_seen_event_ids(storage, session, scope, ["preserved-event"])
 
     assert read_scope_seen_event_ids(storage, session, scope) == {"completed-event", "preserved-event", "running-event"}
     assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
@@ -173,7 +170,11 @@ def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
     team_scope = HistoryScope(kind="team", scope_id="team-123")
     session = _session("session-1")
 
-    set_force_compaction_state(session, agent_scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        agent_scope,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
 
     assert read_scope_state(session, agent_scope).force_compact_before_next_run is True
     assert read_scope_state(session, team_scope).force_compact_before_next_run is False
@@ -188,20 +189,24 @@ def test_queued_force_compaction_reads_the_session_row_without_its_runs(
     assert has_queued_force_compaction(storage, "flagged", agent_scope) is False
 
     flagged = _session("flagged", runs=[_completed_run("run-1")])
-    set_force_compaction_state(flagged, agent_scope, HistoryScopeState(), force=True)
+    flagged.metadata = _with_scope_state(
+        flagged.metadata,
+        agent_scope,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
     pending = _session("pending", runs=[_completed_run("run-2")])
     pending.session_state = add_pending_force_compaction_scope(None, agent_scope)
     for session in (flagged, pending, _session("idle", runs=[_completed_run("run-3")])):
         seed_session(storage, session)
     statements: list[str] = []
-    connect = store_module._connect
+    connect = store_module.connect_conversation_database
 
     def traced_connect(path: Path) -> sqlite3.Connection:
         connection = connect(path)
         connection.set_trace_callback(statements.append)
         return connection
 
-    monkeypatch.setattr(store_module, "_connect", traced_connect)
+    monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
 
     assert has_queued_force_compaction(storage, "flagged", agent_scope) is True
     assert has_queued_force_compaction(storage, "pending", agent_scope) is True
@@ -228,7 +233,11 @@ def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
 
     assert read_scope_state(session, agent_scope).force_compact_before_next_run is False
 
-    set_force_compaction_state(session, agent_scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(
+        session.metadata,
+        agent_scope,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
 
     assert session.metadata == {
         MINDROOM_COMPACTION_METADATA_KEY: {
@@ -263,7 +272,7 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path, storag
             ),
         ],
     )
-    update_scope_seen_event_ids(session, team_scope, ["preserved-team-event"])
+    update_scope_seen_event_ids(storage, session, team_scope, ["preserved-team-event"])
 
     assert read_scope_seen_event_ids(storage, session, agent_scope) == {"agent-event"}
     assert read_scope_seen_event_ids(storage, session, team_scope) == {"team-event", "preserved-team-event"}

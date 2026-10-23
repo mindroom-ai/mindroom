@@ -31,8 +31,8 @@ from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.storage import (
+    _with_scope_state,
     read_scope_seen_event_ids,
-    set_force_compaction_state,
     update_scope_seen_event_ids,
 )
 from mindroom.history.summary_input import build_summary_input
@@ -724,8 +724,8 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     config, runtime_paths = _make_config(tmp_path, num_history_runs=1)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
-    update_scope_seen_event_ids(session, _SCOPE, ["event-1"])
     seed_session(storage, session)
+    update_scope_seen_event_ids(storage, session, _SCOPE, ["event-1"])
     seed_summary(storage, session, _SCOPE, "stored summary")
 
     with open_resolved_scope_session_context(
@@ -817,8 +817,10 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = storage.load_session("session-1", "agent")
     assert session is not None
-    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
-    storage.save_session_fields(session, "metadata")
+    storage.update_metadata(
+        session,
+        lambda metadata: _with_scope_state(metadata, _SCOPE, HistoryScopeState(force_compact_before_next_run=True)),
+    )
     with (
         patch("mindroom.history.compaction.build_model_provider", return_value=summary_model()),
         patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")),

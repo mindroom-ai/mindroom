@@ -377,7 +377,6 @@ def _leader_run(
 ) -> _LeaderRun:
     """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
     history = prepared.prepared_history
-    plan = history.replay_plan
     native = history.native_history
     return _LeaderRun(
         spec=built.spec,
@@ -390,8 +389,7 @@ def _leader_run(
                 store=storage.store if storage is not None else None,
                 session=storage.session if storage is not None else None,
                 scope=storage.scope if storage is not None else None,
-                scoped=storage is not None and plan is not None and plan.add_history_to_context,
-                native_compaction=native.native_compaction if native is not None else None,
+                replay_plan=history.replay_plan,
                 prompt_id=prepared.turn.prompt.id,
                 lifecycle=compaction_lifecycle,
                 turn_recorder=turn_recorder,
@@ -456,18 +454,14 @@ def _persist_bound_seen_event_ids(
     session_id: str,
     event_ids: list[str],
 ) -> None:
-    """Record the Matrix events this team turn consumed on the stored session row.
+    """Record the Matrix events this team turn consumed on the stored session row, creating the row if needed.
 
-    The row is re-read and only then written, so the seen ids land without putting the loaded snapshot's fields
-    back over what the run stored.
+    The ids merge into the metadata the row holds, so nothing the run or another writer stored is put back or lost.
     """
     if scope_context is None:
         return
-    session = scope_context.storage.load_session(session_id, "team")
-    if session is None:
-        session = new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=True)
-    if update_scope_seen_event_ids(session, scope_context.scope, event_ids):
-        scope_context.storage.save_session_fields(session, "metadata")
+    session = new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=True)
+    update_scope_seen_event_ids(scope_context.storage, session, scope_context.scope, event_ids)
 
 
 def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[str]:

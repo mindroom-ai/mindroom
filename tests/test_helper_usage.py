@@ -42,6 +42,7 @@ from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_c
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import session_state_snapshot
 from mindroom.teams.envelope import team_response
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
@@ -461,7 +462,7 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     assert len({row["run_id"] for row in helpers}) == 2
     assert "Synthetic conversation" not in json.dumps(helpers)
     assert "Remember" not in json.dumps(helpers)
-    storage.save_session_fields(session, "metadata", "session_state")
+    storage.save_session_state(session, session_state_snapshot(session.session_state))
     assert collect_admin_usage(config=config, runtime_paths=paths).totals == report.totals
 
 
@@ -645,9 +646,7 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
         owner = get_helper_usage_owner()
         assert owner is not None
         assert owner.initial_session is not None
-        session = _session("session")
-        session.metadata = {"marker": "concurrent session"}
-        context.storage.save_session_fields(session, "metadata")
+        context.storage.update_metadata(_session("session"), lambda _metadata: {"marker": "concurrent session"})
         await record_helper_usage(
             RunRecord(run_id="paid", metrics=llm_usage.RunMetrics(input_tokens=10, output_tokens=1, total_tokens=11)),
             owner=owner,

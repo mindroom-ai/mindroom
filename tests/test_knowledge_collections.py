@@ -15,6 +15,7 @@ from chromadb.config import Settings
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.knowledge import read_process
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import CandidateCheckpoint
 from mindroom.knowledge.collections import (
@@ -29,7 +30,6 @@ from mindroom.knowledge.collections import (
 )
 from mindroom.knowledge.index_metadata import PublishedIndexState, save_published_index_state
 from mindroom.knowledge.manager import KnowledgeManager
-from mindroom.knowledge.read_process import _read_slot
 from mindroom.knowledge.registry import (
     _PublishedIndexHandle,
     get_published_index,
@@ -428,15 +428,20 @@ def test_published_metadata_lookup_does_not_consume_search_capacity(
 ) -> None:
     """Search-worker saturation does not make fresh published metadata unavailable."""
     # Exercise saturation independently of the production reader capacity.
-    monkeypatch.setattr("mindroom.knowledge.read_process._read_slots", BoundedSemaphore(1))
+    slots = BoundedSemaphore(1)
+    monkeypatch.setattr(read_process, "_read_slots", slots)
     config, runtime_paths = published_lookup
     if cached:
         assert resolve_knowledge_base_access("docs", config, runtime_paths).knowledge is not None
 
-    with _read_slot():
+    # A running search holds the only reader slot.
+    assert slots.acquire(blocking=False)
+    try:
         available = resolve_knowledge_base_access("docs", config, runtime_paths)
         assert available.knowledge is not None
         assert available.availability is KnowledgeAvailability.READY
+    finally:
+        slots.release()
 
     recovered = resolve_knowledge_base_access("docs", config, runtime_paths)
     assert recovered.knowledge is not None

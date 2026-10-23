@@ -32,12 +32,8 @@ _NO_DOCUMENTS = "No documents found"
 class _KnowledgeIndex(Protocol):
     """One published index a source searches."""
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
-        """Return at most ``limit`` hits, nearest first; raise when the search fails."""
-        ...
-
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        """Return at most ``limit`` hits without blocking the event loop."""
+        """Return at most ``limit`` hits, nearest first, without blocking the event loop; raise when the search fails."""
         ...
 
 
@@ -150,19 +146,8 @@ class AgentKnowledge:
         """Return how many hits one search returns, enough for every source to contribute."""
         return max(min(len(self.sources), _MAX_MERGED_SOURCE_COVERAGE_RESULTS), _DEFAULT_MAX_RESULTS)
 
-    def search(self, query: str, limit: int | None = None) -> list[SearchHit]:
-        """Search every source in turn and interleave their hits."""
-        effective_limit = limit or self.max_results
-        outcomes: list[tuple[KnowledgeSource, list[SearchHit] | Exception]] = []
-        for source in self.sources:
-            try:
-                outcomes.append((source, source.index.search(query, limit=effective_limit)))
-            except Exception as exc:
-                outcomes.append((source, exc))
-        return _merged(outcomes, effective_limit)
-
     async def asearch(self, query: str, limit: int | None = None) -> list[SearchHit]:
-        """Search sources sequentially, so one query cannot exhaust the native reader slots."""
+        """Search sources sequentially, so one query cannot exhaust the native reader slots, and interleave their hits."""
         effective_limit = limit or self.max_results
         outcomes: list[tuple[KnowledgeSource, list[SearchHit] | Exception]] = []
         for source in self.sources:

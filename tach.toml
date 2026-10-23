@@ -1071,7 +1071,7 @@ depends_on = ["mindroom.history.summary_rows_schema", "mindroom.usage.storage"]
 
 [[modules]]
 path = "mindroom.session_storage.codec"
-depends_on = ["mindroom.llm"]
+depends_on = ["mindroom.llm", "mindroom.session_storage.legacy_tool_results"]
 
 [[modules]]
 path = "mindroom.session_storage.legacy_agno2_runs"
@@ -2564,7 +2564,6 @@ path = "mindroom.history.request_messages"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.legacy_summary_system_prompt",
-    "mindroom.history.legacy_tool_results",
     "mindroom.history.message_content",
     "mindroom.history.summary_message",
     "mindroom.llm",
@@ -2584,6 +2583,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.compaction"
 depends_on = [
+    "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
     "mindroom.background_tasks",
     "mindroom.error_handling",
@@ -2747,6 +2747,7 @@ visibility = [
 path = "mindroom.history.storage"
 depends_on = [
     "mindroom.session_storage.agent_storage",
+    "mindroom.session_storage.lanes",
     "mindroom.history.summary_rows",
     "mindroom.background_tasks",
     "mindroom.constants",
@@ -2807,6 +2808,8 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
+    "mindroom.session_storage.lanes",
+    "mindroom.session_storage.types",
     "mindroom.history.compaction",
     "mindroom.history.native",
     "mindroom.history.policy",
@@ -9358,7 +9361,6 @@ depends_on = [
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
-    "mindroom.session_storage.store",
     "mindroom.usage.storage",
 ]
 visibility = [
@@ -9378,6 +9380,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.history.legacy_tool_results"
+path = "mindroom.session_storage.legacy_tool_results"
 depends_on = ["mindroom.llm"]
-visibility = ["mindroom.history.request_messages"]
+visibility = ["mindroom.session_storage.codec"]

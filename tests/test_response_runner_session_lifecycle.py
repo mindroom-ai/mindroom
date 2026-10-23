@@ -103,10 +103,7 @@ def _history_store(tmp_path: Path) -> ConversationStore:
 
 def _start_session(storage: ConversationStore, session_id: str) -> None:
     """Store the session row a reply's first run creates."""
-    storage.save_session_fields(
-        ConversationSession(session_id=session_id, kind="agent", owner_id="general"),
-        "metadata",
-    )
+    storage.ensure_session_row(ConversationSession(session_id=session_id, kind="agent", owner_id="general"))
 
 
 def _persisted_run(storage: ConversationStore, session_id: str = THREAD_SESSION_ID) -> AnyRunRecord:

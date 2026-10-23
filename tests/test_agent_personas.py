@@ -91,9 +91,6 @@ def _egress_broker_env(*, broker_on: bool) -> dict[str, str]:
 class _Index:
     """A published index the persona is offered but these tests never search."""
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
-        raise AssertionError((query, limit))
-
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         raise AssertionError((query, limit))
 

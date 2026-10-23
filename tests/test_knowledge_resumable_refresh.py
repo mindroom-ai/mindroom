@@ -278,14 +278,11 @@ class _FakeVectorDb:
         with self.lock:
             return self.collection_name in self.store
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         _ = query
         with self.lock:
             records = list(self.store.get(self.collection_name, [])[:limit])
         return [SearchHit(content=record.content, meta_data=dict(record.metadata)) for record in records]
-
-    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        return self.search(query, limit=limit)
 
 
 class _FakeReadProxy(_FakeVectorDb):
@@ -689,7 +686,7 @@ async def test_candidate_resume_never_disturbs_the_last_good_published_index(
     assert result.index_published is False
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.reader.search("published", limit=5)] == [
+    assert [document.content for document in await lookup.index.reader.asearch("published", limit=5)] == [
         "first published",
     ]
     state = _published_state(config, runtime_paths)
@@ -835,7 +832,7 @@ async def test_permanent_embedding_failure_never_publishes_and_reports_classifie
     assert state.collection == published_collection
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.reader.search("body", limit=5)] == [
+    assert [document.content for document in await lookup.index.reader.asearch("body", limit=5)] == [
         "published body",
     ]
 
@@ -3179,7 +3176,7 @@ async def test_overlapping_chunks_are_batch_embedded_and_published(
     assert state.indexed_count == 1
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    hits = lookup.index.reader.search("token0000", limit=5)
+    hits = await lookup.index.reader.asearch("token0000", limit=5)
     assert hits, "the published overlapping index returned nothing"
     assert all("token" in document.content for document in hits)
 

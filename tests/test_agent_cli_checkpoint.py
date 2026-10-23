@@ -21,7 +21,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
-from mindroom.session_storage.types import ConversationSession
+from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolValue
 from tests.test_agent_tool_calls import _catalog
@@ -116,6 +116,22 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
 
 
 @pytest.mark.asyncio
+async def test_the_turns_session_holds_the_checkpoint_as_stored(tmp_path: Path) -> None:
+    """A checkpoint saves through the turn's own session, which then holds the saved run as a load would."""
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    await _capture(checkpoint, _record(), [_assistant("bash-1")])
+
+    await checkpoint.persist("bash-1")
+
+    assert catalog.store is not None
+    stored = catalog.store.load_session("session", "agent")
+    assert stored is not None
+    assert [(run.run_id, run.status) for run in catalog.session.runs] == [("run", RunStatus.cancelled)]
+    assert [run.to_dict() for run in catalog.session.runs] == [run.to_dict() for run in stored.runs]
+
+
+@pytest.mark.asyncio
 async def test_approval_checkpoint_refreshes_mutable_session_state(tmp_path: Path) -> None:
     catalog = await _stored_catalog(tmp_path)
     checkpoint = BatchCheckpoint(catalog)
@@ -140,7 +156,7 @@ async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_ch
     assert store is not None
     session = catalog.session
     session.session_state["cwd"] = "/repo"
-    store.save_session_fields(session, "session_state")
+    store.save_session_state(session, session_state_snapshot(session.session_state))
     # As in a turn, the run's tools change the session's own state in place.
     catalog.run = replace(catalog.run, session_state=session.session_state)
     persist = persist_to(store, session)
@@ -252,7 +268,6 @@ async def test_a_checkpoint_saves_a_session_state_another_thread_keeps_changing(
             await save_cli_session(
                 store,
                 session,
-                live,
                 lambda opened, saved: opened.save_run(saved, record, record_usage=False),
             )
             fields = store.read_session_fields("session")

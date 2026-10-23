@@ -21,7 +21,6 @@ from chromadb.config import Settings
 import mindroom.knowledge.chroma_client as native_chroma
 from mindroom.knowledge import read_process
 from mindroom.knowledge.indexing_config import chroma_collection_exists
-from mindroom.knowledge.read_process import read_chroma
 from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.knowledge.read_proxy import ChromaReadProxy
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -183,7 +182,8 @@ async def test_search_returns_the_fields_the_search_tool_shows(published_index: 
     assert documents[1].meta_data == {"team": "b", "distances": 2.0, "similarity_score": 2.0}
 
 
-def test_search_returns_one_hit_per_named_chunk(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_search_returns_one_hit_per_named_chunk(tmp_path: Path) -> None:
     """A chunk stored twice under one name is one hit, as knowledge search has always reported it."""
     with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path))) as client:
         client.create_collection("published").add(
@@ -193,7 +193,7 @@ def test_search_returns_one_hit_per_named_chunk(tmp_path: Path) -> None:
             metadatas=[{"name": "a.md"}, {"name": "a.md"}, {"name": "b.md"}],
         )
 
-    hits = ChromaReadProxy("published", str(tmp_path), _Embedder()).search("alpha", limit=3)
+    hits = await ChromaReadProxy("published", str(tmp_path), _Embedder()).asearch("alpha", limit=3)
 
     assert [(hit.name, hit.content) for hit in hits] == [("a.md", "same text"), ("b.md", "same text")]
 
@@ -220,11 +220,9 @@ async def test_merged_search_covers_more_sources_than_reader_slots(published_ind
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("async_read", [False, True])
 async def test_locked_database_does_not_freeze_parent_and_timeout_reaps_child(
     published_index: Path,
     capture_read_processes: list[subprocess.Popen[bytes]],
-    async_read: bool,
 ) -> None:
     """A native lock wait stays outside Python's parent GIL and has a bounded lifetime."""
     # A separate lock owner releases even if a regression holds the parent's GIL.
@@ -244,11 +242,7 @@ async def test_locked_database_does_not_freeze_parent_and_timeout_reaps_child(
     async def prepare_request() -> ReadRequest:
         return ReadRequest(str(published_index), "published")
 
-    task = asyncio.create_task(
-        read_process.read_chroma_async(prepare_request, timeout=1.5)
-        if async_read
-        else asyncio.to_thread(read_chroma, ReadRequest(str(published_index), "published"), timeout=1.5),
-    )
+    task = asyncio.create_task(read_process.read_chroma_async(prepare_request, timeout=1.5))
     intervals: list[float] = []
     previous = time.monotonic()
     try:
@@ -446,11 +440,9 @@ async def test_concurrent_search_burst_preserves_results(published_index: Path) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("async_read", [False, True])
 async def test_next_read_uses_warm_reader_and_replaces_it(
     published_index: Path,
     capture_read_processes: list[subprocess.Popen[bytes]],
-    async_read: bool,
 ) -> None:
     """A read hands its request to the child the previous read left warm, then warms the next one."""
     request = ReadRequest(str(published_index), "published", "alpha", [1.0, 0.0])
@@ -459,11 +451,7 @@ async def test_next_read_uses_warm_reader_and_replaces_it(
         return request
 
     async def search() -> list[str]:
-        result = (
-            await read_process.read_chroma_async(prepare_request)
-            if async_read
-            else await asyncio.to_thread(read_chroma, request)
-        )
+        result = await read_process.read_chroma_async(prepare_request)
         return [hit.content for hit in result.hits]
 
     assert await search() == ["alpha document", "beta document"]

@@ -1,19 +1,22 @@
-"""Stored runs holding one combined tool-result message replay every result on every provider route."""
+"""Stored runs holding one combined tool-result message decode into one result per call, for replay and compaction."""
 # ruff: noqa: D103
 
 from __future__ import annotations
 
 import copy
+import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
-from mindroom.history.types import HistoryScope
+from mindroom.history.summary_input import messages_for_runs
+from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, complete
-from mindroom.llm.runs import RunRecord
+from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
+from mindroom.session_storage.codec import run_from_row
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES, scrub_provider_env
 from tests.providers.golden_support import Wire
 
@@ -58,7 +61,9 @@ _STORED_RUN = {
 
 
 def _stored_run() -> RunRecord:
-    return RunRecord.from_dict(copy.deepcopy(_STORED_RUN))
+    run = run_from_row("agent", json.dumps(_STORED_RUN))
+    assert isinstance(run, RunRecord)
+    return run
 
 
 def _history(run: RunRecord, *, max_tool_calls: int | None = None) -> list[Message]:
@@ -93,6 +98,28 @@ def test_tool_call_window_counts_each_combined_result() -> None:
     assistant = next(message for message in history if message.tool_calls)
     assert [call["id"] for call in assistant.tool_calls or []] == ["call_oslo"]
     assert [(m.tool_call_id, m.content) for m in history if m.role == "tool"] == [("call_oslo", "rainy")]
+
+
+def test_a_team_runs_member_responses_decode_each_combined_result() -> None:
+    team_run = {"run_id": "team-1", "team_id": "squad", "status": "COMPLETED", "messages": []}
+    team_run["member_responses"] = [copy.deepcopy(_STORED_RUN)]
+
+    team = run_from_row("team", json.dumps(team_run))
+
+    assert isinstance(team, TeamRunRecord)
+    (member,) = team.member_responses
+    results = [(m.tool_call_id, m.content) for m in member.messages if m.role == "tool"]
+    assert results == [("call_paris", "sunny"), ("call_oslo", "rainy")]
+
+
+def test_compaction_reads_each_combined_result_as_its_own_tool_result() -> None:
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=1)
+
+    messages = messages_for_runs([_stored_run()], settings)
+
+    assistant = next(message for message in messages if message.tool_calls)
+    assert [call["id"] for call in assistant.tool_calls or []] == ["call_oslo"]
+    assert [(m.tool_call_id, m.content) for m in messages if m.role == "tool"] == [("call_oslo", "rainy")]
 
 
 def _chat_results(body: dict[str, Any]) -> list[Any]:

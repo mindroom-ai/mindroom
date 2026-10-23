@@ -470,9 +470,6 @@ async def _run_turn(turn: AgentTurn) -> ScenarioOutput:
 class _UnsearchedIndex:
     """A published index the scenario's agent is offered but never searches."""
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
-        raise AssertionError((query, limit))
-
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         raise AssertionError((query, limit))
 

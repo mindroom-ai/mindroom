@@ -25,10 +25,14 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
-from mindroom.history.replay import compaction_summary_message, estimate_request_messages_tokens
+from mindroom.history.replay import (
+    compaction_summary_message,
+    configured_replay_plan,
+    estimate_request_messages_tokens,
+)
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
-from mindroom.history.storage import new_scope_session, read_scope_state, set_force_compaction_state
+from mindroom.history.storage import _with_scope_state, new_scope_session, read_scope_state
 from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
@@ -136,8 +140,8 @@ def _config(
 class _Agent:
     """The test agent as one reply runs it: its tools, where its runs are stored, and how its turns compact.
 
-    ``replays_history`` puts the stored runs and the scope summary in each request; ``folds_into_scope`` binds the
-    mid-turn hook to the scope, as a reply that replays its history does, so a fold appends a summary row.
+    ``replays_history`` puts the stored runs and the scope summary in each request; ``folds_into_scope`` hands the
+    mid-turn hook the replay plan a reply that replays its history runs under, so a fold appends a summary row.
     ``before_request`` hooks run ahead of the compaction hook; ``records`` keeps every run record a run stored.
     """
 
@@ -226,9 +230,11 @@ async def _run(
         model=agent.model,
         history_settings=settings,
         store=store,
-        session=session if agent.folds_into_scope else None,
-        scope=TEST_AGENT_SCOPE if agent.folds_into_scope else None,
-        native_compaction=agent.native_compaction,
+        session=session,
+        scope=TEST_AGENT_SCOPE,
+        replay_plan=configured_replay_plan(history_settings=settings, estimated_tokens=0)
+        if agent.folds_into_scope
+        else None,
         deferred_tool_names=frozenset(),
         prompt_id=turn.prompt.id,
         lifecycle=agent.lifecycle,
@@ -309,7 +315,7 @@ def _binding(tmp_path: Path, deferred_tool_names: frozenset[str]) -> mid_turn_co
         store=None,
         session=None,
         scope=None,
-        native_compaction=None,
+        replay_plan=None,
         deferred_tool_names=deferred_tool_names,
         prompt_id=None,
         lifecycle=None,
@@ -1344,8 +1350,14 @@ async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_c
     storage = seeded_storage(config, paths)
     stored = storage.load_session("session-1", "agent")
     assert stored is not None
-    set_force_compaction_state(stored, TEST_AGENT_SCOPE, HistoryScopeState(), force=True)
-    storage.save_session_fields(stored, "metadata")
+    storage.update_metadata(
+        stored,
+        lambda metadata: _with_scope_state(
+            metadata,
+            TEST_AGENT_SCOPE,
+            HistoryScopeState(force_compact_before_next_run=True),
+        ),
+    )
     model = ToolLoopModel(tool_rounds=5)
 
     await _run(_scoped_agent(model, config, paths, storage), "Do the task")

@@ -38,16 +38,18 @@ if TYPE_CHECKING:
 
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.schema import TableNames
-    from mindroom.session_storage.types import Refusal, SaveOutcome, SessionField, SessionKind
+    from mindroom.session_storage.types import Refusal, SaveOutcome, SessionKind
     from mindroom.usage.storage import IndependentUsageKind
 
-_BUSY_TIMEOUT_SECONDS = 30.0
+# How long an operation waits for another connection's write lock on the database, its migrations included.
+BUSY_TIMEOUT_SECONDS = 30.0
 _NON_VISIBLE_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
 
 
-def _connect(path: Path) -> sqlite3.Connection:
+def connect_conversation_database(path: Path) -> sqlite3.Connection:
+    """Open a connection to the conversation database at ``path``, for the store and the migrations that open it."""
     # No implicit transactions: every operation begins its own, so its reads cannot straddle a commit.
-    connection = sqlite3.connect(path, timeout=_BUSY_TIMEOUT_SECONDS, isolation_level=None)
+    connection = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
     # Deleting a session row cascades to its runs, summary rows, and usage.
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
@@ -65,7 +67,7 @@ def open_conversation_store(
     Tables are created by the first write. Migrations that recognize an older database by a missing summary-row
     or usage table must run before that write.
     """
-    with closing(_connect(path)) as connection:
+    with closing(connect_conversation_database(path)) as connection:
         if has_blob_runs(connection, names):
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -97,7 +99,7 @@ class ConversationStore:
         A write takes the write lock first, so rules that read the log before writing see what they change,
         and creates any missing table. A read is one snapshot.
         """
-        with closing(_connect(self.path)) as connection:
+        with closing(connect_conversation_database(self.path)) as connection:
             connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             try:
                 if write:
@@ -123,31 +125,12 @@ class ConversationStore:
         The runs are those after the owner scope's latest summary row, every paused, cancelled, or errored run,
         and their member runs, in log order; a run folded mid-turn loads without the messages its segments hold.
         """
-        names = self.names
         with self.transaction(write=False) as connection:
-            tables = _tables(connection)
-            row = self._session_row(connection, session_id)
-            if row is None or row[0] != kind:
-                return None
-            stored_kind, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at = row
-            summaries = quote_identifier(names.summaries) if names.summaries in tables else None
-            run_rows = _loaded_run_rows(connection, names, summaries, session_id) if names.runs in tables else []
-            folded = _folded_message_ids(connection, summaries, session_id, [run_id for run_id, _, _ in run_rows])
-            summary = _replay_summary(
-                connection,
-                summaries,
-                session_id,
-                owner_scope_key(stored_kind, agent_id, team_id),
-            )
+            loaded = self._read_load(connection, session_id, kind)
+        if loaded is None:
+            return None
+        _, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at = loaded.row
         state = _session_state(session_data)
-        runs: list[AnyRunRecord] = []
-        for run_id, stored_type, run_data in run_rows:
-            run = run_from_row(stored_type, run_data)
-            if run is None:
-                continue
-            if run_id in folded:
-                run.messages = [message for message in run.messages if message.id not in folded[run_id]]
-            runs.append(run)
         return ConversationSession(
             session_id=session_id,
             kind=kind,
@@ -156,14 +139,55 @@ class ConversationStore:
             metadata=_decoded_mapping(metadata),
             session_state=state,
             stored_session_state=copy.deepcopy(state),
-            runs=runs,
-            summary=summary,
+            runs=loaded.runs(),
+            summary=loaded.summary,
             created_at=created_at,
             updated_at=updated_at,
         )
 
+    def _read_load(self, connection: sqlite3.Connection, session_id: str, kind: SessionKind) -> _Load | None:
+        """Read what a load of session ``session_id`` returns in the caller's transaction, its runs still encoded."""
+        names = self.names
+        tables = table_names(connection)
+        row = self._session_row(connection, session_id)
+        if row is None or row[0] != kind:
+            return None
+        stored_kind, agent_id, team_id = row[:3]
+        summaries = quote_identifier(names.summaries) if names.summaries in tables else None
+        run_rows = _loaded_run_rows(connection, names, summaries, session_id) if names.runs in tables else []
+        return _Load(
+            row=row,
+            run_rows=run_rows,
+            folded=_folded_message_ids(connection, summaries, session_id, [run_id for run_id, _, _ in run_rows]),
+            summary=_replay_summary(connection, summaries, session_id, owner_scope_key(stored_kind, agent_id, team_id)),
+        )
+
+    @contextmanager
+    def log_transaction(
+        self,
+        session_id: str,
+        *,
+        session: ConversationSession | None = None,
+    ) -> Iterator[sqlite3.Connection]:
+        """Run one write transaction that changes session ``session_id``'s log: its runs, summary rows, or removed runs.
+
+        Once it commits, ``session``, when given, holds the runs and summary a load returns, read in the same
+        transaction, so no other writer's change lands between the write and what the session holds.
+        """
+        with self.transaction(write=True) as connection:
+            yield connection
+            loaded = self._read_load(connection, session_id, session.kind) if session is not None else None
+        if session is not None:
+            _adopt_log(session, loaded)
+
+    def reload_log(self, session: ConversationSession) -> None:
+        """Make ``session``'s runs and summary what a load returns now, after another writer changed its log."""
+        with self.transaction(write=False) as connection:
+            loaded = self._read_load(connection, session.session_id, session.kind)
+        _adopt_log(session, loaded)
+
     def _session_row(self, connection: sqlite3.Connection, session_id: str) -> tuple[Any, ...] | None:
-        if self.names.sessions not in _tables(connection):
+        if self.names.sessions not in table_names(connection):
             return None
         return connection.execute(
             "SELECT session_type, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at "  # noqa: S608
@@ -236,45 +260,58 @@ class ConversationStore:
         _record_stored_state(session, created)
         _reconcile(session, saved)
 
-    def save_session_fields(self, session: ConversationSession, *fields: SessionField) -> None:
-        """Write the named fields of ``session`` to its row, creating the row if needed, and leave the rest alone.
-
-        Writing ``session_state`` records a copy of it as ``session.stored_session_state``.
-        """
-        state = session_state_snapshot(session.session_state) if "session_state" in fields else None
-        self._save_fields(session, metadata="metadata" in fields, state=state)
-
     def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
-        """Write ``state`` as the session's ``session_state`` and record it as ``session.stored_session_state``.
+        """Write ``state`` as the session's ``session_state``, creating the row if needed, and leave the rest alone.
 
-        ``state`` is a ``session_state_snapshot`` of the run's state that the caller took before awaiting the
-        database's lane, as the run's tools change the live state in place meanwhile. The session keeps it, so the
-        caller must not change it.
+        ``state`` is a ``session_state_snapshot`` of the run's state, which a caller outside the database's lane takes
+        before awaiting it, as the run's tools change the live state in place meanwhile. It is recorded as
+        ``session.stored_session_state``, so the caller must not change it.
         """
-        self._save_fields(session, metadata=False, state=state)
-
-    def _save_fields(self, session: ConversationSession, *, metadata: bool, state: dict[str, Any] | None) -> None:
-        """Write ``session``'s metadata when asked and ``state`` when given, creating the row if needed."""
-        names = self.names
+        sessions = quote_identifier(self.names.sessions)
         with self.transaction(write=True) as connection:
-            created = _ensure_session_row(connection, names, session)
-            assignments: list[str] = ["updated_at = ?"]
-            values: list[object] = [int(time())]
-            if metadata:
-                assignments.append("metadata = ?")
-                values.append(_json_or_null(session.metadata))
-            if state is not None:
-                (stored,) = connection.execute(
-                    f"SELECT session_data FROM {quote_identifier(names.sessions)} WHERE session_id = ?",  # noqa: S608
-                    (session.session_id,),
-                ).fetchone()
-                assignments.append("session_data = ?")
-                values.append(json.dumps({**(_decoded_mapping(stored) or {}), "session_state": state}))
+            _ensure_session_row(connection, self.names, session)
+            (stored,) = connection.execute(
+                f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
+                (session.session_id,),
+            ).fetchone()
             connection.execute(
-                f"UPDATE {quote_identifier(names.sessions)} SET {', '.join(assignments)} WHERE session_id = ?",  # noqa: S608
-                (*values, session.session_id),
+                f"UPDATE {sessions} SET session_data = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
+                (
+                    json.dumps({**(_decoded_mapping(stored) or {}), "session_state": state}),
+                    int(time()),
+                    session.session_id,
+                ),
             )
-        _record_stored_state(session, created if state is None else state)
+        _record_stored_state(session, state)
+
+    def update_metadata(
+        self,
+        session: ConversationSession,
+        update: Callable[[dict[str, Any] | None], dict[str, Any] | None],
+    ) -> None:
+        """Apply ``update`` to the metadata ``session``'s row holds, under the write lock.
+
+        ``update`` receives a private copy of the stored metadata, or of the session's own when no row exists yet,
+        and returns the metadata to store, so a change never restores what another writer dropped. Only a change
+        writes, creating the row if needed. Once it commits, ``session.metadata`` is what the row holds.
+        """
+        sessions = quote_identifier(self.names.sessions)
+        created = None
+        with self.transaction(write=True) as connection:
+            stored = connection.execute(
+                f"SELECT metadata FROM {sessions} WHERE session_id = ?",  # noqa: S608
+                (session.session_id,),
+            ).fetchone()
+            current = _decoded_mapping(stored[0]) if stored is not None else session.metadata
+            updated = update(copy.deepcopy(current))
+            if updated != current:
+                created = _ensure_session_row(connection, self.names, session)
+                connection.execute(
+                    f"UPDATE {sessions} SET metadata = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
+                    (_json_or_null(updated), int(time()), session.session_id),
+                )
+        _record_stored_state(session, created)
+        session.metadata = updated
 
     def delete_run_subtrees(
         self,
@@ -297,7 +334,7 @@ class ConversationStore:
     def get_run(self, run_id: str) -> AnyRunRecord | None:
         """Return one stored run, in whatever session, as stored."""
         with self.transaction(write=False) as connection:
-            if self.names.runs not in _tables(connection):
+            if self.names.runs not in table_names(connection):
                 return None
             row = connection.execute(
                 f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} WHERE run_id = ?",  # noqa: S608
@@ -308,7 +345,7 @@ class ConversationStore:
     def list_runs(self, session_id: str) -> list[AnyRunRecord]:
         """Return the session's whole run log as stored, member runs included, in log order."""
         with self.transaction(write=False) as connection:
-            if self.names.runs not in _tables(connection):
+            if self.names.runs not in table_names(connection):
                 return []
             rows = connection.execute(
                 f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} "  # noqa: S608
@@ -320,11 +357,12 @@ class ConversationStore:
     def list_updated_sessions(self, kind: SessionKind, owner_id: str, *, since: int) -> list[tuple[str, int]]:
         """Return ``(session_id, updated_at)`` of ``owner_id``'s sessions updated after ``since``, oldest first.
 
-        A session's update time moves when its row is written: a field save, or a run save that records usage.
+        A session's update time moves when its row is written: a state save, a metadata change, or a run save that
+        records usage.
         """
         owner_column = "team_id" if kind == "team" else "agent_id"
         with self.transaction(write=False) as connection:
-            if self.names.sessions not in _tables(connection):
+            if self.names.sessions not in table_names(connection):
                 return []
             return connection.execute(
                 "SELECT session_id, COALESCE(updated_at, created_at) AS updated "  # noqa: S608
@@ -391,6 +429,34 @@ class ConversationStore:
 
 
 @dataclass(frozen=True, slots=True)
+class _Load:
+    """What one load of a session read: its row, its runs as stored, the messages its folds hold, and its summary."""
+
+    row: tuple[Any, ...]
+    run_rows: list[tuple[str, str, str]]
+    folded: dict[str, set[str]]
+    summary: ScopeSummary | None
+
+    def runs(self) -> list[AnyRunRecord]:
+        """Decode the runs, each folded run without the messages its segments hold."""
+        runs: list[AnyRunRecord] = []
+        for run_id, stored_type, run_data in self.run_rows:
+            run = run_from_row(stored_type, run_data)
+            if run is None:
+                continue
+            if run_id in self.folded:
+                run.messages = [message for message in run.messages if message.id not in self.folded[run_id]]
+            runs.append(run)
+        return runs
+
+
+def _adopt_log(session: ConversationSession, loaded: _Load | None) -> None:
+    """Make ``session``'s runs and summary those of ``loaded``, or none when the session is no longer stored."""
+    session.runs = loaded.runs() if loaded is not None else []
+    session.summary = loaded.summary if loaded is not None else None
+
+
+@dataclass(frozen=True, slots=True)
 class _WrittenRow:
     """One run row as an upsert left it: its timestamps, its ``run_data`` text, and whether it now ends the log."""
 
@@ -437,9 +503,8 @@ def _reconcile(session: ConversationSession, saved: Iterable[_SavedRun]) -> None
                 runs = [*(run for run in runs if run.run_id != save.run_id), stored]
             else:
                 runs[place] = stored
-    # A new list, so a reader of the old one is unaffected. A save in the database's lane assigns it from the lane's
-    # worker thread, so event-loop code must not assign ``session.runs`` while a save of this session is in flight,
-    # or one of the two assignments is lost.
+    # A new list, so a reader of the old one is unaffected. Only the store assigns a session's runs and summary, and
+    # async callers run its writes in the database's lane one at a time, so no write's assignment overtakes another's.
     session.runs = runs
 
 
@@ -487,7 +552,8 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     return persist
 
 
-def _tables(connection: sqlite3.Connection) -> set[str]:
+def table_names(connection: sqlite3.Connection) -> set[str]:
+    """Return the names of the database's tables; an older database lacks the ones its migrations add."""
     return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
@@ -805,9 +871,12 @@ def _replay_summary(
 
 
 __all__ = [
+    "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
+    "connect_conversation_database",
     "delete_run_subtrees_in_transaction",
     "open_conversation_store",
     "persist_to",
     "runs_without",
+    "table_names",
 ]

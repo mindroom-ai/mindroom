@@ -50,12 +50,9 @@ _SDK_FUNCTIONS = ("search_knowledge_base", "get_skill_instructions")
 class _KnowledgeIndex:
     """A published index that answers every query with one synthetic document."""
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         del limit
         return [SearchHit(content=f"Knowledge about {query}")]
-
-    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        return self.search(query, limit=limit)
 
 
 @pytest.mark.asyncio

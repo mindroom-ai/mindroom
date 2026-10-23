@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
-from mindroom.history.legacy_tool_results import split_combined_tool_results
 from mindroom.history.message_content import project_history_media_for_replay
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
 from mindroom.history.summary_message import compaction_summary_fields, is_scope_summary, summary_follows
@@ -65,7 +64,6 @@ def scope_history_messages(
     narrow from the configured policy. Each message is a copy marked ``from_history``, so a request never changes a
     stored run and is never stored again. Prompt roles, ``system_message_role`` included, never replay. Tool calls
     beyond ``max_tool_calls_from_history`` are left out, and so is every media item except the newest viewed images.
-    A legacy tool message holding several results replays as one message per result, on every route.
     """
     selected = _selected_messages(
         runs,
@@ -74,7 +72,7 @@ def scope_history_messages(
         num_history_messages=num_history_messages,
         prompt_roles=prompt_roles_for_history_storage(system_message_role),
     )
-    history = [_history_copy(message) for message in split_combined_tool_results(selected)]
+    history = [_history_copy(message) for message in selected]
     if max_tool_calls_from_history is not None:
         history = filter_tool_calls(history, max_tool_calls_from_history)
     return project_history_media_for_replay(history)

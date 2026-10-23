@@ -229,14 +229,11 @@ class _VectorDb:
         with self.lock:
             return self.collection_name in self.collections
 
-    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         _ = query
         with self.lock:
             items = list(self.collections.get(self.collection_name, []))
         return [SearchHit(content=str(item["content"]), meta_data=dict(item["metadata"])) for item in items[:limit]]
-
-    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        return self.search(query, limit=limit)
 
 
 class _ReadProxy(_VectorDb):

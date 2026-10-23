@@ -26,10 +26,10 @@ from mindroom.history.compaction import (
 )
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
 from mindroom.history.storage import (
+    _with_scope_state,
     append_compaction_chunk,
     read_scope_seen_event_ids,
     read_scope_state,
-    set_force_compaction_state,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, CompactionSummaryOutputLimitError
 from mindroom.history.summary_input import build_summary_input, messages_for_runs
@@ -628,7 +628,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
     observed: list[tuple[str, list[str], int, int | None, str | None]] = []
@@ -1027,7 +1027,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
     observed: list[str] = []
@@ -1146,7 +1146,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
     observed: list[str] = []
@@ -2016,7 +2016,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
     with (

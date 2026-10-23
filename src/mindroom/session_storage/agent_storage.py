@@ -11,7 +11,7 @@ from mindroom.history.legacy_compaction_state import migrate_to_summary_rows
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import ConversationStore, open_conversation_store
+from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, ConversationStore, open_conversation_store
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 
 if TYPE_CHECKING:
@@ -25,9 +25,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-_BUSY_TIMEOUT_SECONDS = 30.0
-
-
 def create_state_storage(storage_name: str, state_root: Path, *, session_table: str) -> ConversationStore:
     """Open the conversation database ``<state_root>/sessions/<storage_name>.db`` with its migrations applied.
 
@@ -39,7 +36,7 @@ def create_state_storage(storage_name: str, state_root: Path, *, session_table: 
         state_root,
         storage_name=storage_name,
         session_table=session_table,
-        timeout_seconds=_BUSY_TIMEOUT_SECONDS,
+        timeout_seconds=BUSY_TIMEOUT_SECONDS,
     ):
         db_dir = state_root / "sessions"
         db_dir.mkdir(parents=True, exist_ok=True)

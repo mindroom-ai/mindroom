@@ -82,7 +82,7 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
         store=None,
         session=None,
         scope=None,
-        native_compaction=_NATIVE,
+        replay_plan=None,
         deferred_tool_names=frozenset(),
         prompt_id=None,
     )
@@ -114,6 +114,57 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
         assert "context_management" not in second_body
         assert second_body["store"] is True
         assert is_compaction_summary(second.messages[-1])
+
+
+@pytest.mark.asyncio
+async def test_a_later_loop_of_the_run_sizes_and_falls_back_by_its_own_request_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team leader's continuation reuses the turn's hook with the turn's native settings; a fold there turns them off.
+
+    The hook reads the provider's compaction from the request it is about to send, so a fallback in an earlier loop
+    of the run cannot leave the hook compacting as text while the continuation's requests still ask the provider to.
+    """
+    config, runtime_paths = _small_window_config(tmp_path)
+
+    async def summarize(**_kwargs: object) -> str:
+        return "SUMMARY"
+
+    monkeypatch.setattr(mid_turn_compaction, "summarize_run_locally", summarize)
+    model = ScriptedModel(
+        [calls(tool_call("probe", "call_1")), answer("paused"), calls(tool_call("probe", "call_2")), answer("done")],
+    )
+    hook = mid_turn_compaction_hook(
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name="test_agent",
+        scope_id="test_agent",
+        is_team=False,
+        model_name="default",
+        model=model,
+        history_settings=config.resolve_entity("test_agent").history_settings,
+        store=None,
+        session=None,
+        scope=None,
+        replay_plan=None,
+        deferred_tool_names=frozenset(),
+        prompt_id=None,
+    )
+
+    for prompt in ("Do the task", "Continue the task"):
+        await collect(
+            run_agent(
+                spec(model, toolkit(probe)),
+                [Message(role="user", content=prompt)],
+                ctx=context(),
+                hooks=LoopHooks(before_request=(hook,)),
+                request_template=ModelRequest(messages=(), native_compaction=_NATIVE),
+            ),
+        )
+
+    assert [request.native_compaction for request in model.requests] == [_NATIVE, None, _NATIVE, None]
+    assert [is_compaction_summary(request.messages[-1]) for request in model.requests] == [False, True, False, True]
 
 
 def _responses_body(request: ModelRequest) -> dict[str, object]:
@@ -151,7 +202,7 @@ def _run_local_hook(config: Config, runtime_paths: RuntimePaths, model: ModelPro
         store=None,
         session=None,
         scope=None,
-        native_compaction=None,
+        replay_plan=None,
         deferred_tool_names=frozenset(),
         prompt_id=None,
     )
