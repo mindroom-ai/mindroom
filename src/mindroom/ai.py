@@ -1554,7 +1554,7 @@ async def ai_response(  # noqa: C901
 ) -> str:
     """Generate one agent response with memory integration and return its text.
 
-    Takes the arguments ``stream_agent_response`` documents, without its resume and completion sinks, plus
+    Takes the arguments ``stream_agent_response`` documents, without its resume inputs and completion sink, plus
     ``collect_streamed_response``, which runs the turn as a stream and collects it into one body (as a minimal-mode
     turn always does), and ``tool_trace_collector``, an optional list that receives the run's structured tool-trace
     entries.
