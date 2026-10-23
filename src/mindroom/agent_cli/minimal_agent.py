@@ -37,7 +37,6 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 __all__ = [
@@ -157,7 +156,6 @@ async def prepare_minimal_catalog(
     build: AgentBuild,
     *,
     run: RunContext,
-    session: ConversationSession,
     store: ConversationStore | None,
     delegation_depth: int,
     record: RunRecord | None = None,
@@ -177,7 +175,6 @@ async def prepare_minimal_catalog(
         agent_name=build.spec.id,
         run=run,
         runtime_context=runtime,
-        session=session,
         store=store,
         middleware=agent_tool_middleware(build),
         tool_call_limit=build.spec.tool_call_limit,
@@ -241,7 +238,6 @@ async def minimal_attempt(
     hooks: LoopHooks,
     *,
     run: RunContext,
-    session: ConversationSession,
     store: ConversationStore | None,
     response_context: ResponseTurnContext,
     context_documents: Mapping[str, str],
@@ -262,7 +258,6 @@ async def minimal_attempt(
     catalog = await prepare_minimal_catalog(
         build,
         run=run,
-        session=session,
         store=store,
         delegation_depth=delegation_depth,
     )

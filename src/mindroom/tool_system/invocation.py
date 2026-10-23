@@ -33,6 +33,7 @@ from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
+    from mindroom.agent_loop.spec import RunContext
     from mindroom.history.types import HistoryScope
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -75,6 +76,19 @@ class ToolCallContext:
     session_state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     history_scope: HistoryScope | None = None
+
+    @classmethod
+    def of_run(cls, run: RunContext, call_id: str | None) -> ToolCallContext:
+        """Return the context of the call ``call_id`` that ``run`` makes, sharing the run's state and scope."""
+        return cls(
+            run_id=run.run_id,
+            session_id=run.session_id,
+            user_id=run.user_id,
+            call_id=call_id,
+            session_state=run.session_state,
+            metadata=run.metadata or {},
+            history_scope=run.history_scope,
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

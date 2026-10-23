@@ -8,7 +8,6 @@ import sys
 import threading
 from contextlib import closing
 from copy import deepcopy
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -184,8 +183,6 @@ async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_ch
     session = catalog.session
     session.session_state["cwd"] = "/repo"
     store.save_session_state(session, session_state_snapshot(session.session_state))
-    # As in a turn, the run's tools change the session's own state in place.
-    catalog.run = replace(catalog.run, session_state=session.session_state)
     persist = persist_to(store, session)
     checkpoint = BatchCheckpoint(catalog)
     record = _record()

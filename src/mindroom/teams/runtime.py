@@ -468,15 +468,8 @@ class _MemberRuns:
         return replace(member.request_template, stream=self.stream)
 
     def _member_context(self, run_id: str) -> RunContext:
-        return RunContext(
-            run_id=run_id,
-            session_id=self.ctx.session_id,
-            user_id=self.ctx.user_id,
-            parent_run_id=self.record.run_id,
-            metadata=self.ctx.metadata,
-            session_state=self.ctx.session_state,
-            history_scope=self.ctx.history_scope,
-        )
+        """Return a member run's context: the team run's, so its tools share the team's state, under its own run id."""
+        return replace(self.ctx, run_id=run_id, parent_run_id=self.record.run_id)
 
     def _capture(self, ended: list[RunRecord]) -> Persist[RunRecord]:
         async def persist(record: RunRecord) -> None:

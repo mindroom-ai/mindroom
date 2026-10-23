@@ -113,7 +113,7 @@ def resume_from_session(
             session_id=session.session_id,
             user_id=user_id,
             metadata=deepcopy(paused.metadata),
-            session_state=session.session_state,
+            session=session,
         ),
         hooks=hooks,
         persist=persist,

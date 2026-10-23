@@ -853,7 +853,7 @@ async def _start_agent_run(
         session_id=run_context.session_id,
         user_id=run_context.turn.requester_id,
         metadata=run_context.metadata,
-        session_state=storage.session.session_state,
+        session=storage.session,
     )
     spec = prepared.spec
     hooks = _agent_loop_hooks(run_context, attempt, storage)
@@ -863,7 +863,6 @@ async def _start_agent_run(
             spec,
             hooks,
             run=run,
-            session=storage.session,
             store=storage.store,
             response_context=run_context.turn,
             context_documents=prepared.cli_context,
@@ -874,7 +873,6 @@ async def _start_agent_run(
         await bind_standard_cli(
             build,
             run=run,
-            session=storage.session,
             store=storage.store,
             response_context=run_context.turn,
             delegation_depth=run_context.delegation_depth,

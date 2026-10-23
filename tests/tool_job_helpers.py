@@ -401,7 +401,7 @@ async def run_job_turn(
         middleware=middleware,
         participation=participation,
     )
-    run = RunContext(run_id=run_id, session_id=session_id, session_state=session.session_state)
+    run = RunContext(run_id=run_id, session_id=session_id, session=session)
     events = run_agent(spec, [Message(role="user", content=prompt)], ctx=run, hooks=hooks, persist=persist)
     finished = [event.record async for event in events if isinstance(event, RunFinished)]
     return finished[-1]
@@ -443,7 +443,7 @@ async def resume_job_turn(
         paused,
         build_resume_request(paused=paused.messages, summary=None, history=[]),
         approved=approved,
-        ctx=RunContext(run_id=paused.run_id, session_id=session_id, session_state=session.session_state),
+        ctx=RunContext(run_id=paused.run_id, session_id=session_id, session=session),
         hooks=hooks,
         persist=persist,
     )
@@ -767,7 +767,7 @@ class DelegatingLeader:
                 run_id=run_id,
                 session_id=self.session.session_id,
                 user_id=self.identity.requester_id,
-                session_state=self.session.session_state,
+                session=self.session,
             ),
             hooks=hooks,
             persist=self._persist,

@@ -78,14 +78,13 @@ async def _attempt(build, runtime, session: ConversationSession, *, run_id: str 
         run_id=run_id,
         session_id=runtime.session_id,
         user_id=runtime.requester_id,
-        session_state=session.session_state,
+        session=session,
     )
     spec, hooks = await minimal_attempt(
         build,
         replace(build.spec, system_message=_turn(build).system_message),
         NO_HOOKS,
         run=run,
-        session=session,
         store=build.store,
         response_context=_turn_context(),
         context_documents=minimal_context_documents(build),
@@ -596,8 +595,12 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
     with tool_runtime_context(runtime):
         catalog = await prepare_minimal_catalog(
             minimal,
-            run=RunContext(run_id="run", session_id=runtime.session_id, user_id=runtime.requester_id),
-            session=_session(runtime),
+            run=RunContext(
+                run_id="run",
+                session_id=runtime.session_id,
+                user_id=runtime.requester_id,
+                session=_session(runtime),
+            ),
             store=None,
             delegation_depth=0,
         )
