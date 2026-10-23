@@ -101,7 +101,6 @@ async def _resume_turn(
     paused: RunRecord,
     *toolkits: AdaptedToolkit,
     external_results: Mapping[str, str],
-    stream: bool,
 ) -> RunRecord:
     """Resume a paused turn with the results of its externally executed calls."""
     _, record = await collect(
@@ -112,7 +111,6 @@ async def _resume_turn(
             external_results=external_results,
             ctx=context(run_id=paused.run_id),
             hooks=_NOTICE_HOOKS,
-            request_template=ModelRequest(messages=(), stream=stream),
         ),
     )
     return record
@@ -821,7 +819,7 @@ async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool
         # Generated media follow the ordinary call's result as a user-role message.
         assert (paused.messages[-1].role == "user") is media
         # The driver resumes the run with the child's result, completing the batch for the judge.
-        await _resume_turn(model, paused, *tools, external_results={"child": "Child result"}, stream=stream)
+        await _resume_turn(model, paused, *tools, external_results={"child": "Child result"})
     assert len(judgments) == 1
     assert _has_notice(model.requests[-1].messages) is interrupt
 
@@ -868,7 +866,7 @@ async def test_a_failing_judge_or_defer_reaction_costs_no_reply(*, failure: str,
         record = await _run_turn(model, *tools, stream=False)
         if resumed:
             assert record.status == RunStatus.paused
-            record = await _resume_turn(model, record, *tools, external_results={"child": "Child result"}, stream=False)
+            record = await _resume_turn(model, record, *tools, external_results={"child": "Child result"})
     assert record.status == RunStatus.completed
     assert record.content == "Done"
     assert len(judgments) == 1

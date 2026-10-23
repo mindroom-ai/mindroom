@@ -173,11 +173,10 @@ class ResumeRunner:
     """Resumes one paused run of a rebuilt agent against its store, with the hooks an agent turn installs.
 
     A resume replays the history the configured policy selects from ``session`` now, not a turn's narrowed plan; the
-    run's native history settings come from the paused request's last response. Every resume streams its requests,
-    as Agno's continuation did. A resume that answers the run's own paused calls with an approval's decisions makes
-    the run a reader of that approval's receipt. The run keeps one set of hooks for its whole life, so per-run hook
-    state, such as the output-limit count or a failed compaction's stop, carries across its delegation
-    continuations.
+    run's native history settings come from the paused request's last response. A resume that answers the run's own
+    paused calls with an approval's decisions makes the run a reader of that approval's receipt. The run keeps one set
+    of hooks for its whole life, so per-run hook state, such as the output-limit count or a failed compaction's stop,
+    carries across its delegation continuations.
     """
 
     build: AgentBuild
@@ -233,7 +232,6 @@ class ResumeRunner:
                 build.request_template,
                 native_compaction=native_compaction,
                 portable_replay=native.portable_replay if native is not None else False,
-                stream=True,
             ),
         )
         return with_resumed_turn_log_context(events)

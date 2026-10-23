@@ -921,8 +921,7 @@ async def _continue_turn_run(
 
     The run keeps its hooks for its whole life, so per-run hook state, such as the output-limit count or a failed
     compaction's stop, carries across its continuations. The resume replays the scope's history as the attempt did
-    and reuses the paused run's stored system message. It streams its requests even when the turn does not, as
-    Agno's delegation continuation did.
+    and reuses the paused run's stored system message.
     """
     prepared = run_context.prepared_run
     events = resume_from_session(
@@ -936,7 +935,7 @@ async def _continue_turn_run(
         user_id=run_context.turn.requester_id,
         hooks=hooks,
         persist=_persist_into(terminal, storage),
-        request_template=replace(run_context.request_template, stream=True),
+        request_template=run_context.request_template,
     )
     return await forward_resume(events, on_event, record_type=RunRecord)
 

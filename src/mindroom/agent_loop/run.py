@@ -127,7 +127,8 @@ def resume_agent(
     an external execution by its result; anything else raises ``ValueError`` here, before any call runs, and
     ``paused`` is left unchanged. Approved calls run from their stored arguments and announce themselves as tool
     events; denied calls answer with their reason, or the default note when it is None or empty; external results
-    answer as they are. The returned stream ends as ``run_agent``'s does.
+    answer as they are. The requests stream (``resume_request_template``). The returned stream ends as
+    ``run_agent``'s does.
     """
     plan = plan_resume(spec, paused, approved=approved, denied=denied, external_results=external_results)
     return resume_planned(
@@ -177,7 +178,10 @@ def resume_planned(
     persist: Persist[RunRecord] | None = None,
     request_template: ModelRequest = EMPTY_REQUEST,
 ) -> AsyncIterator[RunEvent]:
-    """Run a planned resume: answer the decided calls, then continue the loop over ``messages``."""
+    """Run a planned resume: answer the decided calls, then continue the loop over ``messages``.
+
+    The requests stream (``resume_request_template``).
+    """
     return drive_run(
         spec,
         plan.record,
@@ -186,9 +190,19 @@ def resume_planned(
         ctx=ctx,
         hooks=hooks,
         persist=persist,
-        template=request_template,
+        template=resume_request_template(request_template),
         resumed=plan.decided,
     )
+
+
+def resume_request_template(template: ModelRequest) -> ModelRequest:
+    """Return the template a resume's requests use: ``template``, streaming.
+
+    Every resume streams its requests, an approval's and a delegation's continuation alike, even when the run it
+    continues did not, as every continuation of the Agno-backed runtime did. ``resume_planned`` and the team
+    runtime's ``continue_team`` apply it, so every resume of an agent, a team, or a team member streams.
+    """
+    return replace(template, stream=True)
 
 
 def prepare_resume_tools(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> PreparedTools:
@@ -436,6 +450,7 @@ __all__ = [
     "prepare_resume_tools",
     "resume_agent",
     "resume_planned",
+    "resume_request_template",
     "resumed_record",
     "run_agent",
 ]
