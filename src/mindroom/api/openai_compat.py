@@ -508,11 +508,6 @@ async def _resolve_auto_route(
     return selection.entity_name
 
 
-def _request_knowledge_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | None:
-    """Return the app-scoped background knowledge refresh scheduler, if configured."""
-    return config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -679,7 +674,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
         thread_id=None,
         resolved_thread_id=None,
     )
-    knowledge_refresh_scheduler = _request_knowledge_refresh_scheduler(request)
+    knowledge_refresh_scheduler = config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
     budget_monitor = config_lifecycle.app_state(request.app).budget_monitor
     budget = partial(budget_model, config, runtime_paths, budget_monitor, execution_identity.requester_id)
     completion_lock = _openai_completion_lock(

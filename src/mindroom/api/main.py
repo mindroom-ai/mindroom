@@ -306,11 +306,6 @@ async def _worker_cleanup_loop(
                 logger.exception("Background worker cleanup failed")
 
 
-def _api_runtime_paths(request: Request) -> constants.RuntimePaths:
-    """Return the API request's committed runtime paths."""
-    return config_lifecycle.api_runtime_paths(request)
-
-
 def _app_context(api_app: FastAPI) -> ApiSnapshot:
     """Return the committed API snapshot for one app instance."""
     return config_lifecycle.require_api_state(api_app).snapshot
@@ -770,7 +765,7 @@ app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)]
 async def health_check(request: Request) -> JSONResponse:
     """Health check endpoint with Matrix sync-loop liveness."""
     runtime_state = get_runtime_state()
-    runtime_paths = _api_runtime_paths(request)
+    runtime_paths = config_lifecycle.api_runtime_paths(request)
     sync_health = get_matrix_sync_health_snapshot(
         startup_grace_seconds=matrix_sync_startup_timeout_seconds(runtime_paths),
         ingestion_grace_seconds=matrix_ingestion_grace_seconds(runtime_paths),
