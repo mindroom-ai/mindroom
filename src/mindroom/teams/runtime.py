@@ -153,9 +153,6 @@ def continue_team(
     requirements on the team run, and the leader sends no request.
     """
     record = resumed_record(paused)
-    # The resumed record keeps the members that ended before the pause, as Agno's continuation of its live run did,
-    # in a list of its own, so the resume leaves ``paused`` as it was.
-    record.ended_member_runs = list(paused.ended_member_runs)
     record.member_responses = []
     # Agno's continuation started the leader's text afresh; the paused notice is not part of the answer.
     record.content = None
