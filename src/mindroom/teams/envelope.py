@@ -432,9 +432,7 @@ async def _persist_bound_seen_event_ids(*, scope_context: ScopeSessionContext | 
 
 
 def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[str]:
-    if not isinstance(run_metadata, dict):
-        return []
-    raw_event_ids = run_metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
+    raw_event_ids = (run_metadata or {}).get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
     if not isinstance(raw_event_ids, list):
         return []
     return [event_id for event_id in raw_event_ids if isinstance(event_id, str) and event_id]
