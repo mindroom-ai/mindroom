@@ -6,7 +6,7 @@ import hashlib
 import re
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -34,14 +34,30 @@ _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
 
 @dataclass(frozen=True)
 class ScopeSessionContext:
-    """Resolved storage/session context for one logical history scope."""
+    """Resolved storage/session context for one logical history scope.
+
+    ``session`` is the stored session, None while the scope has none. ``session_id`` is the id the context was opened
+    for, which the scope's first session takes, so a run is saved from the context alone.
+    """
 
     scope: HistoryScope
     storage: ConversationStore
     session: ConversationSession | None
-    session_id: str | None = None
+    session_id: str
     storage_factory: Callable[[], ConversationStore] | None = None
     session_exists: bool = True
+
+    def first_session(self) -> ConversationSession:
+        """Return a new session of this scope under ``session_id``, as the scope's first run starts it."""
+        return new_scope_session(
+            session_id=self.session_id,
+            scope_id=self.scope.scope_id,
+            is_team=self.scope.kind == "team",
+        )
+
+    def stored_or_first_session(self) -> ConversationSession:
+        """Return the session a run of this scope is saved into: the stored one, else the scope's first."""
+        return self.session if self.session is not None else self.first_session()
 
 
 @dataclass(frozen=True)
@@ -110,17 +126,17 @@ def open_resolved_scope_session_context(
     )
     storage = storage_factory()
     session = storage.load_session(session_id, scope.kind)
-    session_exists = session is not None
-    if session is None and create_session_if_missing:
-        session = new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
-    yield ScopeSessionContext(
+    context = ScopeSessionContext(
         scope=scope,
         storage=storage,
         session=session,
         session_id=session_id,
         storage_factory=storage_factory,
-        session_exists=session_exists,
+        session_exists=session is not None,
     )
+    if session is None and create_session_if_missing:
+        context = replace(context, session=context.first_session())
+    yield context
 
 
 @contextmanager

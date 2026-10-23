@@ -493,7 +493,7 @@ async def continue_paused_team_run(
                 state=prior_presentation_state,
                 tool_trace=prior_tool_trace,
             )
-            storage = scope_storage(scope, session_id=session_id)
+            storage = scope_storage(scope)
             attempt = TeamAttempt(
                 run_id=run_id,
                 members=members,
@@ -593,11 +593,7 @@ async def continue_paused_team_run(
             try:
                 await finalize_consumption()
             finally:
-                register_team_notice_storage(
-                    scope_context=scope,
-                    session_id=session_id,
-                    entity_name=entity_name,
-                )
+                register_team_notice_storage(scope_context=scope, entity_name=entity_name)
 
 
 __all__ = [

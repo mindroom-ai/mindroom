@@ -144,7 +144,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -285,7 +285,7 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -351,7 +351,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -437,7 +437,7 @@ async def test_native_activation_respects_history_policy(
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
         allow_native_compaction=case != "scheduled",
     )
 
@@ -468,7 +468,7 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
     )
     assert prepared.native_history is not None
     assert prepared.native_history.native_compaction is not None
@@ -503,7 +503,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
     )
 
     assert session.summary is not None
@@ -548,7 +548,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         team_name="team",
         config=config,
         runtime_paths=paths,
-        scope_context=ScopeSessionContext(HistoryScope(kind="team", scope_id="team"), db, session),
+        scope_context=ScopeSessionContext(HistoryScope(kind="team", scope_id="team"), db, session, "session"),
         active_model_name="default",
         active_context_window=200000,
         static_prompt_tokens=100,

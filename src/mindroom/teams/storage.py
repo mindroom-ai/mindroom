@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom import ai_runtime
-from mindroom.history.storage import new_scope_session
 from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.session_storage.store import persist_to
@@ -67,14 +66,9 @@ class TeamRunRecords:
         return self.record
 
 
-def scope_storage(scope_context: ScopeSessionContext, *, session_id: str) -> TeamStorage:
+def scope_storage(scope_context: ScopeSessionContext) -> TeamStorage:
     """Return where a team run in ``scope_context`` is stored, giving a scope without a stored session its first one."""
-    session = scope_context.session or new_scope_session(
-        session_id=session_id,
-        scope_id=scope_context.scope.scope_id,
-        is_team=True,
-    )
-    return TeamStorage(scope_context.storage, session, scope_context.scope)
+    return TeamStorage(scope_context.storage, scope_context.stored_or_first_session(), scope_context.scope)
 
 
 def persist_into(records: TeamRunRecords | None, storage: TeamStorage | None) -> Persist[AnyRunRecord]:
@@ -107,16 +101,13 @@ def team_history_settings(config: Config, team_name: str | None) -> ResolvedHist
     return config.resolve_entity(configured_team(config, team_name)).history_settings
 
 
-def register_team_notice_storage(
-    *,
-    scope_context: ScopeSessionContext | None,
-    session_id: str,
-    entity_name: str,
-) -> None:
-    """Register team storage for response-boundary notice finalization."""
+def register_team_notice_storage(*, scope_context: ScopeSessionContext | None, entity_name: str) -> None:
+    """Register the scope's team storage for response-boundary notice finalization; a team without one has none."""
+    if scope_context is None:
+        return
     ai_runtime.register_queued_notice_storage(
-        storage_factory=scope_context.storage_factory if scope_context is not None else None,
-        session_id=session_id,
+        storage_factory=scope_context.storage_factory,
+        session_id=scope_context.session_id,
         session_kind="team",
         entity_name=entity_name,
     )
