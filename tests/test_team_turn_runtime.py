@@ -64,6 +64,7 @@ from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.scripted_agent_helpers import registered_toolkit
+from tests.team_runtime.squad import member as squad_member
 from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
@@ -1355,6 +1356,26 @@ async def test_a_member_keeps_its_hooks_across_its_delegation_continuation(
     assert "The output limit cut off 3 of this model's responses" in str(
         team.models["default"].requests[-1].messages[-1].content,
     )
+
+
+def test_a_copy_of_a_member_keeps_the_hooks_of_its_runs() -> None:
+    """A member is a frozen spec that holds its runs' hooks, so ``replace`` must carry them over.
+
+    A copy continues a run with the hooks the run started with, and a new run gets one set whichever copy runs it.
+    """
+    built: list[LoopHooks] = []
+
+    def new_hooks() -> LoopHooks:
+        built.append(LoopHooks())
+        return built[-1]
+
+    writer = replace(squad_member("writer", "Writer", ScriptedModel([])), new_hooks=new_hooks)
+    first = writer.hooks("run-1")
+    copy = replace(writer, role="Edited role.")
+
+    assert copy.hooks("run-1") is first
+    assert copy.hooks("run-2") is writer.hooks("run-2")
+    assert len(built) == 2
 
 
 @pytest.mark.asyncio
