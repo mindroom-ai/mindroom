@@ -267,6 +267,11 @@ _RETIRED_MODEL_SETTINGS = (
         reason="Gemini built-in tools other than search, request overrides, and function declarations were retired "
         "with Agno's Gemini model",
     ),
+    _RetiredModelSettings(
+        fields=frozenset({"response_modalities", "speech_config"}),
+        providers=_GEMINI_PROVIDERS,
+        reason="Image and audio replies were retired with Agno's Gemini model",
+    ),
 )
 
 
