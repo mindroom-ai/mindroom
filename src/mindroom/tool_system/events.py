@@ -20,9 +20,6 @@ _MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
 _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
 _MAX_TOOL_RESULT_DISPLAY_CHARS = 500
 _TRUNCATABLE_RESULT_ITEM_FIELDS = frozenset({"body_preview"})
-# Keep v2 trace indexing stable (`events[N-1]`) by not truncating event slots.
-# Large-message handling is responsible for payload size fallbacks.
-_MAX_TOOL_TRACE_EVENTS = 120
 _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
@@ -635,11 +632,7 @@ def body_with_tool_tags(body: str, trace: Sequence[ToolTraceEntry]) -> str:
 
 
 def _line_ending(line: str) -> str:
-    if line.endswith("\r\n"):
-        return "\r\n"
-    if line.endswith("\n"):
-        return "\n"
-    return "\n"
+    return "\r\n" if line.endswith("\r\n") else "\n"
 
 
 def ensure_visible_tool_marker_spacing(text: str) -> str:
@@ -752,16 +745,13 @@ def _format_tool_started(
     tool_index: int | None = None,
 ) -> tuple[str, ToolTraceEntry]:
     """Format a tool-call start marker and return associated trace metadata."""
-    if tool_args:
-        args_preview, truncated = _format_tool_args(tool_args)
-        trace = ToolTraceEntry(
-            type="tool_call_started",
-            tool_name=tool_name,
-            args_preview=args_preview,
-            truncated=truncated,
-        )
-    else:
-        trace = ToolTraceEntry(type="tool_call_started", tool_name=tool_name)
+    args_preview, truncated = _format_tool_args(tool_args)
+    trace = ToolTraceEntry(
+        type="tool_call_started",
+        tool_name=tool_name,
+        args_preview=args_preview or None,
+        truncated=truncated,
+    )
     return _format_tool_marker(tool_name, tool_index, pending=True), trace
 
 
@@ -772,18 +762,11 @@ def format_tool_combined(
     tool_index: int | None = None,
 ) -> tuple[str, ToolTraceEntry]:
     """Format a complete tool call marker and associated trace metadata."""
-    if tool_args:
-        args_preview, truncated = _format_tool_args(tool_args)
-    else:
-        args_preview = ""
-        truncated = False
-
+    args_preview, truncated = _format_tool_args(tool_args)
     result_display = ""
     if result is not None and result != "":
         result_display, result_truncated = _format_tool_result_preview(result)
         truncated = truncated or result_truncated
-
-    block = _format_tool_marker(tool_name, tool_index, pending=False)
 
     trace = ToolTraceEntry(
         type="tool_call_completed",
@@ -792,7 +775,7 @@ def format_tool_combined(
         result_preview=result_display or None,
         truncated=truncated,
     )
-    return block, trace
+    return _format_tool_marker(tool_name, tool_index, pending=False), trace
 
 
 def complete_pending_tool_block(
@@ -819,11 +802,9 @@ def complete_pending_tool_block(
     pending_line = _tool_marker_line(tool_name, tool_index, pending=True)
     completed_line = _tool_marker_line(tool_name, tool_index, pending=False)
     pending_pos = updated.rfind(pending_line)
+    # A duplicate completion finds no pending marker and leaves the text unchanged.
     if pending_pos >= 0:
         updated = updated[:pending_pos] + completed_line + updated[pending_pos + len(pending_line) :]
-    elif completed_line in updated:
-        # Duplicate completion event for the same marker; leave text unchanged.
-        pass
 
     trace = ToolTraceEntry(
         type="tool_call_completed",
@@ -834,51 +815,46 @@ def complete_pending_tool_block(
     return updated, trace
 
 
-def format_tool_started_event(
-    tool: ToolExecution | None,
-    tool_index: int | None = None,
-) -> tuple[str, ToolTraceEntry | None]:
-    """Format an Agno tool-call start into display text and trace metadata."""
-    if tool is None:
-        return "", None
-    tool_name = tool.tool_name or "tool"
-    tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-    text, trace = _format_tool_started(tool_name, tool_args, tool_index=tool_index)
+def _tool_args(tool: ToolExecution) -> dict[str, object]:
+    return {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
+
+
+def _identified(trace: ToolTraceEntry, tool: ToolExecution) -> ToolTraceEntry:
+    """Stamp a trace entry with its call's identity, and the hidden-call identity of an audited call."""
     trace.tool_call_id = _streaming_tool_call_id(tool)
     if isinstance(tool, AuditedToolExecution):
         trace.parent_bash_call_id = tool.parent_bash_call_id
         trace.toolkit_name = tool.toolkit_name
-    return text, trace
+    return trace
+
+
+def format_tool_started_event(
+    tool: ToolExecution | None,
+    tool_index: int | None = None,
+) -> tuple[str, ToolTraceEntry | None]:
+    """Format a tool-call start into display text and trace metadata."""
+    if tool is None:
+        return "", None
+    text, trace = _format_tool_started(tool.tool_name or "tool", _tool_args(tool), tool_index=tool_index)
+    return text, _identified(trace, tool)
 
 
 def format_tool_completed_event(
     tool: ToolExecution | None,
     tool_index: int | None = None,
 ) -> tuple[str, ToolTraceEntry | None]:
-    """Format an Agno tool-call completion into display text and trace metadata."""
+    """Format a tool-call completion into display text and trace metadata."""
     if tool is None:
         return "", None
-    tool_name = tool.tool_name or "tool"
-    tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-    text, trace = format_tool_combined(tool_name, tool_args, tool.result, tool_index=tool_index)
-    trace.tool_call_id = _streaming_tool_call_id(tool)
-    if isinstance(tool, AuditedToolExecution):
-        trace.parent_bash_call_id = tool.parent_bash_call_id
-        trace.toolkit_name = tool.toolkit_name
-    return text, trace
+    text, trace = format_tool_combined(tool.tool_name or "tool", _tool_args(tool), tool.result, tool_index=tool_index)
+    return text, _identified(trace, tool)
 
 
 def extract_tool_completed_info(tool: ToolExecution | None) -> tuple[str, object | None] | None:
-    """Extract tool name and result from a ToolExecution.
-
-    Returns (tool_name, result) or None if tool is absent.
-    Uses ``tool.result`` (actual tool output), not ``event.content``
-    which Agno sets to a timing string like ``"tool() completed in 0.12s"``.
-    """
+    """Return a finished call's tool name and the tool's own result, or None when there is no call."""
     if tool is None:
         return None
-    tool_name = tool.tool_name or "tool"
-    return tool_name, tool.result
+    return tool.tool_name or "tool", tool.result
 
 
 def serialize_tool_trace(
@@ -960,17 +936,7 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
     """Build message content payload for tool trace metadata."""
     if not tool_trace:
         return None
-
-    trace_list = list(tool_trace)
-
-    events = list(serialize_tool_trace(trace_list))
-    has_truncated_content = any(entry.truncated for entry in trace_list)
-
-    payload: dict[str, object] = {
-        "version": _TOOL_TRACE_VERSION,
-        "events": events,
-    }
-    if has_truncated_content:
+    payload: dict[str, object] = {"version": _TOOL_TRACE_VERSION, "events": list(serialize_tool_trace(tool_trace))}
+    if any(entry.truncated for entry in tool_trace):
         payload["content_truncated"] = True
-
     return {_TOOL_TRACE_KEY: payload}
