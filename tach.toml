@@ -1558,6 +1558,7 @@ depends_on = [
     "mindroom.delegation.direct",
     "mindroom.delegation.personas",
     "mindroom.delegation.sessions",
+    "mindroom.delegation.state",
     "mindroom.agent_descriptions",
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.tool_system.runtime_context",
@@ -9380,6 +9381,7 @@ path = "mindroom.knowledge_graph.episodes"
 depends_on = [
     "mindroom.automations.steps",
     "mindroom.constants",
+    "mindroom.delegation.state",
     "mindroom.history.conversation_text",
     "mindroom.history.session_runs",
     "mindroom.knowledge_graph.store",

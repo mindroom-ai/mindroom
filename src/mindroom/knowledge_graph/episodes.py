@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
+from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.history.conversation_text import one_line, run_requester, utterances
 from mindroom.history.session_runs import DELEGATION_SESSION_PREFIX, run_key
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
@@ -43,8 +44,7 @@ _GRAPH_FUNCTIONS = ("search_graph", "graph_entity")
 _PROSE_FUNCTIONS = (
     "think",
     "analyze",
-    "run_subagent",
-    "continue_subagent",
+    *DELEGATION_FUNCTIONS,
     "run_workflow",
     "get_workflow_run",
     "claude_send",

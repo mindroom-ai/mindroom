@@ -12,6 +12,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
+from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.knowledge_graph.episodes import (
     RUN_DONE,
     RenderedEpisode,
@@ -291,7 +292,10 @@ def test_automation_thread_renders_nothing() -> None:
         # `think` and `analyze` return the model's own thoughts, not anything a tool observed.
         pytest.param([_tool("think", "Maybe Bob owns Atlas", thought="Maybe Bob owns Atlas")], id="reasoning"),
         # A subagent's answer is another model's prose; its own tool results come in through its own session.
-        pytest.param([_tool("run_subagent", "Bob owns Atlas, I think.", task="Who owns Atlas?")], id="subagent"),
+        pytest.param(
+            [_tool(name, "Bob owns Atlas, I think.", task="Who owns Atlas?") for name in DELEGATION_FUNCTIONS],
+            id="subagent",
+        ),
         # A job's collected result no longer says whether it was a graph lookup or a subagent's prose.
         pytest.param(
             [
