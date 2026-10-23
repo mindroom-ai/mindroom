@@ -1023,7 +1023,6 @@ def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
             partial_text="partial",
             completed_tools=(_trace("search"),),
             interrupted_tools=(_trace("browse"),),
-            session_id="session-live",
             run_id="run-live",
         )
 

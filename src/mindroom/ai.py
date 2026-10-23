@@ -1809,7 +1809,6 @@ async def ai_response(  # noqa: C901
                 partial_text=_own_assistant_text(record),
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
-                session_id=session_id,
                 run_id=attempt.run_id,
                 metadata_content=_blocking_metadata(prepared_run, record, RunStatus.error, run_id=attempt.run_id),
             )

@@ -717,7 +717,6 @@ class _TeamTurn:
                 partial_text=attempt.interrupted_text(),
                 completed_tools=tuple(attempt.tool_tracker.completed_tools),
                 interrupted_tools=tuple(pending.trace_entry for pending in attempt.tool_tracker.pending_tools),
-                session_id=self.session_id,
                 run_id=attempt.run_id,
                 metadata_content=self.failure_metadata(attempt),
             )

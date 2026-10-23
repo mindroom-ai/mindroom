@@ -440,7 +440,6 @@ class ExcludedAttempt:
     partial_text: str = ""
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     interrupted_tools: tuple[ToolTraceEntry, ...] = ()
-    session_id: str | None = None
     run_id: str | None = None
     metadata_content: dict[str, Any] | None = None
 
