@@ -853,7 +853,14 @@ async def _start_agent_run(
         events,
         store=storage.store,
         session=storage.session,
-        continue_parent=partial(_continue_turn_run, run_context, attempt, storage=storage, terminal=terminal),
+        continue_parent=partial(
+            _continue_turn_run,
+            run_context,
+            spec=spec,
+            hooks=hooks,
+            storage=storage,
+            terminal=terminal,
+        ),
         agent_name=run_context.agent_name,
         run_child=run_delegated_child_response,
         config=run_context.config,
@@ -871,22 +878,25 @@ async def _start_agent_run(
 
 async def _continue_turn_run(
     run_context: _AgentRunContext,
-    attempt: _AgentAttempt,
     paused: RunRecord,
     decisions: ResumeDecisions,
     on_event: ResumeEvents | None,
     *,
+    spec: AgentSpec,
+    hooks: LoopHooks,
     storage: _AttemptStorage,
     terminal: _TerminalRecord,
 ) -> RunRecord:
-    """Continue this attempt's paused run with its delegations' results, under the attempt's hooks and store.
+    """Continue this attempt's paused run with its delegations' results, as the spec and hooks it ran with.
 
-    The resume replays the scope's history as the attempt did and reuses the paused run's stored system message. It
-    streams its requests even when the turn does not, as Agno's delegation continuation did.
+    The run keeps its hooks for its whole life, so per-run hook state, such as the output-limit count or a failed
+    compaction's stop, carries across its continuations. The resume replays the scope's history as the attempt did
+    and reuses the paused run's stored system message. It streams its requests even when the turn does not, as
+    Agno's delegation continuation did.
     """
     prepared = run_context.prepared_run
     events = resume_from_session(
-        prepared.spec,
+        spec,
         paused,
         decisions,
         session=storage.session,
@@ -894,7 +904,7 @@ async def _continue_turn_run(
         settings=prepared.build.history_settings,
         plan=prepared.prepared_history.replay_plan,
         user_id=run_context.turn.requester_id,
-        hooks=_agent_loop_hooks(run_context, attempt, storage),
+        hooks=hooks,
         persist=_persist_into(terminal, storage),
         request_template=replace(run_context.request_template, stream=True),
     )

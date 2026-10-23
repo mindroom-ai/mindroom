@@ -12,11 +12,13 @@ import asyncio
 import json
 import threading
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.agents import _hide_unresumable_approval_functions, apply_tool_approval_capability
+from mindroom.ai import run_delegated_child_response
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -28,8 +30,9 @@ from mindroom.delegation.records import DelegationRecordLocator, DelegationRecor
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.history.storage import new_scope_session
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import ModelOutputLimitError, ProviderError
 from mindroom.llm.events import ToolCompleted
+from mindroom.llm.provider import Capabilities, TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -46,11 +49,12 @@ from tests.delegation_helpers import (
     _runtime_paths,
     _saved_approval_calls,
     approval_executor,
+    pause_parent,
     registered_report_tool,
     respond,
     resume,
 )
-from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
 from tests.tool_approval_helpers import gated_functions
@@ -958,3 +962,63 @@ def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path:
         for function in adapted.functions
     }
     assert flags == {"run_subagent": (True, True), "continue_subagent": (True, True)}
+
+
+def _cut_off_turn(call_id: str) -> list[ScriptStep]:
+    """Return a response the output limit cut off while it requested ``run_subagent``."""
+    *steps, completed = calls(tool_call("run_subagent", call_id, agent_name="code", task="Cut off"))
+    assert isinstance(completed, TurnCompleted)
+    return [*steps, replace(completed, stop_reason="output_limit")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["turn", "resume"])
+async def test_a_run_keeps_its_hooks_across_its_delegation_continuations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    """Per-run hook state lasts the whole run: the output-limit count reaches its cap across two continuations.
+
+    The leader's run is cut off twice after its first delegation and once more after its second; the third cut-off
+    of one run ends it, whether the run is a live turn or an approval resume the delegation driver continues.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-1", agent_name="code", task="First")),
+            _cut_off_turn("cut-1"),
+            _cut_off_turn("cut-2"),
+            calls(tool_call("run_subagent", "delegate-2", agent_name="code", task="Second")),
+            _cut_off_turn("cut-3"),
+            answer("The hooks were rebuilt."),
+        ],
+        capabilities=Capabilities(claude_family=True),
+    )
+    code = ScriptedModel([answer("first result"), answer("second result")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    identity = _leader_identity()
+
+    if path == "turn":
+        reply = await respond("leader", "delegate", config=config, runtime_paths=paths, identity=identity)
+        assert isinstance(reply, str)
+        assert "output limit" in reply.lower()
+    else:
+        parent = await pause_parent("leader", "delegate", config=config, runtime_paths=paths, identity=identity)
+        with (
+            tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
+            pytest.raises(ModelOutputLimitError),
+        ):
+            await execution._drive_delegations(
+                parent.record,
+                store=parent.store,
+                session=parent.session,
+                continue_parent=parent.runner.continue_run,
+                agent_name="leader",
+                run_child=run_delegated_child_response,
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+            )
+    assert len(leader.requests) == 5
