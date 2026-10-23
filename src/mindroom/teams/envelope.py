@@ -128,19 +128,13 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Message length limits for team context and logging
-_MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
 _MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
 _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
     max_messages=30,
-    max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
+    max_message_length=200,
     missing_sender_label="Unknown",
 )
 type TeamStreamChunk = str | StructuredStreamChunk
-
-
-def _team_run_input_text(run_input: Sequence[Message]) -> str:
-    return render_prepared_team_messages_text(run_input)
 
 
 def _team_request_log_context(
@@ -163,7 +157,7 @@ def _team_request_log_context(
         ),
         prompt=prompt,
         model_prompt=None,
-        full_prompt=_team_run_input_text(run_input),
+        full_prompt=render_prepared_team_messages_text(run_input),
         metadata=metadata,
     )
 
@@ -191,7 +185,7 @@ class PreparedTeamExecution:
     @property
     def prompt_text(self) -> str:
         """Return the prompt-visible text derived from the turn's messages."""
-        return _team_run_input_text(self.turn.in_request_order())
+        return render_prepared_team_messages_text(self.turn.in_request_order())
 
     def run_input(self, media: MediaInputs) -> list[Message]:
         """Return one attempt's request body, media on the prompt: the summary, the replayed history, then the turn."""
@@ -202,24 +196,6 @@ class PreparedTeamExecution:
         prompt.files = media.files or None
         prompt.videos = media.videos or None
         return build_request(system=(), summary=self.summary, history=deepcopy(self.history), turn=turn)
-
-
-def _replayed_team_history(
-    scope_context: ScopeSessionContext | None,
-    prepared_history: PreparedHistoryState,
-    *,
-    config: Config,
-    configured_team_name: str | None,
-) -> tuple[list[Message], ScopeSummary | None]:
-    """Return the stored team history this request replays under the resolved plan, and the scope summary."""
-    if scope_context is None:
-        return [], None
-    return replayed_history(
-        scope_context.session,
-        scope_context.scope,
-        team_history_settings(config, configured_team_name),
-        prepared_history.replay_plan,
-    )
 
 
 async def prepare_materialized_team_execution(
@@ -282,11 +258,16 @@ async def prepare_materialized_team_execution(
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)
-    history, summary = _replayed_team_history(
-        scope_context,
-        prepared_history,
-        config=config,
-        configured_team_name=configured_team_name,
+    # The stored team history this request replays under the resolved plan, and the scope summary.
+    history, summary = (
+        replayed_history(
+            scope_context.session,
+            scope_context.scope,
+            team_history_settings(config, configured_team_name),
+            prepared_history.replay_plan,
+        )
+        if scope_context is not None
+        else ([], None)
     )
     run_extra_content = build_prepared_history_metadata_content(prepared_history)
     run_metadata = build_matrix_run_metadata(
@@ -313,17 +294,6 @@ async def prepare_materialized_team_execution(
 # ---------------------------------------------------------------------------
 # Running the leader and storing the turn
 # ---------------------------------------------------------------------------
-
-
-def _team_storage(run: TurnRunState) -> TeamStorage | None:
-    """Return where one attempt's team run is stored; the turn's scope context keeps the session a run first gave it.
-
-    A team without a bound scope stores nothing, as Agno's team ran without a database then.
-    """
-    if run.scope_context is None:
-        return None
-    run.scope_context = run.scope_context.with_session()
-    return scope_storage(run.scope_context)
 
 
 @dataclass(frozen=True)
@@ -629,7 +599,11 @@ class _TeamTurn:
         logger.info("executing_team_response", agent_count=len(members.builds), mode=self.mode.value)
         run_input = prepared.run_input(self.media)
         logger.info("team_prompt_preview", agents=members.display_names, prompt_preview=prepared.prompt_text[:500])
-        storage = _team_storage(run)
+        # The turn's scope context keeps the session a run first gave it; a team without a bound scope stores nothing.
+        storage: TeamStorage | None = None
+        if run.scope_context is not None:
+            run.scope_context = run.scope_context.with_session()
+            storage = scope_storage(run.scope_context)
         leader = _leader_run(
             built,
             prepared,
