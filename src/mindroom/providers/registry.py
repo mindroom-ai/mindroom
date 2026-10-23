@@ -36,12 +36,24 @@ _CLAUDE_PROVIDERS = frozenset(get_args(ClaudeRouteKind.__value__))
 _GEMINI_PROVIDERS = frozenset({"google", "gemini"})
 
 
+def _configured_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelConfig:
+    """Return the model configured as ``model_name``, with the key the dashboard saved for it applied."""
+    if model_name not in config.models:
+        available = ", ".join(sorted(config.models))
+        msg = f"Unknown model: {model_name}. Available models: {available}"
+        raise ValueError(msg)
+    model_config = config.models[model_name]
+    if dashboard_key := dashboard_api_key(model_name, runtime_paths):
+        return model_config.model_copy(update={"api_key": dashboard_key})
+    return model_config
+
+
 def _build_adapter(
+    config: Config,
     model_config: ModelConfig,
     runtime_paths: RuntimePaths,
     *,
     execution_identity: ToolExecutionIdentity | None,
-    codex_default_instructions: str,
 ) -> ModelProvider:
     """Return the bare adapter of the family that serves ``model_config.provider``."""
     provider = canonical_provider(model_config.provider)
@@ -49,7 +61,7 @@ def _build_adapter(
         runtime = ProviderRuntime(
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
-            codex_default_instructions=codex_default_instructions,
+            codex_default_instructions=config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"),
         )
         return build_openai_provider(model_config, runtime)
     if provider in _CLAUDE_PROVIDERS:
@@ -81,19 +93,8 @@ def build_model_provider(
     Raises ``ValueError`` for an unknown model name, an unsupported provider, or ``extra_kwargs`` its route
     does not accept.
     """
-    if model_name not in config.models:
-        available = ", ".join(sorted(config.models))
-        msg = f"Unknown model: {model_name}. Available models: {available}"
-        raise ValueError(msg)
-    model_config = config.models[model_name]
-    if dashboard_key := dashboard_api_key(model_name, runtime_paths):
-        model_config = model_config.model_copy(update={"api_key": dashboard_key})
-    adapter = _build_adapter(
-        model_config,
-        runtime_paths,
-        execution_identity=execution_identity,
-        codex_default_instructions=config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"),
-    )
+    model_config = _configured_model(config, runtime_paths, model_name)
+    adapter = _build_adapter(config, model_config, runtime_paths, execution_identity=execution_identity)
     logger.info(
         "Using AI model",
         model=model_name,
@@ -117,10 +118,5 @@ def build_model_provider(
 
 def model_capabilities(config: Config, runtime_paths: RuntimePaths, model_name: str) -> Capabilities:
     """Return what the route of the model configured as ``model_name`` supports; building its adapter sends nothing."""
-    adapter = _build_adapter(
-        config.models[model_name],
-        runtime_paths,
-        execution_identity=None,
-        codex_default_instructions=config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"),
-    )
-    return adapter.capabilities
+    model_config = _configured_model(config, runtime_paths, model_name)
+    return _build_adapter(config, model_config, runtime_paths, execution_identity=None).capabilities
