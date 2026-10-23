@@ -8,7 +8,7 @@ import weakref
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
@@ -55,7 +55,6 @@ if TYPE_CHECKING:
     from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
-_UNSET = object()
 _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
 CONFIG_GENERATION_HEADER = "x-mindroom-config-generation"
 CONFIG_USES_INCLUDES_HEADER = "x-mindroom-config-uses-includes"
@@ -508,50 +507,13 @@ def _request_or_current_snapshot(request: Request) -> ApiSnapshot:
     return require_api_state(request.app).snapshot
 
 
-def _published_snapshot(
-    snapshot: ApiSnapshot,
-    *,
-    increment_generation: bool = True,
-    runtime_paths: constants.RuntimePaths | None = None,
-    config_data: dict[str, Any] | None = None,
-    runtime_config: Config | None | object = _UNSET,
-    config_load_result: ConfigLoadResult | None | object = _UNSET,
-    source_fingerprint: str | None | object = _UNSET,
-    source_files: frozenset[Path] | None | object = _UNSET,
-    uses_includes: bool | None | object = _UNSET,
-    auth_state: object = _UNSET,
-) -> ApiSnapshot:
-    """Return one new published snapshot, always with a fresh commit revision."""
-    updated_runtime_paths = snapshot.runtime_paths if runtime_paths is None else runtime_paths
-    updated_config_data = snapshot.config_data if config_data is None else config_data
-    updated_runtime_config = (
-        snapshot.runtime_config if runtime_config is _UNSET else cast("Config | None", runtime_config)
-    )
-    updated_load_result = (
-        snapshot.config_load_result
-        if config_load_result is _UNSET
-        else cast("ConfigLoadResult | None", config_load_result)
-    )
-    updated_source_fingerprint = (
-        snapshot.source_fingerprint if source_fingerprint is _UNSET else cast("str | None", source_fingerprint)
-    )
-    updated_source_files = (
-        snapshot.source_files if source_files is _UNSET else cast("frozenset[Path] | None", source_files)
-    )
-    updated_uses_includes = snapshot.uses_includes if uses_includes is _UNSET else cast("bool | None", uses_includes)
-    updated_auth_state = snapshot.auth_state if auth_state is _UNSET else auth_state
+def _published_snapshot(snapshot: ApiSnapshot, *, increment_generation: bool = True, **changes: object) -> ApiSnapshot:
+    """Return ``snapshot`` with ``changes`` as one new publication, always with a fresh commit revision."""
     return replace(
         snapshot,
         generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
         revision=snapshot.revision + 1,
-        runtime_paths=updated_runtime_paths,
-        config_data=updated_config_data,
-        runtime_config=updated_runtime_config,
-        config_load_result=updated_load_result,
-        source_fingerprint=updated_source_fingerprint,
-        source_files=updated_source_files,
-        uses_includes=updated_uses_includes,
-        auth_state=updated_auth_state,
+        **changes,
     )
 
 
