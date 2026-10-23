@@ -452,7 +452,7 @@ async def test_llm_request_logging_redacts_sensitive_values_before_jsonl_write(t
 
 
 def test_concurrent_large_records_each_land_on_their_own_line(tmp_path: Path) -> None:
-    """Records larger than the file buffer, written by concurrent model calls, never share a line."""
+    """Records larger than one buffered write, written by concurrent model calls, never share a line."""
     path = tmp_path / "llm-requests.jsonl"
     writers = 8
     records_per_writer = 10
