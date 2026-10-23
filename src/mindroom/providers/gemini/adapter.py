@@ -198,17 +198,13 @@ class GeminiProvider:
             config["response_mime_type"] = "application/json"
             config["response_schema"] = schema
         thinking = {
-            key: value
-            for key, value in (
-                ("thinking_budget", settings.thinking_budget),
-                ("include_thoughts", settings.include_thoughts),
-                ("thinking_level", settings.thinking_level),
-            )
-            if value is not None
+            "thinking_budget": settings.thinking_budget,
+            "include_thoughts": settings.include_thoughts,
+            "thinking_level": settings.thinking_level,
         }
         # ``overrides.disable_thinking`` leaves the authored thinking config alone: Gemini 2.5 and 3 think by
         # default, so dropping a ``thinking_budget: 0`` would turn thinking on, and the Pro models cannot turn it off.
-        if thinking:
+        if thinking := {key: value for key, value in thinking.items() if value is not None}:
             config["thinking_config"] = thinking
         # Agno sent built-in tools instead of the function declarations, so a grounded model calls no function.
         if settings.search:
