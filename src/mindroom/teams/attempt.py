@@ -1,10 +1,12 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
 ``TeamReplyText`` is the reply's text without tool markers as the run's events build it, which a streamed turn records,
-also when it is interrupted, and which tells the attempt the runs that streamed text. When the team run ends, the
-attempt adds what a run hands over and its events did not show to the document and to that text alike
-(``TeamAttempt.show_unshown_handover``). The attempt also collects the records the run hands over, which a blocking
-turn renders its reply from and records however it ends, and renders the run's metadata from them.
+also when it is interrupted, and which tells the attempt the runs that streamed text. When the team run ends, a resume
+adds what each of its runs hands over and its events did not show, and a live streamed turn adds each failed member
+run's reason (``TeamAttempt.show_failure_reasons``); both go through ``TeamAttempt.show_unshown_handover``, which adds
+to the document and to that text alike. A blocking attempt adds nothing: the attempt collects the records the run hands
+over, which a blocking turn renders its reply from and records however it ends, and renders the run's metadata from
+them.
 """
 
 from __future__ import annotations
@@ -61,8 +63,9 @@ class TeamReplyText:
     ``presentation`` owns the member identities: the configured slot order, the display names, and the slot an event's
     member resolves to. A member's deltas join directly, so a hidden tool call between them leaves no gap, as the
     run's own content joins them. ``streamed_member_runs`` names the member runs whose deltas gave text, by run id,
-    since a member's slot holds the text of each of its runs. What a run hands over and its events did not show
-    joins the text when the team run ends (``TeamAttempt.show_unshown_handover``).
+    since a member's slot holds the text of each of its runs. When the team run ends, a resume adds what each of its
+    runs hands over and its events did not show, and a live streamed turn adds each failed member run's reason
+    (``TeamAttempt.show_failure_reasons``); both go through ``TeamAttempt.show_unshown_handover``.
     """
 
     presentation: TeamStreamPresentation
