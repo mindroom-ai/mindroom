@@ -872,6 +872,51 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     db.close()
 
 
+def test_a_request_replaying_from_a_checkpoint_that_skips_runs_records_no_basis(tmp_path: Path) -> None:
+    """A run that checkpointed before waiting for approval sorts after the turns it waited for, which replay then skips."""
+    config, _ = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(threshold_tokens=120000),
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
+    )
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    resolved = resolve_agent_preparation_inputs(
+        agent=_agent(model=model),
+        agent_name="test_agent",
+        config=config,
+        static_prompt_tokens=100,
+    )
+
+    def configured_basis(runs: list[RunOutput]) -> str:
+        configure_native_history(
+            model,
+            plan=resolved.execution_plan,
+            history_settings=resolved.history_settings,
+            session=None,
+            allowed=True,
+            runs=runs,
+        )
+        assert model.native_compaction is not None
+        return model.native_compaction.basis
+
+    first, waited = _completed_run("first"), _completed_run("waited")
+    configured_basis([])
+    settings = model.native_compaction
+    assert settings is not None
+
+    def resumed(basis: str) -> RunOutput:
+        response = ModelResponse(content="Done")
+        items = [{"type": "compaction", "encrypted_content": "checkpoint"}]
+        record_native_checkpoint(response, items, replace(settings, basis=basis))
+        answer = Message(role="assistant", content="Done", provider_data=response.provider_data)
+        return _completed_run("resumed", messages=[Message(role="user", content="Go"), answer])
+
+    covering = resumed(replay_basis(None, [first, waited]))
+    assert configured_basis([first, waited, covering]) == replay_basis(None, [first, waited, covering])
+    skipping = resumed(replay_basis(None, [first]))
+    assert configured_basis([first, waited, skipping]) == ""
+
+
 @pytest.mark.asyncio
 async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) -> None:
     """A summary left in the session row cannot name the route checkpoints are recorded under."""

@@ -207,6 +207,20 @@ def replay_basis(summary: str | None, runs: Sequence[RunOutput | TeamRunOutput])
     return hashlib.sha256(json.dumps([summary, [run.run_id for run in runs]]).encode()).hexdigest()
 
 
+def request_replay_basis(summary: str | None, runs: Sequence[RunOutput | TeamRunOutput], route: str) -> str:
+    """Return the basis a native request on ``route`` records; empty when its replay leaves out some of ``runs``.
+
+    The request replays from the latest checkpoint on its route, which covers only what its own request replayed:
+    a run that checkpointed before waiting for approval sorts after the turns it waited for.
+    """
+    for index in range(len(runs) - 1, -1, -1):
+        for message in reversed(runs[index].messages or []):
+            if checkpoint_items(message, route):
+                recorded = (message.provider_data or {})[_NATIVE_CHECKPOINT_KEY].get("basis")
+                return replay_basis(summary, runs) if recorded == replay_basis(summary, runs[:index]) else ""
+    return replay_basis(summary, runs)
+
+
 def checkpoint_summary(message: Message, basis: str) -> str | None:
     """Return the readable text of the message's checkpoint, whatever its route, if its request replayed ``basis``.
 

@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.history.replay import compaction_summary_message, current_summary_text
-from mindroom.native_compaction import NativeCompactionModel, recorded_native_settings, replay_basis
+from mindroom.native_compaction import NativeCompactionModel, recorded_native_settings, request_replay_basis
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -55,7 +55,8 @@ def configure_native_history(
     )
     if model.native_compaction is not None:
         summary = current_summary_text(session) if session is not None else None
-        model.native_compaction = replace(model.native_compaction, basis=replay_basis(summary, runs))
+        basis = request_replay_basis(summary, runs, model.native_compaction.route)
+        model.native_compaction = replace(model.native_compaction, basis=basis)
     return model
 
 
