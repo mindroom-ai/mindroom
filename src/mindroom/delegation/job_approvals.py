@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 async def request_child_approvals(
     child: DelegationChild,
     response: RunRecord,
-    toolkit_owners: Mapping[tuple[str, str], str | None],
+    toolkit_owners: Mapping[tuple[str, str], str],
     *,
     owner: ToolExecutionIdentity,
     config: Config,

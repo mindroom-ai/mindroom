@@ -151,7 +151,7 @@ class _ChildOutcome:
     """Retained outcome and executable ownership observed by its actual envelope."""
 
     response: RunRecord
-    toolkit_owners: Mapping[tuple[str, str], str | None]
+    toolkit_owners: Mapping[tuple[str, str], str]
 
 
 @dataclass(frozen=True)

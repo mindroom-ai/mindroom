@@ -196,7 +196,7 @@ async def plan_approval_calls(
     config: Config,
     runtime_paths: RuntimePaths,
     requester_id: str,
-    toolkit_owners: Mapping[tuple[str, str], str | None],
+    toolkit_owners: Mapping[tuple[str, str], str],
     room_id: str | None,
     thread_id: str | None,
 ) -> _ApprovalPausePlan:

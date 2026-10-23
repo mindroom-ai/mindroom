@@ -462,7 +462,7 @@ class PausedAttempt:
     session_id: str
     run_id: str
     tools: tuple[ToolExecution, ...]
-    toolkit_owners: Mapping[tuple[str, str], str | None]
+    toolkit_owners: Mapping[tuple[str, str], str]
     requirements: tuple[RunRequirement, ...] = ()
     runtime_model_name: str | None = None
     team_member_model_names: tuple[tuple[str, str], ...] = ()
@@ -534,7 +534,7 @@ def paused_attempt_from_response(
     *,
     fallback_session_id: str | None,
     fallback_run_id: str | None,
-    toolkit_owners: Mapping[tuple[str, str], str | None],
+    toolkit_owners: Mapping[tuple[str, str], str],
 ) -> PausedAttempt | None:
     """Extract confirmation requirements from one paused run record."""
     if record.status is not RunStatus.paused:
@@ -542,10 +542,12 @@ def paused_attempt_from_response(
     delegation = DelegationState.from_metadata(record.metadata)
     if delegation.pending_tools:
         if delegation.pending_child_id is not None:
+            # A source that recorded no toolkit leaves its call unowned, as a missing key does.
             toolkit_owners = {
                 (source.child.child_agent_name, str(tool["tool_name"])): source.toolkit_name
                 for tool in delegation.pending_tools
                 if (source := delegation.pending_tool_sources.get(str(tool["tool_call_id"]))) is not None
+                and source.toolkit_name is not None
             }
         paused = _paused_attempt_from_pause(
             toolkit_owners=toolkit_owners,
@@ -576,7 +578,7 @@ def _paused_attempt_from_pause(
     *,
     tools: Sequence[ToolExecution],
     requirements: Sequence[RunRequirement],
-    toolkit_owners: Mapping[tuple[str, str], str | None],
+    toolkit_owners: Mapping[tuple[str, str], str],
     session_id: str | None,
     run_id: str | None,
 ) -> PausedAttempt | None:

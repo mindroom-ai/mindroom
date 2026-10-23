@@ -19,6 +19,7 @@ from mindroom.constants import (
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
 )
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history import storage as history_storage
 from mindroom.history.session_context import ScopeSessionContext
@@ -299,6 +300,52 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     assert paused.tools == (tool,)
     assert paused.requirements == (requirement,)
     assert paused.requirements[0].member_agent_name == "researcher"
+
+
+@pytest.mark.parametrize(
+    ("recorded", "owners"),
+    [("files", {("worker", "write"): "files"}), (None, {})],
+)
+def test_a_paused_child_s_toolkit_owners_are_the_toolkits_its_sources_recorded(
+    recorded: str | None,
+    owners: dict[tuple[str, str], str],
+) -> None:
+    """A source that recorded no toolkit leaves its call unowned, so the owner map never holds a missing owner."""
+    tool = ToolExecution(tool_call_id="child-card", tool_name="write", tool_args={}, requires_confirmation=True)
+    child = DelegationChild(
+        delegation_id="delegation",
+        parent_tool_call_id="parent-call",
+        caller_agent_name="leader",
+        child_agent_name="worker",
+        task="write it",
+        session_id="child-session",
+        run_id="child-run",
+        model_name="default",
+        depth=1,
+        execution_identity={},
+    )
+    state = DelegationState(
+        pending_tools=[tool.to_dict()],
+        pending_tool_sources={"child-card": DelegationPendingTool(child, "child-call", toolkit_name=recorded)},
+        pending_requirements=[RunRequirement(tool).to_dict()],
+        pending_child_id="delegation",
+    )
+    response = RunRecord(
+        run_id="parent-run",
+        session_id="parent-session",
+        status=RunStatus.paused,
+        metadata={DELEGATION_STATE_KEY: state.to_dict()},
+    )
+
+    paused = response_turn_module.paused_attempt_from_response(
+        response,
+        fallback_session_id=None,
+        fallback_run_id=None,
+        toolkit_owners={},
+    )
+
+    assert paused is not None
+    assert paused.toolkit_owners == owners
 
 
 @pytest.mark.parametrize(

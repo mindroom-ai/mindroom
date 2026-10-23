@@ -57,7 +57,7 @@ async def _catalog(
     tmp_path: Path,
     toolkits: Sequence[AdaptedToolkit],
     *,
-    owners: Mapping[str, str | None] | None = None,
+    owners: Mapping[str, str] | None = None,
     include: Callable[[Any], bool] | None = None,
     middleware: Sequence[ToolMiddleware] = (),
     tool_call_limit: int | None = None,
