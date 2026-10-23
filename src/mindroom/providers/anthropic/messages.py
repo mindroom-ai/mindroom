@@ -83,7 +83,13 @@ from mindroom.providers.anthropic.wire import (
     tool_call_from_block,
 )
 from mindroom.providers.assistant_turn import stamp_finished_turn, whole_turn_deltas
-from mindroom.providers.errors import classify_provider_error, google_auth_error, transport_error
+from mindroom.providers.claude_wire_blocks import (
+    SERVER_TOOL_USE_BLOCK_TYPE,
+    TOOL_SEARCH_RESULT_BLOCK_TYPE,
+    TOOL_SEARCH_TOOL_NAME,
+    as_dict,
+)
+from mindroom.providers.errors import classify_provider_error, google_auth_error, stream_event_error, transport_error
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -487,12 +493,15 @@ class ClaudeProvider:
     def _raise_provider_error(self, error: Exception, *, server_tool_started: bool) -> NoReturn:
         """Translate an SDK, transport, or Google token failure into the shared provider errors; others propagate.
 
-        Once a server tool (web search, code execution, tool search) started, a retry would run it again, so the
-        failure is final and carries the code that keeps the media fallback from resending the request.
+        An ``error`` event inside the stream reaches here with the stream's committed 200 status, so its error type
+        classifies it. Once a server tool such as web search or code execution started, a retry would run it again,
+        so the failure is final and carries the code that keeps the media fallback from resending the request.
         """
         provider = self.identity.provider_name
         if isinstance(error, anthropic.APIConnectionError | httpx.TransportError):
             mapped: ProviderError = transport_error(error, provider=provider)
+        elif isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:
+            mapped = stream_event_error(error.message, provider=provider, error_type=_event_error_type(error.body))
         elif isinstance(error, anthropic.APIStatusError):
             mapped = classify_provider_error(error.message, provider=provider, status_code=error.status_code)
         elif isinstance(error, anthropic.APIError):
@@ -515,13 +524,30 @@ class ClaudeProvider:
 
 # Raw API events the SDK forwards; its convenience events (text, thinking, input_json, ...) repeat them.
 _PROVIDER_EVENT_TYPES = frozenset({"content_block_start", "content_block_delta", "content_block_stop", "message_delta"})
-# Blocks the model produces itself; any other block type is a server tool at work.
-_MODEL_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
+# The HTTP status the SDK reports for an ``error`` event that arrives after the stream started.
+_COMMITTED_STREAM_STATUS = 200
+# Blocks a retry may produce again: the model's own, a tool search, which only looks up deferred tool definitions, and
+# a compaction, which only summarizes the request's history. Any other block is a server tool at work.
+_REPEATABLE_BLOCK_TYPES = frozenset(
+    {"text", "thinking", "redacted_thinking", "tool_use", TOOL_SEARCH_RESULT_BLOCK_TYPE, "compaction"},
+)
 
 
 def _starts_server_tool(event: Any) -> bool:  # noqa: ANN401 - SDK stream event
-    """Return whether a ``content_block_start`` opens a block a server-side tool produces."""
-    return event.type == "content_block_start" and event.content_block.type not in _MODEL_BLOCK_TYPES
+    """Return whether a ``content_block_start`` opens a block of a server-side tool whose rerun would repeat its work."""
+    if event.type != "content_block_start":
+        return False
+    block = event.content_block
+    if block.type == SERVER_TOOL_USE_BLOCK_TYPE:
+        return block.name != TOOL_SEARCH_TOOL_NAME
+    return block.type not in _REPEATABLE_BLOCK_TYPES
+
+
+def _event_error_type(body: object) -> str | None:
+    """Return the error type of a stream's ``error`` event body, ``{"type": "error", "error": {"type": ...}}``."""
+    error = as_dict((as_dict(body) or {}).get("error")) or {}
+    error_type = error.get("type")
+    return error_type if isinstance(error_type, str) else None
 
 
 def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady | None:

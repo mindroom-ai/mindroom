@@ -11,15 +11,8 @@ from typing import Any, cast
 
 import httpx
 
-from mindroom.llm.errors import ContextWindowExceeded, ProviderError, ProviderUnavailable, RateLimited
-from mindroom.providers.errors import (
-    OVERLOADED_ERROR_TYPE,
-    RATE_LIMIT_STATUSES,
-    TRANSIENT_STATUSES,
-    classify_provider_error,
-    is_context_window_error,
-    transport_error,
-)
+from mindroom.llm.errors import ProviderError
+from mindroom.providers.errors import classify_provider_error, stream_event_error, transport_error
 
 __all__ = [
     "missing_api_key_error",
@@ -28,8 +21,6 @@ __all__ = [
     "sdk_failures",
 ]
 
-# Error types OpenAI-compatible servers put in mid-stream SSE error events for transient failures.
-_TRANSIENT_ERROR_TYPES = frozenset({"overloaded", OVERLOADED_ERROR_TYPE, "server_error", "internal_server_error"})
 _RESPONSES_EVENT_STATUSES = {"server_error": 500, "rate_limit_exceeded": 429, "vector_store_timeout": 504}
 
 
@@ -53,26 +44,6 @@ def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
     )
 
 
-def _stream_event_error(message: str, *, provider: str, code: str | None, error_type: str | None) -> ProviderError:
-    """Classify an error event sent inside an already committed 200 stream, reading a numeric ``code`` as a status."""
-    status = int(code) if code is not None and code.isdecimal() else None
-    if status in RATE_LIMIT_STATUSES:
-        return RateLimited(message, provider=provider, code=code)
-    transient = (
-        status in TRANSIENT_STATUSES
-        or error_type in _TRANSIENT_ERROR_TYPES
-        or (
-            error_type == "api_error"
-            and any(marker in message.casefold() for marker in ("overloaded", "internal server error"))
-        )
-    )
-    if transient:
-        return ProviderUnavailable(message, provider=provider, code=code)
-    if is_context_window_error(message, code=code):
-        return ContextWindowExceeded(message, provider=provider, code=code)
-    return ProviderError(message, provider=provider, code=code)
-
-
 def provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the owned error for one SDK or transport failure; ``provider`` is the metrics provider name."""
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
@@ -86,7 +57,7 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
         return transport_error(error, provider=provider)
     if isinstance(error, openai.APIError):
         message, code, error_type = _error_fields(error.body)
-        return _stream_event_error(message or error.message, provider=provider, code=code, error_type=error_type)
+        return stream_event_error(message or error.message, provider=provider, code=code, error_type=error_type)
     return ProviderError(str(error) or type(error).__name__, provider=provider)
 
 

@@ -24,8 +24,8 @@ from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
     ("status", "message", "code", "expected", "retryable"),
     [
         (429, "slow down", None, RateLimited, True),
-        (529, "Overloaded", None, RateLimited, True),
-        (503, "overloaded_error: the model is busy", None, RateLimited, True),
+        (529, "Overloaded", None, ProviderUnavailable, True),
+        (503, "overloaded_error: the model is busy", None, ProviderUnavailable, True),
         (400, "The input token count exceeds the maximum number of tokens allowed", None, ContextWindowExceeded, False),
         (400, "too long", "context_length_exceeded", ContextWindowExceeded, False),
         (None, "prompt is too long", None, ContextWindowExceeded, False),

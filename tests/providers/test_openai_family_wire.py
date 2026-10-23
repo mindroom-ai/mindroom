@@ -528,7 +528,7 @@ async def test_http_errors_map_to_typed_provider_errors(
         ({"message": "Timed out", "code": "408"}, True),
         ({"message": "Bad input", "code": "400"}, False),
     ],
-    ids=["overloaded-type", "rate-limit-status", "transient-status", "client-status"],
+    ids=["overloaded-type", "overloaded-status", "transient-status", "client-status"],
 )
 async def test_mid_stream_error_events_are_retryable_when_transient(
     tmp_path: Path,
@@ -556,8 +556,8 @@ async def test_mid_stream_error_events_are_retryable_when_transient(
         ),
         (
             {"message": "Slow down", "code": 529},
-            RateLimited,
-            "⏱️ Rate limited. Please wait a moment and try again.",
+            ProviderUnavailable,
+            "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly.",
         ),
         (
             {"message": "Service Unavailable", "code": 503},
@@ -567,13 +567,13 @@ async def test_mid_stream_error_events_are_retryable_when_transient(
     ],
     ids=["429", "529", "503"],
 )
-async def test_a_rate_limit_error_event_inside_a_stream_reads_as_a_rate_limit(
+async def test_a_stream_error_event_reads_as_the_status_its_code_names(
     tmp_path: Path,
     error: dict[str, Any],
     error_type: type[ProviderError],
     user_message: str,
 ) -> None:
-    """A stream's error event with a rate-limit code reads as a rate limit, as that HTTP status does."""
+    """A stream's error event reads as the HTTP status its code names does: 429 rate-limited, 529 and 503 unavailable."""
     reply = _chat_reply({"data": {"error": error}})
     built = _Built(tmp_path, {**_OPENAI_CHAT, "extra_kwargs": {"max_retries": 0}}, reply)
 

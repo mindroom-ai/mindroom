@@ -2710,6 +2710,7 @@ depends_on = [
     "mindroom.providers.anthropic.settings",
     "mindroom.providers.anthropic.wire",
     "mindroom.providers.assistant_turn",
+    "mindroom.providers.claude_wire_blocks",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",

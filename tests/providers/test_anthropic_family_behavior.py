@@ -32,10 +32,12 @@ from mindroom.llm.provider import (
     ToolSpec,
     TurnCompleted,
     UsageReported,
+    complete,
 )
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
 from mindroom.providers.anthropic.wire import supports_prefill
+from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.system_prompt import render_session_context
 from tests.providers.anthropic_family_support import (
     CLAUDE_USAGE,
@@ -49,7 +51,7 @@ from tests.providers.anthropic_family_support import (
     route_provider,
     sse_reply,
 )
-from tests.providers.golden_support import Wire, sse_response
+from tests.providers.golden_support import Wire, pipeline_provider, sse_response
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -297,7 +299,7 @@ async def test_refusal_completes_with_the_refusal_stop_reason(tmp_path: Path) ->
     ("status", "body", "expected", "retryable"),
     [
         (429, {"type": "rate_limit_error", "message": "Rate limited"}, RateLimited, True),
-        (529, {"type": "overloaded_error", "message": "Overloaded"}, RateLimited, True),
+        (529, {"type": "overloaded_error", "message": "Overloaded"}, ProviderUnavailable, True),
         (503, {"type": "api_error", "message": "Unavailable"}, ProviderUnavailable, True),
         (
             400,
@@ -327,6 +329,55 @@ async def test_sdk_status_errors_map_to_the_shared_provider_errors(
     assert raised.value.provider == "Anthropic"
     assert body["message"] in str(raised.value)
     assert len(wire.requests) == 1, "sdk_max_retries=0 must stop the SDK's own retries"
+
+
+def _stream_failing_with(error_type: str) -> httpx.Response:
+    """A stream that starts the message, then sends an ``error`` event of ``error_type``."""
+    start = claude_message([], usage={**CLAUDE_USAGE, "output_tokens": 1}) | {"stop_reason": None}
+    error = {"type": "error", "error": {"type": error_type, "message": "Internal server error"}}
+    return sse_response([{"type": "message_start", "message": start}, error], named=True)
+
+
+@pytest.mark.asyncio
+async def test_a_mid_stream_api_error_before_output_reissues_the_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``api_error`` event after the 200 status, before any output, is retried like the same HTTP failure."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    wire = Wire(_stream_failing_with("api_error"), sse_reply([{"type": "text", "text": "hello world"}]))
+    provider = pipeline_provider(route_provider("anthropic", tmp_path, wire))
+
+    with isolated_provider_environment():
+        turn = await complete(provider, ModelRequest(messages=_user()))
+
+    assert (turn.content, len(wire.requests)) == ("hello world", 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "expected"),
+    [
+        ("overloaded_error", ProviderUnavailable),
+        ("api_error", ProviderUnavailable),
+        ("rate_limit_error", RateLimited),
+        ("invalid_request_error", ProviderError),
+    ],
+)
+async def test_a_mid_stream_error_event_is_classified_by_its_error_type(
+    tmp_path: Path,
+    error_type: str,
+    expected: type[ProviderError],
+) -> None:
+    """The SDK reports a stream's error event with the 200 status, so the event's error type decides the error."""
+    wire = Wire(_stream_failing_with(error_type))
+    provider = route_provider("anthropic", tmp_path, wire)
+
+    with pytest.raises(ProviderError) as raised:
+        await claude_turn(provider, ModelRequest(messages=_user()))
+
+    assert type(raised.value) is expected
+    assert (raised.value.status_code, raised.value.retryable) == (None, expected is not ProviderError)
 
 
 @pytest.mark.asyncio
