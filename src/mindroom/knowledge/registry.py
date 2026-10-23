@@ -376,17 +376,6 @@ def _build_published_index_reader(
     )
 
 
-def _build_existing_published_index_reader(
-    key: PublishedIndexKey,
-    state: PublishedIndexState,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> ChromaReadProxy | None:
-    reader = _build_published_index_reader(key, state, config=config, runtime_paths=runtime_paths)
-    return reader if reader.exists() else None
-
-
 def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
     """Return whether persisted metadata points at an existing Chroma collection."""
     if state.status != "complete" or state.collection is None:
@@ -484,7 +473,8 @@ def _load_queryable_index_from_state(
 ) -> ChromaReadProxy | None:
     if not _published_index_state_queryable(key, state):
         return None
-    return _build_existing_published_index_reader(key, state, config=config, runtime_paths=runtime_paths)
+    reader = _build_published_index_reader(key, state, config=config, runtime_paths=runtime_paths)
+    return reader if reader.exists() else None
 
 
 def get_published_index(
