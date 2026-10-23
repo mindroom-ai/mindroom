@@ -129,9 +129,9 @@ def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -
 
 def _write_line(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # One write per record, so a concurrent request's record never lands inside one larger than the file buffer.
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(redact_sensitive_data(payload)))
-        handle.write("\n")
+        handle.write(json.dumps(redact_sensitive_data(payload)) + "\n")
 
 
 def _log_usage(

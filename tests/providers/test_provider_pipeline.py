@@ -919,6 +919,30 @@ async def test_a_response_record_that_cannot_be_written_is_reported_and_the_answ
     ]
 
 
+def test_concurrent_large_records_each_land_on_their_own_line(tmp_path: Path) -> None:
+    """Records larger than the file buffer, written by concurrent model calls, never share a line."""
+    path = tmp_path / "llm-requests.jsonl"
+    writers = 8
+    records_per_writer = 25
+    start = threading.Barrier(writers)
+
+    def write(writer: int) -> None:
+        start.wait()
+        for index in range(records_per_writer):
+            request_log_stage._write_line(path, {"writer": writer, "index": index, "padding": "x" * 65536})
+
+    threads = [threading.Thread(target=write, args=(writer,)) for writer in range(writers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert sorted((record["writer"], record["index"]) for record in records) == [
+        (writer, index) for writer in range(writers) for index in range(records_per_writer)
+    ]
+
+
 @pytest.mark.asyncio
 async def test_usage_seen_before_a_stream_is_abandoned_is_still_recorded(tmp_path: Path) -> None:
     usage = MessageMetrics(input_tokens=3, cache_read_tokens=42)
