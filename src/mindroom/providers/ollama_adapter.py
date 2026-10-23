@@ -148,17 +148,17 @@ class OllamaProvider:
         yield TurnCompleted(message=message, stop_reason=_stop_reason(reply))
 
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
-        """Return the chat parameters of one request, in the order Agno's Ollama built them."""
+        """Return the chat parameters of one request, in the order Agno's Ollama built them.
+
+        Agno's Ollama model had no temperature field, so a request's temperature override, such as a thread
+        summary's, never replaced the sampling the model authors in ``options``.
+        """
         settings = self.settings
-        overrides = request.overrides
-        options = dict(settings.options or {})
-        if overrides.temperature is not None:
-            options["temperature"] = overrides.temperature
         kwargs: dict[str, Any] = {
             key: value
             for key, value in (
                 ("format", settings.format),
-                ("options", options or None),
+                ("options", settings.options or None),
                 ("keep_alive", settings.keep_alive),
             )
             if value is not None

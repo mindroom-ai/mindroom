@@ -1389,7 +1389,10 @@ def test_ollama_host_and_key_resolution(tmp_path: Path, monkeypatch: pytest.Monk
 
 @pytest.mark.asyncio
 async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> None:
-    """Options, keep_alive, format, and request_params pass through; overrides land in options."""
+    """Options, keep_alive, format, and request_params pass through; a temperature override changes no option.
+
+    Agno's Ollama model had no temperature field, so its options were always the authored ones.
+    """
     config = _config(
         OLLAMA,
         options={"num_ctx": 8192},
@@ -1406,7 +1409,7 @@ async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> 
     )
 
     body = request["body"]
-    assert body["options"] == {"num_ctx": 8192, "temperature": 0.1}
+    assert body["options"] == {"num_ctx": 8192}
     assert body["keep_alive"] == "5m"
     assert body["format"] == "json"
     assert body["think"] is False
