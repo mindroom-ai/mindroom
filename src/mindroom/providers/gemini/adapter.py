@@ -174,7 +174,9 @@ class GeminiProvider:
         """Return the generation config of one request, in the order Agno's Gemini built it."""
         settings = self.settings
         overrides = request.overrides
-        # Agno let the dedicated fields replace authored generation_config keys, even when unset.
+        # TODO(simplify): an authored ``generation_config`` key that has a dedicated field, such as temperature, is
+        # dropped when that field is unset, as Agno did. Let a dedicated field replace the key only when it is set.
+        # Operators and models would notice.
         config: dict[str, Any] = {
             **(settings.generation_config or {}),
             **(settings.generative_model_kwargs or {}),
