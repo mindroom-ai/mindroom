@@ -13,6 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.llm.runs import RunStatus
 from mindroom.prompts import BACKGROUND_JOBS_ENDED_NOTICE
+from mindroom.response_turn import TurnContinuationRunState
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.conversation import ConversationKey
@@ -492,7 +493,15 @@ async def test_only_a_standard_reply_opens_with_the_job_note(
         ):
             await ai._prepare_agent_run_context(
                 replace(make_turn_context("leader"), agent_mode=agent_mode),
-                prompt="hello",
+                TurnContinuationRunState.initial(
+                    prompt="hello",
+                    model_prompt=None,
+                    current_timestamp_ms=None,
+                    current_prompt_is_structured=False,
+                    current_event_id=None,
+                    run_id=None,
+                    continuation_model_prompt_tail="",
+                ),
                 session_id=conversation.context.session_id,
                 runtime_paths=conversation.context.runtime_paths,
                 config=conversation.context.config,
@@ -506,10 +515,6 @@ async def test_only_a_standard_reply_opens_with_the_job_note(
                 compaction_lifecycle=None,
                 delegation_depth=0,
                 refresh_scheduler=None,
-                model_prompt=None,
-                current_timestamp_ms=None,
-                current_event_id=None,
-                current_prompt_is_structured=False,
                 turn_recorder=None,
                 pipeline_timing=None,
             )
