@@ -326,8 +326,7 @@ def _team_member(
     A member runs under the agent hook policy: its own tool-call policy, output-limit policy, portable tool search,
     mid-turn compaction, and the approval receipt hook; its tools run under its own identity. It replays no history,
     so its compaction stays within the run, and the leader owns the queued-message notices of the turn.
-    ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against. The
-    compaction hook holds the state of the run it serves, so each run or resume builds its own hooks.
+    ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against.
     """
     # The binding joins the policy a managed job runs again, so a member's call that becomes a job runs as the member.
     as_member = replace(build, tool_policy=(*build.tool_policy, _as_member(build.spec.id, model_name)))
@@ -342,13 +341,13 @@ def _team_member(
         prompt_id=None,
     )
 
-    def hooks() -> LoopHooks:
+    def new_hooks() -> LoopHooks:
         return agent_loop_hooks(as_member, turn, agent_name=build.spec.id, queued_notices=False)
 
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
         role=build.prompt.role or "",
-        hooks=hooks,
+        new_hooks=new_hooks,
         request_template=build.request_template,
     )
 

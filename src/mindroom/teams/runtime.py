@@ -444,21 +444,21 @@ class _MemberRuns:
             member.spec,
             [Message(role="user", content=task)],
             ctx=ctx,
-            hooks=member.hooks(),
+            hooks=member.hooks(ctx.run_id),
             persist=self._capture(ended),
             request_template=self._request_template(member),
         )
         return await self._finish(member, ctx.run_id, stream, ended)
 
     async def resume(self, member: TeamMember, paused: RunRecord, plan: ResumePlan) -> RunRecord:
-        """Resume ``member``'s paused run from its stored messages, which hold no history copies."""
+        """Resume ``member``'s paused run, under that run's hooks, from its stored messages, which hold no history."""
         ended: list[RunRecord] = []
         stream = resume_planned(
             member.spec,
             plan,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
             ctx=self._member_context(paused.run_id),
-            hooks=member.hooks(),
+            hooks=member.hooks(paused.run_id),
             persist=self._capture(ended),
             request_template=self._request_template(member),
         )

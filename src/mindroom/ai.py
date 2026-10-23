@@ -16,7 +16,7 @@ from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_executions
 from mindroom.agent_cli.minimal_agent import minimal_attempt, minimal_turn, presented_build
 from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
-from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.run import own_answers, run_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
@@ -600,19 +600,14 @@ def _attach_blocking_pause_presentation(
 
 
 def _own_assistant_text(record: AnyRunRecord | None) -> str:
-    """Return the last text this run's own model requests produced, never a replayed earlier answer.
+    """Return the last text this run's own model requests produced (``own_answers``), never an earlier reply.
 
     A failed run whose model said nothing holds the error's text as its ``content``, so the partial text an
-    interrupted-turn record keeps comes from the run's own assistant messages only.
+    interrupted-turn record keeps comes from the run's own answers only.
     """
     if record is None:
         return ""
-    parts = [
-        message.get_content_string().strip()
-        for message in record.messages
-        if message.role == "assistant" and not message.from_history and message.content
-    ]
-    return next((part for part in reversed(parts) if part), "")
+    return next((part for answer in reversed(own_answers(record)) if (part := answer.strip())), "")
 
 
 def _reported(metrics: RunMetrics | None, key: str) -> int | None:

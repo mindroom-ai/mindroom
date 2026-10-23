@@ -321,21 +321,20 @@ def _append_unstreamed_run_content(
     *,
     streamed: set[str],
 ) -> None:
-    """Add each resumed run's content to its slot when the resume streamed no text there, as Agno's resume did.
+    """Add what each resumed run hands over (``handover_content``) to its slot when the resume streamed no text there.
 
-    The leader's content goes to the consensus and each member run's to its member's slot: a run that pauses again
-    adds its paused notice, and a member run started in the resume that fails before it writes anything adds its
-    error. A run without content adds nothing, where Agno's resume added its messages' text, which repeated what the
-    run wrote before the pause. A member resumed after approval keeps its paused content until its model writes new
-    text, so when its model call fails before that, its slot repeats the text it wrote before the pause, or shows its
-    paused notice, and its error is not shown, as on Agno's resume.
+    The leader's goes to the consensus and each member run's to its member's slot, as Agno's resume added their
+    content: a run that pauses again adds its paused notice, and a member run that fails adds the reason its run
+    recorded, credentials redacted, also when its record still holds the content it had before the pause. A run
+    without content adds nothing, where Agno's resume added its messages' text, which repeated what the run wrote
+    before the pause.
     """
     if "team" not in streamed:
-        presentation.append_consensus(record.content)
+        presentation.append_consensus(record.handover_content)
     for member in members:
         member_id = presentation.resolve_member_id(member.agent_id, member.agent_name)
         if f"agent:{member_id}" not in streamed:
-            presentation.append_member(member_id, member.content)
+            presentation.append_member(member_id, member.handover_content)
 
 
 def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:

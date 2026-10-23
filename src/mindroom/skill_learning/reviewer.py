@@ -21,6 +21,7 @@ from pydantic import validate_call
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, EndRun, LoopHooks, SendRequest, run_model_loop
 from mindroom.agent_loop.output_limit import output_limit_answers
+from mindroom.agent_loop.run import own_model_messages
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
@@ -403,7 +404,7 @@ async def review_conversation(
     logger.info(
         "Skill review model run finished",
         forked=review.forked,
-        model_requests=sum(1 for message in record.messages if message.role == "assistant"),
+        model_requests=len(own_model_messages(record)),
         input_tokens=_context_tokens(config, review.model, review.model_name, metrics),
         cache_read_tokens=metrics.cache_read_tokens,
     )

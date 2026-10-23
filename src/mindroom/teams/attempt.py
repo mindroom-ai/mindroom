@@ -127,8 +127,9 @@ class TeamAttempt:
         """Return the text the turn records when this attempt is stopped or fails.
 
         A streamed attempt records the text its events built. A blocking attempt records its stored runs' document,
-        stripped, as Agno's blocking turn did, or nothing before the run stored a record. A leader that wrote nothing
-        contributes nothing, as Agno's stopped run then held only its cancellation notice, which it dropped.
+        stripped, as Agno's blocking turn did, or nothing before the run stored a record. A stopped leader that wrote
+        nothing contributes nothing, as Agno's stopped run then held only its cancellation notice, which it dropped;
+        a failed one contributes the reason its run recorded, credentials redacted.
         """
         if self.stream:
             return self.reply.canonical_text()

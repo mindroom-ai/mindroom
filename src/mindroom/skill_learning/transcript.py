@@ -13,6 +13,7 @@ import json
 from itertools import groupby
 from typing import TYPE_CHECKING
 
+from mindroom.agent_loop.run import own_model_messages
 from mindroom.history.conversation_text import Utterance, one_line, utterances
 from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.redaction import redact_sensitive_text
@@ -47,7 +48,7 @@ def conversation_messages(session: ConversationSession) -> list[list[Utterance]]
 
 
 def count_model_replies(run: RunRecord | None) -> tuple[int, bool]:
-    """Count a model-visible run's assistant messages, one per model request including tool-calling steps.
+    """Count a model-visible run's own model messages (``own_model_messages``), one per request, tool-calling steps too.
 
     Like Hermes resetting its counter when ``skill_manage`` runs, only replies after the last reply that called it
     count; the second value says whether one did.
@@ -55,9 +56,7 @@ def count_model_replies(run: RunRecord | None) -> tuple[int, bool]:
     replies, restarted = 0, False
     if run is None or not is_model_history_visible_run(run):
         return replies, restarted
-    for message in run.messages or []:
-        if message.role != "assistant" or message.from_history:
-            continue
+    for message in own_model_messages(run):
         if any((call.get("function") or {}).get("name") == "skill_manage" for call in message.tool_calls or []):
             replies, restarted = 0, True
         else:

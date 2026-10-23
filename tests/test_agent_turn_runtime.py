@@ -29,6 +29,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
     is_queued_notice_message,
@@ -73,6 +74,7 @@ from tests.conftest import (
     make_matrix_client_mock,
     make_relation_lookup,
     make_turn_context,
+    make_visible_message,
     message_origin,
     seed_session,
     test_runtime_paths,
@@ -632,6 +634,33 @@ async def test_an_error_record_never_repeats_an_earlier_answer(
     # The turn's own record keeps no partial text either: the earlier answer was history, not this reply's.
     assert reply.recorder.outcome == "interrupted"
     assert reply.recorder.original_status is RunStatus.error
+    assert reply.recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_its_own_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that fails on its first request records no partial text, though its input carries an earlier reply.
+
+    The thread's earlier reply reaches the run's input, and is stored with the run, as an assistant message no model
+    of this run answered.
+    """
+    reply = _reply(tmp_path, monkeypatch, [[_raising(RateLimited("slow down", provider="openai"))]])
+    agent_id = entity_identity_registry(reply.config, reply.runtime_paths).current_ids["assistant"].full_id
+    thread_history = [
+        make_visible_message(sender=REQUESTER_ID, body="What is this?", event_id="$question:localhost"),
+        make_visible_message(sender=agent_id, body="The image is one green pixel.", event_id="$answer:localhost"),
+    ]
+
+    text = await _respond(reply, thread_history=thread_history)
+
+    assert "Rate limited" in text
+    stored_replies = [message for message in _stored(reply).messages if message.role == "assistant"]
+    assert ["green pixel" in str(message.content) for message in stored_replies] == [True]
+    assert reply.recorder.outcome == "interrupted"
     assert reply.recorder.assistant_text == ""
 
 

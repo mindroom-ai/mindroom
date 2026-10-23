@@ -1,7 +1,8 @@
 """What every adapter does to finish a turn: record the answering model and its timings.
 
-The ``mindroom_model`` provenance key is persisted with every assistant message and read by usage accounting,
-so each adapter stamps it through one function.
+The ``mindroom_model`` provenance key is persisted with every assistant message a model answered, and usage
+accounting and a run's own model messages read it. ``stamp_model`` is its one writer: an adapter stamps the turn it
+finishes, and the loop the usage message it keeps for a request cut off before its turn was taken.
 """
 
 from __future__ import annotations
@@ -22,7 +23,16 @@ __all__ = [
     "finished_assistant_message",
     "output_started",
     "stamp_finished_turn",
+    "stamp_model",
 ]
+
+
+def stamp_model(message: Message, identity: ModelIdentity) -> None:
+    """Record on ``message`` which model answered it, as ``MODEL_PROVENANCE_KEY`` in its provider data."""
+    message.provider_data = {
+        **(message.provider_data or {}),
+        MODEL_PROVENANCE_KEY: {"id": identity.id, "provider": identity.provider_name},
+    }
 
 
 def stamp_finished_turn(
@@ -33,10 +43,7 @@ def stamp_finished_turn(
     first_output_at: float | None,
 ) -> Message:
     """Record which model answered ``message`` and how long the request took; ``started`` is a monotonic time."""
-    message.provider_data = {
-        **(message.provider_data or {}),
-        MODEL_PROVENANCE_KEY: {"id": identity.id, "provider": identity.provider_name},
-    }
+    stamp_model(message, identity)
     message.metrics.duration = time.monotonic() - started
     if first_output_at is not None:
         message.metrics.time_to_first_token = first_output_at - started

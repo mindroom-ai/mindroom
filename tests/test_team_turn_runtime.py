@@ -35,7 +35,7 @@ from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import Capabilities, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -974,6 +974,68 @@ async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_stream
     assert result.response_text == HEADER + body
 
 
+_KEY = "api_key=unit-test-secret"
+
+
+async def _writer_leaks_its_key() -> None:
+    msg = f"Writer unavailable: {_KEY}"
+    raise ProviderError(msg, provider="Synthetic", status_code=503)
+
+
+async def _checker_leaks_its_key() -> None:
+    msg = f"Checker unavailable: {_KEY}"
+    raise ProviderError(msg, provider="Synthetic", status_code=503)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("leader", "checker", "writer", "body"),
+    [
+        pytest.param(
+            [delegate("call-write", "writer", "Write it up"), answer("Done.")],
+            [answer("Touched.")],
+            [[Await(_writer_leaks_its_key)]],
+            "**Writer**: Writer unavailable: api_key=***redacted***\n\n**Checker**: Touched.\n\n\n"
+            "**Team Consensus**:\n\nDone.",
+            id="started-in-the-resume",
+        ),
+        pytest.param(
+            [answer("Done.")],
+            [[Await(_checker_leaks_its_key)]],
+            [],
+            "**Checker**: Checker unavailable: api_key=***redacted***\n\n\n**Team Consensus**:\n\nDone.",
+            id="resumed-after-approval",
+        ),
+    ],
+)
+async def test_an_approved_resume_shows_a_failed_member_s_redacted_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leader: list[list[ScriptStep]],
+    checker: list[list[ScriptStep]],
+    writer: list[list[ScriptStep]],
+    body: str,
+) -> None:
+    """A member whose run fails in an approval resume shows why in the resumed reply, credentials redacted.
+
+    The writer the resumed leader hands a task fails before it writes anything. The approved checker fails after its
+    approved call ran, while its record still holds its paused notice, which the reply does not show for it.
+    """
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel(leader)
+    team.models["checker-model"] = ScriptedModel(checker)
+    team.models["writer-model"] = ScriptedModel(writer)
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert ProbeToolkit.calls == ["dangerous"]
+    assert result.response_text == HEADER + body
+
+
 @pytest.mark.asyncio
 async def test_an_approved_resume_shows_once_the_text_its_runs_wrote_before_the_pause(
     tmp_path: Path,
@@ -1108,6 +1170,25 @@ async def test_a_failed_blocking_team_turn_records_the_failed_run_s_records(
     assert team.recorder.assistant_text == recorded
 
 
+async def _lose_the_provider_and_leak_its_key() -> None:
+    msg = f"provider connection lost: {_KEY}"
+    raise ProviderError(msg, provider="Synthetic")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_blocking_team_turn_records_its_leader_s_redacted_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The text a blocking turn records when its leader fails before writing is why it failed, credentials redacted."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[[Await(_lose_the_provider_and_leak_its_key)]])
+
+    await team.respond(show_tool_calls=False)
+
+    assert team.recorder.outcome == "interrupted"
+    assert team.recorder.assistant_text == "**Team Consensus**:\n\nprovider connection lost: api_key=***redacted***"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approved", [True, False], ids=["approved", "denied"])
 async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_longer_fits(
@@ -1234,6 +1315,45 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
     assert "Helper found it." in str(team.models["writer-model"].requests[-1].messages[-1].content)
     assert team.models["default"].requests[-1].messages[-1].content == (
         "Member results after human-in-the-loop resolution:\n[Writer]: Writer: the helper found it."
+    )
+
+
+def _cut_off(call_id: str) -> list[ScriptStep]:
+    """Return a response the output limit cut off while it requested ``touch``."""
+    *steps, completed = calls(tool_call("touch", call_id, label="cut off"))
+    assert isinstance(completed, TurnCompleted)
+    return [*steps, replace(completed, stop_reason="output_limit")]
+
+
+@pytest.mark.asyncio
+async def test_a_member_keeps_its_hooks_across_its_delegation_continuation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member run's hook state lasts the whole run: its third cut-off ends it, though a delegation came between.
+
+    The writer is cut off twice, delegates to the helper, and is cut off once more when the team continues it, so
+    the output-limit policy stops its run and the leader reads why.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.")],
+        helper=[answer("Helper found it.")],
+    )
+    team.models["writer-model"] = ScriptedModel(
+        [_cut_off("cut-1"), _cut_off("cut-2"), _delegate_to_helper("Dig"), _cut_off("cut-3"), answer("Rebuilt.")],
+        capabilities=Capabilities(claude_family=True),
+    )
+
+    await team.stream()
+
+    assert ProbeToolkit.calls == []
+    assert len(team.models["writer-model"].requests) == 4
+    _, member, _ = _delegation_state(team)
+    assert member.status is RunStatus.error
+    assert "The output limit cut off 3 of this model's responses" in str(
+        team.models["default"].requests[-1].messages[-1].content,
     )
 
 

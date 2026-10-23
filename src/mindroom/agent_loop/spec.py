@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from mindroom.tool_system.invocation import ToolCallContext
+
 if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.llm.messages import Message
@@ -49,12 +51,26 @@ class RunContext:
     session: ConversationSession | None = None
     history_scope: HistoryScope | None = None
     # The state a run without a session shares with its tools, and with the member runs ``replace`` makes of it.
+    # It is an ``__init__`` field so that ``replace`` carries it over: ``replace`` passes on only ``__init__`` fields,
+    # so a member run's context would otherwise start with a new empty dict.
     _own_state: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def session_state(self) -> dict[str, Any]:
         """Return the state the run's tool calls share: its session's, or its own when no session stores the run."""
         return self.session.session_state if self.session is not None else self._own_state
+
+    def call_context(self, call_id: str | None) -> ToolCallContext:
+        """Return the context of the call ``call_id`` this run makes, sharing the run's state and scope."""
+        return ToolCallContext(
+            run_id=self.run_id,
+            session_id=self.session_id,
+            user_id=self.user_id,
+            call_id=call_id,
+            session_state=self.session_state,
+            metadata=self.metadata or {},
+            history_scope=self.history_scope,
+        )
 
 
 __all__ = [

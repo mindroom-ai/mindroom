@@ -22,7 +22,7 @@ from mindroom.llm.runs import DENIED_WITHOUT_REASON, RunRequirement, ToolExecuti
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
-from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.invocation import execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolDescriptor, ToolKey, UnknownToolError, validate_tool_arguments
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits, first_of_each_name
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
-    from mindroom.tool_system.invocation import ToolMiddleware
+    from mindroom.tool_system.invocation import ToolCallContext, ToolMiddleware
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolkitClose, ToolValue
 
@@ -246,7 +246,7 @@ class PreparedAgentToolCatalog:
 
     def call_context(self, call_id: str) -> ToolCallContext:
         """Return the execution context of one call: the turn's run and the call's own id."""
-        return ToolCallContext.of_run(self.run, call_id)
+        return self.run.call_context(call_id)
 
     async def bind(
         self,

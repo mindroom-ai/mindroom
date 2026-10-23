@@ -63,6 +63,4 @@ class CompactContextTools(Toolkit):
             session_state=run_context.session_state if run_context is not None else None,
             record_pending_scope_in_session_state=run_context is not None,
         )
-        if run_context is not None and result.session_state is not None:
-            run_context.session_state = result.session_state
         return result.message

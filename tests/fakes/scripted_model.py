@@ -20,6 +20,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.llm.usage import MessageMetrics
+from mindroom.providers.assistant_turn import stamp_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -39,7 +40,10 @@ SYNTHETIC = ModelIdentity(id="scripted-model", provider="Synthetic", provider_na
 
 @dataclass
 class ScriptedModel:
-    """Replay one scripted turn per request, in order; ``requests`` keeps every request as the loop sent it."""
+    """Replay one scripted turn per request, in order; ``requests`` keeps every request as the loop sent it.
+
+    Each finished turn is stamped with the model's identity, as every adapter stamps the turns it finishes.
+    """
 
     turns: list[Sequence[ScriptStep]]
     identity: ModelIdentity = SYNTHETIC
@@ -57,8 +61,10 @@ class ScriptedModel:
         for step in self.turns.pop(0):
             if isinstance(step, Await):
                 await step.run()
-            else:
-                yield step
+                continue
+            if isinstance(step, TurnCompleted):
+                stamp_model(step.message, self.identity)
+            yield step
 
 
 def usage(input_tokens: int, output_tokens: int, **counters: float) -> MessageMetrics:
