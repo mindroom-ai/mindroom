@@ -54,6 +54,7 @@ from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
 from mindroom.providers import registry
+from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
@@ -268,10 +269,11 @@ class _RecordingAdapter:
         return self.adapter.model_params
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Answer the request with the responder's message as one finished turn."""
+        """Answer the request with the responder's message as one finished turn, stamped as the adapter stamps it."""
         response = self.respond(request)
         if response.content:
             yield TextDelta(response.content)
+        stamp_model(response, self.identity)
         yield TurnCompleted(message=response, stop_reason="tool_use" if response.tool_calls else "end")
 
 

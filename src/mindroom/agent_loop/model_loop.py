@@ -24,10 +24,11 @@ from mindroom.agent_loop.tools import (
 )
 from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.events import ContentDelta, RequestCompleted, ToolCompleted, ToolStarted
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY, Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
 from mindroom.logging_config import get_logger
+from mindroom.providers.assistant_turn import stamp_model
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -256,10 +257,10 @@ def _accept_turn(
 ) -> Message:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
-    A request that answers with tool calls and no text leaves the content as it was, as Agno's loop did, so a
-    resumed run keeps its paused text until the model says something new.
+    The provider stamped the message with the model that answered it. A request that answers with tool calls and no
+    text leaves the content as it was, as Agno's loop did, so a resumed run keeps its paused text until the model
+    says something new.
     """
-    _stamp_model(message, identity)
     state.messages.append(message)
     _count_request(metrics, message.metrics, identity)
     state.request_index += 1
@@ -459,17 +460,9 @@ async def _stream_turn(
                 if turn is not None and (turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True:
                     # The turn's usage sums retried attempts, which must not read as one request's.
                     cut_off.provider_data = {AGGREGATE_USAGE_KEY: True}
-                _stamp_model(cut_off, identity)
+                stamp_model(cut_off, identity)
                 messages.append(cut_off)
                 _count_request(metrics, billed, identity)
-
-
-def _stamp_model(message: Message, identity: ModelIdentity) -> None:
-    """Record which model answered on the message, the key usage attribution reads (``usage/storage.py``)."""
-    message.provider_data = {
-        **(message.provider_data or {}),
-        MODEL_PROVENANCE_KEY: {"id": identity.id, "provider": identity.provider_name},
-    }
 
 
 def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelIdentity) -> None:
