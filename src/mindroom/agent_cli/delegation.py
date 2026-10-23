@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.delegation.execution import advance_delegation_call, persist_delegation_state, prepare_delegation_state
+from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import PausedAttempt, paused_attempt_from_response
@@ -59,11 +60,7 @@ async def advance_cli_delegation(
     context = catalog.runtime_context
     response = catalog.record
     tool = requirement.tool_execution
-    if (
-        response is None
-        or not requirement.needs_external_execution
-        or tool.tool_name not in {"run_subagent", "continue_subagent"}
-    ):
+    if response is None or not requirement.needs_external_execution or tool.tool_name not in DELEGATION_FUNCTIONS:
         msg = "CLI delegation requires its exact external call"
         raise ValueError(msg)
     if (

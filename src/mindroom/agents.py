@@ -30,6 +30,7 @@ from mindroom.delegation.personas import (
     persona_tool_policy,
     require_built_persona_tools,
 )
+from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.hooks import HookRegistry
@@ -1238,7 +1239,7 @@ def apply_tool_approval_capability(
     """
 
     def approved(function: ToolFunction) -> ToolFunction:
-        if registered_tool_name == "delegate" and function.name in {"run_subagent", "continue_subagent"}:
+        if registered_tool_name == "delegate" and function.name in DELEGATION_FUNCTIONS:
             # The delegation driver owns the policy gate and exact child wait.
             return replace(
                 function,

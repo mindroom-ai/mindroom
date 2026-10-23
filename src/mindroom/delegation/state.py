@@ -16,6 +16,12 @@ if TYPE_CHECKING:
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
 
+# The functions of the ``delegate`` toolkit, which run outside the loop: the driver runs the child and continues the
+# parent with its result.
+RUN_SUBAGENT = "run_subagent"
+CONTINUE_SUBAGENT = "continue_subagent"
+DELEGATION_FUNCTIONS = (RUN_SUBAGENT, CONTINUE_SUBAGENT)
+
 type PersonaSourceKind = Literal["inline", "profile", "workflow"]
 _SOURCE_KINDS: tuple[PersonaSourceKind, ...] = ("inline", "profile", "workflow")
 
@@ -144,7 +150,7 @@ class DelegationHookState:
     execution_identity: dict[str, object]
     arguments: dict[str, Any]
     started_at: float
-    tool_name: str = "run_subagent"
+    tool_name: str = RUN_SUBAGENT
     blocked_result: str | None = None
     after_called: bool = False
 

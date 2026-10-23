@@ -18,6 +18,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH
+from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -137,6 +138,11 @@ class TestDelegateTools:
     def test_toolkit_name(self, tools: DelegateTools) -> None:
         """Test that the toolkit is registered with the correct name."""
         assert tools.name == "delegate"
+
+    def test_toolkit_offers_exactly_the_delegation_functions(self, tools: DelegateTools) -> None:
+        """The names the driver, the approval capability, and the tool metadata share are the toolkit's own functions."""
+        assert tuple(tools.async_functions) == DELEGATION_FUNCTIONS
+        assert TOOL_METADATA["delegate"].function_names == DELEGATION_FUNCTIONS
 
     def test_toolkit_has_delegate_task(self, tools: DelegateTools) -> None:
         """Test that the toolkit exposes the run_subagent function."""
