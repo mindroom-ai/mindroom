@@ -15,8 +15,6 @@ from dataclasses import asdict, dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, LiteralString, cast
 
-from mindroom.session_storage.schema import TableNames, table_names
-
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -299,6 +297,9 @@ def _read_run_database(
 
     A conversation database `<name>.db` holds the tables of the sessions table `<name>_sessions`.
     """
+    # The schema module loads the history package, which the CLI's import path keeps out (tests/test_cli_config.py).
+    from mindroom.session_storage.schema import TableNames, table_names  # noqa: PLC0415
+
     where = " OR ".join(conditions)
     runs_table = TableNames(f"{database.stem}_sessions").runs
     with _read_only_connection(database) as connection:
