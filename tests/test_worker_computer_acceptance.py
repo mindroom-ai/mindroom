@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import os
+import signal
 import sys
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
@@ -16,8 +19,10 @@ from agno.tools.function import ToolResult
 from mindroom.api import computers
 from mindroom.config.main import Config
 from mindroom.tool_system.media_transport import encode_media_result
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.workers.backend import WorkerBackendError
 from tests.test_docker_worker_backend import _backend
+from tests.test_shell_async import _make_runtime_paths
 
 
 def _helper() -> ModuleType:
@@ -105,6 +110,47 @@ def _driver(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.asyncio
+async def test_background_shell_leaves_a_process_running_after_the_call_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shell tool has no background mode, so the fixture detaches with nohup and the call still returns."""
+    module = _driver(monkeypatch)
+    toolkit = get_tool_by_name(
+        "shell",
+        _make_runtime_paths(tmp_path),
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+    )
+    entrypoint = toolkit.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    async def execute(tool: str, function: str, kwargs: dict[str, object], *, user: str | None = None) -> dict:
+        assert (tool, function, user) == ("shell", "run_shell_command", None)
+        return {"ok": True, "result": await entrypoint(**kwargs)}
+
+    fixture = object.__new__(module.Fixture)
+    fixture.execute = execute
+    pid_file = tmp_path / "pid"
+    pid: int | None = None
+    try:
+        async with asyncio.timeout(10):
+            await fixture.shell(
+                ["sh", "-c", 'echo $$ > "$0.tmp" && mv "$0.tmp" "$0" && exec tail -f /dev/null', str(pid_file)],
+                background=True,
+            )
+            while not pid_file.exists():  # noqa: ASYNC110 - the detached process writes its PID asynchronously
+                await asyncio.sleep(0.05)
+        pid = int(pid_file.read_text())
+        os.kill(pid, 0)  # Raises ProcessLookupError when the shell call's return took the process with it.
+    finally:
+        if pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
 
 
 @pytest.mark.parametrize("host_uid", [501, 1000, 1001])
