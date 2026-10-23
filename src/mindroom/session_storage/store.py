@@ -160,13 +160,12 @@ class ConversationStore:
             loaded = self._read_load(connection, session_id, kind)
         if loaded is None:
             return None
-        _, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at = loaded.row
+        _, agent_id, team_id, _, session_data, metadata, created_at, updated_at = loaded.row
         state = _session_state(session_data)
         return ConversationSession(
             session_id=session_id,
             kind=kind,
             owner_id=(team_id if kind == "team" else agent_id) or "",
-            user_id=user_id,
             metadata=_decoded_mapping(metadata),
             session_state=state,
             stored_session_state=copy.deepcopy(state),
@@ -668,14 +667,13 @@ def _ensure_session_row(
     # One encode reads the live state, as ``session_state_snapshot`` does, and the created row's copy decodes from it.
     session_data = json.dumps({"session_state": session.session_state})
     cursor = connection.execute(
-        f"INSERT INTO {quote_identifier(names.sessions)} (session_id, session_type, {owner_column}, user_id, "  # noqa: S608
-        "session_data, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        f"INSERT INTO {quote_identifier(names.sessions)} (session_id, session_type, {owner_column}, "  # noqa: S608
+        "session_data, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(session_id) DO NOTHING",
         (
             session.session_id,
             session.kind,
             session.owner_id,
-            session.user_id,
             session_data,
             # Agno's JSON column stored no metadata as the text ``null``, never as SQL NULL.
             json.dumps(session.metadata),
@@ -692,10 +690,11 @@ def _adopt_requester(
     session_id: str,
     requester_id: str | None,
 ) -> None:
-    """Give a session row that has no requester yet the requester of a run saved into it.
+    """Give a session row that has no requester yet the requester of a run saved into it, the only writer of the column.
 
     A conversation's first run names its requester, but the row is often created before that run is saved, by a
-    write that knows no requester, such as a fold or a helper's usage. The first requester a run names stays.
+    write that knows no requester, such as a fold or a helper's usage, so a created row has none. The first requester
+    a run names stays.
     """
     if requester_id:
         connection.execute(

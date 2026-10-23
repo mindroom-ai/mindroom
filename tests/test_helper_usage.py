@@ -368,7 +368,6 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
             message.created_at = 1_790_000_000
             message.provider_data = {"mindroom_model": {"id": "reply-model", "provider": "test-provider"}}
     session = _session("session", runs=[run])
-    session.user_id = "@user:localhost"
     config, paths, _storage, _scope, _context = _forced_compaction_context(tmp_path, session=session)
     usage = CompletionUsage(prompt_tokens=120, completion_tokens=30, total_tokens=150)
     create = MagicMock(return_value=SimpleNamespace(usage=usage))
@@ -419,7 +418,6 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     run.user_id = "@previous:localhost"
     run.metrics = llm_usage.RunMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
     session = _session("session", runs=[run])
-    session.user_id = "@previous:localhost"
     config, paths, storage, _scope, context = _forced_compaction_context(tmp_path, session=session)
     identity = build_execution_identity_from_runtime_context(context)
     model = ScriptedModel(

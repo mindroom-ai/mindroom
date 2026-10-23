@@ -110,7 +110,6 @@ def seed_private_usage(
             kind="agent",
             session_id="same-session-id",
             owner_id=agent,
-            user_id=stored_requester,
             runs=[
                 RunRecord(
                     run_id="same-run-id",

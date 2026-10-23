@@ -79,7 +79,6 @@ def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id
     assert (
         session.session_id,
         session.owner_id,
-        session.user_id,
         session.metadata,
         session.session_state,
         session.created_at,
@@ -87,7 +86,6 @@ def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id
     ) == (
         agno["session_id"],
         agno["team_id"] if session.kind == "team" else agno["agent_id"],
-        agno["user_id"],
         agno["metadata"],
         agno["session_data"]["session_state"],
         agno["created_at"],

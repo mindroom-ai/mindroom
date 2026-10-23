@@ -78,7 +78,7 @@ def test_blob_runs_become_rows_when_the_store_opens(tmp_path: Path) -> None:
     assert _blob(db_file) is None
     session = store.load_session("session-1", "agent")
     assert session is not None
-    assert (session.user_id, session.session_state) == ("@alice:example.test", {})
+    assert session.session_state == {}
     assert [(run.run_id, run.status.value) for run in session.runs] == [
         ("run-1", "RUNNING"),
         ("run-2", "RUNNING"),

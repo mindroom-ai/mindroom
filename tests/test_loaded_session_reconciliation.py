@@ -108,7 +108,7 @@ def _completed(run_id: str, agent_name: str, content: str) -> RunRecord:
 def _seed(store: ConversationStore, agent_name: str, *runs: AnyRunRecord) -> None:
     seed_session(
         store,
-        ConversationSession(session_id=SESSION, kind="agent", owner_id=agent_name, user_id=REQUESTER, runs=list(runs)),
+        ConversationSession(session_id=SESSION, kind="agent", owner_id=agent_name, runs=list(runs)),
     )
 
 

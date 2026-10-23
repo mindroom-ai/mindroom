@@ -69,7 +69,6 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
         ],
     }
     session = _session("session", runs=[run])
-    session.user_id = "@previous:localhost"
     config, paths, storage, scope, context = _forced_compaction_context(tmp_path, session=session)
     model = _summary_model(
         *[
