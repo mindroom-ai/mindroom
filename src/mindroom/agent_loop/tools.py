@@ -96,13 +96,6 @@ class PlannedCall:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class _ResolvedCall:
-    call_id: str | None
-    function: ToolFunction
-    arguments: dict[str, Any] | None
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
 class ToolBatch:
     """One assistant message's tool calls after resolution and limit accounting.
 
@@ -134,7 +127,9 @@ def plan_tool_batch(
     ``tool_call_limit`` gets a limit-error result instead of running. An admitted call whose function requires
     confirmation or external execution is planned paused, with the flags its stored execution carries.
     """
-    resolved: list[_ResolvedCall] = []
+    planned: list[PlannedCall] = []
+    refused: list[Message] = []
+    count = calls_so_far
     for tool_call in tool_calls:
         call_id = tool_call.get("id")
         function_data = tool_call.get("function") or {}
@@ -147,40 +142,27 @@ def plan_tool_batch(
         if isinstance(arguments, ToolArgumentError):
             messages.append(Message(role="tool", tool_call_id=call_id, tool_name=name, content=arguments.error_text))
             continue
-        resolved.append(_ResolvedCall(call_id=call_id, function=function, arguments=arguments))
-
-    planned: list[PlannedCall] = []
-    refused: list[Message] = []
-    count = calls_so_far
-    for call in resolved:
         if tool_call_limit is not None:
             count += 1
             if count > tool_call_limit:
                 refused.append(
                     Message(
                         role="tool",
-                        content=_LIMIT_ERROR_TEXT.format(name=call.function.name),
-                        tool_call_id=call.call_id,
-                        tool_name=call.function.name,
-                        tool_args=call.arguments,
+                        content=_LIMIT_ERROR_TEXT.format(name=function.name),
+                        tool_call_id=call_id,
+                        tool_name=function.name,
+                        tool_args=arguments,
                         tool_call_error=True,
                     ),
                 )
                 continue
-        planned.append(
-            PlannedCall(
-                call_id=call.call_id,
-                function=call.function,
-                arguments=call.arguments,
-                execution=_planned_execution(call),
-            ),
-        )
+        execution = _planned_execution(call_id, function, arguments)
+        planned.append(PlannedCall(call_id=call_id, function=function, arguments=arguments, execution=execution))
     return ToolBatch(planned=tuple(planned), refused=tuple(refused))
 
 
-def _planned_execution(call: _ResolvedCall) -> ToolExecution:
-    function = call.function
-    execution = ToolExecution(tool_call_id=call.call_id, tool_name=function.name, tool_args=call.arguments)
+def _planned_execution(call_id: str | None, function: ToolFunction, arguments: dict[str, Any] | None) -> ToolExecution:
+    execution = ToolExecution(tool_call_id=call_id, tool_name=function.name, tool_args=arguments)
     if function.requires_confirmation:
         execution.requires_confirmation = True
     if function.external_execution:
