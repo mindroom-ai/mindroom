@@ -15,7 +15,7 @@ from mindroom.llm.provider import NativeCompactionReplay, StreamProgress, TurnCo
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.extra_kwargs import settings_params
-from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
+from mindroom.providers.openai.adapter_common import SDKClients, request_settings
 from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openai.replay_estimate import (
     estimate_responses_replay_tokens,
@@ -114,18 +114,15 @@ class ResponsesAdapter:
         )
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
-        kwargs = responses_request_kwargs(
+        return responses_request_kwargs(
             model_id=self.identity.id,
             request=request,
-            settings=self.settings,
+            settings=request_settings(
+                self.settings,
+                request.overrides,
+                sampling=not self.capabilities.provider_default_sampling,
+            ),
             wire=self.wire,
-        )
-        # Codex rejects sampling fields.
-        codex = self.wire.route == "codex"
-        return with_overrides(
-            kwargs,
-            request.overrides,
-            temperature=not codex and not self.capabilities.provider_default_sampling,
         )
 
     async def _streamed(

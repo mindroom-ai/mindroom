@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -12,8 +12,9 @@ if TYPE_CHECKING:
     from openai import AsyncOpenAI
 
     from mindroom.llm.provider import RequestOverrides
+    from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 
-__all__ = ["SDKClients", "with_overrides"]
+__all__ = ["SDKClients", "request_settings"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,12 +40,17 @@ class SDKClients:
         return client
 
 
-def with_overrides(kwargs: dict[str, Any], overrides: RequestOverrides, *, temperature: bool) -> dict[str, Any]:
-    """Apply a request's temperature override to SDK call arguments; ``temperature=False`` leaves sampling to the provider.
+def request_settings[S: (ChatSettings, ResponsesSettings)](
+    settings: S,
+    overrides: RequestOverrides,
+    *,
+    sampling: bool,
+) -> S:
+    """Return the settings one request is built from: its temperature override replaces the model's temperature.
 
-    The override replaces the configured temperature keyword, as a model's own temperature did under Agno.
+    Setting a model's temperature did the same under Agno, so the route's own rules still apply to it, such as
+    Codex dropping every temperature. ``sampling=False`` leaves sampling to the provider.
     """
-    if not temperature or overrides.temperature is None:
-        return kwargs
-    kwargs["temperature"] = overrides.temperature
-    return kwargs
+    if not sampling or overrides.temperature is None:
+        return settings
+    return replace(settings, temperature=overrides.temperature)
