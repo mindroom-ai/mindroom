@@ -25,13 +25,13 @@ import nio
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import (
     MATRIX_MEDIA_MSGTYPES,
     AudioMessageEvent,
     FileOrVideoMessageEvent,
     ImageMessageEvent,
-    canonical_mime_type,
     download_media_bytes,
     is_audio_message_event,
     is_file_or_video_message_event,

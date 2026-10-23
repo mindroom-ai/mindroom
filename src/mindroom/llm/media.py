@@ -261,6 +261,17 @@ def image_format(data: bytes) -> str | None:
     return next((name for offset, signature, name in _IMAGE_SIGNATURES if data[offset:].startswith(signature)), None)
 
 
+def canonical_mime_type(mime_type: str | None) -> str | None:
+    """Return ``mime_type``, such as a Content-Type header, as a lowercase ``type/subtype`` without parameters.
+
+    None when it names no type.
+    """
+    if not isinstance(mime_type, str):
+        return None
+    normalized = mime_type.split(";", 1)[0].strip().lower()
+    return normalized or None
+
+
 def image_mime_type(image: Image, data: bytes) -> str:
     """Return an image's MIME type: its own, else its format, path extension, or header bytes, else JPEG.
 
@@ -360,6 +371,7 @@ __all__ = [
     "File",
     "Image",
     "Video",
+    "canonical_mime_type",
     "image_format",
     "image_mime_type",
 ]

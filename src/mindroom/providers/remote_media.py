@@ -11,6 +11,7 @@ import httpx
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.llm.errors import InvalidRequest
+from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -31,7 +32,7 @@ async def download_media(url: str, *, kind: str, limit_bytes: int, provider: str
         ):
             response.raise_for_status()
             data = await collect_bounded_bytes(response.aiter_bytes(), max_bytes=limit_bytes)
-            declared = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            declared = canonical_mime_type(response.headers.get("content-type"))
     except (httpx.HTTPError, httpx.InvalidURL, ByteLimitExceededError) as error:
         logger.warning("remote_media_unavailable", kind=kind, url=url, error=str(error))
         msg = f"The {kind} at a remote URL could not be downloaded for the model"
@@ -39,7 +40,7 @@ async def download_media(url: str, *, kind: str, limit_bytes: int, provider: str
     if not data:
         msg = f"The {kind} at a remote URL is empty"
         raise InvalidRequest(msg, provider=provider)
-    return data, declared or None
+    return data, declared
 
 
 __all__ = ["download_media"]

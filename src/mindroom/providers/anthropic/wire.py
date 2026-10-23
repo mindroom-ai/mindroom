@@ -26,7 +26,7 @@ from anthropic.types.beta import (
     BetaUsage,
 )
 
-from mindroom.llm.media import image_format
+from mindroom.llm.media import canonical_mime_type, image_format
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
@@ -252,8 +252,7 @@ async def _fetched(url: str, http_client: httpx.AsyncClient) -> tuple[bytes, str
     except (httpx.HTTPError, httpx.InvalidURL) as error:
         logger.warning("claude_url_media_dropped", url=url, error=str(error))
         return None
-    media_type = response.headers.get("content-type", "").partition(";")[0].strip()
-    return response.content, media_type or None
+    return response.content, canonical_mime_type(response.headers.get("content-type"))
 
 
 async def _inlined_images(images: Sequence[Image] | None, http_client: httpx.AsyncClient) -> list[Image]:

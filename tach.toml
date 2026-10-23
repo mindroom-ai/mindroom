@@ -5302,6 +5302,7 @@ depends_on = ["mindroom.tool_system.plugin_imports"]
 [[modules]]
 path = "mindroom.tool_system.worker_media"
 depends_on = [
+    "mindroom.llm",
     "mindroom.server_fetch_url",
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.worker_proxy_client",
