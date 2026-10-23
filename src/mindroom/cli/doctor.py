@@ -20,7 +20,7 @@ from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentia
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import AuthenticationFailed, ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.matrix.health import (
@@ -46,7 +46,7 @@ from .config import activate_cli_runtime, console, load_config_quiet
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError, TransportError
+    from google.auth.exceptions import DefaultCredentialsError
 
     from mindroom.config.models import ModelConfig
 
@@ -328,23 +328,18 @@ def _validate_provider_key(
 
 
 def _classify_vertexai_claude_error(
-    exc: ProviderError
-    | DefaultCredentialsError
-    | RefreshError
-    | TransportError
-    | RuntimeError
-    | TypeError
-    | ValueError,
+    exc: ProviderError | DefaultCredentialsError | RuntimeError | TypeError | ValueError,
 ) -> tuple[bool | None, str]:
-    """Classify one Vertex AI Claude validation failure for doctor output."""
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError  # noqa: PLC0415
+    """Classify one Vertex AI Claude validation failure for doctor output.
 
+    The Claude adapter types every failure of a request, rejected Google credentials included, so rejected
+    credentials fail with the reason their error carries and another rejected request with its status. Credentials
+    that cannot be found and a service that cannot be reached leave the check inconclusive.
+    """
+    if isinstance(exc, AuthenticationFailed):
+        return False, str(exc)
     if isinstance(exc, ProviderError) and exc.status_code is not None:
         return False, _vertexai_claude_api_error_detail(exc.status_code, str(exc))
-    if isinstance(exc, DefaultCredentialsError):
-        return None, str(exc)
-    if isinstance(exc, RefreshError):
-        return False, str(exc)
     return None, str(exc)
 
 
@@ -391,7 +386,7 @@ def _validate_vertexai_claude_connection(
     if missing:
         return None, f"missing {', '.join(missing)}"
 
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError, TransportError  # noqa: PLC0415
+    from google.auth.exceptions import DefaultCredentialsError  # noqa: PLC0415
 
     # The anthropic SDK loads only when a Vertex Claude model is checked.
     from mindroom.providers.anthropic.messages import build_provider  # noqa: PLC0415
@@ -407,15 +402,7 @@ def _validate_vertexai_claude_connection(
         asyncio.run(closing_model_connections(complete(provider, request)))
     except PermanentStartupError as exc:
         return False, str(exc)
-    except (
-        ProviderError,
-        DefaultCredentialsError,
-        RefreshError,
-        TransportError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-    ) as exc:
+    except (ProviderError, DefaultCredentialsError, RuntimeError, TypeError, ValueError) as exc:
         return _classify_vertexai_claude_error(exc)
 
     return True, ""
