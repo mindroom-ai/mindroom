@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ToolSpec
     from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
-    from mindroom.tool_system.agno_toolkits import Function, Toolkit
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
@@ -124,17 +124,12 @@ def _declares_background_after(parameters: Mapping[str, Any]) -> bool:
     return BACKGROUND_AFTER in parameters.get("properties", {})
 
 
-def approval_can_run_as_job(function: Function, toolkit: Toolkit) -> bool:
-    """Whether a policy-gated function's approval can be the first phase of the managed job its call runs as.
-
-    ``function`` is the toolkit's own function: whether it asks its user for input is not part of the call the loop
-    sees, and such a call must finish in its run.
-    """
+def approval_can_run_as_job(function: ToolFunction, toolkit: Toolkit) -> bool:
+    """Whether a policy-gated function of ``toolkit`` can ask for its approval as the first phase of its call's job."""
     return not (
         isinstance(toolkit, JobTools)
         or function.external_execution
         or function.stop_after_tool_call
-        or function.requires_user_input
         or connects_per_run(toolkit)
     )
 

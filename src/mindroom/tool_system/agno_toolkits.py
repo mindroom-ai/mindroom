@@ -15,7 +15,7 @@ from __future__ import annotations
 import inspect
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, get_type_hints
 
 from agno.media import Audio as AgnoAudio
 from agno.media import File as AgnoFile
@@ -58,6 +58,67 @@ _UNBINDABLE_KINDS = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _Rejected:
+    """Fields whose value the owned loop cannot honor: adapting a function for which ``sets`` holds raises ``error``.
+
+    Rejected rather than dropped, because the tool's author relies on what the value asks for.
+    """
+
+    sets: Callable[[Function], bool]
+    error: str
+
+
+# Every field of Agno's ``Function``, each named by one row: "mapped" fields reach the ``ToolFunction``, a rejected
+# field fails the function that sets it, and an "ignored" field is left unread for the reason beside it.
+# tests/tool_system/test_agno_toolkits.py fails when Agno adds a field no row names.
+_FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejected] = {
+    # The model-facing definition; ``parameters`` becomes the finished schema.
+    ("name", "description", "parameters", "strict"): "mapped",
+    # Wrapped in Agno's coercion unless processing is skipped; the signature names the injected parameters.
+    ("entrypoint", "skip_entrypoint_processing"): "mapped",
+    # The pause and stop flags the loop reads.
+    (
+        "requires_confirmation",
+        "approval_type",
+        "external_execution",
+        "external_execution_silent",
+        "stop_after_tool_call",
+    ): "mapped",
+    ("pre_hook", "post_hook", "tool_hooks"): _Rejected(
+        sets=lambda function: (
+            function.pre_hook is not None or function.post_hook is not None or bool(function.tool_hooks)
+        ),
+        error="sets an Agno pre_hook, post_hook, or tool_hooks, which MindRoom does not run; move that logic into"
+        " the tool or a `tool:before_call` / `tool:after_call` hook",
+    ),
+    ("requires_user_input",): _Rejected(
+        sets=lambda function: bool(function.requires_user_input),
+        error="sets Agno's requires_user_input, but MindRoom never pauses a run to ask its user for input",
+    ),
+    # Agno adds a function's instructions to the system prompt only with ``add_instructions``; a deferred toolkit
+    # turns that off once it has captured them for its search results.
+    ("instructions", "add_instructions"): _Rejected(
+        sets=lambda function: function.add_instructions and function.instructions is not None,
+        error="sets instructions for Agno to add to the system prompt, which MindRoom adds only per toolkit; set"
+        " them on the toolkit instead",
+    ),
+    # Agno reads these only for a function that requires user input, which is rejected.
+    ("user_input_fields", "user_input_schema"): "ignored",
+    # Agno also showed the result in the reply text; MindRoom gives a tool's result only to the model.
+    ("show_result",): "ignored",
+    # Agno's on-disk result cache; every call runs.
+    ("cache_results", "cache_dir", "cache_ttl"): "ignored",
+    # Metadata for people, Agno's discovery, and MCP clients; the model never sees it.
+    ("title", "annotations", "has_side_effects"): "ignored",
+    # MindRoom stamps it for the function filters that run before adaptation; a run names each function's owner by
+    # the toolkit entry it was assembled in.
+    ("owning_toolkit",): "ignored",
+    # Set only by Agno's component registry, which MindRoom does not use.
+    ("source_toolkit",): "ignored",
+}
+
+
 def adapt_toolkit(toolkit: Toolkit) -> AdaptedToolkit:
     """Adapt every function of ``toolkit`` in the order Agno prepares them for an async run.
 
@@ -84,7 +145,10 @@ def adapt_function(function: Function) -> ToolFunction:
     if function.entrypoint is None:
         msg = f"Tool function {function.name!r} has no entrypoint"
         raise ValueError(msg)
-    reject_agno_hooks(function)
+    for handling in _FUNCTION_FIELDS.values():
+        if isinstance(handling, _Rejected) and handling.sets(function):
+            msg = f"Tool function {function.name!r} {handling.error}"
+            raise ValueError(msg)
     prepared = function.model_copy(deep=False)
     prepared.parameters = deepcopy(function.parameters)
     # An explicit strict setting on the function wins; MindRoom never asks Agno for strict schemas otherwise.
@@ -104,19 +168,6 @@ def adapt_function(function: Function) -> ToolFunction:
         injected_params=injected_parameter_names(function.entrypoint),
         entrypoint_processed=not function.skip_entrypoint_processing,
     )
-
-
-def reject_agno_hooks(function: Function) -> None:
-    """Raise when ``function`` sets an Agno ``pre_hook``, ``post_hook``, or ``tool_hooks``, which MindRoom does not run.
-
-    Rejected rather than dropped: such a hook may be a policy gate the tool's author relies on.
-    """
-    if function.pre_hook is not None or function.post_hook is not None or function.tool_hooks:
-        msg = (
-            f"Tool function {function.name!r} sets an Agno pre_hook, post_hook, or tool_hooks, which MindRoom does not"
-            " run; move that logic into the tool or a `tool:before_call` / `tool:after_call` hook"
-        )
-        raise ValueError(msg)
 
 
 def injected_parameter_names(entrypoint: Callable[..., Any]) -> frozenset[str]:
@@ -376,7 +427,6 @@ __all__ = [
     "framework_arguments",
     "injected_parameter_names",
     "model_arguments",
-    "reject_agno_hooks",
     "tool_value",
     "warm_agno_tool_imports",
 ]

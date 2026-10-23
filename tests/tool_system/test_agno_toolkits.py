@@ -11,6 +11,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.llm.provider import ToolSpec
+from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameter_names
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
@@ -119,6 +120,43 @@ def test_functions_with_agno_hooks_are_rejected_instead_of_running_without_them(
 
     with pytest.raises(ValueError, match=r"'lookup' sets an Agno pre_hook, post_hook, or tool_hooks"):
         adapt_function(function)
+
+
+def test_every_field_of_agnos_function_is_named_by_one_row_of_the_adapter_table() -> None:
+    """Each ``Function`` field is mapped, rejected when set, or ignored by decision; a field Agno adds fails here."""
+    named = [name for names in agno_toolkits._FUNCTION_FIELDS for name in names]
+
+    assert sorted(named) == sorted(Function.model_fields)
+
+
+@pytest.mark.parametrize(
+    ("options", "error"),
+    [
+        ({"requires_user_input": True}, r"'lookup' sets Agno's requires_user_input"),
+        ({"instructions": "Call it twice."}, r"'lookup' sets instructions for Agno to add to the system prompt"),
+    ],
+    ids=["requires_user_input", "instructions"],
+)
+def test_functions_asking_for_what_the_owned_loop_never_does_are_rejected(options: dict[str, Any], error: str) -> None:
+    """A function that needs user input or adds its own prompt instructions fails loudly instead of running without."""
+    with pytest.raises(ValueError, match=error):
+        adapt_function(Function(name="lookup", entrypoint=_lookup, **options))
+
+
+def test_fields_agno_would_not_act_on_adapt_unchanged() -> None:
+    """Instructions Agno keeps out of the prompt, and user-input fields without the pause, are left unread."""
+    plain = adapt_function(Function(name="lookup", entrypoint=_lookup))
+    quiet = adapt_function(
+        Function(
+            name="lookup",
+            entrypoint=_lookup,
+            instructions="Unseen.",
+            add_instructions=False,
+            user_input_fields=["city"],
+        ),
+    )
+
+    assert quiet.definition() == plain.definition()
 
 
 def test_async_variants_replace_sync_functions_in_place() -> None:
