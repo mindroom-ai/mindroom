@@ -36,8 +36,10 @@ _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
 class ScopeSessionContext:
     """Resolved storage/session context for one logical history scope.
 
-    ``session`` is the stored session, None while the scope has none. ``session_id`` is the id the context was opened
-    for, which the scope's first session takes, so a run is saved from the context alone.
+    ``session`` is the session the scope's runs load from and save into: the stored one, or a first one the context
+    was given (``with_session``) before anything stored it; None while the context holds neither.
+    ``session_exists`` tells whether the scope had a stored session when the context was opened. ``session_id`` is
+    the id the context was opened for, which the scope's first session takes, so a run is saved from the context alone.
     """
 
     scope: HistoryScope
