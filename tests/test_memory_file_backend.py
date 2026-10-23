@@ -1587,6 +1587,29 @@ async def test_file_backend_capped_entrypoint_withholds_the_oldest_entries(
 
 
 @pytest.mark.asyncio
+async def test_file_backend_oversized_oldest_entry_does_not_withhold_newer_entries(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """An oldest entry too long for the token cap is withheld alone, not with every newer entry."""
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+    config.memory.file.max_entrypoint_tokens = 15
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text(
+        f"# Memory\nCurated fact.\n- [id=m1] {'Long oldest entry. ' * 5}\n- [id=m2] Newest entry.\n",
+        encoding="utf-8",
+    )
+
+    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", storage_path, config)
+
+    assert "# Memory\nCurated fact.\n- [id=m2] Newest entry." in prompt_parts.session_preamble
+    assert "Long oldest entry." not in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
 async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
     storage_path: Path,
     config: Config,

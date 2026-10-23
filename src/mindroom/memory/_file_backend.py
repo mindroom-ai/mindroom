@@ -860,7 +860,7 @@ def _entrypoint_lines_within_caps(lines: list[str], max_lines: int, max_tokens: 
         (index for index, line in enumerate(lines) if FILE_MEMORY_ENTRY_PATTERN.match(line.strip())),
         len(lines),
     )
-    if len(leading) == len(lines) or len(leading) <= first_entry:
+    if len(leading) == len(lines) or len(leading) < first_entry:
         return leading
     head = lines[:first_entry]
     kept_chars = len("\n".join(head))
