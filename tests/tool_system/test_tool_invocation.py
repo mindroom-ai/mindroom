@@ -101,23 +101,36 @@ async def test_run_context_is_built_from_the_call_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_and_team_parameters_receive_the_session_state_stand_in() -> None:
-    """``agent`` and ``team`` get an owned stand-in whose ``session_state`` is the run's, as DaytonaTools reads it."""
+async def test_agent_and_team_parameters_share_the_toolkits_own_state_stand_in() -> None:
+    """``agent`` and ``team`` get an owned stand-in whose ``session_state`` belongs to the adapted toolkit.
 
-    def working_directory(agent: object, team: object, directory: str) -> str:
-        if agent.session_state is None:
-            agent.session_state = {}
-        agent.session_state["working_directory"] = directory
+    The toolkit's functions share it across calls, as DaytonaTools keeps its sandbox and working directory there,
+    and it is never the run's stored session state; a toolkit adapted again starts empty, as Agno's per-reply agent
+    did.
+    """
+
+    def change_directory(agent: object, team: object, directory: str) -> str:
         assert team.session_state is agent.session_state
+        agent.session_state["working_directory"] = directory
+        return directory
+
+    def working_directory(agent: object) -> str:
         return str(agent.session_state.get("working_directory", "/home/daytona"))
 
     state: dict[str, Any] = {}
-    [function] = _functions(working_directory).values()
+    functions = _functions(change_directory, working_directory)
 
-    outcome = await _run(function, '{"directory": "/srv", "agent": "spoof", "team": "spoof"}', session_state=state)
+    await _run(
+        functions["change_directory"],
+        '{"directory": "/srv", "agent": "spoof", "team": "spoof"}',
+        session_state=state,
+    )
+    outcome = await _run(functions["working_directory"], "{}", session_state={})
 
     assert outcome.content == "/srv"
-    assert state == {"working_directory": "/srv"}
+    assert state == {}
+    readapted = _functions(change_directory, working_directory)
+    assert (await _run(readapted["working_directory"], "{}")).content == "/home/daytona"
 
 
 @pytest.mark.asyncio
