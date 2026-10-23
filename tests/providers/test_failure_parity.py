@@ -395,6 +395,20 @@ _SDK_AND_PIPELINE = 15
 _PIPELINE = 5
 _STALLED = 2
 
+
+# An early end, a stream that ends before the provider finished the turn, is retried like a dropped connection on
+# every route until the attempt committed. Only on Responses did the Agno-backed runtime do the same; on Claude,
+# Gemini, and Ollama it accepted what had arrived as the finished reply after one request, an empty one when nothing
+# had. A Chat stream has no early end: its end finishes the turn, since OpenAI-compatible servers may omit the finish
+# reason, as on the Agno-backed runtime.
+def _early_ends(before_output: Reply, after_output: Reply) -> list[_Case]:
+    """Return the early end before any output and the early end after visible output of one route's wire."""
+    return [
+        _Case("end_before_output", before_output, ProviderUnavailable, UNAVAILABLE, _PIPELINE, code=INCOMPLETE_STREAM),
+        _Case("end_after_visible_output", after_output, ProviderUnavailable, UNAVAILABLE, 1, code=INCOMPLETE_STREAM),
+    ]
+
+
 _CLAUDE_WEB_SEARCH = {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}
 _CLAUDE_CASES = [
     _Case(
@@ -563,6 +577,8 @@ _CLAUDE_CASES = [
         UNAVAILABLE,
         1,
     ),
+    # The stream ends before message_stop.
+    *_early_ends(_claude_stream(), _claude_stream(*_claude_text(0, _PARTIAL))),
     # Rerunning a tool search or a compaction repeats no work, so their blocks keep the retry budget.
     _Case(
         "event_after_tool_search",
@@ -893,14 +909,6 @@ _RESPONSES_CASES = [
     ),
     _Case("event_invalid_prompt", _responses_stream(_response_error("invalid_prompt")), ProviderError, ERROR, 1),
     _Case("response_failed", _responses_stream(_RESPONSE_FAILED), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
-    _Case(
-        "end_before_completed",
-        _responses_stream(),
-        ProviderUnavailable,
-        UNAVAILABLE,
-        _PIPELINE,
-        code=INCOMPLETE_STREAM,
-    ),
     _Case("reset_before_output", _responses_stream(drop=True), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
     _Case(
         "stall",
@@ -926,15 +934,10 @@ _RESPONSES_CASES = [
         1,
         code="connection_error",
     ),
-    _Case(
-        "end_after_visible_output",
-        _responses_stream(_response_text(_PARTIAL)),
-        ProviderUnavailable,
-        UNAVAILABLE,
-        1,
-        code=INCOMPLETE_STREAM,
-    ),
-    # A retry would run the hosted tool again, so a failure after it started is final, a stall included.
+    # The stream ends before response.completed.
+    *_early_ends(_responses_stream(), _responses_stream(_response_text(_PARTIAL))),
+    # A retry would run the hosted tool again, so a failure after it started is final, a stall included; the
+    # Agno-backed runtime retried a stall once.
     *(
         _Case(
             f"{failure}_after_{tool}",
@@ -950,7 +953,8 @@ _RESPONSES_CASES = [
             ("stall", _then_silent(_responses_stream(started)), STREAM_STALLED),
         )
     ),
-    # Rerunning a tool search or a compaction repeats no work, so their items keep the retry budget.
+    # Rerunning a tool search or a compaction repeats no work, so their items keep the retry budget; the Agno-backed
+    # runtime ended the request at once when an error event followed one.
     *(
         _Case(f"{failure}_after_{name}", reply, ProviderUnavailable, UNAVAILABLE, requests, code=code)
         for name, started in (("tool_search", _TOOL_SEARCH_STARTED), ("compaction", _COMPACTION_STARTED))
@@ -1092,6 +1096,8 @@ _GEMINI_CASES = [
         UNAVAILABLE,
         1,
     ),
+    # The stream ends before a candidate carries its finish reason.
+    *_early_ends(_gemini_stream(_gemini_chunk({"text": ""})), _gemini_stream(_gemini_chunk({"text": _PARTIAL}))),
     # A retry would run Google Search grounding or code execution again, so a failure after either is final, a
     # stall included; the Agno-backed runtime retried a stall.
     *(
@@ -1202,6 +1208,8 @@ _OLLAMA_CASES = [
         UNAVAILABLE,
         1,
     ),
+    # The stream ends before its done chunk.
+    *_early_ends(_ollama_stream(_ollama_chunk()), _ollama_stream(_ollama_chunk(_PARTIAL))),
 ]
 
 # Vertex AI Claude, Bedrock Claude, and Vertex AI Gemini failed exactly as their family's direct route did on the

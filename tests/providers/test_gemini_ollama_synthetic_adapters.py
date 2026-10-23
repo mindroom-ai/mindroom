@@ -409,13 +409,59 @@ async def test_gemini_parses_reasoning_tool_calls_and_usage(tmp_path: Path) -> N
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("finish", "stop"),
-    [("MAX_TOKENS", "output_limit"), ("SAFETY", "content_filter"), ("OTHER", "incomplete"), (None, None)],
+    [("MAX_TOKENS", "output_limit"), ("SAFETY", "content_filter"), ("OTHER", "incomplete")],
 )
-async def test_gemini_stop_reasons(finish: str | None, stop: str | None, tmp_path: Path) -> None:
+async def test_gemini_stop_reasons(finish: str, stop: str, tmp_path: Path) -> None:
     """Gemini finish reasons map to the normalized stop reasons."""
     _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(_gemini_chunk({"text": "x"}, finish=finish)))
 
     assert _completed(events).stop_reason == stop
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("family", "response"),
+    [
+        (GEMINI, gemini_sse(_gemini_chunk({"text": "Hi"}, finish=None, usage=False))),
+        (
+            OLLAMA,
+            ollama_ndjson({"model": "qwen3.8:27b", "done": False, "message": {"role": "assistant", "content": "Hi"}}),
+        ),
+    ],
+    ids=["gemini-without-finish-reason", "ollama-without-done-chunk"],
+)
+async def test_a_stream_the_provider_never_ended_finishes_no_turn(
+    family: dict[str, Any],
+    response: httpx.Response,
+    tmp_path: Path,
+) -> None:
+    """A stream cut off before Gemini's finish reason or Ollama's done chunk yields its output but no finished turn.
+
+    The request pipeline turns the missing turn into its retryable early-end error.
+    """
+    _, events = await run_adapter(family, _request(), tmp_path, response)
+
+    assert events == [TextDelta("Hi")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("family", "reply"),
+    [
+        (GEMINI, _gemini_chunk({"text": "Hi"}, finish=None, usage=False)),
+        (OLLAMA, {"model": "qwen3.8:27b", "done": False, "message": {"role": "assistant", "content": "Hi"}}),
+    ],
+    ids=["gemini", "ollama"],
+)
+async def test_a_whole_reply_finishes_its_turn_without_the_marker_a_stream_ends_with(
+    family: dict[str, Any],
+    reply: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """Only a stream can be cut off, so a reply that arrives in one response body always finishes its turn."""
+    _, events = await run_adapter(family, _request(stream=False), tmp_path, httpx.Response(200, json=reply))
+
+    assert _completed(events).message.content == "Hi"
 
 
 @pytest.mark.asyncio
@@ -563,19 +609,14 @@ async def test_gemini_usage_counts_thinking_as_output_and_keeps_cached_input(tmp
 
 @pytest.mark.asyncio
 async def test_gemini_non_streaming_requests_use_generate_content(tmp_path: Path) -> None:
-    """``stream=False`` sends the route's non-streaming call and still yields the usage and the finished turn."""
+    """``stream=False`` sends the route's non-streaming call and yields only the usage and the finished turn."""
     reply = httpx.Response(200, json=_gemini_chunk({"text": "Whole."}))
 
     request, events = await run_adapter(GEMINI, _request(stream=False), tmp_path, reply)
 
     assert request["url"].endswith(":generateContent")
     completed = _completed(events)
-    assert [type(event).__name__ for event in events] == [
-        "TextDelta",
-        "UsageReported",
-        "UsageReported",
-        "TurnCompleted",
-    ]
+    assert [type(event).__name__ for event in events] == ["UsageReported", "UsageReported", "TurnCompleted"]
     assert completed.message.content == "Whole."
     assert completed.message.metrics.input_tokens == 10
 
@@ -1487,20 +1528,15 @@ async def test_ollama_parses_text_tool_calls_usage_and_length_stops(tmp_path: Pa
         ([_ollama_done("load")], "incomplete"),
         # Servers from before done_reason existed, and some Ollama-compatible ones, end a normal reply without one.
         ([{key: value for key, value in _ollama_done(content="Hi").items() if key != "done_reason"}], "end"),
-        (
-            [{"model": "qwen3.8:27b", "done": False, "message": {"role": "assistant", "content": "Hi"}}],
-            None,
-        ),
     ],
-    ids=["stop", "stop-with-tool-calls", "load", "no-done-reason", "no-done-chunk"],
+    ids=["stop", "stop-with-tool-calls", "load", "no-done-reason"],
 )
-async def test_ollama_stop_reasons(chunks: list[dict[str, Any]], stop: str | None, tmp_path: Path) -> None:
-    """Done reasons map to stop reasons; a stream that ends without its ``done`` chunk has neither one nor usage."""
+async def test_ollama_stop_reasons(chunks: list[dict[str, Any]], stop: str, tmp_path: Path) -> None:
+    """Done reasons map to stop reasons, and the done chunk reports the usage."""
     _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER]), tmp_path, ollama_ndjson(*chunks))
 
     assert _completed(events).stop_reason == stop
-    # Usage comes with the done chunk only.
-    assert any(isinstance(event, UsageReported) for event in events) == (stop is not None)
+    assert any(isinstance(event, UsageReported) for event in events)
 
 
 @pytest.mark.asyncio
@@ -1621,6 +1657,20 @@ async def test_synthetic_waits_for_each_chunk_at_the_configured_rate(
     _completed([event async for event in provider.stream(_request())])
 
     assert sleeps == [2.0, 2.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_a_whole_synthetic_reply_yields_only_its_finished_turn(tmp_path: Path) -> None:
+    """``stream=False`` gets the planned text and shell call on the finished turn, without deltas, as on every route."""
+    config = _synthetic_config(chars_per_second=0, tool_call_probability=1.0)
+    provider = build_synthetic_provider(config, runtime_paths_for(tmp_path))
+    shell = ToolSpec(name="run_shell_command", description="Run a shell command.", parameters={"type": "object"})
+
+    [completed] = [event async for event in provider.stream(_request(tools=[shell], stream=False))]
+
+    assert isinstance(completed, TurnCompleted)
+    assert completed.message.content
+    assert [call["function"]["name"] for call in completed.message.tool_calls or []] == ["run_shell_command"]
 
 
 @pytest.mark.parametrize(

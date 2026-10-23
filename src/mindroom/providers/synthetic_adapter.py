@@ -125,7 +125,8 @@ class SyntheticProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Stream the planned text at the configured rate, then the shell call if this turn makes one.
 
-        After the shell call's result, the next request streams the rest of the same response.
+        After the shell call's result, the next request streams the rest of the same response. A request with
+        ``stream=False`` waits as long and yields only the finished turn.
         """
         settings = self.settings
         shell_available = request.tool_choice != "none" and any(tool.name == SHELL_TOOL for tool in request.tools)
@@ -147,10 +148,12 @@ class SyntheticProvider:
                 await asyncio.sleep(len(chunk) / settings.chars_per_second)
             if first_text_at is None:
                 first_text_at = time.monotonic()
-            yield TextDelta(chunk)
+            if request.stream:
+                yield TextDelta(chunk)
         tool_calls = [] if continuation or plan.tool_call_id is None else [shell_call(plan.tool_call_id)]
-        for call in tool_calls:
-            yield ToolCallReady(call)
+        if request.stream:
+            for call in tool_calls:
+                yield ToolCallReady(call)
         message = finished_assistant_message(
             self.identity,
             content=content or None,

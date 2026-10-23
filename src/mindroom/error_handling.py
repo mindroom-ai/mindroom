@@ -18,6 +18,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.logging_config import get_logger
+from mindroom.providers.errors import classify_provider_error
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -96,15 +97,13 @@ def _structured_provider_error(error_str: str) -> tuple[str, str] | None:
     return error_type.casefold(), message.casefold()
 
 
-def _names_provider_overload(error_str: str) -> bool:
-    """Return whether an untyped error's text holds a provider payload that reports an overload."""
+def _names_transient_failure(error_str: str) -> bool:
+    """Return whether an untyped error's text holds a provider payload the provider classifier calls transient."""
     structured_error = _structured_provider_error(error_str)
     if structured_error is None:
         return False
     error_type, message = structured_error
-    return error_type in {"overloaded", "overloaded_error"} or (
-        error_type == "api_error" and "internal server error" in message
-    )
+    return isinstance(classify_provider_error(message, provider="unknown", error_type=error_type), ProviderUnavailable)
 
 
 def _missing_provider_key_message(runtime_paths: RuntimePaths | None) -> str:
@@ -188,7 +187,7 @@ def _untyped_error_message(error: Exception, safe_error: str, runtime_paths: Run
         return f"❌ Authentication failed{provider_hint}: {safe_error}"
     if any(x in error_str for x in ["rate", "429", "quota"]):
         return _RATE_LIMITED
-    if _names_provider_overload(error_str):
+    if _names_transient_failure(error_str):
         return _PROVIDER_UNAVAILABLE
     if "timeout" in error_str:
         return "⏰ Request timed out. Please try again."

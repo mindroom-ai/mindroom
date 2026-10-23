@@ -133,33 +133,40 @@ class GeminiProvider:
                             first_output_at = output_started(first_output_at, event)
                             yield event
             else:
-                events = read_chunk(reply, await client.aio.models.generate_content(**call), whole_response=True)
+                whole = read_chunk(reply, await client.aio.models.generate_content(**call), whole_response=True)
                 first_output_at = time.monotonic()
-                for event in events:
-                    yield event
+                # A reply that arrives whole yields no deltas; its usage still comes first, so a malformed call
+                # settles it.
+                for event in whole:
+                    if isinstance(event, UsageReported):
+                        yield event
         except ProviderError:
             # Media and chunk failures arrive normalized.
             raise
         except Exception as error:
             raise _provider_error(error, provider=self.identity.provider_name) from error
+        if request.stream and not reply.finished:
+            # The stream ended before Gemini ended the reply, so the turn did not finish.
+            return
+        for event in self._finished_turn(reply, started=started, first_output_at=first_output_at):
+            yield event
+
+    def _finished_turn(self, reply: GeminiReply, *, started: float, first_output_at: float | None) -> list[StreamEvent]:
+        """Return the final usage report and the finished turn of a reply Gemini ended, or raise its malformed call."""
         if (malformed := malformed_tool_call_error(reply, provider=self.identity.provider_name)) is not None:
             raise malformed
-        provider_data: dict[str, Any] = {}
-        if reply.thought_signature is not None:
-            provider_data["thought_signature"] = reply.thought_signature
         message = finished_assistant_message(
             self.identity,
             content=reply.content or None,
             reasoning=reply.reasoning or None,
             tool_calls=reply.tool_calls,
-            provider_data=provider_data,
+            provider_data={} if reply.thought_signature is None else {"thought_signature": reply.thought_signature},
             usage=reply.usage,
             started=started,
             first_output_at=first_output_at,
         )
-        if reply.usage is not None:
-            yield UsageReported(message.metrics)
-        yield TurnCompleted(message=message, stop_reason=stop_reason(reply))
+        usage = [] if reply.usage is None else [UsageReported(message.metrics)]
+        return [*usage, TurnCompleted(message=message, stop_reason=stop_reason(reply))]
 
     def _request_config(
         self,

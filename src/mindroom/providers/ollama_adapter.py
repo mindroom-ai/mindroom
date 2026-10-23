@@ -131,6 +131,9 @@ class OllamaProvider:
                 _read_whole_reply(reply, cast("ChatResponse", response))
         except Exception as error:
             raise _provider_error(error, provider=self.identity.provider_name) from error
+        if request.stream and not reply.done:
+            # The stream ended before its done chunk, so the turn did not finish.
+            return
         message = finished_assistant_message(
             self.identity,
             content=reply.content or None,

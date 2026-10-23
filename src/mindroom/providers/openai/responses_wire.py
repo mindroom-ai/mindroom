@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel
 
-from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError, ProviderUnavailable
 from mindroom.llm.provider import (
     ReasoningDelta,
     StopReason,
@@ -46,6 +45,7 @@ if TYPE_CHECKING:
 
     from openai.types.responses import Response, ResponseStreamEvent, ResponseUsage
 
+    from mindroom.llm.errors import ProviderError
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, NativeCompactionReplay, StreamEvent, ToolSpec
     from mindroom.providers.openai.settings import ResponsesSettings
@@ -535,11 +535,6 @@ class ResponsesStream:
             native_compaction=self.native_compaction,
         )
         self.parts.status = response.status
-
-    def incomplete_error(self) -> ProviderError:
-        """Return the error for a stream that ended without ``response.completed``, retried like a dropped connection."""
-        message = "OpenAI Responses stream ended without response.completed"
-        return ProviderUnavailable(message, provider=self.wire.provider_name, code=INCOMPLETE_STREAM)
 
     def finish(self) -> ResponsesTurnParts:
         """Return the finished turn after ``response.completed``."""

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.attachments.storage import register_bytes_attachment
-from mindroom.providers.names import canonical_provider
+from mindroom.providers.registry import model_capabilities
 from mindroom.tool_system.agno_toolkits import ToolResult
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 
@@ -56,11 +56,12 @@ def _retain_tool_media(result: object) -> object:  # noqa: PLR0911
 
 
 def _active_model_omits_images(context: ToolRuntimeContext) -> bool:
-    """Return whether the active model's route never sends images; only Cerebras takes no media at all."""
-    if context.active_model_name is None:
+    """Return whether the active model's route never sends images, as the route's ``omitted_media`` says."""
+    config = context.current_config
+    model_name = context.active_model_name
+    if model_name is None or model_name not in config.models:
         return False
-    model_config = context.current_config.models.get(context.active_model_name)
-    return model_config is not None and canonical_provider(model_config.provider) == "cerebras"
+    return "image" in model_capabilities(config, context.runtime_paths, model_name).omitted_media
 
 
 def _image_marked_unsupported(result: object, context: ToolRuntimeContext) -> object:

@@ -70,10 +70,10 @@ async def test_stream_events_match_the_finished_message(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Deltas add up to the finished message, and usage is final once, as the message's own metrics.
+    """A stream's deltas add up to the finished message, and usage is final once, as the message's own metrics.
 
-    A whole Ollama reply yields no deltas; Gemini reads a whole reply as one chunk, so its deltas come too. The chunk
-    that carries the usage reports it as a partial report first, which the final report replaces.
+    A whole reply yields no deltas. The chunk that carries the usage reports it as a partial report first, which the
+    final report replaces.
     """
     hide_provider_environment(monkeypatch)
 
@@ -87,7 +87,7 @@ async def test_stream_events_match_the_finished_message(
     calls = [event.call for event in result.events if isinstance(event, ToolCallReady)]
     reports = [event for event in result.events if isinstance(event, UsageReported)]
     final = [report.usage for report in reports if report.final]
-    if golden.data["input"]["stream"] or golden.family != "ollama":
+    if golden.data["input"]["stream"]:
         assert text == (message.content or "")
         assert reasoning == (message.reasoning_content or "")
         assert calls == (message.tool_calls or [])

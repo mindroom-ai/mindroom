@@ -557,6 +557,12 @@ class GeminiReply:
     thought_signature: str | None = None
     usage: MessageMetrics | None = None
     finish_reason: str | None = None
+    prompt_blocked: bool = False
+
+    @property
+    def finished(self) -> bool:
+        """Whether Gemini ended the reply: a candidate carried its finish reason, or the prompt was blocked."""
+        return self.finish_reason is not None or self.prompt_blocked
 
 
 def read_chunk(
@@ -575,6 +581,9 @@ def read_chunk(
     at work reports that hosted tool's start.
     """
     if not chunk.candidates:
+        if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason is not None:
+            # A blocked prompt gets feedback instead of a candidate, which ends the reply.
+            reply.prompt_blocked = True
         if not whole_response or chunk.usage_metadata is None:
             return []
         reply.usage = _usage_metrics(chunk.usage_metadata)

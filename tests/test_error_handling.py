@@ -24,6 +24,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
+from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.errors import missing_api_key_error
 
 _MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
@@ -221,6 +222,31 @@ def test_internal_provider_error_is_user_friendly() -> None:
 
     assert "Model provider temporarily unavailable after automatic retries" in message
     assert "req_secret" not in message
+
+
+@pytest.mark.parametrize(
+    ("error_type", "message", "transient"),
+    [
+        ("api_error", "Unexpected upstream failure", True),
+        ("server_error", "The server had an error.", True),
+        ("timeout_error", "Request timed out", True),
+        ("invalid_request_error", "messages: bad block", False),
+    ],
+)
+def test_an_untyped_provider_payload_is_unavailable_exactly_when_the_classifier_says_transient(
+    error_type: str,
+    message: str,
+    *,
+    transient: bool,
+) -> None:
+    """An untyped error's provider payload reads as temporary unavailability exactly when its typed twin would."""
+    payload = {"type": "error", "error": {"type": error_type, "message": message}, "request_id": "req_secret"}
+    typed = classify_provider_error(message, provider="anthropic", error_type=error_type)
+
+    reply = get_user_friendly_error_message(Exception(repr(payload)))
+
+    assert isinstance(typed, ProviderUnavailable) is transient
+    assert reply.startswith("⚠️ Model provider temporarily unavailable" if transient else "⚠️ Error: ")
 
 
 def test_json_provider_error_is_case_insensitive() -> None:
