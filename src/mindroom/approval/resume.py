@@ -9,14 +9,14 @@ after its delegations calls ``resume_from_session`` with its own plan.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.run import resume_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
-from mindroom.history.native import restore_native_history
+from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
 from mindroom.llm.events import RunFinished
@@ -214,7 +214,6 @@ class ResumeRunner:
         """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` as ``resume_agent``'s does."""
         build = self.build
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
-        native_compaction = native.native_compaction if native is not None else None
         if decisions.approved or decisions.denied:
             add_approval_receipt_reader(paused.run_id)
         events = resume_from_session(
@@ -228,11 +227,7 @@ class ResumeRunner:
             user_id=self.user_id,
             hooks=self._hooks,
             persist=persist_to(self.store, self.session),
-            request_template=replace(
-                build.request_template,
-                native_compaction=native_compaction,
-                portable_replay=native.portable_replay if native is not None else False,
-            ),
+            request_template=with_native_history(build.request_template, native),
         )
         return with_resumed_turn_log_context(events)
 

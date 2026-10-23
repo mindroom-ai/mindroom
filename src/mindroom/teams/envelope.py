@@ -33,6 +33,7 @@ from mindroom.execution_preparation import (
     render_prepared_team_messages_text,
 )
 from mindroom.history.mid_turn_compaction import without_fold_records
+from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import open_bound_scope_session_context
@@ -380,7 +381,6 @@ def _leader_run(
 ) -> _LeaderRun:
     """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
     history = prepared.prepared_history
-    native = history.native_history
     return _LeaderRun(
         spec=built.spec,
         storage=storage,
@@ -404,12 +404,7 @@ def _leader_run(
             tool_middleware=built.leader_middleware,
             jobs=built.leader_jobs,
         ),
-        request_template=ModelRequest(
-            messages=(),
-            stream=stream,
-            native_compaction=native.native_compaction if native is not None else None,
-            portable_replay=native.portable_replay if native is not None else False,
-        ),
+        request_template=with_native_history(ModelRequest(messages=(), stream=stream), history.native_history),
     )
 
 

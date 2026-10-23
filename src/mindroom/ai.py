@@ -40,6 +40,7 @@ from mindroom.history.interrupted_replay import (
     tool_execution_call_id,
 )
 from mindroom.history.mid_turn_compaction import without_fold_records
+from mindroom.history.native import with_native_history
 from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
@@ -1427,12 +1428,7 @@ async def _prepare_agent_run_context(
         note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
     build = prepared_run.build
-    native = prepared_run.prepared_history.native_history
-    request_template = replace(
-        build.request_template,
-        native_compaction=native.native_compaction if native is not None else None,
-        portable_replay=native.portable_replay if native is not None else False,
-    )
+    request_template = with_native_history(build.request_template, prepared_run.prepared_history.native_history)
     run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
     metadata = build_matrix_run_metadata(
         ctx.reply_to_event_id,

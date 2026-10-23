@@ -22,7 +22,7 @@ from mindroom.approval.tool_owners import require_original_toolkit, required_app
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.native import restore_native_history
+from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
 from mindroom.history.session_context import open_resolved_scope_session_context
@@ -518,11 +518,7 @@ async def continue_paused_team_run(
                     tool_middleware=built.leader_middleware,
                     jobs=built.leader_jobs,
                 ),
-                request_template=ModelRequest(
-                    messages=(),
-                    native_compaction=native.native_compaction if native is not None else None,
-                    portable_replay=native.portable_replay if native is not None else False,
-                ),
+                request_template=with_native_history(ModelRequest(messages=()), native),
                 settings=settings,
                 plan=plan,
                 user_id=user_id,

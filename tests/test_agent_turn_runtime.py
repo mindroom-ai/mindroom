@@ -27,6 +27,7 @@ from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.config.models import CompactionConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
@@ -49,7 +50,14 @@ from mindroom.hooks import (
 from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, RateLimited
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, TextDelta, ToolCallReady, TurnCompleted, UsageReported
+from mindroom.llm.provider import (
+    Capabilities,
+    NativeCompactionReplay,
+    TextDelta,
+    ToolCallReady,
+    TurnCompleted,
+    UsageReported,
+)
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -956,6 +964,41 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     assert hooks.on_loop_end is not None
     assert captured["request_template"].native_compaction is None
     assert captured["request_template"].stream is True
+
+
+@dataclass(frozen=True)
+class _NativeRoute:
+    """A route that compacts natively at the threshold it is given."""
+
+    def native_compaction_settings(
+        self,
+        *,
+        threshold: int | None,
+        history_generation: str,
+        allow_authored: bool,
+    ) -> NativeCompactionReplay | None:
+        del history_generation, allow_authored
+        return None if threshold is None else NativeCompactionReplay(route="route-a", threshold=threshold)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_on_a_natively_compacting_route_sends_the_native_history_its_preparation_chose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply's request compacts on the provider at the configured threshold and replays its history explicitly."""
+    reply = _reply(tmp_path, monkeypatch, [answer("ok")])
+    reply.model.capabilities = Capabilities(native_compaction=True)
+    reply.model.native_history_route = _NativeRoute()
+    reply.config.models["default"].context_window = 200_000
+    reply.config.defaults.compaction = CompactionConfig(threshold_tokens=30_000)
+
+    await _stream(reply)
+
+    [request] = reply.model.requests
+    assert request.native_compaction == NativeCompactionReplay(route="route-a", threshold=30_000)
+    assert request.portable_replay is True
 
 
 @pytest.mark.asyncio
