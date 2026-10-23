@@ -33,7 +33,6 @@ from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import ContentDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ReasoningDelta
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
@@ -45,19 +44,12 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.provider import ModelRequest, ToolSpec
+    from mindroom.llm.provider import ModelRequest, ReasoningDelta, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.teams.delegate_tools import MemberRunner
     from mindroom.teams.spec import TeamMember, TeamSpec
 
 logger = get_logger(__name__)
-
-# Agno's texts for the leader after its members' approvals were resolved.
-MEMBER_RESULTS_HEADING = "Member results after human-in-the-loop resolution:"
-MEMBER_RESULT_LINE = "[{name}]: {content}"
-MEMBER_TASK_COMPLETED = "Task completed"
-
-type MemberLoopEvent = ContentDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +59,7 @@ class MemberEvent:
     member_id: str
     member_name: str
     run_id: str
-    event: MemberLoopEvent
+    event: ContentDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted
 
 
 type TeamRunEvent = RunEvent | MemberEvent
@@ -185,9 +177,8 @@ def continue_team(
                 if resumed.status is RunStatus.paused:
                     propagate_member_pause(record, plan.member, resumed)
                 else:
-                    content = resumed.handover_content or MEMBER_TASK_COMPLETED
-                    results.append(MEMBER_RESULT_LINE.format(name=plan.member.spec.name, content=content))
-            if plans and not any(not r.is_resolved() for r in record.requirements or ()):
+                    results.append(f"[{plan.member.spec.name}]: {resumed.handover_content or 'Task completed'}")
+            if plans and all(r.is_resolved() for r in record.requirements or ()):
                 _answer_delegations(record, messages, [plan.member for plan in plans], results)
 
         await _forward(
@@ -377,7 +368,7 @@ def _answer_delegations(
     resume, no longer reaches the leader; Agno 3.0.9 lost it the same way, and the request-body parity contract keeps
     that.
     """
-    text = "\n".join([MEMBER_RESULTS_HEADING, *results])
+    text = "\n".join(["Member results after human-in-the-loop resolution:", *results])
     answered: set[str | None] = set()
     for tool in record.tools or ():
         if any(waited_on_member(tool, member) for member in resumed):
@@ -533,12 +524,8 @@ async def _team_stream(produce: Callable[[Emit], Awaitable[None]]) -> AsyncItera
 
 
 __all__ = [
-    "MEMBER_RESULTS_HEADING",
-    "MEMBER_RESULT_LINE",
-    "MEMBER_TASK_COMPLETED",
     "Emit",
     "MemberEvent",
-    "MemberLoopEvent",
     "TeamCallKey",
     "TeamRunEvent",
     "continue_team",
