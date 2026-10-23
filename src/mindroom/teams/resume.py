@@ -578,7 +578,7 @@ async def continue_paused_team_run(
             if paused is not None:
                 return continued_team_pause(presentation, paused)
             if continued.status is not RunStatus.completed:
-                raise RuntimeError(str(continued.content or "Team continuation did not complete"))
+                raise RuntimeError(str(continued.handover_content or "Team continuation did not complete"))
             if tool_trace_collector is not None and show_tool_calls:
                 tool_trace_collector.extend(presentation.tool_trace)
             # A resume whose document stays empty, every run's text blank, renders its finished runs, as Agno's did.

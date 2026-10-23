@@ -26,6 +26,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics
+from mindroom.providers.assistant_turn import stamp_model
 from tests.agno_parity.prompt_scenarios import message_dict
 
 if TYPE_CHECKING:
@@ -36,7 +37,7 @@ IDENTITY = ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic", provider_
 
 @dataclass
 class _RecordingProvider:
-    """Answer every request with one canned turn and keep the requests."""
+    """Answer every request with one canned turn, stamped as an adapter stamps it, and keep the requests."""
 
     answer: str
     capabilities: Capabilities = field(default_factory=Capabilities)
@@ -54,7 +55,9 @@ class _RecordingProvider:
             return
         usage = MessageMetrics(input_tokens=12, output_tokens=5, total_tokens=17)
         yield UsageReported(usage)
-        yield TurnCompleted(message=Message(role="assistant", content=self.answer, metrics=usage), stop_reason="end")
+        message = Message(role="assistant", content=self.answer, metrics=usage)
+        stamp_model(message, self.identity)
+        yield TurnCompleted(message=message, stop_reason="end")
 
 
 class _Verdict(BaseModel):

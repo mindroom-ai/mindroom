@@ -232,13 +232,15 @@ async def _append_response_events(
                 ),
             )
 
-    if response.content is not None:
+    # What the attempt hands over, as its parent reads it: a failed child's reason, not the text it wrote first.
+    content = response.handover_content
+    if content is not None:
         await owner.append_event(
             handle,
             DelegationEvent(
                 kind="output",
-                event_id=f"output:{run_id}:{_value_digest(response.content)}",
-                data={"content": response.content},
+                event_id=f"output:{run_id}:{_value_digest(content)}",
+                data={"content": content},
             ),
         )
     usage = child_response_usage(response)

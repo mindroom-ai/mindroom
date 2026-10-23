@@ -51,7 +51,7 @@ class CompactContextTools(Toolkit):
         if session_id is None:
             return "Error: No active session available. Cannot determine session."
 
-        result = request_compaction_before_next_reply(
+        return request_compaction_before_next_reply(
             scope=scope,
             agent_name=self._agent_name,
             session_id=session_id,
@@ -63,4 +63,3 @@ class CompactContextTools(Toolkit):
             session_state=run_context.session_state if run_context is not None else None,
             record_pending_scope_in_session_state=run_context is not None,
         )
-        return result.message

@@ -40,6 +40,7 @@ from mindroom.history.summary_message import (
 )
 from mindroom.history.summary_rows import Segment, folded_tool_call_ids
 from mindroom.history.types import HistoryScope
+from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
@@ -489,11 +490,12 @@ def _tool_tokens(binding: _MidTurnCompaction, tools: Sequence[ToolSpec], message
 def _thinking_tokens(messages: Sequence[Message]) -> int:
     """Estimate this turn's thinking, which providers resend inside a tool loop but history estimates skip.
 
-    Encrypted or omitted thinking shows no text, so a response's reported output beyond its visible part counts too.
+    Each of the turn's own model messages (``is_own_model_message``) counts. Encrypted or omitted thinking shows no
+    text, so a response's reported output beyond its visible part counts too.
     """
     total = 0
     for message in messages:
-        if message.from_history or message.role != "assistant":
+        if not is_own_model_message(message):
             continue
         text = estimate_text_tokens((message.reasoning_content or "") + (message.redacted_reasoning_content or ""))
         visible = estimate_request_messages_tokens([message], replay_model=None)

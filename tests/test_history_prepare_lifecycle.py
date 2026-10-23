@@ -53,6 +53,7 @@ from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, NativeCompactionReplay
 from mindroom.llm.usage import MessageMetrics
+from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import prepare_history_for_run_for_test, seed_session
@@ -1918,22 +1919,18 @@ def _reported_run(
     created_at: int = _SUMMARY_WRITTEN_AT + 1,
     images: list[Image] | None = None,
 ) -> RunRecord:
-    """Return a completed run whose answer carries the request size its provider reported.
+    """Return a completed run whose answer carries the request size its provider reported and the model's stamp.
 
     By default the answer's request starts the second after any summary a test writes.
     """
-    run = _completed_run(
-        run_id,
-        messages=[
-            Message(role="user", content="u" * 2_000, images=images),
-            Message(
-                role="assistant",
-                content="a" * 2_000,
-                metrics=MessageMetrics(input_tokens=input_tokens),
-                created_at=created_at,
-            ),
-        ],
+    answer = Message(
+        role="assistant",
+        content="a" * 2_000,
+        metrics=MessageMetrics(input_tokens=input_tokens),
+        created_at=created_at,
     )
+    stamp_model(answer, ModelIdentity(id=model, provider="fake", provider_name="fake"))
+    run = _completed_run(run_id, messages=[Message(role="user", content="u" * 2_000, images=images), answer])
     run.model = model
     run.model_provider = "fake"
     return run

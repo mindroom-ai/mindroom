@@ -566,7 +566,7 @@ async def test_the_member_that_posts_an_ad_hoc_teams_replies_hears_when_its_jobs
                 config=config,
                 runtime_paths=runtime_paths,
                 model_name="default",
-            ).new_hooks()
+            ).hooks("member-run")
             for build in members.builds
         }
         await start_job(runtime, "ended", tool_name="report", depth=0, adapter={}, owner=identity, operation=operation)

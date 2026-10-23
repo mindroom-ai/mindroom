@@ -29,6 +29,8 @@ class Utterance:
     """One message of a stored turn: who said it and what, before redaction or clipping."""
 
     # `said` is a message in a prompt, `reply` the run's agent, `runtime` a prompt MindRoom wrote, `tool_result` a tool's.
+    # A `reply` names who spoke, not which model answered: an earlier reply of the agent that the turn's input carried,
+    # which the turn stores because its scope had not, is a `reply` too.
     kind: Literal["said", "reply", "runtime", "tool_result"]
     # The Matrix ID behind a `said` message; None for the agent, MindRoom, or a tool.
     sender: str | None

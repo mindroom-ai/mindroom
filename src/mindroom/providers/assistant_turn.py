@@ -1,8 +1,8 @@
 """What every adapter does to finish a turn: record the answering model and its timings.
 
-The ``mindroom_model`` provenance key is persisted with every assistant message a model answered, and usage
-accounting and a run's own model messages read it. ``stamp_model`` is its one writer: an adapter stamps the turn it
-finishes, and the loop the usage message it keeps for a request cut off before its turn was taken.
+Every assistant message a model answered is stored with its provenance (``llm/messages.py`` ``model_provenance``),
+which usage accounting and a run's own model messages read; ``stamp_model`` is how an adapter records it on the turn
+it finishes.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message
+from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady
 
 if TYPE_CHECKING:
@@ -28,10 +28,10 @@ __all__ = [
 
 
 def stamp_model(message: Message, identity: ModelIdentity) -> None:
-    """Record on ``message`` which model answered it, as ``MODEL_PROVENANCE_KEY`` in its provider data."""
+    """Record on ``message`` which model answered it (``model_provenance``), keeping the rest of its provider data."""
     message.provider_data = {
         **(message.provider_data or {}),
-        MODEL_PROVENANCE_KEY: {"id": identity.id, "provider": identity.provider_name},
+        **model_provenance(identity.id, identity.provider_name),
     }
 
 

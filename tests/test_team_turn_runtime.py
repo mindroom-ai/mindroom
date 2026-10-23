@@ -64,6 +64,7 @@ from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.scripted_agent_helpers import registered_toolkit
+from tests.team_runtime.squad import member as squad_member
 from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
@@ -1357,12 +1358,36 @@ async def test_a_member_keeps_its_hooks_across_its_delegation_continuation(
     )
 
 
+def test_a_copy_of_a_member_keeps_the_hooks_of_its_runs() -> None:
+    """A member is a frozen spec that holds its runs' hooks, so ``replace`` must carry them over.
+
+    A copy continues a run with the hooks the run started with, and a new run gets one set whichever copy runs it.
+    """
+    built: list[LoopHooks] = []
+
+    def new_hooks() -> LoopHooks:
+        built.append(LoopHooks())
+        return built[-1]
+
+    writer = replace(squad_member("writer", "Writer", ScriptedModel([])), new_hooks=new_hooks)
+    first = writer.hooks("run-1")
+    copy = replace(writer, role="Edited role.")
+
+    assert copy.hooks("run-1") is first
+    assert copy.hooks("run-2") is writer.hooks("run-2")
+    assert len(built) == 2
+
+
 @pytest.mark.asyncio
 async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_team_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Members number their calls independently, so two can delegate under one call id; each child runs once."""
+    """Members number their calls independently, so two can delegate under one call id; each child runs once.
+
+    The members run concurrently, so either child may ask the shared helper first; each member's call finishes with
+    the answer of the child its delegation state records for it.
+    """
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -1383,15 +1408,6 @@ async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_t
     chunks = await team.stream()
 
     assert len(team.models["helper-model"].requests) == 2
-    # The driver's events about each member's call land in that member's slot, each call finished with its child.
-    assert [
-        (entry.type, entry.scope_key, (entry.result_preview or "").partition("\n")[0])
-        for entry in chunks[-1].tool_trace or []
-        if entry.tool_name == "run_subagent"
-    ] == [
-        ("tool_call_completed", "agent:writer", "Helper one."),
-        ("tool_call_completed", "agent:checker", "Helper two."),
-    ]
     record, members = team.stored_runs()
     assert (record.status, record.content) == (RunStatus.completed, "Consensus.")
     assert sorted((member.agent_id or "", member.status) for member in members) == [
@@ -1402,6 +1418,22 @@ async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_t
     assert sorted((child.caller_agent_name, child.status) for child in state.children) == [
         ("checker", "completed"),
         ("writer", "completed"),
+    ]
+    answers: dict[str, str] = {}
+    for child in state.children:
+        identity = child_execution_identity(child)
+        helper_run = create_session_storage("helper", team.config, team.runtime_paths, identity).get_run(child.run_id)
+        assert helper_run is not None
+        answers[f"agent:{child.caller_agent_name}"] = str(helper_run.content)
+    assert sorted(answers.values()) == ["Helper one.", "Helper two."]
+    # The driver's events about each member's call land in that member's slot, each call finished with its child.
+    assert sorted(
+        (entry.scope_key or "", entry.type, (entry.result_preview or "").partition("\n")[0])
+        for entry in chunks[-1].tool_trace or []
+        if entry.tool_name == "run_subagent"
+    ) == [
+        ("agent:checker", "tool_call_completed", answers["agent:checker"]),
+        ("agent:writer", "tool_call_completed", answers["agent:writer"]),
     ]
 
 

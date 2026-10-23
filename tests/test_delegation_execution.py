@@ -128,6 +128,11 @@ def _record_files(tmp_path: Path) -> list[dict[str, object]]:
     ]
 
 
+def _record_events(tmp_path: Path) -> list[dict[str, object]]:
+    [path] = tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/events.jsonl")
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
 def _parent_record(config: Config, paths: RuntimePaths, identity: ToolExecutionIdentity, run_id: str) -> RunRecord:
     record = create_session_storage("leader", config, paths, identity).get_run(run_id)
     assert isinstance(record, RunRecord)
@@ -450,7 +455,7 @@ async def test_a_fresh_child_s_provider_failure_reaches_its_parent_as_the_redact
     *,
     child_wrote_text: bool,
 ) -> None:
-    """The parent reads why its fresh child failed, credentials redacted, even when the child wrote text before failing."""
+    """The parent and the child's audit record read why the child failed, credentials redacted, even when it wrote text."""
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=())
     identity = _leader_identity()
@@ -479,6 +484,10 @@ async def test_a_fresh_child_s_provider_failure_reaches_its_parent_as_the_redact
     assert record["status"] == "failed"
     assert str(record["error"]).startswith("provider connection lost: api_key=")
     assert "example-secret" not in json.dumps(record)
+    events = _record_events(tmp_path)
+    assert "example-secret" not in json.dumps(events)
+    *_, output = (event for event in events if event["kind"] == "output")
+    assert output["data"] == {"content": record["error"]}
 
 
 @pytest.mark.asyncio
