@@ -146,21 +146,15 @@ class OllamaProvider:
         yield TurnCompleted(message=message, stop_reason=_stop_reason(reply))
 
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
-        """Return the chat parameters of one request, in the order Agno's Ollama built them.
-
-        Agno's Ollama model had no temperature field, so a request's temperature override, such as a thread
-        summary's, never replaced the sampling the model authors in ``options``.
-        """
+        """Return the chat parameters of one request, in the order Agno's Ollama built them."""
         settings = self.settings
-        kwargs: dict[str, Any] = {
-            key: value
-            for key, value in (
-                ("format", settings.format),
-                ("options", settings.options or None),
-                ("keep_alive", settings.keep_alive),
-            )
-            if value is not None
-        }
+        # TODO(simplify): a request's temperature override, such as a thread summary's, is ignored, as Agno's Ollama
+        # had no temperature field. Send it as ``options.temperature``, as other routes apply theirs. Models would
+        # notice (#3075).
+        authored = {"format": settings.format, "options": settings.options or None, "keep_alive": settings.keep_alive}
+        kwargs: dict[str, Any] = {key: value for key, value in authored.items() if value is not None}
+        # TODO(simplify): ``tool_choice: "none"`` still sends the tools, so the model can call them; only a decision
+        # request drops them. Drop the tools whenever ``tool_choice`` is "none". Models would notice (#3075).
         if tools := _format_tools(request.tools):
             kwargs["tools"] = tools
         kwargs.update(settings.request_params or {})
@@ -204,6 +198,9 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 
 def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
     """Return Ollama tool definitions sorted by name; a tool without a description sends none, as Agno's did."""
+    # TODO(simplify): the SDK's tool model keeps only a parameter's type, items, description, and enum, so an
+    # ``anyOf`` parameter such as ``background_after`` reaches the model without a type. Send such a parameter
+    # with its type. Models would notice (#3075).
     return [
         {
             "type": "function",
