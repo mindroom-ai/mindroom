@@ -110,7 +110,7 @@ def identify_approval_tools(
     owners = {
         requirement.tool_execution.tool_call_id: slots[member_slot_id(slots, requirement.member_agent_id)]
         for requirement in paused.requirements
-        if requirement.tool_execution is not None and requirement.member_agent_id
+        if requirement.member_agent_id
     }
     identified: list[tuple[ToolExecution, str, str, str]] = []
     for tool in paused.tools:
@@ -142,7 +142,7 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
     requirements_by_call_id = {
         requirement.tool_execution.tool_call_id: requirement
         for requirement in paused.requirements
-        if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
+        if requirement.tool_execution.tool_call_id
     }
     is_team_presentation = paused.response_presentation_state.get("kind") == "team_stream"
     config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
@@ -373,7 +373,7 @@ class ApprovalResponseCoordinator:
         pending_text: str,
         reply_pause: _ReplyPause,
     ) -> _ApprovalPausePresentation:
-        """Replace one claim with Agno's next exact pause generation.
+        """Replace one claim with the run's next exact pause generation.
 
         ``reply_pause`` records the advance with the reply's pause row and
         returns the advanced continuation and whether its pause row reached Matrix.
@@ -517,7 +517,7 @@ class ApprovalResponseCoordinator:
         *,
         recover: bool = False,
     ) -> MatrixDelivery | None:
-        """Return FINAL debt produced by a completed Agno continuation, not failure settlement."""
+        """Return FINAL debt produced by a completed continuation, not failure settlement."""
         delivery = await self.final_delivery(continuation, recover=recover)
         if delivery is None or delivery.permanently_failed:
             return None
