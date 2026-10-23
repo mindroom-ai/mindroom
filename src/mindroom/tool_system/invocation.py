@@ -313,7 +313,7 @@ async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], con
     if inspect.iscoroutinefunction(entrypoint) or inspect.isasyncgenfunction(entrypoint):
         result = entrypoint(**kwargs)
     else:
-        result = await run_sync_tool_entrypoint(partial(_invoke_and_drain_sync, entrypoint, kwargs), {})
+        result = await run_sync_tool_entrypoint(partial(_invoke_and_drain_sync, entrypoint, kwargs))
     if inspect.isawaitable(result):
         result = await result
     if isinstance(result, AsyncIterator):

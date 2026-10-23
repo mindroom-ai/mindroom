@@ -364,17 +364,14 @@ def _format_declined_result(tool_name: str, reason: str) -> str:
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
 
 
-async def run_sync_tool_entrypoint(
-    entrypoint: Callable[..., _ToolHookResult],
-    arguments: dict[str, Any],
-) -> _ToolHookResult:
-    """Run one synchronous tool entrypoint off the event loop, retained by any completion owner."""
+async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _ToolHookResult:
+    """Run one synchronous tool call off the event loop, retained by any completion owner."""
     tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
 
     def invoke() -> _ToolHookResult:
         if tracker is not None and not tracker._claim_start():
             raise asyncio.CancelledError
-        return entrypoint(**arguments)
+        return call()
 
     async def offload() -> _ToolHookResult:
         executor = tracker.executor if tracker is not None else None
@@ -405,7 +402,7 @@ async def run_async_entrypoint_blocking_call(
     tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
     if tracker is None or tracker.executor is None:
         return await asyncio.get_running_loop().run_in_executor(executor, copy_context().run, call)
-    return await run_sync_tool_entrypoint(call, {})
+    return await run_sync_tool_entrypoint(call)
 
 
 async def _call_tool(

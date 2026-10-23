@@ -1093,7 +1093,7 @@ async def _run_sync_tool_call(call: Callable[[], object]) -> object:
     # Deferred: the tool hook bridge loads Agno, which the slim tool registry must not import.
     from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint  # noqa: PLC0415
 
-    return await run_sync_tool_entrypoint(call, {})
+    return await run_sync_tool_entrypoint(call)
 
 
 async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
