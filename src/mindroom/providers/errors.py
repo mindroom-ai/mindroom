@@ -36,10 +36,10 @@ _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 # Anthropic reports an overloaded model with this error type, with or without a 529 status.
 _OVERLOADED_ERROR_TYPE = "overloaded_error"
 # Error types of a stream's error event that report throttling, and those that report a transient provider failure:
-# Anthropic's, and those OpenAI-compatible servers send.
+# Anthropic's, whose ``timeout_error`` is a gateway timeout, and those OpenAI-compatible servers send.
 _RATE_LIMIT_ERROR_TYPES = frozenset({"rate_limit_error"})
 _TRANSIENT_ERROR_TYPES = frozenset(
-    {"overloaded", _OVERLOADED_ERROR_TYPE, "server_error", "internal_server_error", "api_error"},
+    {"overloaded", _OVERLOADED_ERROR_TYPE, "server_error", "internal_server_error", "api_error", "timeout_error"},
 )
 # Wording providers use when a request does not fit the model's context window (Agno's
 # ``ModelProviderError.CONTEXT_WINDOW_PATTERNS`` without its over-broad ``max_tokens``, plus the
@@ -112,8 +112,9 @@ def stream_event_error(
     """Return the normalized error for an error event inside a stream whose HTTP response already succeeded.
 
     Such an event carries no HTTP status of its own: OpenAI-compatible servers put a status in ``code``, which
-    counts as one, and Anthropic names the failure in ``error_type``. Throttling and transient failures are
-    retryable; any other event is final, as the same request would fail again.
+    counts as one, and Anthropic names the failure in ``error_type``. Throttling and transient failures, timeouts
+    included, are retryable; any other event, such as an invalid request, is final, as the same request would fail
+    again.
     """
     status = int(code) if code is not None and code.isdecimal() else None
     if status == _RATE_LIMIT_STATUS or error_type in _RATE_LIMIT_ERROR_TYPES:

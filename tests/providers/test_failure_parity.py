@@ -470,6 +470,13 @@ _CLAUDE_CASES = [
         UNAVAILABLE,
         _PIPELINE,
     ),
+    _Case(
+        "event_timeout_error",
+        _claude_stream(_claude_error("timeout_error", "Request timed out")),
+        ProviderUnavailable,
+        UNAVAILABLE,
+        _PIPELINE,
+    ),
     # A deterministic error event is final; the Agno-backed runtime retried every event after the 200 status.
     _Case(
         "event_invalid_request_error",

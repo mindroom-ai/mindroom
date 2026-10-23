@@ -384,6 +384,7 @@ async def test_a_mid_stream_api_error_before_output_reissues_the_request(
     [
         ("overloaded_error", ProviderUnavailable),
         ("api_error", ProviderUnavailable),
+        ("timeout_error", ProviderUnavailable),
         ("rate_limit_error", RateLimited),
         ("invalid_request_error", ProviderError),
     ],
