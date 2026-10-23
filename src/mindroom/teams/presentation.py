@@ -151,29 +151,16 @@ def team_response_text(record: TeamRunRecord) -> str:
     return format_team_response(record) or finished_run_text(record) or NO_TEAM_RESPONSE
 
 
-def _restore_hidden_team_separators(
-    state: Mapping[str, object],
-    *,
-    valid_tool_scopes: set[str],
-    show_tool_calls: bool,
-    per_member: Mapping[str, str],
-    consensus: str,
-) -> set[str]:
-    """Restore validated hidden-tool boundaries from a durable team snapshot."""
-    stored = state.get("separate_next_scopes", [])
-    if (
-        not isinstance(stored, list)
-        or any(not isinstance(scope, str) or scope not in valid_tool_scopes for scope in stored)
-        or len(stored) != len(set(stored))
-        or (show_tool_calls and stored)
-    ):
-        msg = "Team continuation presentation snapshot is invalid"
-        raise RuntimeError(msg)
-    scopes = cast("list[str]", stored)
-    if any(not (consensus if scope == "team" else per_member[scope.removeprefix("agent:")]) for scope in scopes):
-        msg = "Team continuation presentation snapshot is invalid"
-        raise RuntimeError(msg)
-    return set(scopes)
+_INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
+
+
+def _is_snapshot_member(member: object) -> bool:
+    """Return whether one stored member slot holds text fields, its id and config name non-empty."""
+    if not isinstance(member, dict):
+        return False
+    fields = cast("dict[str, object]", member)
+    keys = ("id", "config_name", "display_name", "content")
+    return all(isinstance(fields.get(key), str) for key in keys) and bool(fields["id"]) and bool(fields["config_name"])
 
 
 @dataclass
@@ -241,76 +228,54 @@ class TeamStreamPresentation:
         state: Mapping[str, object] | None,
         tool_trace: Sequence[ToolTraceEntry],
     ) -> TeamStreamPresentation:
-        """Restore a durable structured snapshot without interpreting its rendered Markdown."""
+        """Restore a durable structured snapshot without interpreting its rendered Markdown.
+
+        The snapshot must hold the slots of ``config_names`` in order, and every tool call of ``tool_trace`` one of
+        them; a hidden tool call separates only slot text written before it.
+        """
         if state is None or state.get("kind") != "team_stream" or state.get("version") != 2:
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)
+            raise RuntimeError(_INVALID_SNAPSHOT)
         stored_members = state.get("members")
-        if not isinstance(stored_members, list):
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)  # noqa: TRY004
-        restored_ids: list[str] = []
-        config_names_by_id: dict[str, str] = {}
-        display_names_by_id: dict[str, str] = {}
-        per_member: dict[str, str] = {}
-        for member in stored_members:
-            if not isinstance(member, dict):
-                msg = "Team continuation presentation snapshot is invalid"
-                raise RuntimeError(msg)  # noqa: TRY004
-            stored_member = cast("dict[str, object]", member)
-            member_id = stored_member.get("id")
-            config_name = stored_member.get("config_name")
-            display_name = stored_member.get("display_name")
-            content = stored_member.get("content")
-            if (
-                not isinstance(member_id, str)
-                or not member_id
-                or member_id in per_member
-                or not isinstance(config_name, str)
-                or not config_name
-                or not isinstance(display_name, str)
-                or not isinstance(content, str)
-            ):
-                msg = "Team continuation presentation snapshot is invalid"
-                raise RuntimeError(msg)
-            restored_ids.append(member_id)
-            config_names_by_id[member_id] = config_name
-            display_names_by_id[member_id] = display_name
-            per_member[member_id] = content
-        expected_config_names = list(config_names)
-        expected_ids = [url_safe_member_id(config_name) for config_name in expected_config_names]
+        if not isinstance(stored_members, list) or not all(_is_snapshot_member(member) for member in stored_members):
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        members = cast("list[dict[str, str]]", stored_members)
+        member_ids = [member["id"] for member in members]
         if (
-            restored_ids != expected_ids
-            or len(expected_ids) != len(set(expected_ids))
-            or [config_names_by_id[member_id] for member_id in restored_ids] != expected_config_names
+            member_ids != [url_safe_member_id(config_name) for config_name in config_names]
+            or len(member_ids) != len(set(member_ids))
+            or [member["config_name"] for member in members] != list(config_names)
         ):
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)
-        valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in restored_ids)}
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in member_ids)}
         if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace):
             msg = "Team continuation durable tool scope is not a frozen presentation slot"
             raise RuntimeError(msg)
+        per_member = {member["id"]: member["content"] for member in members}
         consensus = state.get("consensus")
-        if not isinstance(consensus, str):
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)  # noqa: TRY004
-        restored_separators = _restore_hidden_team_separators(
-            state,
-            valid_tool_scopes=valid_tool_scopes,
-            show_tool_calls=show_tool_calls,
-            per_member=per_member,
-            consensus=consensus,
-        )
+        separators = state.get("separate_next_scopes", [])
+        if (
+            not isinstance(consensus, str)
+            or not isinstance(separators, list)
+            or any(not isinstance(scope, str) or scope not in valid_tool_scopes for scope in separators)
+        ):
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        scopes = cast("list[str]", separators)
+        if (
+            len(scopes) != len(set(scopes))
+            or (show_tool_calls and scopes)
+            or any(not (consensus if scope == "team" else per_member[scope.removeprefix("agent:")]) for scope in scopes)
+        ):
+            raise RuntimeError(_INVALID_SNAPSHOT)
         restored = cls(
-            member_ids=restored_ids,
-            config_names_by_id=config_names_by_id,
-            display_names_by_id=display_names_by_id,
+            member_ids=member_ids,
+            config_names_by_id={member["id"]: member["config_name"] for member in members},
+            display_names_by_id={member["id"]: member["display_name"] for member in members},
             show_tool_calls=show_tool_calls,
             per_member=per_member,
             consensus=consensus,
             tool_trace=list(deepcopy(tool_trace)),
         )
-        restored.separate_next_scopes.update(restored_separators)
+        restored.separate_next_scopes.update(scopes)
         return restored
 
     def to_state(self) -> dict[str, object]:
