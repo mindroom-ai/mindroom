@@ -539,28 +539,18 @@ def _build_responses(
                 headers["ChatGPT-Account-ID"] = account_id
             return _openai_client(token, {**options, "default_headers": headers or None}, settings, http_client)
 
-        return ResponsesAdapter(
-            identity=identity,
-            capabilities=capabilities,
-            wire=wire,
-            settings=settings,
-            clients=SDKClients(codex_client, per_request=True),
-        )
-    api_key_env = "OPENAI_API_KEY"
-    api_key = _configured_key("openai", model_config, runtime) or runtime.runtime_paths.process_env.get(api_key_env)
+        clients = SDKClients(codex_client, per_request=True)
+    else:
+        api_key_env = "OPENAI_API_KEY"
+        api_key = _configured_key("openai", model_config, runtime) or runtime.runtime_paths.process_env.get(api_key_env)
 
-    def openai_client() -> AsyncOpenAI:
-        if not api_key:
-            raise missing_api_key_error(api_key_env, provider=provider_name)
-        return _openai_client(api_key, options, settings, http_client)
+        def openai_client() -> AsyncOpenAI:
+            if not api_key:
+                raise missing_api_key_error(api_key_env, provider=provider_name)
+            return _openai_client(api_key, options, settings, http_client)
 
-    return ResponsesAdapter(
-        identity=identity,
-        capabilities=capabilities,
-        wire=wire,
-        settings=settings,
-        clients=SDKClients(openai_client),
-    )
+        clients = SDKClients(openai_client)
+    return ResponsesAdapter(identity=identity, capabilities=capabilities, wire=wire, settings=settings, clients=clients)
 
 
 def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatAdapter | ResponsesAdapter:
