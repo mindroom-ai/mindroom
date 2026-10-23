@@ -25,7 +25,6 @@ from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
@@ -70,6 +69,7 @@ from mindroom.response_turn import (
 )
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
+from mindroom.teams.formation import team_member_name
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     allow_direct_private_team_agents,
@@ -1144,7 +1144,7 @@ async def team_response_stream(
     knowledge-availability enrichment before the turn runs.
     """
     assert orchestrator.config is not None
-    registry = orchestrator.config
+    config = orchestrator.config
     turn = await asyncio.to_thread(
         _team_turn,
         ctx,
@@ -1152,7 +1152,7 @@ async def team_response_stream(
         execution_identity=execution_identity,
         mode=mode,
         requested_agent_names=requested_team_agent_names(
-            [_member_name(member_id, registry, orchestrator.runtime_paths) for member_id in agent_ids],
+            [team_member_name(member_id, config, orchestrator.runtime_paths) for member_id in agent_ids],
         ),
         thread_history=thread_history,
         model_name=model_name,
@@ -1199,17 +1199,6 @@ async def team_response_stream(
     async with aclosing(response_stream) as closing_stream:
         async for chunk in closing_stream:
             yield chunk
-
-
-def _member_name(agent_id: MatrixID, config: Config, runtime_paths: RuntimePaths) -> str:
-    """Return the config name of the agent behind one Matrix id."""
-    return (
-        entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
-            agent_id.full_id,
-            include_router=True,
-        )
-        or agent_id.username
-    )
 
 
 __all__ = [

@@ -289,16 +289,12 @@ async def select_ad_hoc_team_mode(
     Team formation itself is pure; this AI refinement must run only where the
     team response actually executes.
     """
-    agent_names = [_team_member_name(agent_id, config, runtime_paths) for agent_id in team_agents]
+    agent_names = [team_member_name(agent_id, config, runtime_paths) for agent_id in team_agents]
     return await _select_team_mode(message, agent_names, config, runtime_paths)
 
 
-def _team_member_name(
-    agent_id: MatrixID,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> str:
-    """Return the canonical agent name used throughout team resolution."""
+def team_member_name(agent_id: MatrixID, config: Config, runtime_paths: RuntimePaths) -> str:
+    """Return the config name of the agent behind one Matrix id, used throughout team resolution."""
     return (
         entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
             agent_id.full_id,
@@ -434,7 +430,7 @@ def _evaluate_team_members(
         if sender_visible_ids is None and room is not None
         else None
     )
-    agent_names = [_team_member_name(agent_id, config, runtime_paths) for agent_id in requested_members]
+    agent_names = [team_member_name(agent_id, config, runtime_paths) for agent_id in requested_members]
     unsupported_agents = config.get_unsupported_team_agents(
         agent_names,
         allow_direct_private_agents=allow_direct_private_agents,
@@ -610,4 +606,5 @@ __all__ = [
     "resolve_live_shared_agent_names",
     "resolve_team_materializable_agent_names",
     "select_ad_hoc_team_mode",
+    "team_member_name",
 ]
