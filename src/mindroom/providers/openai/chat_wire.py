@@ -72,8 +72,8 @@ _CHAT_STOP_REASONS: dict[str, StopReason] = {
 class ChatWire:
     """How one route shapes Chat Completions requests and reads responses.
 
-    Besides its dialect, a route keeps rules of its own: ``openai`` sends the system prompt as ``developer``,
-    ``deepseek`` replays ``reasoning_content``, and ``openrouter`` replays ``reasoning_details``.
+    Besides its dialect, the route selects rules of its own, such as ``openai`` sending the system prompt as
+    ``developer`` and ``deepseek`` and ``openrouter`` replaying their reasoning fields.
     """
 
     route: str
