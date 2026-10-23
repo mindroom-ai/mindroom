@@ -570,17 +570,8 @@ def runs_without(runs: Iterable[AnyRunRecord], run_ids: Iterable[str]) -> list[A
     """Return ``runs`` minus ``run_ids`` and every run descending from them through ``parent_run_id``."""
     run_list = list(runs)
     removed = {run_id for run_id in run_ids if run_id}
-    children_by_parent: dict[str, list[str]] = {}
-    for run in run_list:
-        if run.parent_run_id:
-            children_by_parent.setdefault(run.parent_run_id, []).append(run.run_id)
-    frontier = list(removed)
-    while frontier:
-        parent = frontier.pop()
-        for child in children_by_parent.get(parent, []):
-            if child not in removed:
-                removed.add(child)
-                frontier.append(child)
+    while below := {run.run_id for run in run_list if run.parent_run_id and run.parent_run_id in removed} - removed:
+        removed |= below
     return [run for run in run_list if run.run_id not in removed and run.parent_run_id not in removed]
 
 
