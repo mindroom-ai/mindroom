@@ -194,14 +194,14 @@ def test_queued_force_compaction_reads_the_session_row_without_its_runs(
     for session in (flagged, pending, _session("idle", runs=[_completed_run("run-3")])):
         seed_session(storage, session)
     statements: list[str] = []
-    connect = store_module._connect
+    connect = store_module.connect_conversation_database
 
     def traced_connect(path: Path) -> sqlite3.Connection:
         connection = connect(path)
         connection.set_trace_callback(statements.append)
         return connection
 
-    monkeypatch.setattr(store_module, "_connect", traced_connect)
+    monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
 
     assert has_queued_force_compaction(storage, "flagged", agent_scope) is True
     assert has_queued_force_compaction(storage, "pending", agent_scope) is True
