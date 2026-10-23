@@ -369,7 +369,6 @@ class _CallResponseTracker:
         ) as scope_context:
             persist_interrupted_replay(
                 scope_context=scope_context,
-                session_id=state.session_id,
                 run_id=state.run_id,
                 user_message=state.user_message,
                 user_message_is_structured=False,
@@ -377,7 +376,6 @@ class _CallResponseTracker:
                 completed_tools=state.completed_tools,
                 interrupted_tools=state.interrupted_tools,
                 run_metadata=state.run_metadata,
-                is_team=False,
                 original_status=original_status,
             )
 

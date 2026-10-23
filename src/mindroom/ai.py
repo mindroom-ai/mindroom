@@ -393,7 +393,6 @@ def _build_agent_turn_callbacks(
     ) -> None:
         persist_interrupted_replay(
             scope_context=scope_context,
-            session_id=snapshot.session_id or session_id,
             run_id=snapshot.run_id,
             user_message=prompt,
             user_message_is_structured=current_prompt_is_structured,
@@ -401,7 +400,6 @@ def _build_agent_turn_callbacks(
             completed_tools=snapshot.completed_tools,
             interrupted_tools=snapshot.interrupted_tools,
             run_metadata=snapshot.run_metadata,
-            is_team=False,
             original_status=snapshot.original_status,
         )
 
@@ -1811,7 +1809,6 @@ async def ai_response(  # noqa: C901
                 partial_text=_own_assistant_text(record),
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
-                session_id=session_id,
                 run_id=attempt.run_id,
                 metadata_content=_blocking_metadata(prepared_run, record, RunStatus.error, run_id=attempt.run_id),
             )

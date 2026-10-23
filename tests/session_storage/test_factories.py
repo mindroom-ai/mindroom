@@ -6,6 +6,8 @@ import sqlite3
 from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -21,8 +23,6 @@ from tests.history_helpers import stored_run_ids
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
-
-    import pytest
 
     from mindroom.session_storage.store import ConversationStore
 
@@ -93,6 +93,14 @@ def test_a_fresh_database_gets_its_tables_from_the_first_write_only(tmp_path: Pa
         "code_sessions_usage",
         "code_sessions_summaries",
     }
+
+
+def test_a_storage_name_that_leaves_the_sessions_directory_opens_nothing(tmp_path: Path) -> None:
+    """The opener refuses a name that is not a file directly inside the sessions directory, and creates nothing."""
+    with pytest.raises(ValueError, match="must identify a file directly inside its sessions directory"):
+        create_state_storage("../outside", tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_stored_runs_leave_out_the_prompt_roles_of_the_history_settings(tmp_path: Path) -> None:

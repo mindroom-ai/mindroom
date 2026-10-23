@@ -1023,7 +1023,6 @@ def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
             partial_text="partial",
             completed_tools=(_trace("search"),),
             interrupted_tools=(_trace("browse"),),
-            session_id="session-live",
             run_id="run-live",
         )
 
@@ -1040,7 +1039,6 @@ def test_blocking_cancelled_attempt_records_persists_and_raises() -> None:
 
     assert len(log.persisted) == 1
     snapshot = log.persisted[0]
-    assert snapshot.session_id == "session-live"
     assert snapshot.run_id == "run-live"
     assert snapshot.partial_text == "partial"
     assert snapshot.run_metadata == {"room_id": "!room"}

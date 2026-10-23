@@ -13,10 +13,8 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, LiteralString, cast
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
+from typing import Any, LiteralString, cast
 
 _AI_RUN_KEY = "io.mindroom.ai_run"
 _JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
@@ -25,14 +23,10 @@ _MAX_RUNS = 100
 _MAX_LOG_LINES = 2000
 _MAX_LOG_LINE_CHARS = 4000
 _TOOL_CALL_ROTATIONS = 5
-# Where the runtime writes conversation databases under the session root: shared agents, teams, private instances
-# (`<worker>/<agent>`), and system usage. Agent workspaces are never walked, so a planted sessions/ folder is not read.
-_SESSION_DATABASE_GLOBS = (
-    "agents/*/sessions/*.db",
-    "teams/*/sessions/*.db",
-    "private_instances/*/*/sessions/*.db",
-    "system/sessions/*.db",
-)
+# Where the runtime keeps the state roots of its conversation databases under the session root: shared agents, teams,
+# private instances (`<worker>/<agent>`), and system usage. Agent workspaces are never walked, so a planted sessions/
+# folder is not read.
+_STATE_ROOT_GLOBS = ("agents/*", "teams/*", "private_instances/*/*", "system")
 
 _Query = Callable[[str, Sequence[object]], list[dict[str, Any]]]
 
@@ -234,6 +228,17 @@ def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[st
     return results
 
 
+def _session_databases(session_root: Path) -> list[Path]:
+    """Return every conversation database in the state roots under `session_root`, whatever its storage name."""
+    # The schema module loads the history package, which the CLI's import path keeps out (tests/test_cli_config.py).
+    from mindroom.session_storage.schema import TableNames  # noqa: PLC0415
+
+    # A wildcard storage name matches the database of every storage name.
+    wildcard = TableNames("*")
+    patterns = (str(wildcard.database_path(Path(state_root))) for state_root in _STATE_ROOT_GLOBS)
+    return sorted({database for pattern in patterns for database in session_root.glob(pattern)})
+
+
 def _read_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
     """Read stored runs by run ID or session ID from every conversation database under the session root.
 
@@ -245,7 +250,7 @@ def _read_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
     the failure is recorded as `<path>: <error>` in `error`. The status is "error" only when every database
     failed, and a database that fails part-way contributes none of its rows.
     """
-    databases = sorted({database for pattern in _SESSION_DATABASE_GLOBS for database in session_root.glob(pattern)})
+    databases = _session_databases(session_root)
     if not databases:
         return _SourceResult("missing", [str(session_root)])
     result = _SourceResult("ok", [str(database) for database in databases])
@@ -295,13 +300,13 @@ def _read_run_database(
 ) -> tuple[int, list[dict[str, Any]]]:
     """Return how many runs match and the newest `_MAX_RUNS` of the database's runs table, oldest first.
 
-    The tables of a conversation database `<name>.db` are those `TableNames(<name>)` names.
+    The runs table is the one `TableNames.of_database` names for the database's file.
     """
     # The schema module loads the history package, which the CLI's import path keeps out (tests/test_cli_config.py).
     from mindroom.session_storage.schema import TableNames, table_names  # noqa: PLC0415
 
     where = " OR ".join(conditions)
-    runs_table = TableNames(database.stem).runs
+    runs_table = TableNames.of_database(database).runs
     with _read_only_connection(database) as connection:
         if runs_table not in table_names(connection):
             return 0, []

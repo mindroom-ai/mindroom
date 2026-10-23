@@ -26,7 +26,6 @@ from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
-    SYSTEM_USAGE_RELATIVE_PATH,
     SYSTEM_USAGE_STORAGE_NAME,
     TOKEN_FIELDS,
     USAGE_KINDS,
@@ -190,17 +189,16 @@ def discover_self_usage_sources(
         runtime_paths,
         execution_identity=execution_identity,
     )
-    database = resolved.session_state_root / "sessions" / f"{agent_name}.db"
+    names = TableNames(agent_name)
+    database = names.database_path(resolved.session_state_root)
     if resolved.execution.is_private:
         worker_key = resolved.execution.worker_key
         if worker_key is None:
             return (_diagnostic("self", "partial", "source discovery unavailable"),)
-        relative = (
-            Path("private_instances") / worker_dir_name(worker_key) / agent_name / "sessions" / f"{agent_name}.db"
-        )
+        relative = names.database_path(Path("private_instances") / worker_dir_name(worker_key) / agent_name)
         scope: _UsageStorageScope = "private_agent"
     else:
-        relative = Path("agents") / agent_name / "sessions" / f"{agent_name}.db"
+        relative = names.database_path(Path("agents") / agent_name)
         scope = "shared_agent"
     candidate = _safe_candidate(session_root, relative)
     if candidate is None or candidate != database.expanduser().resolve():
@@ -210,7 +208,6 @@ def discover_self_usage_sources(
             path=candidate,
             root=session_root,
             scope=scope,
-            storage_name=agent_name,
             agent_name=agent_name,
             config=config,
             requester_isolated=resolved.execution.is_private,
@@ -269,14 +266,16 @@ def discover_admin_usage_sources(
     sources = _shared_agent_sources(root, config)
     sources.extend(_private_agent_sources(root, config, runtime_paths.storage_root))
     sources.extend(_team_sources(root, config))
-    system_path = _safe_candidate(root, Path(SYSTEM_USAGE_RELATIVE_PATH))
+    system_path = _safe_candidate(
+        root,
+        TableNames(SYSTEM_USAGE_STORAGE_NAME).database_path(Path(SYSTEM_USAGE_STORAGE_NAME)),
+    )
     if system_path is not None and system_path.is_file():
         sources.append(
             _source(
                 path=system_path,
                 root=root,
                 scope="system",
-                storage_name=SYSTEM_USAGE_STORAGE_NAME,
                 agent_name=None,
                 config=config,
                 requester_isolated=False,
@@ -297,7 +296,7 @@ def _shared_agent_sources(
     for agent_name, agent_config in config.agents.items():
         if agent_config.private is not None:
             continue
-        relative = Path("agents") / agent_name / "sessions" / f"{agent_name}.db"
+        relative = TableNames(agent_name).database_path(Path("agents") / agent_name)
         candidate = _safe_candidate(root, relative)
         if candidate is None:
             sources.append(
@@ -309,7 +308,6 @@ def _shared_agent_sources(
                 path=candidate,
                 root=root,
                 scope="shared_agent",
-                storage_name=agent_name,
                 agent_name=agent_name,
                 config=config,
                 requester_isolated=False,
@@ -354,7 +352,9 @@ def _private_agent_sources(
         except (PrivateInstanceIdentityError, OSError):
             owner = None
         for agent_name in private_agents:
-            relative = Path("private_instances") / worker_directory.name / agent_name / "sessions" / f"{agent_name}.db"
+            relative = TableNames(agent_name).database_path(
+                Path("private_instances") / worker_directory.name / agent_name,
+            )
             candidate = _safe_candidate(root, relative)
             if candidate is None:
                 sources.append(
@@ -368,7 +368,6 @@ def _private_agent_sources(
                     path=candidate,
                     root=root,
                     scope="private_agent",
-                    storage_name=agent_name,
                     agent_name=agent_name,
                     config=config,
                     requester_isolated=True,
@@ -391,7 +390,7 @@ def _team_sources(
         storage_name = directory.name
         if _IDENTIFIER.fullmatch(storage_name) is None:
             continue
-        relative = Path("teams") / storage_name / "sessions" / f"{storage_name}.db"
+        relative = TableNames(storage_name).database_path(Path("teams") / storage_name)
         candidate = _safe_candidate(root, relative)
         if candidate is None:
             sources.append(_diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="team"))
@@ -403,7 +402,6 @@ def _team_sources(
                 path=candidate,
                 root=root,
                 scope="team",
-                storage_name=storage_name,
                 agent_name=None,
                 config=config,
                 requester_isolated=False,
@@ -449,7 +447,6 @@ def _source(
     path: Path,
     root: Path,
     scope: _UsageStorageScope,
-    storage_name: str,
     agent_name: str | None,
     config: Config,
     requester_isolated: bool,
@@ -459,7 +456,7 @@ def _source(
         path=path,
         path_label=path.relative_to(root).as_posix(),
         scope=scope,
-        names=TableNames(storage_name),
+        names=TableNames.of_database(path),
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset(config.agents),
         requester_isolated=requester_isolated,
