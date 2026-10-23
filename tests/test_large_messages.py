@@ -1067,10 +1067,17 @@ async def test_prepare_large_message_preview_html_follows_the_truncated_text(
     assert preview["body"].endswith("[Message continues in attached file]")
     assert preview["format"] == "org.matrix.custom.html"
     assert preview["formatted_body"] == markdown_to_html(preview["body"])
-    size = (
-        _actual_encrypted_event_size(result, room_id="!room:server") if room_encrypted else calculate_event_size(result)
-    )
-    assert size <= _MATRIX_EVENT_HARD_LIMIT
+
+    def size(event: dict[str, object]) -> int:
+        if room_encrypted:
+            return _actual_encrypted_event_size(event, room_id="!room:server")
+        return calculate_event_size(event)
+
+    assert size(result) <= _MATRIX_EVENT_HARD_LIMIT
+    # The shrink keeps most of the room: a quarter more text would not fit, even with no outer fallback.
+    longer_body = _create_preview(text, int(len(preview["body"].encode("utf-8")) * 1.25))
+    longer = {**preview, "body": longer_body, "formatted_body": markdown_to_html(longer_body)}
+    assert size({**result, "body": "", "m.new_content": longer} if is_edit else longer) > _MATRIX_EVENT_HARD_LIMIT
 
 
 @pytest.mark.asyncio
