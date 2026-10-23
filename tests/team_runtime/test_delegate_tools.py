@@ -34,10 +34,11 @@ def test_collaborate_result_text_labels_json_content_and_a_failed_member_only_wi
         member("writer", "Writer", scripted("writer-model")),
         member("checker", "Checker", scripted("checker-model")),
     ]
-    # A failed member's record holds its error text as its content, which the broadcast reads like any result.
+    # A failed member hands over the reason its run recorded instead of the text it wrote, which the broadcast reads
+    # like any result.
     children = [
         RunRecord(run_id="w", status=RunStatus.completed, content={"answer": 42}),
-        RunRecord(run_id="c", status=RunStatus.error, content="Checker overloaded"),
+        RunRecord(run_id="c", status=RunStatus.error, content="I will check.", error="Checker overloaded"),
     ]
     record = TeamRunRecord(run_id="t", team_id="squad", team_name="Squad")
 

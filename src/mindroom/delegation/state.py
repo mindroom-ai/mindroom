@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.llm.runs import RunRequirement
+    from mindroom.llm.runs import AnyRunRecord, RunRequirement
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
 
@@ -253,6 +253,16 @@ def child_card_id(delegation_id: str, call_id: str) -> str:
 def child_call_id(delegation_id: str, card_id: str) -> str:
     """Return the child's own call id from the id ``child_card_id`` gave that call on the child's parent."""
     return card_id.removeprefix(f"{delegation_id}:")
+
+
+def handover_content(record: AnyRunRecord) -> str | dict[str, Any] | None:
+    """Return what a finished child or member run hands the run that started it: why it failed, else its content.
+
+    A run that failed in this process carries its reason, credentials redacted, on ``error``; its ``content`` is what
+    its model said before the failure, or the unredacted error when it said nothing. A record loaded from storage has
+    no ``error`` and hands over its stored content.
+    """
+    return record.content if record.error is None else record.error
 
 
 class ChildResponseRunner(Protocol):

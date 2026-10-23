@@ -30,6 +30,7 @@ from mindroom.agent_loop.run import (
 )
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.delegation.state import handover_content
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import ContentDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
@@ -183,8 +184,7 @@ def continue_team(
                 if resumed.status is RunStatus.paused:
                     propagate_member_pause(record, plan.member, resumed)
                 else:
-                    # A failed resume keeps the member's paused content, so the leader reads why it failed instead.
-                    content = resumed.error or resumed.content or MEMBER_TASK_COMPLETED
+                    content = handover_content(resumed) or MEMBER_TASK_COMPLETED
                     results.append(MEMBER_RESULT_LINE.format(name=plan.member.spec.name, content=content))
             if plans and not any(not r.is_resolved() for r in record.requirements or ()):
                 _answer_delegations(record, messages, results)
@@ -486,7 +486,7 @@ class _MemberRuns:
         """Forward the member's events and return its terminal record.
 
         A member whose run fails is stored ``ERROR`` by its loop and still reaches the leader, as Agno absorbed a
-        member's error into the member's run: a fresh run as its record's text, a resumed one as its ``error``; only
+        member's error into the member's run, with the reason its record carries (``handover_content``); only
         cancellation propagates.
         """
         try:
