@@ -309,6 +309,31 @@ def test_a_configured_toolkit_the_run_offers_nothing_of_is_reported(tmp_path: Pa
     assert [(log["toolkit"], log["function_names"]) for log in shadowed] == [("wikipedia", ["ping"])]
 
 
+def test_a_deferred_function_an_earlier_one_shadows_is_offered_nowhere_and_never_reported(tmp_path: Path) -> None:
+    """The run's deferred toolkits hold only the functions it offers, so no run or build warns about a shadowed one."""
+    config, runtime_paths = _config(
+        tmp_path,
+        tools=["calculator", {"wikipedia": {"defer": True}}, {"arxiv": {"defer": True}}],
+    )
+    surfaces = {"calculator": [ping], "wikipedia": [ping, search_knowledge_base], "arxiv": [ping]}
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        return Toolkit(name=tool_name, tools=surfaces[tool_name])
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
+        build = _build(config, runtime_paths, persist_runtime_state=False)
+        offered = _offered(build)
+
+    calculator, wikipedia, arxiv = build.spec.toolkits[:3]
+    assert (calculator.name, wikipedia.name, arxiv.name) == ("calculator", "wikipedia", "arxiv")
+    assert offered["ping"] is calculator.functions[0]
+    assert [function.name for function in wikipedia.functions] == ["search_knowledge_base"]
+    assert arxiv.functions == ()
+    assert build.request_template.deferred_tool_names == frozenset({"search_knowledge_base"})
+    assert not [log for log in logs if log["event"] == "duplicate_tool_name"]
+    assert not [log for log in logs if log["event"].startswith("Configured toolkit exposes no unique")]
+
+
 def test_a_function_hidden_across_toolkits_leaves_the_run_and_its_owners(tmp_path: Path) -> None:
     """An MCP function that collides with a later local one is hidden, so the run offers and owns the local one."""
     config, runtime_paths = _config(tmp_path, tools=["wikipedia", "calculator"])

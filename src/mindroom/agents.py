@@ -147,10 +147,12 @@ class _AdditionalContextChunk:
 class _ToolkitEntry:
     """One toolkit assembled for an agent: the Agno toolkit built for it, what a run offers of it, and its owner.
 
-    ``adapted`` holds the functions a run offers of the toolkit; the steps across toolkits leave functions out of it,
-    never out of the Agno toolkit. ``owner`` is the authored toolkit that approvals and tool jobs name its functions
-    by; ``toolkit`` is the concrete toolkit tool jobs check a call's grant and exclusions by. ``deferral`` is set for
-    a toolkit whose functions stay off the provider request until tool search finds them.
+    ``adapted`` holds the functions a run may offer of the toolkit; the steps across toolkits leave functions out of
+    it, never out of the Agno toolkit, and leave a deferred toolkit only those a run offers, while a run drops an
+    eager function that an earlier toolkit's same-named function shadows. ``owner`` is the authored toolkit that
+    approvals and tool jobs name its functions by; ``toolkit`` is the concrete toolkit tool jobs check a call's grant
+    and exclusions by. ``deferral`` is set for a toolkit whose functions stay off the provider request until tool
+    search finds them.
     """
 
     toolkit: Toolkit
@@ -187,13 +189,9 @@ class _AgentToolAssembly:
 
     @cached_property
     def deferred_toolkits(self) -> tuple[DeferredToolkit, ...]:
-        """Return each deferred toolkit with the functions a run offers of it, which only tool search shows.
-
-        A deferred function that a same-named function of an earlier toolkit shadows is not offered, so neither the
-        search nor the request's deferred names show it, and the earlier function keeps its name.
-        """
+        """Return each deferred toolkit with the functions a run offers of it, which only tool search shows."""
         return tuple(
-            DeferredToolkit(entry.deferral, tuple(function for owner, function in self.offered if owner is entry))
+            DeferredToolkit(entry.deferral, entry.adapted.functions)
             for entry in self.entries
             if entry.deferral is not None
         )
@@ -1645,7 +1643,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     if persona_tools is not None:
         require_built_persona_tools(persona_tools, persona_built, hidden_mcp_functions)
     assembly = _AgentToolAssembly(
-        entries=tuple(kept_entries),
+        entries=_deferred_entries_as_offered(kept_entries),
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
@@ -1952,6 +1950,23 @@ def _agent_toolkits(
     if skills is not None and (visible_skills := _prune_toolkit_functions(skills, generated_visible)) is not None:
         offered.append(adapt_toolkit(visible_skills))
     return tuple(offered)
+
+
+def _deferred_entries_as_offered(entries: Sequence[_ToolkitEntry]) -> tuple[_ToolkitEntry, ...]:
+    """Return ``entries`` with each deferred toolkit holding only the functions a run offers of it.
+
+    A deferred function that a same-named function of an earlier toolkit shadows is never offered, so tool search,
+    the request's deferred names, and the run leave it out, and the earlier function keeps its name, as the build
+    under Agno dropped it. A shadowed eager function stays, and each run drops it, as Agno's run did; a deferred
+    toolkit's instructions travel with the search results, so leaving functions out of it changes no prompt.
+    """
+    offered = _offered_entries(entries)
+    return tuple(
+        entry
+        if entry.deferral is None
+        else replace(entry, adapted=replace(entry.adapted, functions=tuple(f for e, f in offered if e is entry)))
+        for entry in entries
+    )
 
 
 def _offered_entries(entries: Sequence[_ToolkitEntry]) -> tuple[_OfferedFunction, ...]:
