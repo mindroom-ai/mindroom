@@ -347,7 +347,7 @@ def test_a_fold_racing_a_retirement_is_refused(storage: ConversationStore) -> No
     session = _seed(storage, [_run("r1")])
     basis = read_fold_basis(storage, _session(), _SCOPE)
     assert basis is not None
-    summary_rows.retire(storage, session_id="session", scope_key=_SCOPE.key)
+    summary_rows.retire(storage, session=_session(), scope_key=_SCOPE.key)
 
     assert not append_fold(
         storage,
@@ -369,7 +369,7 @@ def test_retiring_summaries_removes_runs_that_folded_mid_turn(storage: Conversat
     running = _run("live")
     assert _fold(storage, running, "S2")
 
-    summary_rows.retire(storage, session_id="session", scope_key=_SCOPE.key)
+    summary_rows.retire(storage, session=_session(), scope_key=_SCOPE.key)
 
     assert log_of(storage, _SCOPE.key, "session") == ["run:r1", "row:S1", "row:S2", "row:None"]
     _save(storage, running)

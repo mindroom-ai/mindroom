@@ -185,14 +185,13 @@ def covered_runs(storage: ConversationStore, *, session_id: str, run_ids: Sequen
 def append_summary(
     storage: ConversationStore,
     *,
-    session_id: str,
+    session: ConversationSession,
     scope_key: str,
     based_on: int | None,
     covered: Sequence[CoveredRun],
     summary: str,
     summary_model: str,
     segment: Segment | None = None,
-    session: ConversationSession | None = None,
 ) -> int | None:
     """Append one summary row after the newest covered run, unless its input went stale; return its id.
 
@@ -203,6 +202,7 @@ def append_summary(
     run, when stored, moves after the new row, since what it still holds follows what the row folded.
     ``session``, a loaded copy of the session, then holds the runs and summary a load returns.
     """
+    session_id = session.session_id
     with _write_transaction(storage, session_id, session) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key, latest_only=True)
         previous_index = rows[-1].after_run_index if rows else -1
@@ -380,17 +380,12 @@ def legacy_event_ids(storage: ConversationStore, *, session_id: str, scope_key: 
     return frozenset().union(*(row.event_ids for row in in_force)) if in_force else None
 
 
-def cut_at_legacy_row(
-    storage: ConversationStore,
-    *,
-    session_id: str,
-    scope_key: str,
-    session: ConversationSession | None = None,
-) -> None:
+def cut_at_legacy_row(storage: ConversationStore, *, session: ConversationSession, scope_key: str) -> None:
     """Delete the legacy summary in force and everything after it: every run and later row of the scope.
 
     ``session``, a loaded copy of the session, then holds the runs and summary a load returns.
     """
+    session_id = session.session_id
     with _write_transaction(storage, session_id, session) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
         if legacy := _legacy_in_force(rows):
@@ -403,18 +398,13 @@ def _legacy_in_force(rows: Sequence[_SummaryRow]) -> list[_SummaryRow]:
     return [row for row in rows if row.id > barrier and row.legacy and row.summary is not None]
 
 
-def retire(
-    storage: ConversationStore,
-    *,
-    session_id: str,
-    scope_key: str,
-    session: ConversationSession | None = None,
-) -> None:
+def retire(storage: ConversationStore, *, session: ConversationSession, scope_key: str) -> None:
     """Stop every summary of the scope from replaying or counting as seen, keeping the runs stored.
 
     A run that folded mid-turn goes with its descendants, since its stored part would replay without
     what it built on. ``session``, a loaded copy of the session, then holds the runs and summary a load returns.
     """
+    session_id = session.session_id
     with _write_transaction(storage, session_id, session) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
         connection.execute(
