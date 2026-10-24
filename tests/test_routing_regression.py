@@ -1778,8 +1778,6 @@ class TestRoutingRegression:
             ),
             tmp_path,
         )
-        # Keep background summaries off the team's scripted model.
-        mock_config.defaults.thread_summary_first_threshold = 100
         mock_from_yaml.return_value = mock_config
 
         # Get the actual domain from config

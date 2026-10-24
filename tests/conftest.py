@@ -2249,12 +2249,20 @@ def bind_runtime_paths(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> Config:
-    """Return a runtime-bound copy of a test config."""
+    """Return a runtime-bound copy of a test config.
+
+    Unless the test config authors them, a reply waits no coalescing debounce and starts no automatic thread summary.
+    A summary builds a model by name in the background, usually the reply's own ``default``, so it would take a turn
+    that the test scripted for the reply.
+    """
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     _persist_bound_entity_accounts(bound, runtime_paths)
     authored_coalescing = config.defaults.coalescing
     if "debounce_ms" not in authored_coalescing.model_fields_set:
         bound.defaults.coalescing.debounce_ms = 0
+    if "thread_summary_first_threshold" not in config.defaults.model_fields_set:
+        # No test thread reaches this many messages.
+        bound.defaults.thread_summary_first_threshold = sys.maxsize
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
     return bound
 

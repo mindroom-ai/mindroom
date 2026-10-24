@@ -897,6 +897,7 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(tmp_path: Path) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)
+    config.defaults.thread_summary_first_threshold = 5
     runtime_paths = runtime_paths_for(config)
     client = make_matrix_client_mock()
     client.room_messages.return_value = nio.RoomMessagesResponse(
@@ -1021,6 +1022,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
 async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_room(tmp_path: Path) -> None:
     """Ad-hoc invited rooms should inherit the responding entity's summary model override."""
     config = _config(tmp_path)
+    config.defaults.thread_summary_first_threshold = 1
     config.room_thread_summary_models["general"] = "qwen"
     config.models["qwen"] = ModelConfig(provider="openai", id="qwen-test-model")
     runtime_paths = runtime_paths_for(config)

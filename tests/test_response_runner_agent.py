@@ -2762,6 +2762,7 @@ class TestAgentBot(AgentBotTestBase):
             return task
 
         config = self._config_for_storage(tmp_path)
+        config.defaults.thread_summary_first_threshold = 1
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
@@ -3357,8 +3358,6 @@ class TestAdaptiveResponse(AgentBotTestBase):
         config.memory.backend = "none"
         # The llm judgment backend decides on its own model.
         config.models["judge"] = config.models["default"]
-        # Keep background summaries out of foreground participation call counts.
-        config.defaults.thread_summary_first_threshold = 100
         paths = replace(runtime_paths_for(config), process_env=process_env or {})
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=paths)
         install_direct_response_admission(bot)

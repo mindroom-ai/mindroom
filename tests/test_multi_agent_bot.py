@@ -1573,8 +1573,6 @@ class TestAgentBot(AgentBotTestBase):
         """Test agent bot thread response behavior based on agent participation."""
         # Use the helper method to create mock config
         config = self._config_for_storage(tmp_path)
-        # Keep background summaries off the team's scripted model.
-        config.defaults.thread_summary_first_threshold = 100
         mock_load_config.return_value = config
 
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
