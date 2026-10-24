@@ -917,7 +917,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value=_full(_make_thread_history(3)),
             ),
             patch(
-                "mindroom.thread_summary._timed_generate_summary",
+                "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(return_value="Summary"),
             ) as mock_timed_gen,
         ):
@@ -1398,7 +1398,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value=_full(_make_thread_history(5)),
             ),
             patch(
-                "mindroom.thread_summary._timed_generate_summary",
+                "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(return_value="Users discussed testing strategies"),
             ) as mock_timed_gen,
             patch(

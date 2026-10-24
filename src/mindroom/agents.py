@@ -99,7 +99,6 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig, FileAccess
-    from mindroom.credentials.manager import CredentialsManager
     from mindroom.delegation.state import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -574,74 +573,13 @@ def _file_mode_knowledge_instruction_block(
     return "\n".join([*lines, *source_lines])
 
 
-def _tool_supports_base_dir(tool_name: str) -> bool:
-    """Return whether a registered tool exposes a base_dir config field."""
+def _tool_base_dir_override(tool_name: str, *, workspace_path: Path | None) -> dict[str, object] | None:
+    """Point a registered tool that exposes a ``base_dir`` config field at the agent's workspace."""
     metadata = TOOL_METADATA.get(tool_name)
-    if metadata is None or not metadata.config_fields:
-        return False
-    return any(field.name == "base_dir" for field in metadata.config_fields)
-
-
-def _tool_base_dir_override(
-    tool_name: str,
-    *,
-    workspace_path: Path | None,
-) -> dict[str, object] | None:
-    """Build per-agent tool overrides for workspace-aware local tools."""
-    if workspace_path is None or not _tool_supports_base_dir(tool_name):
+    config_fields = (metadata.config_fields if metadata is not None else None) or ()
+    if workspace_path is None or not any(field.name == "base_dir" for field in config_fields):
         return None
     return {"base_dir": str(workspace_path)}
-
-
-def _build_registered_agent_tool(
-    tool_name: str,
-    runtime_paths: constants.RuntimePaths,
-    credentials_manager: CredentialsManager,
-    shared_storage_path: Path,
-    worker_tools: list[str],
-    worker_scope: WorkerScope | None,
-    allowed_shared_services: frozenset[str] | None,
-    agent_name: str,
-    tool_config_overrides: dict[str, object] | None,
-    workspace_path: Path | None,
-    agent_state_root: Path,
-    tool_output_auto_save_threshold_bytes: int,
-    routing_agent_is_private: bool,
-    execution_identity: ToolExecutionIdentity | None,
-    runtime_overrides: dict[str, object] | None,
-    config: Config,
-    *,
-    list_mcp_functions: bool,
-) -> Toolkit:
-    """Build one registered toolkit using the resolved routing inputs for this agent."""
-    worker_target = build_agent_toolkit_worker_target(
-        worker_scope,
-        agent_name,
-        is_private=routing_agent_is_private,
-        execution_identity=execution_identity,
-        runtime_paths=runtime_paths,
-    )
-
-    return get_tool_by_name(
-        tool_name,
-        runtime_paths,
-        credentials_manager=credentials_manager,
-        runtime_config=config,
-        tool_config_overrides=tool_config_overrides,
-        tool_init_overrides=_tool_base_dir_override(
-            tool_name,
-            workspace_path=workspace_path,
-        ),
-        runtime_overrides=runtime_overrides,
-        shared_storage_root_path=shared_storage_path,
-        worker_tools_override=worker_tools,
-        allowed_shared_services=allowed_shared_services,
-        tool_output_workspace_root=workspace_path,
-        agent_state_root=agent_state_root,
-        tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-        worker_target=worker_target,
-        list_mcp_functions=list_mcp_functions,
-    )
 
 
 def _log_toolkits_without_offered_functions(
@@ -938,23 +876,28 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
         )
 
-    return _build_registered_agent_tool(
+    worker_scope = agent_runtime.execution.execution_scope
+    return get_tool_by_name(
         tool_name,
         runtime_paths,
-        credentials_manager,
-        shared_storage_path,
-        worker_tools,
-        agent_runtime.execution.execution_scope,
-        (config.get_worker_grantable_credentials() if agent_runtime.execution.execution_scope is not None else None),
-        agent_name,
-        tool_config_overrides,
-        agent_runtime.tool_base_dir,
-        agent_runtime.state_root,
-        config.defaults.tool_output_auto_save_threshold_bytes,
-        agent_runtime.execution.is_private,
-        execution_identity,
-        runtime_overrides,
-        config,
+        credentials_manager=credentials_manager,
+        runtime_config=config,
+        tool_config_overrides=tool_config_overrides,
+        tool_init_overrides=_tool_base_dir_override(tool_name, workspace_path=agent_runtime.tool_base_dir),
+        runtime_overrides=runtime_overrides,
+        shared_storage_root_path=shared_storage_path,
+        worker_tools_override=worker_tools,
+        allowed_shared_services=config.get_worker_grantable_credentials() if worker_scope is not None else None,
+        tool_output_workspace_root=agent_runtime.tool_base_dir,
+        agent_state_root=agent_runtime.state_root,
+        tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+        worker_target=build_agent_toolkit_worker_target(
+            worker_scope,
+            agent_name,
+            is_private=agent_runtime.execution.is_private,
+            execution_identity=execution_identity,
+            runtime_paths=runtime_paths,
+        ),
         list_mcp_functions=list_mcp_functions,
     )
 
@@ -1116,21 +1059,6 @@ def _build_dynamic_tooling_instruction_block(
         "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
         tool_catalog="\n".join(
             f"{name} - {description}" if description else name for name, description in catalog.items()
-        ),
-    )
-
-
-def _build_native_tool_search_instruction_blocks(
-    config: Config,
-    deferred_tool_names: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Return compact discovery guidance for provider-native deferred tools."""
-    if not deferred_tool_names:
-        return ()
-    return (
-        config.render_prompt(
-            "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE",
-            tool_domains=", ".join(deferred_tool_names),
         ),
     )
 
@@ -1436,20 +1364,16 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
         required_tool_names=required_tool_names,
     )
-    hidden_toolkits = _context_hidden_toolkits(execution_identity)
-    resolved_tool_configs = {entry.name: entry for entry in dynamic_tool_selection.runtime_tool_configs}
-    if disable_runtime_capabilities:
-        resolved_tool_configs = {}
-    elif disabled_tool_names:
-        resolved_tool_configs = {
-            tool_name: entry
-            for tool_name, entry in resolved_tool_configs.items()
-            if tool_name not in disabled_tool_names
+    excluded_tool_names = disabled_tool_names | _context_hidden_toolkits(execution_identity)
+    resolved_tool_configs = (
+        {}
+        if disable_runtime_capabilities
+        else {
+            entry.name: entry
+            for entry in dynamic_tool_selection.runtime_tool_configs
+            if entry.name not in excluded_tool_names
         }
-    if hidden_toolkits:
-        resolved_tool_configs = {
-            tool_name: entry for tool_name, entry in resolved_tool_configs.items() if tool_name not in hidden_toolkits
-        }
+    )
     deferred_configs = {}
     if minimal_mode:
         complete = visible_tool_surface(
@@ -1461,9 +1385,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         deferred_configs = {
             entry.name: entry
             for entry in complete.runtime_tool_configs
-            if entry.name not in resolved_tool_configs
-            and entry.name not in hidden_toolkits
-            and entry.name not in disabled_tool_names
+            if entry.name not in resolved_tool_configs and entry.name not in excluded_tool_names
         }
     with _agent_create_timing("resolve_worker_tools"):
         worker_tools = resolve_runtime_worker_tools(
@@ -1627,7 +1549,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             entries.append(entry)
             target_names = worker_routed_tool_names if routes_through_worker(tool_name) else local_tool_names
             target_names.append(tool_name)
-    controls = _job_controls(
+    controls = JobTools.build(
         [entry.toolkit for entry in entries],
         runtime_paths,
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
@@ -1710,16 +1632,9 @@ def _build_agent_role_context(
     if not include_identity:
         return _AgentRoleContext(role=runtime_facts.lstrip(), context_documents=())
 
-    # Get model config for identity context
-    if model_name in config.models:
-        model_config = config.models[model_name]
-        model_provider = model_config.provider.title()  # Capitalize provider name
-        model_id = model_config.id
-    else:
-        # Fallback if model not found
-        model_provider = "AI"
-        model_id = model_name
-
+    model_config = config.models.get(model_name)
+    model_provider = model_config.provider.title() if model_config is not None else "AI"
+    model_id = model_config.id if model_config is not None else model_name
     with _agent_create_timing("identity_context"):
         identity_context = _render_agent_identity_context(
             agent_name,
@@ -1735,6 +1650,9 @@ def _build_agent_role_context(
     context_documents: list[_AdditionalContextChunk] = []
     if not disable_runtime_capabilities:
         workspace = agent_runtime.workspace
+        # TODO(simplify): The tool-environment section ends without a newline, so the "## Personality Context"
+        # heading lands on its last line. End the section with a newline so the heading starts its own line.
+        # Models would notice: it changes system prompt bytes (#3075).
         full_context += _build_additional_context(
             agent_name,
             agent_config,
@@ -1793,13 +1711,14 @@ def _build_agent_instructions(
     ``skill_authoring`` adds the note on writing workspace skills, for agents that can use skills.
     """
     instructions = [*configured_instructions, *skill_instructions]
-
-    instructions.extend(
-        _build_native_tool_search_instruction_blocks(
-            config,
-            native_deferred_tool_names,
-        ),
-    )
+    if native_deferred_tool_names:
+        # Compact discovery guidance for provider-native deferred tools.
+        instructions.append(
+            config.render_prompt(
+                "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE",
+                tool_domains=", ".join(native_deferred_tool_names),
+            ),
+        )
 
     dynamic_tooling_block = _build_dynamic_tooling_instruction_block(config, portable_deferred_toolkits)
     if dynamic_tooling_block is not None:
@@ -1818,8 +1737,7 @@ def _build_agent_instructions(
     if file_mode_knowledge_instruction is not None:
         instructions.append(file_mode_knowledge_instruction)
 
-    show_tool_calls = show_tool_calls_for_agent(config, agent_name)
-    if not show_tool_calls:
+    if not show_tool_calls_for_agent(config, agent_name):
         instructions.append(config.get_prompt("HIDDEN_TOOL_CALLS_PROMPT"))
 
     if include_interactive_questions:
@@ -1828,31 +1746,12 @@ def _build_agent_instructions(
     return instructions
 
 
-def _job_controls(
-    tools: Sequence[Toolkit],
-    runtime_paths: constants.RuntimePaths,
-    owner: ToolExecutionIdentity | None,
-    *,
-    depth: int,
-    enabled: bool,
-    output_file_policy: ToolOutputFilePolicy | None = None,
-) -> Toolkit | None:
-    """Build the reserved job toolkit; the loop runs the caller's tool hooks around its calls as around any other.
-
-    It never asks for approval: it acts only on the caller's own jobs, each of which passed its own.
-    """
-    return JobTools.build(
-        list(tools),
-        runtime_paths,
-        owner,
-        depth=depth,
-        enabled=enabled,
-        output_file_policy=output_file_policy,
-    )
-
-
 def _job_controls_entry(controls: Toolkit) -> _ToolkitEntry:
-    """Assemble the job controls as their own authored toolkit, which no approval rule gates."""
+    """Assemble the job controls as their own authored toolkit, which no approval rule gates.
+
+    The loop runs the caller's tool hooks around their calls as around any other, but they never ask for approval:
+    they act only on the caller's own jobs, each of which passed its own.
+    """
     return _ToolkitEntry(toolkit=controls, adapted=adapt_toolkit(controls), owner=controls.name)
 
 
@@ -1880,7 +1779,7 @@ def team_background_jobs(
     """
     if not background_tool_jobs_enabled(config, runtime_paths) or owner is None:
         return None
-    controls = _job_controls((), runtime_paths, owner, depth=0, enabled=True)
+    controls = JobTools.build([], runtime_paths, owner, depth=0, enabled=True)
     if controls is None:
         return None
     plugins = _load_agent_plugins(config, runtime_paths)

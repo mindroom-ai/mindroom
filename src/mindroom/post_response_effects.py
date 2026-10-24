@@ -214,21 +214,22 @@ async def apply_post_response_effects(
             response_event_id,
             final_delivery_outcome.interactive_metadata,
         )
-    else:  # noqa: PLR5501, RUF100
-        if response_event_id is not None and (
-            "React with an emoji or type the number to respond." in (final_delivery_outcome.final_visible_body or "")
-            or final_delivery_outcome.interactive_metadata is not None
-        ):
-            deps.logger.warning(
-                "Interactive question buttons skipped",
-                response_event_id=response_event_id,
-                add_interactive_buttons_is_none=deps.add_interactive_buttons is None,
-                terminal_status=final_delivery_outcome.terminal_status,
-                final_visible_body_is_none=final_delivery_outcome.final_visible_body is None,
-                suppressed=final_delivery_outcome.suppressed,
-                option_map_empty=not bool(final_delivery_outcome.interactive_metadata),
-                options_list_empty=not bool(final_delivery_outcome.interactive_metadata),
-            )
+    elif response_event_id is not None and (
+        "React with an emoji or type the number to respond." in (final_delivery_outcome.final_visible_body or "")
+        or final_delivery_outcome.interactive_metadata is not None
+    ):
+        deps.logger.warning(
+            "Interactive question buttons skipped",
+            response_event_id=response_event_id,
+            add_interactive_buttons_is_none=deps.add_interactive_buttons is None,
+            terminal_status=final_delivery_outcome.terminal_status,
+            final_visible_body_is_none=final_delivery_outcome.final_visible_body is None,
+            suppressed=final_delivery_outcome.suppressed,
+            # TODO(simplify): option_map_empty and options_list_empty log the same value, whether metadata is missing.
+            # Log it once, as interactive_metadata_is_none. Operators reading this warning would notice.
+            option_map_empty=not bool(final_delivery_outcome.interactive_metadata),
+            options_list_empty=not bool(final_delivery_outcome.interactive_metadata),
+        )
 
     if (
         outcome.response_run_id is not None

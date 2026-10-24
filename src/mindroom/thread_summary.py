@@ -573,6 +573,9 @@ def _resolve_thread_summary_model_name(
     return config.defaults.thread_summary_model or "default"
 
 
+# TODO(simplify): This timer shares its label with the post-response timer around the whole summary pass, so timing
+# logs show two durations under one name. Label this one thread_summary_generation. Operators would notice.
+@timed("maybe_generate_thread_summary")
 async def _generate_summary(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
@@ -608,6 +611,9 @@ async def _generate_summary(
         prompt,
         instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS").splitlines(),
         schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
+        # TODO(simplify): The Ollama adapter ignores this override and keeps the sampling its model's options author,
+        # as Agno's Ollama model did. Send thread_summary_temperature as options.temperature on Ollama too.
+        # Users would notice different Ollama summaries (#3075).
         overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
     )
     await record_system_usage(response.record, runtime_paths=runtime_paths, kind="thread_summary")
@@ -719,27 +725,6 @@ async def _summary_delivery_timestamp(
         trusted_sender_ids=trusted_sender_ids,
         human_sender_allowed=human_sender_allowed,
         thread_id=thread_id,
-    )
-
-
-@timed("maybe_generate_thread_summary")
-async def _timed_generate_summary(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    model_name: str | None = None,
-    tag_vocabulary: str | None = None,
-    trusted_sender_ids: Collection[str],
-) -> str | _ThreadEnrichment | None:
-    """Run the summary generation attempt with timing instrumentation."""
-    return await _generate_summary(
-        thread_history,
-        config,
-        runtime_paths,
-        model_name=model_name,
-        tag_vocabulary=tag_vocabulary,
-        trusted_sender_ids=trusted_sender_ids,
     )
 
 
@@ -1318,7 +1303,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
                 room_id,
                 entity_name=entity_name,
             )
-            generated = await _timed_generate_summary(
+            generated = await _generate_summary(
                 thread_history,
                 config,
                 runtime_paths,
