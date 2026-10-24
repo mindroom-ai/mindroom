@@ -57,7 +57,7 @@ _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GeminiSettings:
-    """The ``extra_kwargs`` a Gemini model accepts, named as Agno's ``Gemini`` fields."""
+    """The ``extra_kwargs`` a Gemini model accepts."""
 
     api_key: str | None = field(default=None, metadata=SECRET)
     vertexai: bool = False
@@ -83,7 +83,8 @@ class GeminiSettings:
     thinking_budget: int | None = None
     include_thoughts: bool | None = None
     thinking_level: str | None = None
-    # Google Search grounding, sent in place of the request's function tools.
+    # Google Search grounding, sent in place of the request's function tools, so a grounded model calls no
+    # function; kept as main behaves.
     search: bool = False
 
 
@@ -108,17 +109,17 @@ class GeminiProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.
 
-        Media uploads and downloads happen first, so their SDK and transport errors are normalized too. Usage is
-        reported as each chunk carries it, ahead of the chunk's output, so an attempt that fails or is cut off
-        afterwards, such as one that ended in a malformed tool call, still settles it.
+        Media uploads and downloads happen first, so their SDK and transport errors are normalized too.
         """
         started = time.monotonic()
         reply = GeminiReply()
         first_output_at: float | None = None
         # Client construction reads credentials from disk; its failures are configuration errors, not transient.
         client = self._sdk_client()
+        provider = self.identity.provider_name
+        upload = None if self.vertexai else partial(uploaded_file_uri, client, provider=provider)
         try:
-            contents, system_instruction = await format_contents(request.messages, self._media_route())
+            contents, system_instruction = await format_contents(request.messages, MediaRoute(provider, upload))
             config = self._request_config(request, system_instruction)
             # The request dicts use google-genai's field names; the SDK validates them into its types.
             call = {"model": self.identity.id, "contents": cast("Any", contents), "config": cast("Any", config or None)}
@@ -142,7 +143,7 @@ class GeminiProvider:
             # Media and chunk failures arrive normalized.
             raise
         except Exception as error:
-            raise _provider_error(error, provider=self.identity.provider_name) from error
+            raise _provider_error(error, provider=provider) from error
         if request.stream and not reply.finished:
             # The stream ended before Gemini ended the reply, so the turn did not finish.
             return
@@ -171,12 +172,12 @@ class GeminiProvider:
         request: ModelRequest,
         system_instruction: str | list[Any] | None,
     ) -> dict[str, Any] | GenerateContentConfig:
-        """Return the generation config of one request, in the order Agno's Gemini built it."""
+        """Return the generation config of one request."""
         settings = self.settings
         overrides = request.overrides
         # TODO(simplify): an authored ``generation_config`` key that has a dedicated field, such as temperature, is
-        # dropped when that field is unset, as Agno did. Let a dedicated field replace the key only when it is set.
-        # Operators and models would notice.
+        # dropped when that field is unset. Let a dedicated field replace the key only when it is set. Operators and
+        # models would notice.
         config: dict[str, Any] = {
             **(settings.generation_config or {}),
             **(settings.generative_model_kwargs or {}),
@@ -206,7 +207,6 @@ class GeminiProvider:
         # default, so dropping a ``thinking_budget: 0`` would turn thinking on, and the Pro models cannot turn it off.
         if thinking := {key: value for key, value in thinking.items() if value is not None}:
             config["thinking_config"] = thinking
-        # Agno sent built-in tools instead of the function declarations, so a grounded model calls no function.
         if settings.search:
             config["tools"] = [{"google_search": {}}]
         elif (declarations := function_declarations(request.tools)) is not None:
@@ -232,12 +232,6 @@ class GeminiProvider:
             msg = "Participation decisions cannot safely apply Gemini body overrides"
             raise ValueError(msg)
         return without_tool_selection(config, vertexai=self.vertexai) if config else config
-
-    def _media_route(self) -> MediaRoute:
-        provider = self.identity.provider_name
-        if self.vertexai:
-            return MediaRoute(provider=provider)
-        return MediaRoute(provider=provider, upload=partial(uploaded_file_uri, self._sdk_client(), provider=provider))
 
     def _sdk_client(self) -> Client:
         if self._client is None:
