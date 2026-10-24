@@ -187,8 +187,8 @@ def format_claude_messages(
     merged = _merged_turns(turns)
     if append_trailing_user_message and merged and merged[-1]["role"] == "assistant":
         merged.append({"role": "user", "content": [{"type": "text", "text": _TRAILING_USER_MESSAGE}]})
-    # TODO(simplify): System and developer messages join with one space, as Agno joined them, so a later one runs on
-    # from the end of the previous one. Join them with a blank line. Models would notice.
+    # TODO(simplify): System and developer messages join with one space, so a later one runs on from the end of
+    # the previous one. Join them with a blank line. Models would notice.
     return FormattedConversation(messages=merged, system=" ".join(system_texts))
 
 
@@ -550,14 +550,11 @@ def assistant_message_from_response(
 ) -> Message:
     """Build the assistant message of one finished response.
 
-    The stored reasoning is the one Agno stored for the same request: a ``streamed`` response joins its thinking
-    blocks and its redacted thinking blocks, as Agno summed their deltas, and a non-streamed one keeps only the
-    last block of each, as Agno's response parser did.
-
-    ``provider_data`` keeps ``content_blocks`` (the response blocks in order, as the API produced them),
-    ``server_tool_blocks`` (every other block, including types the SDK does not know), the thinking ``signature``,
-    the raw ``stop_reason``, and ``context_management`` when the model was configured with one. Every tool
-    use becomes a tool call, including the calls of a response the output limit cut off.
+    A ``streamed`` response joins its thinking blocks and its redacted thinking blocks, and a non-streamed one
+    keeps only the last block of each. ``provider_data`` keeps ``content_blocks`` (the response blocks in order,
+    as the API produced them), ``server_tool_blocks`` (every other block, including types the SDK does not know),
+    the thinking ``signature``, the raw ``stop_reason``, and ``context_management`` when the model was configured
+    with one. Every tool use becomes a tool call, including the calls of a response the output limit cut off.
     """
     texts: list[str] = []
     thinking: list[str] = []
@@ -604,7 +601,7 @@ def assistant_message_from_response(
 
 def _stored_reasoning(blocks: list[str], *, streamed: bool) -> str | None:
     # TODO(simplify): A non-streamed reply stores only its last thinking and redacted-thinking block while a streamed
-    # one joins them all, as Agno did. Join them in both modes. Stored runs would notice.
+    # one joins them all. Join them in both modes. Stored runs would notice.
     if not blocks:
         return None
     return "".join(blocks) if streamed else blocks[-1]
