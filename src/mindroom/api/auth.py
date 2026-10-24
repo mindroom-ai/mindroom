@@ -76,6 +76,7 @@ _SUPABASE_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_
 # Each Supabase token check is a blocking network call in a worker thread; cap how many run at once.
 _supabase_token_checks = asyncio.Semaphore(4)
 _REDIRECT_TARGET_DECODE_PASSES = 5
+# Callback paths an unauthenticated standalone request may still enter the handler of.
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
         "/api/homeassistant/callback",
@@ -293,11 +294,6 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
         return None
     token = authorization.removeprefix("Bearer ").strip()
     return token or None
-
-
-def _is_standalone_public_path(path: str) -> bool:
-    """Return whether one unauthenticated standalone callback path may enter its handler."""
-    return path in _STANDALONE_PUBLIC_PATHS
 
 
 def _validated_trusted_upstream_email_to_matrix_template(settings: _TrustedUpstreamAuthSettings) -> str | None:
@@ -1131,7 +1127,7 @@ async def authenticate_user(
         return trusted_auth_user
 
     if auth_state.supabase_auth is None:
-        if allow_public_paths and _is_standalone_public_path(request.scope["path"]):
+        if allow_public_paths and request.scope["path"] in _STANDALONE_PUBLIC_PATHS:
             auth_user = {"user_id": "standalone", "email": None}
             request.scope["auth_user"] = auth_user
             return auth_user
