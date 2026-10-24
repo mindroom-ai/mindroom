@@ -89,10 +89,8 @@ def test_sections_render_in_agno_order() -> None:
     )
 
 
-def test_an_empty_skills_block_adds_nothing_and_a_system_message_replaces_everything() -> None:
-    """Only a non-empty skills block is added, and a set system message is sent verbatim."""
+def test_an_empty_skills_block_adds_nothing() -> None:
+    """Only a non-empty skills block is added."""
     assert render_system_message(PromptSpec(role="Role.", skills_block="")).content == (
         "<your_role>\nRole.\n</your_role>"
     )
-    message = render_system_message(PromptSpec(role="Role.", system_message="  Bootstrap.\n"))
-    assert (message.role, message.content) == ("system", "  Bootstrap.\n")

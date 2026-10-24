@@ -25,7 +25,6 @@ CLAUDE_TOOLS_NOTE = "Do not reflect on the quality of the returned search result
 class PromptSpec:
     """Every input of one agent's system message, in the order the message renders them.
 
-    ``system_message``, when set, is sent verbatim instead of everything else, as minimal mode's bootstrap message is.
     ``markdown`` adds the markdown line; callers with an output schema leave it False, as main does.
     ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered.
     ``model_note`` is the text the provider family adds (``model_note_for``), and ``output_format_prompt`` the JSON
@@ -42,7 +41,6 @@ class PromptSpec:
     knowledge_block: str | None = None
     model_note: str | None = None
     output_format_prompt: str | None = None
-    system_message: str | None = None
 
 
 def render_instructions(instructions: Sequence[str]) -> str:
@@ -74,8 +72,6 @@ def model_note_for(capabilities: Capabilities, *, offers_tools: bool) -> str | N
 
 def render_system_message(spec: PromptSpec) -> Message:
     """Return the system message for ``spec``."""
-    if spec.system_message is not None:
-        return Message(role="system", content=spec.system_message)
     return Message(role="system", content=(_agent_sections(spec) + _context_sections(spec)).strip())
 
 
