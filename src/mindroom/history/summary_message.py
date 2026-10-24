@@ -53,8 +53,8 @@ def mark_summary_follows(prompt: Message) -> None:
 
 def summary_follows(message: Message) -> bool:
     """Return whether the scope's summary replays right after this message."""
-    return isinstance(message.provider_data, dict) and message.provider_data.get(_SUMMARY_FOLLOWS_KEY) is True
+    return (message.provider_data or {}).get(_SUMMARY_FOLLOWS_KEY) is True
 
 
 def _summary_kind(message: Message) -> object:
-    return message.provider_data.get(_COMPACTION_SUMMARY_MARKER) if isinstance(message.provider_data, dict) else None
+    return (message.provider_data or {}).get(_COMPACTION_SUMMARY_MARKER)
