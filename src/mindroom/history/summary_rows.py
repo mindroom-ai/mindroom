@@ -200,7 +200,7 @@ def append_summary(
     removed the segment's run. The row's event sets come from the covered rows as they are stored now, so
     metadata written during the summary call, such as a reply's response event id, counts. A segment's
     run, when stored, moves after the new row, since what it still holds follows what the row folded.
-    ``session``, a loaded copy of the session, then holds the runs and summary a load returns.
+    ``session`` is the loaded session the row is appended to; it then holds the runs and summary a load returns.
     """
     session_id = session.session_id
     with _write_transaction(storage, session_id, session) as (connection, tables):
@@ -383,7 +383,7 @@ def legacy_event_ids(storage: ConversationStore, *, session_id: str, scope_key: 
 def cut_at_legacy_row(storage: ConversationStore, *, session: ConversationSession, scope_key: str) -> None:
     """Delete the legacy summary in force and everything after it: every run and later row of the scope.
 
-    ``session``, a loaded copy of the session, then holds the runs and summary a load returns.
+    ``session`` is the loaded session whose log is cut; it then holds the runs and summary a load returns.
     """
     session_id = session.session_id
     with _write_transaction(storage, session_id, session) as (connection, tables):
@@ -402,7 +402,8 @@ def retire(storage: ConversationStore, *, session: ConversationSession, scope_ke
     """Stop every summary of the scope from replaying or counting as seen, keeping the runs stored.
 
     A run that folded mid-turn goes with its descendants, since its stored part would replay without
-    what it built on. ``session``, a loaded copy of the session, then holds the runs and summary a load returns.
+    what it built on. ``session`` is the loaded session whose summaries retire; it then holds the runs and
+    summary a load returns.
     """
     session_id = session.session_id
     with _write_transaction(storage, session_id, session) as (connection, tables):
