@@ -406,17 +406,17 @@ async def _execute_agent_tool_call(
         if limit is not None and catalog._call_count >= limit:
             yield _failure(binding, call_id, arguments, "Tool call limit reached")
             return
-        paused = binding.function.planned_execution(call_id, arguments)
-        # A call that resumes from its decision runs now.
-        if requirement is None and paused.is_paused:
-            if paused.external_execution_required:
+        # A call that resumes from its decision runs now, so only a fresh call plans its execution.
+        execution = binding.function.planned_execution(call_id, arguments) if requirement is None else None
+        if execution is not None and execution.is_paused:
+            if execution.external_execution_required:
                 catalog._call_count += 1
             yield AgentToolCallEvent(
                 "waiting",
                 call_id,
                 binding.key,
-                call=paused.call,
-                requirement=RunRequirement(paused),
+                call=execution.call,
+                requirement=RunRequirement(execution),
             )
             return
         catalog._call_count += 1
