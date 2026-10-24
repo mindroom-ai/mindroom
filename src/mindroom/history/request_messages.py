@@ -1,9 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Assemble model requests from a scope's stored runs, its compaction summary, and the current turn.
 
-Selection follows what Agno's ``get_messages`` and ``filter_tool_calls`` returned for MindRoom's replay limits, except
-that a legacy tool message holding several results counts against the tool-call limit once per result, and the
-placement and media rules are the ones MindRoom applied on top of Agno's message builders.
+The replay limits select what main selected (kept as main behaves), except that a legacy tool message holding several
+results counts against the tool-call limit once per result.
 """
 
 from __future__ import annotations
@@ -13,11 +12,11 @@ from dataclasses import dataclass, replace
 from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
-from mindroom.constants import prompt_roles_for_history_storage
+from mindroom.constants import PROMPT_MESSAGE_ROLES
 from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
-from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
+from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_fields, is_scope_summary, summary_follows
 from mindroom.llm.messages import Message
 
@@ -27,8 +26,6 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan, ScopeSummary
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
-
-_PROMPT_ROLES = frozenset({"system", "developer"})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -57,23 +54,26 @@ def scope_history_messages(
     num_history_runs: int | None,
     num_history_messages: int | None,
     max_tool_calls_from_history: int | None,
-    system_message_role: str = "system",
 ) -> list[Message]:
     """Return the stored history one request of ``scope`` replays, oldest first.
 
     ``runs`` are the session's runs in stored order. The two limits are the request's own, which a replay plan may
-    narrow from the configured policy. Each message is a copy marked ``from_history``, so a request never changes a
-    stored run and is never stored again. Prompt roles, ``system_message_role`` included, never replay. Tool calls
-    are read in the shape current releases store before the message and tool-call limits count them, and those beyond
-    ``max_tool_calls_from_history`` are left out, as is every media item except the newest viewed images.
+    narrow from the configured policy. The run limit applies before the message limit, which counts only messages that
+    replay, so a legacy placeholder and its orphan result take no message of it; a tool result whose call the message
+    limit cut off is dropped, since it cannot replay without that call. Each message is a copy marked
+    ``from_history``, so a request never changes a stored run and is never stored again. Prompt messages never replay.
+    Tool calls are read in the shape current releases store before the message and tool-call limits count them, and
+    those beyond ``max_tool_calls_from_history`` are left out, as is every media item except the newest viewed images.
     """
-    selected = _selected_messages(
-        runs,
-        scope,
-        num_history_runs=num_history_runs,
-        num_history_messages=num_history_messages,
-        system_message_role=system_message_role,
-    )
+    replayed = [run for run in runs if replays_in_scope(run, scope)]
+    if num_history_runs is not None:
+        if num_history_runs <= 0:
+            return []
+        replayed = replayed[-num_history_runs:]
+    selected = replayable_messages(replayed)
+    if num_history_messages is not None:
+        newest = selected[-num_history_messages:] if num_history_messages > 0 else []
+        selected = list(dropwhile(lambda message: message.role == "tool", newest))
     history = [_history_copy(message) for message in selected]
     if max_tool_calls_from_history is not None:
         history = filter_tool_calls(history, max_tool_calls_from_history)
@@ -98,54 +98,26 @@ def replayed_history(
         num_history_runs=plan.num_history_runs,
         num_history_messages=plan.num_history_messages,
         max_tool_calls_from_history=settings.max_tool_calls_from_history,
-        system_message_role=settings.system_message_role,
     )
     return history, session.summary
 
 
-def replayable_messages(runs: Iterable[AnyRunRecord], *, system_message_role: str) -> list[Message]:
+def replayable_messages(runs: Iterable[AnyRunRecord]) -> list[Message]:
     """Return the stored messages of ``runs`` that can replay, oldest first, in the shape current releases store.
 
-    Prompt roles, ``system_message_role`` included, never replay. Nor do the history copies a stored run holds,
-    since the runs they came from replay or are summarized on their own. The messages are the stored ones, never
-    copies, except those a legacy repair replaces. A request's history and a compaction's input both select their
-    messages here, so each counts the same messages against its limits.
+    Prompt messages never replay. Nor do the history copies a stored run holds, since the runs they came from replay
+    or are summarized on their own. The messages are the stored ones, never copies, except those a legacy repair
+    replaces. A request's history and a compaction's input both select their messages here, so each counts the same
+    messages against its limits.
     """
-    prompt_roles = prompt_roles_for_history_storage(system_message_role)
     return repair_legacy_tool_calls(
         [
             message
             for run in runs
             for message in run.messages
-            if not message.from_history and message.role not in prompt_roles
+            if not message.from_history and message.role not in PROMPT_MESSAGE_ROLES
         ],
     )
-
-
-def _selected_messages(
-    runs: Sequence[AnyRunRecord],
-    scope: HistoryScope,
-    *,
-    num_history_runs: int | None,
-    num_history_messages: int | None,
-    system_message_role: str,
-) -> list[Message]:
-    """Select the scope's replayable messages within the replay limits.
-
-    The run limit applies before the message limit, which counts only messages that replay, so a legacy placeholder
-    and its orphan result take no message of it. A tool result whose call the message limit cut off is dropped, since
-    it cannot replay without that call.
-    """
-    replayed = [run for run in runs if is_model_history_visible_run(run) and run_in_scope(run, scope)]
-    if num_history_runs is not None:
-        if num_history_runs <= 0:
-            return []
-        replayed = replayed[-num_history_runs:]
-    messages = replayable_messages(replayed, system_message_role=system_message_role)
-    if num_history_messages is None:
-        return messages
-    newest = messages[-num_history_messages:] if num_history_messages > 0 else []
-    return list(dropwhile(lambda message: message.role == "tool", newest))
 
 
 def _history_copy(message: Message) -> Message:
@@ -237,7 +209,7 @@ def _with_scope_summary(messages: list[Message], summary: ScopeSummary | None) -
     text = summary.text.strip() if summary is not None else ""
     if not text or any(is_scope_summary(message) for message in messages):
         return messages
-    index = next((index for index, message in enumerate(messages) if message.role not in _PROMPT_ROLES), len(messages))
+    index = next((i for i, message in enumerate(messages) if message.role not in PROMPT_MESSAGE_ROLES), len(messages))
     if index < len(messages) and summary_follows(messages[index]):
         index += 1
     return [*messages[:index], Message(**compaction_summary_fields(text, run_local=False)), *messages[index:]]

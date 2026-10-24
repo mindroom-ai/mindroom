@@ -35,8 +35,8 @@ from mindroom.history.replay import (
 )
 from mindroom.history.session_context import (
     ScopeSessionContext,
-    resolve_bound_history_owner,
-    resolve_bound_team_scope_context,
+    has_named_member,
+    resolve_bound_team_scope,
 )
 from mindroom.history.storage import (
     consume_pending_force_compaction_scope,
@@ -787,13 +787,11 @@ async def prepare_bound_scope_history(
     """
     if scope_context is not None:
         # A team without a named member has no history, whether or not its scope is open.
-        has_scope = resolve_bound_history_owner(member_names) is not None
+        has_scope = has_named_member(member_names)
     elif team_name is None and ad_hoc_team_has_private_member(member_names, config.agents):
         has_scope = False
     else:
-        has_scope = (
-            resolve_bound_team_scope_context(member_names=member_names, config=config, team_name=team_name) is not None
-        )
+        has_scope = resolve_bound_team_scope(member_names=member_names, config=config, team_name=team_name) is not None
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
         entity_name=team_name if team_name in config.teams else None,

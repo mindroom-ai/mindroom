@@ -46,8 +46,8 @@ KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_KNOWLEDGE_REFRESH_SUBPROCES
 # Generous enough for a cold full index of a large corpus, short enough that a
 # wedged child cannot outlive the day.
 DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS = 3600.0
-_STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
-_PROMPT_HISTORY_STORAGE_ROLES = frozenset({"system", "developer"})
+# The roles of the prompt messages MindRoom writes: history never replays them, and only a paused run stores them.
+PROMPT_MESSAGE_ROLES = frozenset({"system", "developer"})
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
@@ -79,15 +79,6 @@ WORKER_RUNTIME_PATH_ENV_NAMES = frozenset(
     },
 )
 WORKSPACE_HOME_CONTRACT_ENV_NAMES = _WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_PATH_ENV_NAMES
-
-
-def prompt_roles_for_history_storage(system_message_role: str = "system") -> frozenset[str]:
-    """Return prompt roles that should be stripped before durable history storage."""
-    roles = set(_PROMPT_HISTORY_STORAGE_ROLES)
-    configured_role = system_message_role.strip()
-    if configured_role and configured_role not in _STANDARD_HISTORY_ROLES:
-        roles.add(configured_role)
-    return frozenset(roles)
 
 
 def workspace_home_identity_env(workspace: Path | str) -> dict[str, str]:

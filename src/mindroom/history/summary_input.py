@@ -194,7 +194,7 @@ def _serialize_run_excerpt(
 
 def _compaction_replay_messages(run: AnyRunRecord, history_settings: ResolvedHistorySettings) -> list[Message]:
     """Return the run's messages a summary reads, not copied: the input renders no thinking, so only hooks strip it."""
-    messages = replayable_messages([run], system_message_role=history_settings.system_message_role)
+    messages = replayable_messages([run])
     if history_settings.max_tool_calls_from_history is not None:
         messages = filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
     return messages

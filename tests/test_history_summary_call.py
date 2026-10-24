@@ -591,7 +591,6 @@ def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> N
         messages=[
             Message(role="system", content="legacy system prompt"),
             Message(role="developer", content="legacy developer prompt"),
-            Message(role="instructions", content="legacy custom prompt"),
             Message(role="user", content="user request"),
             Message(role="assistant", content="assistant answer"),
             Message(role="tool", content="tool result"),
@@ -600,11 +599,7 @@ def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> N
 
     replay_messages = _compaction_replay_messages(
         run,
-        ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-            system_message_role="instructions",
-        ),
+        ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
     )
 
     assert [(message.role, message.content) for message in replay_messages] == [
@@ -646,7 +641,6 @@ def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
         messages=[
             Message(role="system", content="Persisted system prompt that should not be summarized"),
             Message(role="developer", content="Persisted developer prompt that should not be summarized"),
-            Message(role="instructions", content="Persisted custom prompt that should not be summarized"),
             Message(role="user", content="user request"),
             Message(role="assistant", content="assistant answer"),
             Message(role="tool", content="tool result"),
@@ -656,18 +650,13 @@ def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
     summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-            system_message_role="instructions",
-        ),
+        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         max_input_tokens=1_000,
     )
 
     assert included_runs == [run]
     assert "Persisted system prompt" not in summary_input
     assert "Persisted developer prompt" not in summary_input
-    assert "Persisted custom prompt" not in summary_input
     assert "user request" in summary_input
     assert "assistant answer" in summary_input
     assert "tool result" in summary_input

@@ -1245,7 +1245,6 @@ class Config(BaseModel):
                 num_history_messages=self.defaults.num_history_messages,
             ),
             max_tool_calls_from_history=self.defaults.max_tool_calls_from_history,
-            system_message_role="system",
         )
 
     def _configured_entity(self, entity_name: str) -> AgentConfig | TeamConfig:
@@ -1282,7 +1281,6 @@ class Config(BaseModel):
                 num_history_messages=num_history_messages,
             ),
             max_tool_calls_from_history=max_tool_calls_from_history,
-            system_message_role="system",
         )
 
     def _entity_max_tool_calls_per_turn(self, entity_name: str) -> int:

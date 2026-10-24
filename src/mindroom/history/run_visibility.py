@@ -27,6 +27,11 @@ def run_in_scope(run: AnyRunRecord, scope: HistoryScope) -> bool:
     return isinstance(run, RunRecord) and run.agent_id == scope.scope_id
 
 
+def replays_in_scope(run: AnyRunRecord, scope: HistoryScope) -> bool:
+    """Return whether a stored run replays as ``scope``'s model history: a visible top-level run of the scope."""
+    return is_model_history_visible_run(run) and run_in_scope(run, scope)
+
+
 # A queued-message notice, MindRoom's instruction to pause for a newer message, is stored as a user message marked so.
 QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER = "persisted"

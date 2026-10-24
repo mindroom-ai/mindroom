@@ -1666,7 +1666,7 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_context_window_guard_preserves_custom_system_message_role(
+async def test_prepare_history_for_run_context_window_guard_skips_developer_prompts(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path, context_window=40)
@@ -1705,11 +1705,7 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
         execution_identity=None,
         storage=storage,
         session=persisted,
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-            system_message_role="developer",
-        ),
+        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         # The 40-token window minus its clamped 20-token reserve leaves 10 tokens of history beside this prompt.
         static_prompt_tokens=10,
         available_history_budget=10,

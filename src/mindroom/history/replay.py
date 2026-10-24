@@ -13,7 +13,7 @@ from mindroom.history.message_content import (
     render_message_content,
 )
 from mindroom.history.request_messages import scope_history_messages
-from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
+from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_fields
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
 from mindroom.llm.messages import Message
@@ -68,7 +68,6 @@ def estimate_prompt_visible_history_tokens(
         num_history_runs=policy.num_history_runs,
         num_history_messages=policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
-        system_message_role=history_settings.system_message_role,
     )
     tokens, has_checkpoint = _route_tokens(history_messages, replay_model=replay_model, native_route=native_route)
     # A checkpoint covers the summary message before it, which native projection drops.
@@ -133,7 +132,7 @@ def _estimate_messages_tokens(
     # ceiling with one, so one history gets two estimates. Use one rounding rule. Operators would see compaction and
     # replay trimming trigger a few tokens earlier or later.
     canonical_tokens = (
-        _estimate_history_messages_tokens(canonical_messages)
+        sum(_estimated_message_chars(message) for message in canonical_messages) // 4
         if native_route is None
         else sum((_estimated_message_chars(message) + 3) // 4 for message in canonical_messages)
     )
@@ -180,14 +179,9 @@ def estimate_summary_tokens(session: ConversationSession) -> int:
     return estimate_text_tokens(str(compaction_summary_message(summary, run_local=False).content))
 
 
-def _estimate_history_messages_tokens(messages: list[Message]) -> int:
-    """Estimate the token count of materialized history messages."""
-    return sum(_estimated_message_chars(message) for message in messages) // 4
-
-
 def scope_visible_runs(session: ConversationSession, scope: HistoryScope) -> list[AnyRunRecord]:
     """Return this scope's model-history-visible runs in stored order."""
-    return [run for run in session.runs if is_model_history_visible_run(run) and run_in_scope(run, scope)]
+    return [run for run in session.runs if replays_in_scope(run, scope)]
 
 
 def current_summary_text(session: ConversationSession) -> str | None:

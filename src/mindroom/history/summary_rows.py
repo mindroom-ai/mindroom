@@ -397,6 +397,12 @@ def cut_at_legacy_row(
             _cut(connection, tables, session_id, scope_key, rows, (legacy[0].after_run_index, legacy[0].id))
 
 
+def _legacy_in_force(rows: Sequence[_SummaryRow]) -> list[_SummaryRow]:
+    """Return the legacy summary rows with text after the scope's latest barrier."""
+    barrier = max((row.id for row in rows if row.summary is None), default=0)
+    return [row for row in rows if row.id > barrier and row.legacy and row.summary is not None]
+
+
 def retire(
     storage: ConversationStore,
     *,
@@ -585,12 +591,6 @@ def _rows(
         )
     ]
     return rows[::-1]
-
-
-def _legacy_in_force(rows: Sequence[_SummaryRow]) -> list[_SummaryRow]:
-    """Return the legacy summary rows with text after the scope's latest barrier."""
-    barrier = max((row.id for row in rows if row.summary is None), default=0)
-    return [row for row in rows if row.id > barrier and row.legacy and row.summary is not None]
 
 
 @contextmanager
