@@ -155,6 +155,9 @@ def continue_team(
             else:
                 # TODO(simplify): A resumed member's result is its raw content, or ``Task completed`` without any,
                 # unlike a first run's (``member_result_text``). Use that rule for both. Models would notice.
+                # TODO(simplify): A resumed member that wrote nothing hands over its carried pause notice ("I have
+                # tools to execute, but I need confirmation.") after its call ran, as main did. Hand over only what the
+                # resume added (``new_handover_content``) or a completion note. The leader model would notice.
                 results.append(f"[{plan.member.spec.name}]: {resumed.handover_content or 'Task completed'}")
         if plans and all(r.is_resolved() for r in record.requirements or ()):
             _answer_delegations(record, messages, [plan.member for plan in plans], results)
