@@ -11,7 +11,38 @@ from dataclasses import asdict, dataclass, fields
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TokenCounts:
+    """The token counters a usage report holds, in the order usage rows and reports list them."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    audio_input_tokens: int = 0
+    audio_output_tokens: int = 0
+    audio_total_tokens: int = 0
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, object], read: Callable[[object], int]) -> TokenCounts:
+        """Read each counter of a stored dict, None when it is missing, through the reader's own validation rule."""
+        return cls(**{name: read(values.get(name)) for name in TOKEN_FIELDS})
+
+    def to_dict(self) -> dict[str, int]:
+        """Return every counter, zero included, in report order."""
+        return asdict(self)
+
+    def __add__(self, other: TokenCounts) -> TokenCounts:
+        """Add the counters one by one."""
+        return TokenCounts(**{name: getattr(self, name) + getattr(other, name) for name in TOKEN_FIELDS})
+
+
+TOKEN_FIELDS = tuple(item.name for item in fields(TokenCounts))
 
 
 @dataclass(slots=True)
@@ -326,10 +357,12 @@ class ToolCallMetrics(_Stored):
 
 
 __all__ = [
+    "TOKEN_FIELDS",
     "MessageMetrics",
     "ModelMetrics",
     "RunMetrics",
     "SessionMetrics",
+    "TokenCounts",
     "ToolCallMetrics",
     "add_usage",
     "known_fields",

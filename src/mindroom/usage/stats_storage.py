@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, TypeGuard, cast
 
 from mindroom.constants import RuntimePaths, resolve_session_state_root
+from mindroom.llm.usage import TOKEN_FIELDS
 from mindroom.private_storage.legacy_private_storage_aliases import is_verified_private_instance_alias
 from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentityError,
@@ -27,7 +28,6 @@ from mindroom.tool_system.worker_routing import build_requester_execution_identi
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
     SYSTEM_USAGE_STORAGE_NAME,
-    TOKEN_FIELDS,
     USAGE_KINDS,
     quote_identifier,
 )

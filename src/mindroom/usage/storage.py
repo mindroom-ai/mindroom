@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY, read_model_provenance
+from mindroom.llm.usage import TOKEN_FIELDS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -35,18 +36,6 @@ USAGE_KINDS: frozenset[str] = frozenset({"run", *get_args(IndependentUsageKind._
 
 SYSTEM_USAGE_ENTITY = "system:internal"
 SYSTEM_USAGE_STORAGE_NAME = "system"
-
-TOKEN_FIELDS = (
-    "input_tokens",
-    "output_tokens",
-    "total_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "reasoning_tokens",
-    "audio_input_tokens",
-    "audio_output_tokens",
-    "audio_total_tokens",
-)
 
 
 def has_token_usage(metrics: Mapping[str, object]) -> bool:

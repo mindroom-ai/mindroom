@@ -21,9 +21,8 @@ from mindroom.budgets.pricing import (
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.llm.usage import ModelMetrics, RunMetrics
+from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
 from mindroom.providers.registry import build_model_provider
-from mindroom.usage.stats import TokenTotals
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,7 +38,7 @@ def _paths(tmp_path: Path) -> RuntimePaths:
 
 def test_openai_cache_reads_are_charged_out_of_input() -> None:
     priced = PricedModel(ModelPricing(input=2.0, output=8.0, cache_read=0.5), input_includes_cache=True)
-    totals = TokenTotals(input_tokens=1_000_000, cache_read_tokens=400_000, output_tokens=100_000)
+    totals = TokenCounts(input_tokens=1_000_000, cache_read_tokens=400_000, output_tokens=100_000)
 
     assert cost_usd(totals, priced) == pytest.approx((600_000 * 2.0 + 400_000 * 0.5 + 100_000 * 8.0) / 1e6)
 
@@ -47,14 +46,14 @@ def test_openai_cache_reads_are_charged_out_of_input() -> None:
 def test_anthropic_cache_tokens_are_charged_beside_input() -> None:
     pricing = ModelPricing(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75)
     priced = PricedModel(pricing, input_includes_cache=False)
-    totals = TokenTotals(input_tokens=10_000, cache_read_tokens=90_000, cache_write_tokens=5_000, output_tokens=1_000)
+    totals = TokenCounts(input_tokens=10_000, cache_read_tokens=90_000, cache_write_tokens=5_000, output_tokens=1_000)
 
     assert cost_usd(totals, priced) == pytest.approx((10_000 * 3.0 + 90_000 * 0.3 + 5_000 * 3.75 + 1_000 * 15.0) / 1e6)
 
 
 def test_unset_cache_price_charges_cache_reads_at_input_price() -> None:
     priced = PricedModel(ModelPricing(input=2.0, output=8.0), input_includes_cache=True)
-    totals = TokenTotals(input_tokens=1_000_000, cache_read_tokens=400_000)
+    totals = TokenCounts(input_tokens=1_000_000, cache_read_tokens=400_000)
 
     assert cost_usd(totals, priced) == pytest.approx(2.0)
 
@@ -62,7 +61,7 @@ def test_unset_cache_price_charges_cache_reads_at_input_price() -> None:
 def test_inconsistent_cache_counters_never_make_input_negative() -> None:
     priced = PricedModel(ModelPricing(input=2.0, output=8.0, cache_read=0.5), input_includes_cache=True)
 
-    assert cost_usd(TokenTotals(input_tokens=10, cache_read_tokens=1_000_000), priced) == pytest.approx(0.5)
+    assert cost_usd(TokenCounts(input_tokens=10, cache_read_tokens=1_000_000), priced) == pytest.approx(0.5)
 
 
 def test_price_table_keys_models_by_their_recorded_provider_identity(tmp_path: Path) -> None:
@@ -155,7 +154,7 @@ def test_reasoning_tokens_are_charged_as_part_of_output(tmp_path: Path, provider
         },
     )
     (priced,) = _price_table(config, _paths(tmp_path)).prices.values()
-    totals = TokenTotals(input_tokens=1_000_000, output_tokens=500_000, reasoning_tokens=400_000)
+    totals = TokenCounts(input_tokens=1_000_000, output_tokens=500_000, reasoning_tokens=400_000)
 
     assert cost_usd(totals, priced) == pytest.approx(1.0 + 500_000 * 10.0 / 1e6)
 

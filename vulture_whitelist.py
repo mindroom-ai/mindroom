@@ -408,3 +408,4 @@ get_presets  # FastAPI route (src/mindroom/api/egress_broker.py, src/mindroom/ap
 _._reject_non_finite_numbers  # Pydantic field validator (src/mindroom/api/script_gateway.py)
 _.child_run_id  # Stored tool-execution field of the Agno 3 run dict shape; MindRoom writes None and nothing reads it (src/mindroom/llm/runs.py)
 _.end_time  # Stored tool-call timing field the owned agent loop writes and nothing reads (src/mindroom/llm/usage.py)
+_.audio_total_tokens  # Token counter read by name in the stored, reported, and published usage dicts (src/mindroom/llm/usage.py)

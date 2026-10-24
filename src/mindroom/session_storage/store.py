@@ -24,13 +24,13 @@ from mindroom.history.summary_rows_schema import (
 )
 from mindroom.history.types import ScopeSummary
 from mindroom.llm.runs import RunStatus
-from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics
+from mindroom.llm.usage import TOKEN_FIELDS, ModelMetrics, RunMetrics, SessionMetrics
 from mindroom.session_storage.codec import run_from_row, run_type
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json
 from mindroom.session_storage.schema import schema_sql, table_names
 from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
-from mindroom.usage.storage import TOKEN_FIELDS, project_usage, quote_identifier, usage_upsert_sql
+from mindroom.usage.storage import project_usage, quote_identifier, usage_upsert_sql
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping
