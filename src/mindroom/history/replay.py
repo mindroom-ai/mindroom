@@ -56,16 +56,23 @@ def estimate_prompt_visible_history_tokens(
     native_route: str | None = None,
     replay_model: PortableReplayEstimator | None = None,
 ) -> int:
-    """Estimate the durable summary plus visible persisted history for one run."""
-    summary_tokens = estimate_summary_tokens(session)
-    history_messages = _history_messages_for_estimation(
-        session=session,
+    """Estimate the durable summary plus visible persisted history for one run.
+
+    The history is the selection a request under ``history_settings`` sends, so the estimate counts exactly what the
+    model will read. Stale Anthropic replay fields are left in place because the char estimate never counts them.
+    """
+    policy = history_settings.policy
+    history_messages = scope_history_messages(
+        session.runs,
         scope=scope,
-        history_settings=history_settings,
+        num_history_runs=policy.num_history_runs,
+        num_history_messages=policy.num_history_messages,
+        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+        system_message_role=history_settings.system_message_role,
     )
     tokens, has_checkpoint = _route_tokens(history_messages, replay_model=replay_model, native_route=native_route)
     # A checkpoint covers the summary message before it, which native projection drops.
-    return tokens if has_checkpoint else summary_tokens + tokens
+    return tokens if has_checkpoint else estimate_summary_tokens(session) + tokens
 
 
 def _route_tokens(
@@ -122,6 +129,9 @@ def _estimate_messages_tokens(
         _without_image_transport(message, strip_content_blocks=provider_accounts_for_images)
         for message in history_messages
     ]
+    # TODO(simplify): Canonical text counts as total characters // 4 without a native route but as a per-message
+    # ceiling with one, so one history gets two estimates. Use one rounding rule. Operators would see compaction and
+    # replay trimming trigger a few tokens earlier or later.
     canonical_tokens = (
         _estimate_history_messages_tokens(canonical_messages)
         if native_route is None
@@ -175,28 +185,6 @@ def _estimate_history_messages_tokens(messages: list[Message]) -> int:
     return sum(_estimated_message_chars(message) for message in messages) // 4
 
 
-def _history_messages_for_estimation(
-    *,
-    session: ConversationSession,
-    scope: HistoryScope,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    """Return the history a request under ``history_settings`` replays, for token estimation.
-
-    The same selection a request sends, so the estimate counts exactly what the model will read. Stale Anthropic
-    replay fields are left in place because the char estimate never counts them.
-    """
-    policy = history_settings.policy
-    return scope_history_messages(
-        session.runs,
-        scope=scope,
-        num_history_runs=policy.num_history_runs,
-        num_history_messages=policy.num_history_messages,
-        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
-        system_message_role=history_settings.system_message_role,
-    )
-
-
 def scope_visible_runs(session: ConversationSession, scope: HistoryScope) -> list[AnyRunRecord]:
     """Return this scope's model-history-visible runs in stored order."""
     return [run for run in session.runs if is_model_history_visible_run(run) and run_in_scope(run, scope)]
@@ -234,12 +222,13 @@ def _estimated_message_chars(message: Message) -> int:
 
 def _estimate_message_media_chars(message: Message) -> int:
     """Estimate serialized character cost for a message's media payloads."""
-    media_chars = 0
-    for _tag, media_value in message_media_entries(message):
-        if media_value is None:
-            continue
-        media_chars += len(stable_serialize(media_payload_snapshot(media_value)))
-    return media_chars
+    # TODO(simplify): Estimation strips every non-empty media field before counting characters, so this adds only two
+    # characters per empty media list. Drop the media count. Operators would see estimates move by a few tokens at most.
+    return sum(
+        len(stable_serialize(media_payload_snapshot(media_value)))
+        for _tag, media_value in message_media_entries(message)
+        if media_value is not None
+    )
 
 
 def _image_fallback_tokens(messages: list[Message]) -> int:
@@ -305,14 +294,11 @@ def _context_window_guard_limit_bounds(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> tuple[Literal["runs", "messages"], int]:
-    configured_limit = history_settings.policy.limit or 0
-    if history_settings.policy.mode == "messages":
-        return "messages", configured_limit
-
+    policy = history_settings.policy
+    if policy.mode == "messages":
+        return "messages", policy.limit or 0
     visible_run_count = len(scope_visible_runs(session, scope))
-    if history_settings.policy.mode == "all":
-        return "runs", visible_run_count
-    return "runs", min(configured_limit, visible_run_count)
+    return "runs", visible_run_count if policy.mode == "all" else min(policy.limit or 0, visible_run_count)
 
 
 def _find_fitting_history_limit_for_budget(

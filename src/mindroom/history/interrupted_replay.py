@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import TYPE_CHECKING, Any
@@ -21,7 +20,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
@@ -68,26 +67,19 @@ def split_interrupted_tool_trace(
 ) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
     """Split cancelled-run tools into completed and still-interrupted traces.
 
-    Prefer the explicit terminal state when the execution carries one. Only fall back to
-    ``result is None`` when it holds neither a completion payload nor an explicit
-    success/failure marker.
+    A tool is still interrupted when it holds neither a result nor an explicit success/failure marker.
     """
     completed: list[ToolTraceEntry] = []
     interrupted: list[ToolTraceEntry] = []
     for tool in tools or ():
-        if tool.tool_call_error is False:
-            _, trace_entry = format_tool_completed_event(tool)
-            if trace_entry is not None:
-                completed.append(trace_entry)
-            continue
-        if tool.result is None and tool.tool_call_error is not True:
+        if tool.result is None and tool.tool_call_error is None:
             _, trace_entry = format_tool_started_event(tool)
-            if trace_entry is not None:
-                interrupted.append(trace_entry)
-            continue
-        _, trace_entry = format_tool_completed_event(tool)
+            traces = interrupted
+        else:
+            _, trace_entry = format_tool_completed_event(tool)
+            traces = completed
         if trace_entry is not None:
-            completed.append(trace_entry)
+            traces.append(trace_entry)
     return completed, interrupted
 
 
@@ -179,14 +171,8 @@ def _render_retained_tool_context(snapshot: InterruptedReplaySnapshot) -> str:
 
 def _render_interrupted_replay_content(snapshot: InterruptedReplaySnapshot) -> str:
     """Render one interrupted snapshot into canonical assistant replay text."""
-    parts: list[str] = []
-    if snapshot.partial_text:
-        parts.append(snapshot.partial_text)
-    parts.append(_render_interruption_summary(snapshot))
-    retained_tool_context = _render_retained_tool_context(snapshot)
-    if retained_tool_context:
-        parts.append(retained_tool_context)
-    return "\n\n".join(parts)
+    parts = (snapshot.partial_text, _render_interruption_summary(snapshot), _render_retained_tool_context(snapshot))
+    return "\n\n".join(part for part in parts if part)
 
 
 def render_stopped_attempt(
@@ -206,17 +192,6 @@ def render_stopped_attempt(
             run_metadata=None,
         ),
     )
-
-
-def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[str, Any]:
-    metadata = dict(snapshot.run_metadata)
-    metadata.update(
-        {
-            _ORIGINAL_STATUS_KEY: snapshot.original_status.name,
-            _INTERRUPTED_REPLAY_STATE_KEY: _INTERRUPTED_REPLAY_STATE,
-        },
-    )
-    return metadata
 
 
 def _build_interrupted_replay_run(
@@ -245,7 +220,11 @@ def _build_interrupted_replay_run(
             user_content = render_msg_tag(sender=requester_id, body=user_content, event_id=source_event_id)
         messages.append(Message(role="user", content=user_content))
     messages.append(Message(role="assistant", content=content))
-    metadata = _interrupted_replay_metadata(snapshot)
+    metadata = {
+        **snapshot.run_metadata,
+        _ORIGINAL_STATUS_KEY: snapshot.original_status.name,
+        _INTERRUPTED_REPLAY_STATE_KEY: _INTERRUPTED_REPLAY_STATE,
+    }
     if session.kind == "team":
         return TeamRunRecord(
             run_id=run_id,
@@ -283,7 +262,7 @@ def build_interrupted_replay_snapshot(
 
     Calls a mid-turn fold already summarized, and tools nested in a folded shell call, are left out.
     """
-    metadata = dict(run_metadata) if isinstance(run_metadata, Mapping) else {}
+    metadata = dict(run_metadata or {})
     raw_response_event_id = response_event_id or metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
     if isinstance(raw_response_event_id, str) and raw_response_event_id:
         metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = raw_response_event_id
@@ -360,7 +339,6 @@ def persist_interrupted_replay(
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
             run_metadata=run_metadata,
-            response_event_id=None,
             original_status=original_status,
         ),
     )

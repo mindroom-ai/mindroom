@@ -40,24 +40,20 @@ def media_payload_snapshot(media_value: object) -> object:
 def _retained_viewed_images(messages: Sequence[Message]) -> set[tuple[int, int]]:
     """Return ``(message, image)`` indexes of the newest viewed images replay keeps within its count and byte caps."""
     retained: set[tuple[int, int]] = set()
-    retained_count = 0
     retained_bytes = 0
-    for message_index in range(len(messages) - 1, -1, -1):
+    for message_index in reversed(range(len(messages))):
         images = messages[message_index].images or []
-        for image_index in range(len(images) - 1, -1, -1):
+        for image_index in reversed(range(len(images))):
             image = images[image_index]
-            content = image.content
-            if not _is_viewed_image(image) or not content:
+            if not _is_viewed_image(image) or not image.content:
                 continue
-            image_bytes = len(content)
             if (
-                retained_count >= _MAX_HISTORY_VIEWED_IMAGES
-                or image_bytes > _MAX_HISTORY_VIEWED_IMAGE_BYTES - retained_bytes
+                len(retained) >= _MAX_HISTORY_VIEWED_IMAGES
+                or len(image.content) > _MAX_HISTORY_VIEWED_IMAGE_BYTES - retained_bytes
             ):
                 continue
             retained.add((message_index, image_index))
-            retained_count += 1
-            retained_bytes += image_bytes
+            retained_bytes += len(image.content)
     return retained
 
 
@@ -111,6 +107,9 @@ def image_content_for_token_estimation(value: object) -> object:
 
 def render_message_content(message: Message) -> str:
     """Render one replayable string form of a message body."""
+    # TODO(simplify): A stored ``compressed_content``, which only the retired compress_tool_results wrote and no provider
+    # sends, replaces the content in estimates, summary input, and a replayed viewed-image omission notice. Read
+    # ``content`` only. Models and operators would notice only on runs stored while that option was on.
     content = message.compressed_content if message.compressed_content is not None else message.content
     if isinstance(content, str):
         return content

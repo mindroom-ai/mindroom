@@ -648,26 +648,22 @@ def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
         run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
     )
 
-    recorder.set_assistant_text("Text emitted before interruption")
-    recorder.set_completed_tools(
-        [
-            ToolTraceEntry(
-                type="tool_call_completed",
-                tool_name="run_shell_command",
-                args_preview="cmd=pwd",
-                result_preview="/app",
-            ),
-        ],
-    )
-    recorder.set_interrupted_tools(
-        [
-            ToolTraceEntry(
-                type="tool_call_started",
-                tool_name="save_file",
-                args_preview="file_name=main.py",
-            ),
-        ],
-    )
+    recorder.assistant_text = "Text emitted before interruption"
+    recorder.completed_tools = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="run_shell_command",
+            args_preview="cmd=pwd",
+            result_preview="/app",
+        ),
+    ]
+    recorder.interrupted_tools = [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="save_file",
+            args_preview="file_name=main.py",
+        ),
+    ]
     recorder.mark_interrupted()
 
     snapshot = recorder.interrupted_snapshot()

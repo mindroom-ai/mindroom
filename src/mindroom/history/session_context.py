@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
@@ -194,7 +193,8 @@ def create_scope_session_storage(
     """Open the canonical conversation store of one persisted history scope."""
     if scope.kind == "agent":
         return create_session_storage(agent_name, config, runtime_paths, execution_identity=execution_identity)
-    storage_name = _scope_session_storage_name(scope)
+    normalized_scope_id = _TEAM_STORAGE_NAME_PATTERN.sub("_", scope.scope_id).strip("_") or "team"
+    storage_name = f"team_{normalized_scope_id}_{hashlib.sha256(scope.key.encode()).hexdigest()[:12]}"
     return create_state_storage(
         storage_name,
         resolve_session_state_root(
@@ -204,17 +204,5 @@ def create_scope_session_storage(
     )
 
 
-def _scope_session_storage_name(scope: HistoryScope) -> str:
-    if scope.kind == "agent":
-        return scope.scope_id
-    normalized_scope_id = _TEAM_STORAGE_NAME_PATTERN.sub("_", scope.scope_id).strip("_") or "team"
-    digest = hashlib.sha256(scope.key.encode()).hexdigest()[:12]
-    return f"team_{normalized_scope_id}_{digest}"
-
-
-def _team_scope_state_root(
-    *,
-    storage_name: str,
-    runtime_paths: RuntimePaths,
-) -> Path:
+def _team_scope_state_root(*, storage_name: str, runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / _TEAM_STATE_ROOT_DIRNAME / storage_name

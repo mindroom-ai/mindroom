@@ -180,7 +180,7 @@ def has_queued_force_compaction(storage: ConversationStore, session_id: str, sco
     fields = storage.read_session_fields(session_id)
     if fields is None:
         return False
-    forced = bool(_raw_scope_states(fields.metadata).get(scope.key, {}).get("force_compact_before_next_run"))
+    forced = _scope_state(fields.metadata, scope).force_compact_before_next_run
     return forced or scope.key in _pending_scope_keys(fields.session_state)
 
 
@@ -494,20 +494,18 @@ def append_fold(
     ``session``, the turn's own, then holds what a fresh load does, so a request rebuilt from it within the turn,
     as a delegation continuation is, replays only what the summary does not cover.
     """
-    return (
-        summary_rows.append_summary(
-            storage,
-            session_id=session.session_id,
-            scope_key=scope.key,
-            based_on=basis.based_on,
-            covered=basis.covered,
-            summary=summary,
-            summary_model=summary_model,
-            segment=segment,
-            session=session,
-        )
-        is not None
+    row_id = summary_rows.append_summary(
+        storage,
+        session_id=session.session_id,
+        scope_key=scope.key,
+        based_on=basis.based_on,
+        covered=basis.covered,
+        summary=summary,
+        summary_model=summary_model,
+        segment=segment,
+        session=session,
     )
+    return row_id is not None
 
 
 def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
