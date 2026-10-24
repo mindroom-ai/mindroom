@@ -44,7 +44,6 @@ TEAM_NAME = "Team-writer-checker"
 PROVIDER = "Synthetic"
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-_PROMPT_ROLES = frozenset({"system", "developer"})
 
 
 def golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:
@@ -214,7 +213,7 @@ def comparable(run: dict[str, Any]) -> dict[str, Any]:
 def _stored_shape(run: dict[str, Any]) -> dict[str, Any]:
     result = dict(run)
     if run["status"] != "PAUSED":
-        result["messages"] = [message for message in run["messages"] if message["role"] not in _PROMPT_ROLES]
+        result["messages"] = [message for message in run["messages"] if message["role"] != "system"]
     if "member_responses" in run:
         result["member_responses"] = [_stored_shape(item) for item in run["member_responses"]]
     return result

@@ -115,7 +115,7 @@ async def format_contents(
     contents: list[dict[str, Any]] = []
     system_instruction: str | list[Any] | None = None
     for message in messages:
-        if message.role in ("system", "developer"):
+        if message.role == "system":
             system_instruction = message.content
             continue
         role = _ROLE_MAP.get(message.role, message.role)

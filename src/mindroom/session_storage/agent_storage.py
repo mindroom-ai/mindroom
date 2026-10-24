@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.history.legacy_compaction_state import migrate_to_summary_rows
-from mindroom.llm.messages import PROMPT_MESSAGE_ROLES
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.session_storage.schema import TableNames
@@ -42,7 +41,7 @@ def create_state_storage(storage_name: str, state_root: Path) -> ConversationSto
         db_path.parent.mkdir(parents=True, exist_ok=True)
         migrate_usage_database(db_path, names)
         migrate_to_summary_rows(db_path, names)
-        return ConversationStore(db_path, names, prompt_roles=PROMPT_MESSAGE_ROLES)
+        return ConversationStore(db_path, names, prompt_roles=frozenset({"system"}))
 
 
 def create_session_storage(

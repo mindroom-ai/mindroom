@@ -103,7 +103,7 @@ def minimal_turn(
         instructions=surface.minimal_instructions,
         context_files=surface.context_files,
         memory_root=surface.memory_root,
-        runtime_context=(build.prompt.additional_context or "") + surface.runtime_context,
+        runtime_context=(build.prompt.turn_context or "") + surface.runtime_context,
     )
     if required := [item for item in system_enrichment if item.minimal_required]:
         system_message += "\n" + render_system_enrichment_block(required)

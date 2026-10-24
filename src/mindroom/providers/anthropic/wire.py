@@ -162,16 +162,16 @@ def format_claude_messages(
 ) -> FormattedConversation:
     """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
 
-    System and developer messages are extracted and joined with a space. Consecutive same-role turns merge
-    into one, dropping the earlier assistant turn's thinking: the API verifies an assistant message's thinking
-    sequence against one original response. A conversation that ends with an assistant turn gets a trailing
-    ``continue`` user turn when the model rejects prefill. Documents ask for citations unless ``citations`` is
-    False, as a request with structured output must be: the API rejects citations beside an output format.
+    System messages are extracted and joined with a space. Consecutive same-role turns merge into one, dropping
+    the earlier assistant turn's thinking: the API verifies an assistant message's thinking sequence against one
+    original response. A conversation that ends with an assistant turn gets a trailing ``continue`` user turn when
+    the model rejects prefill. Documents ask for citations unless ``citations`` is False, as a request with
+    structured output must be: the API rejects citations beside an output format.
     """
     turns: list[dict[str, Any]] = []
     system_texts: list[str] = []
     for message in messages:
-        if message.role in {"system", "developer"}:
+        if message.role == "system":
             system_texts.append(message.get_content_string())
             continue
         if message.role == "user":
@@ -189,8 +189,8 @@ def format_claude_messages(
     merged = _merged_turns(turns)
     if append_trailing_user_message and merged and merged[-1]["role"] == "assistant":
         merged.append({"role": "user", "content": [{"type": "text", "text": _TRAILING_USER_MESSAGE}]})
-    # TODO(simplify): System and developer messages join with one space, so a later one runs on from the end of
-    # the previous one. Join them with a blank line. Models would notice.
+    # TODO(simplify): System messages join with one space, so a later one runs on from the end of the previous
+    # one. Join them with a blank line. Models would notice.
     return FormattedConversation(messages=merged, system=" ".join(system_texts))
 
 

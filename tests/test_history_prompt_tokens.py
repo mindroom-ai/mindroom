@@ -161,7 +161,6 @@ def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt
                 "run-1",
                 messages=[
                     Message(role="system", content="legacy system prompt " * 20),
-                    Message(role="developer", content="legacy developer prompt " * 20),
                     *conversation_messages,
                 ],
             ),

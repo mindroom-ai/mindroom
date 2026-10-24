@@ -17,7 +17,7 @@ from mindroom.history.run_visibility import (
     is_queued_notice_message,
     queued_notice_marker,
 )
-from mindroom.llm.messages import PROMPT_MESSAGE_ROLES, Message
+from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
 
@@ -215,7 +215,7 @@ def _ends_with_completed_tool_batch(
         if _is_queued_notice_message(message, response_turn_id=response_turn_id):
             continue
         # Provider projections can insert trusted context between calls and results.
-        if message.role in PROMPT_MESSAGE_ROLES:
+        if message.role == "system":
             continue
         # Formatting may append user-role media after a just-completed batch, and a paused call's
         # result follows that media when the run resumes. Only a trailing user message is real input,

@@ -1062,7 +1062,7 @@ class TestUserIdPassthrough:
         assert transient.role == "user"
         assert transient.content == render_transient_context(("turn context",))
         assert transient.add_to_agent_memory is False
-        build_context = prepared_run.build.prompt.additional_context
+        build_context = prepared_run.build.prompt.turn_context
         assert build_context is not None
         system = prepared_run.spec.system_message
         assert system is not None

@@ -132,7 +132,6 @@ def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path:
         "run-1",
         messages=[
             Message(role="system", content="Current system prompt"),
-            Message(role="developer", content="Current developer prompt"),
             Message(role="user", content="user request"),
             Message(role="assistant", content="assistant answer"),
             Message(role="tool", content="tool result"),
@@ -145,7 +144,6 @@ def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path:
     # The record handed to the store keeps its prompts; the row, and the session's copy of it, do not.
     assert [(message.role, message.content) for message in run.messages] == [
         ("system", "Current system prompt"),
-        ("developer", "Current developer prompt"),
         ("user", "user request"),
         ("assistant", "assistant answer"),
         ("tool", "tool result"),

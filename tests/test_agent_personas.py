@@ -681,10 +681,10 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         persona=None,
     )
     assert standard.spec.system_message is None
-    assert standard.prompt.description is None
+    assert standard.prompt.persona is None
     assert "Configured role" in (standard.prompt.role or "")
     assert minimal.surface.mode == "minimal"
-    assert minimal.prompt.description is None
+    assert minimal.prompt.persona is None
     assert _bootstrap(minimal).startswith("You are Helper (helper) in minimal mode.")
 
 

@@ -69,12 +69,12 @@ def test_instructions_render_as_bullets_unless_one_is_a_block() -> None:
 def test_sections_render_in_agno_order() -> None:
     """Each input lands in its section, in the order and with the separators Agno rendered."""
     spec = PromptSpec(
-        description="Persona.",
+        persona="Persona.",
         role="Role.",
         instructions=("One.", "Two."),
         markdown=True,
         tool_instructions=("Toolkit guidance.", "More guidance."),
-        additional_context="<context>",
+        turn_context="<context>",
         skills_block="<skills_system>\n</skills_system>",
         knowledge_block="<knowledge_base>\n</knowledge_base>",
         model_note="Model note.\n\n",
@@ -89,10 +89,8 @@ def test_sections_render_in_agno_order() -> None:
     )
 
 
-def test_an_empty_skills_block_adds_nothing_and_a_system_message_replaces_everything() -> None:
-    """Only a non-empty skills block is added, and a set system message is sent verbatim."""
+def test_an_empty_skills_block_adds_nothing() -> None:
+    """Only a non-empty skills block is added."""
     assert render_system_message(PromptSpec(role="Role.", skills_block="")).content == (
         "<your_role>\nRole.\n</your_role>"
     )
-    message = render_system_message(PromptSpec(role="Role.", system_message="  Bootstrap.\n"))
-    assert (message.role, message.content) == ("system", "  Bootstrap.\n")

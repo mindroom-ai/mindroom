@@ -32,9 +32,9 @@ _LEGACY_SUMMARY_BLOCK = re.compile(
 # tests/test_mid_turn_compaction.py::test_legacy_resume_then_mid_turn_compaction_leaves_one_summary;
 # tests/test_agent_turn_runtime.py::test_the_hooks_of_a_reply_are_installed_in_their_documented_order.
 def system_message_embeds_summary(messages: Sequence[Message]) -> bool:
-    """Return whether a leading system or developer message already carries Agno's summary block."""
+    """Return whether a leading system message already carries Agno's summary block."""
     for message in messages:
-        if message.role not in {"system", "developer"}:
+        if message.role != "system":
             return False
         if isinstance(message.content, str) and _LEGACY_SUMMARY_TAG in message.content:
             return True
@@ -42,6 +42,6 @@ def system_message_embeds_summary(messages: Sequence[Message]) -> bool:
 
 
 def strip_embedded_summary(message: Message) -> None:
-    """Remove Agno's summary block from a system or developer message in place, keeping the message's identity."""
+    """Remove Agno's summary block from a system message in place, keeping the message's identity."""
     if isinstance(message.content, str) and _LEGACY_SUMMARY_TAG in message.content:
         message.content = _LEGACY_SUMMARY_BLOCK.sub("", message.content)

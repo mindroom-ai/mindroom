@@ -120,10 +120,10 @@ def test_agent_prompt_datetime_changes_with_timezone(monkeypatch: pytest.MonkeyP
         config.timezone = "Asia/Tokyo"
         agent_tokyo = _build(config, monkeypatch)
 
-    assert agent_ny.prompt.additional_context is not None
-    assert agent_tokyo.prompt.additional_context is not None
-    assert "Timezone: America/New_York (EDT)" in agent_ny.prompt.additional_context
-    assert "Timezone: Asia/Tokyo (JST)" in agent_tokyo.prompt.additional_context
+    assert agent_ny.prompt.turn_context is not None
+    assert agent_tokyo.prompt.turn_context is not None
+    assert "Timezone: America/New_York (EDT)" in agent_ny.prompt.turn_context
+    assert "Timezone: Asia/Tokyo (JST)" in agent_tokyo.prompt.turn_context
     assert agent_ny.prompt.role == agent_tokyo.prompt.role
 
 
@@ -141,9 +141,9 @@ def test_agent_prompt_datetime_stable_within_same_day(monkeypatch: pytest.Monkey
         second_agent = _build(config, monkeypatch)
 
     assert first_agent.prompt.role == second_agent.prompt.role
-    assert first_agent.prompt.additional_context == second_agent.prompt.additional_context
-    assert first_agent.prompt.additional_context is not None
-    assert "Today is Friday, March 20, 2026." in first_agent.prompt.additional_context
+    assert first_agent.prompt.turn_context == second_agent.prompt.turn_context
+    assert first_agent.prompt.turn_context is not None
+    assert "Today is Friday, March 20, 2026." in first_agent.prompt.turn_context
 
 
 def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pytest.MonkeyPatch) -> None:
