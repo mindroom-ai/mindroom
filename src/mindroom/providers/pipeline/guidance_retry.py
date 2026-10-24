@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Request once more, with guidance, after the model wrote a tool call the provider could not parse.
 
 A request that fails with ``MALFORMED_TOOL_CALL`` before the attempt committed is sent once more with a temporary
