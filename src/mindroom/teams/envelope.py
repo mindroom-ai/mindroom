@@ -344,6 +344,7 @@ def _leader_run(
         spec=built.spec,
         storage=storage,
         hooks=leader_loop_hooks(
+            built,
             HookTurn(
                 config=config,
                 runtime_paths=runtime_paths,
@@ -355,11 +356,6 @@ def _leader_run(
                 turn_recorder=turn_recorder,
             ),
             entity_name=configured_team_name,
-            scope_id=built.spec.id,
-            model=built.spec.model,
-            history_settings=team_history_settings(config, configured_team_name),
-            tool_middleware=built.leader_middleware,
-            jobs=built.leader_jobs,
         ),
         request_template=with_native_history(ModelRequest(messages=(), stream=stream), history.native_history),
         model_name=prepared.runtime_model_name,

@@ -1534,7 +1534,7 @@ async def _answer(
     )
     hooks = LoopHooks(
         before_request=(offer_wait_budget,),
-        on_loop_end=capture_final_request(capture, model, run_id=run_id, model_name=model_name),
+        on_loop_end=capture_final_request(capture, model, model_name=model_name),
     )
     await collect(
         run_agent(
@@ -1699,7 +1699,7 @@ async def test_the_capture_keeps_only_its_attempts_final_request_as_sent() -> No
     """The hook records the run it is installed on, and later edits of the messages never change the capture."""
     capture = SkillReviewCapture()
     model = ScriptedModel([answer("Done.")])
-    hooks = LoopHooks(on_loop_end=capture_final_request(capture, model, run_id="r1", model_name="default"))
+    hooks = LoopHooks(on_loop_end=capture_final_request(capture, model, model_name="default"))
 
     _, record = await collect(
         run_agent(
@@ -1713,7 +1713,7 @@ async def test_the_capture_keeps_only_its_attempts_final_request_as_sent() -> No
     record.messages[-1].content = "rewritten after the loop"
 
     assert capture.latest is not None
-    assert (capture.latest.run_id, capture.latest.model_name) == ("r1", "default")
+    assert (capture.latest.run_id, capture.latest.model_name) == ("run-1", "default")
     request = capture.latest.request
     assert [message.get_content_string() for message in request.messages] == [
         "You are Code.",

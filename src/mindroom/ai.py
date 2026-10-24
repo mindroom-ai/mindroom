@@ -55,6 +55,7 @@ from mindroom.llm.events import RequestCompleted, RunFinished, TextDelta, ToolCo
 from mindroom.llm.messages import Message
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.media_inputs import MediaInputs
@@ -546,12 +547,9 @@ def _own_assistant_text(record: AnyRunRecord | None) -> str:
     return next((part for answer in reversed(own_answers(record)) if (part := answer.strip())), "")
 
 
-def _reported(usage: RunMetrics | MessageMetrics | None, key: str) -> int | None:
-    """Return one usage counter of a run or a request, or None when the provider reported nothing for it."""
-    if usage is None:
-        return None
-    value = usage.to_dict().get(key)
-    return value if isinstance(value, int) else None
+def _reported_tokens(usage: RunMetrics | MessageMetrics | None) -> TokenCounts:
+    """Return the token counters a run or a request reported, all zero when it reported none."""
+    return usage.tokens if usage is not None else TokenCounts()
 
 
 def agent_run_metadata_content(
@@ -585,9 +583,9 @@ def agent_run_metadata_content(
         metrics=metrics,
         context_metrics=metrics,
         context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
-        context_raw_input_tokens=_reported(last_request, "input_tokens"),
-        context_cache_read_tokens=_reported(last_request, "cache_read_tokens"),
-        context_cache_write_tokens=_reported(last_request, "cache_write_tokens"),
+        context_raw_input_tokens=_reported_tokens(last_request).input_tokens or None,
+        context_cache_read_tokens=_reported_tokens(last_request).cache_read_tokens or None,
+        context_cache_write_tokens=_reported_tokens(last_request).cache_write_tokens or None,
         tool_count=len(record.tools or ()) if record is not None else 0,
         prepared_history=prepared_history,
     )
@@ -734,7 +732,6 @@ def _begin_attempt(
 
 def _agent_loop_hooks(
     run_context: _AgentRunContext,
-    attempt: _AgentAttempt,
     storage: RunStorage,
 ) -> LoopHooks:
     """Return the hooks of one agent run: the turn's gate, lifecycle, recorder, and skill capture around the shared set.
@@ -758,7 +755,6 @@ def _agent_loop_hooks(
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
-        run_id=attempt.run_id,
     )
 
 
@@ -788,7 +784,7 @@ async def _start_agent_run(
         model_name=prepared.runtime_model_name,
     )
     spec = prepared.spec
-    hooks = _agent_loop_hooks(run_context, attempt, storage)
+    hooks = _agent_loop_hooks(run_context, storage)
     if build.surface.mode == "minimal":
         spec, hooks = await minimal_attempt(
             build,
@@ -1632,7 +1628,7 @@ async def ai_response(  # noqa: C901
                 reason="participation_declined",
                 session_id=record.session_id or session_id,
                 run_id=record.run_id,
-                output_tokens=_reported(record.metrics, "output_tokens"),
+                output_tokens=_reported_tokens(record.metrics).output_tokens or None,
             )
         ):
             return skipped
@@ -1675,7 +1671,7 @@ async def ai_response(  # noqa: C901
             run_id=record.run_id,
             attempt_run_id=attempt.run_id,
             runtime_model_name=prepared_run.runtime_model_name,
-            output_tokens=_reported(record.metrics, "output_tokens"),
+            output_tokens=_reported_tokens(record.metrics).output_tokens or None,
             tool_executions=tuple(record.tools or ()),
             control_calls=cli_control_calls(attempt.run_id),
             completed_tools=tuple(response_tool_trace),
@@ -2035,7 +2031,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             reason="participation_declined",
             session_id=session_id,
             run_id=attempt.run_id,
-            output_tokens=_reported(record.metrics, "output_tokens"),
+            output_tokens=_reported_tokens(record.metrics).output_tokens or None,
         ):
             yield AttemptResolved(skipped)
             return
@@ -2082,7 +2078,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 run_id=record.run_id,
                 attempt_run_id=attempt.run_id,
                 runtime_model_name=prepared_run.runtime_model_name,
-                output_tokens=_reported(record.metrics, "output_tokens"),
+                output_tokens=_reported_tokens(record.metrics).output_tokens or None,
                 tool_executions=tuple(record.tools or ()),
                 control_calls=cli_control_calls(attempt.run_id),
                 completed_tools=tuple(state.completed_tools),

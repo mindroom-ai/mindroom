@@ -386,12 +386,13 @@ def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
 
 @dataclass(frozen=True)
 class BuiltTeam:
-    """One team ready to run: its spec, the tool-call policy the leader's own tools run under, and the team's jobs.
+    """One team ready to run: its spec, its history settings, the tool-call policy the leader's own tools run under, and the team's jobs.
 
     ``leader_jobs`` is the team as tool jobs see it while the instance runs them for a Matrix owner.
     """
 
     spec: TeamSpec
+    history_settings: ResolvedHistorySettings
     leader_middleware: tuple[ToolMiddleware, ...]
     leader_jobs: JobActor | None = None
 
@@ -470,9 +471,15 @@ def build_team_spec(
         max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
         members=team_members,
     )
+    history_settings = team_history_settings(config, configured_team_name)
     if jobs is None:
-        return BuiltTeam(spec=spec, leader_middleware=())
-    return BuiltTeam(spec=spec, leader_middleware=jobs.middleware, leader_jobs=jobs.actor)
+        return BuiltTeam(spec=spec, history_settings=history_settings, leader_middleware=())
+    return BuiltTeam(
+        spec=spec,
+        history_settings=history_settings,
+        leader_middleware=jobs.middleware,
+        leader_jobs=jobs.actor,
+    )
 
 
 __all__ = [

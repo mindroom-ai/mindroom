@@ -31,7 +31,7 @@ from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
 from mindroom.llm.messages import Message
 from mindroom.teams.envelope import PreparedTeamExecution
-from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, TeamTurnModelSelection
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, TeamTurnModelSelection, team_history_settings
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -382,7 +382,11 @@ def _memberless_team() -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
         display_names=[],
         failed_agent_names=[],
     )
-    return members, BuiltTeam(spec=spec, leader_middleware=()), TeamMode.COORDINATE
+    return (
+        members,
+        BuiltTeam(spec=spec, history_settings=team_history_settings(Config(), None), leader_middleware=()),
+        TeamMode.COORDINATE,
+    )
 
 
 def _prepared_team_turn() -> PreparedTeamExecution:

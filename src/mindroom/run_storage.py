@@ -2,7 +2,7 @@
 
 A turn binds the session its attempts save into to its scope context and takes each attempt's ``RunStorage`` from it
 (``bind_turn_session``); any other run in a scope takes it from the scope context it runs in (``scope_run_storage``).
-The run's hooks, resume, delegation driver, and tool catalog read the same value.
+The run's hooks, resume, and delegation driver read the same value, and the tool catalog takes its store.
 """
 
 from __future__ import annotations

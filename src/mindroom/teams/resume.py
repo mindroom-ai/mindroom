@@ -41,7 +41,6 @@ from mindroom.teams.members import (
     configured_team,
     materialize_exact_team_members,
     materialized_team_label,
-    team_history_settings,
     team_label,
 )
 from mindroom.teams.presentation import (
@@ -469,7 +468,7 @@ async def continue_paused_team_run(
             runtime_model_name=model_name,
             prepared_history=None,
         )
-        settings = team_history_settings(config, team_name)
+        settings = built.history_settings
         plan = configured_replay_plan(history_settings=settings, estimated_tokens=0)
         # TODO(simplify): like ResumeRunner.events (approval/resume.py), this resume names no model, so its tools see
         # the tool context's. Pass model_name. Tools that follow the reply's model, such as claude_agent, would notice.
@@ -478,6 +477,7 @@ async def continue_paused_team_run(
             storage=storage,
             records=attempt.records,
             hooks=leader_loop_hooks(
+                built,
                 HookTurn(
                     config=config,
                     runtime_paths=runtime_paths,
@@ -487,11 +487,6 @@ async def continue_paused_team_run(
                     prompt_id=None,
                 ),
                 entity_name=team_name,
-                scope_id=built.spec.id,
-                model=built.spec.model,
-                history_settings=settings,
-                tool_middleware=built.leader_middleware,
-                jobs=built.leader_jobs,
             ),
             request_template=with_native_history(ModelRequest(messages=()), native),
             settings=settings,

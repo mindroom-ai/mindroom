@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.participation import ParticipationGate
     from mindroom.run_storage import RunStorage
     from mindroom.skill_learning.capture import SkillReviewCapture
+    from mindroom.teams.members import BuiltTeam
     from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_system.invocation import ToolMiddleware
 
@@ -73,14 +74,13 @@ def agent_loop_hooks(
     *,
     participation: ParticipationGate | None = None,
     skill_review_capture: SkillReviewCapture | None = None,
-    run_id: str | None = None,
     queued_notices: bool = True,
 ) -> LoopHooks:
     """Return the hooks of one agent run or resume, from the build's model, history settings, tools, and jobs.
 
     The run compacts as its build's agent, in the turn's scope when one is given and under its own name otherwise, and
     a top-level agent hears of its ended jobs. ``queued_notices`` is off for a team member, whose leader owns the
-    turn's notices; ``skill_review_capture`` records the final request of run ``run_id``.
+    turn's notices; ``skill_review_capture`` records the run's final request.
     """
     jobs = build.tool_jobs
     agent_name = build.spec.id
@@ -101,42 +101,36 @@ def agent_loop_hooks(
         job_notices_for=jobs.name if jobs is not None and jobs.depth == 0 else None,
         queued_notices=queued_notices,
         skill_review_capture=skill_review_capture,
-        run_id=run_id,
     )
 
 
 def leader_loop_hooks(
+    built: BuiltTeam,
     turn: HookTurn,
     *,
     entity_name: str | None,
-    scope_id: str,
-    model: ModelProvider,
-    history_settings: ResolvedHistorySettings,
-    tool_middleware: tuple[ToolMiddleware, ...],
-    jobs: JobActor | None,
 ) -> LoopHooks:
-    """Return the hooks of one team leader's turn or resume.
+    """Return the hooks of one team leader's turn or resume, from the built team's model, history settings, and jobs.
 
     The leader compacts as the team: as the configured team ``entity_name`` names, or as no entity when it is None
-    for an ad hoc team, under the team's ``history_settings``. It has no participation gate, deferred tools, job
-    definitions, or skill-review capture; it owns the turn's queued-message notices and hears of its team's ended
-    ``jobs``.
+    for an ad hoc team. It has no participation gate, deferred tools, job definitions, or skill-review capture; it
+    owns the turn's queued-message notices and hears of its team's ended jobs.
     """
+    jobs = built.leader_jobs
     return _loop_hooks(
         turn,
-        model=model,
+        model=built.spec.model,
         entity_name=entity_name,
-        scope_id=scope_id,
+        scope_id=built.spec.id,
         is_team=True,
-        history_settings=history_settings,
+        history_settings=built.history_settings,
         deferred_tools=DeferredTools(),
-        tool_middleware=tool_middleware,
+        tool_middleware=built.leader_middleware,
         participation=None,
         job_definitions=None,
         job_notices_for=jobs.name if jobs is not None else None,
         queued_notices=True,
         skill_review_capture=None,
-        run_id=None,
     )
 
 
@@ -155,7 +149,6 @@ def _loop_hooks(
     job_notices_for: str | None,
     queued_notices: bool,
     skill_review_capture: SkillReviewCapture | None,
-    run_id: str | None,
 ) -> LoopHooks:
     """Return the hooks of one run or resume, in the order the loop applies them before each request.
 
@@ -166,7 +159,7 @@ def _loop_hooks(
     scope only when the run replays it; the bound approval receipt then projects into the first request of a run
     that reads it. Queued-message notices follow every tool batch and a resume's entry when ``queued_notices`` is
     on; the run hears of the ended jobs of ``job_notices_for`` after each batch; ``skill_review_capture`` records the
-    final request of run ``run_id``.
+    run's final request.
     """
     capabilities = model.capabilities
     before_request: list[BeforeRequestHook] = []
@@ -205,7 +198,7 @@ def _loop_hooks(
         ),
         on_resume_entry=(ai_runtime.queued_notice_on_resume_entry(notice_text),) if queued_notices else (),
         on_loop_end=(
-            capture_final_request(skill_review_capture, model, run_id=run_id or "", model_name=turn.model_name)
+            capture_final_request(skill_review_capture, model, model_name=turn.model_name)
             if skill_review_capture is not None
             else None
         ),

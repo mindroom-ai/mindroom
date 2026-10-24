@@ -18,7 +18,7 @@ from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn,
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.llm.messages import Message
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
-from mindroom.teams.members import _team_member, build_team_spec, materialize_exact_team_members, team_history_settings
+from mindroom.teams.members import _team_member, build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.conversation import current_conversation
@@ -482,6 +482,7 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
         assert built.leader_jobs is not None
         assert built.leader_jobs.team
         hooks = leader_loop_hooks(
+            built,
             HookTurn(
                 config=config,
                 runtime_paths=runtime_paths,
@@ -491,11 +492,6 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
                 prompt_id=None,
             ),
             entity_name="pair",
-            scope_id=built.spec.id,
-            model=built.spec.model,
-            history_settings=team_history_settings(config, "pair"),
-            tool_middleware=built.leader_middleware,
-            jobs=built.leader_jobs,
         )
         await start_job(runtime, "ended", tool_name="report", depth=0, adapter={}, owner=identity, operation=operation)
         await wait_for_status(runtime, "ended", "completed")

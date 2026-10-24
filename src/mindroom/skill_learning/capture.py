@@ -40,7 +40,6 @@ def capture_final_request(
     capture: SkillReviewCapture,
     model: ModelProvider,
     *,
-    run_id: str,
     model_name: str,
 ) -> LoopEndHook:
     """Return the loop-end hook that records one primary attempt's final request for the skill review.
@@ -57,7 +56,7 @@ def capture_final_request(
         capture.latest = CapturedRequest(
             model=model,
             model_name=model_name,
-            run_id=run_id,
+            run_id=state.run.run_id,
             request=replace(request, messages=messages, tools=state.offered.specs()),
         )
 

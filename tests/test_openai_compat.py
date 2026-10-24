@@ -79,7 +79,7 @@ from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.routing import ResponderSelection
 from mindroom.teams import envelope
 from mindroom.teams.envelope import PreparedTeamExecution
-from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, team_history_settings
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
@@ -3222,7 +3222,11 @@ def _scripted_team(
         display_names=[name for _member_id, name, _model in members],
         failed_agent_names=[],
     )
-    return resolved, BuiltTeam(spec=spec, leader_middleware=()), mode
+    return (
+        resolved,
+        BuiltTeam(spec=spec, history_settings=team_history_settings(Config(), None), leader_middleware=()),
+        mode,
+    )
 
 
 def _finished(content: str) -> RunFinished:

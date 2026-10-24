@@ -96,8 +96,8 @@ class AgentToolCallEvent:
 class PreparedAgentToolCatalog:
     """One turn's catalog of the agent's tools, each under the toolkit it was authored in.
 
-    ``run`` is the turn's run identity, whose session holds the state its calls share; ``storage`` is where the run is
-    stored, that same session included, and ``record`` is the run itself once known: the live run after its first
+    ``run`` is the turn's run identity, whose session holds the state its calls share and receives the catalog's
+    checkpoints and delegations; ``store`` is the store they write, and ``record`` is the run itself once known: the live run after its first
     tool batch is planned, or the stored run a recovery continues. ``middleware`` is the build's tool-call policy,
     which every call runs through, and ``max_tool_calls_per_turn`` bounds the calls of one turn. The toolkits it
     connects, the ones a run reaches only through it and every deferred toolkit it materializes, stay connected until
