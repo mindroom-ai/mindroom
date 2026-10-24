@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, TypeGuard, cast
 
 from mindroom.constants import RuntimePaths, resolve_session_state_root
 from mindroom.private_storage.legacy_private_storage_aliases import is_verified_private_instance_alias
@@ -656,12 +656,6 @@ def _extract_run(
     run_metrics = cast("dict[str, object]", metrics)
     selected_metrics = _select_metrics(run_metrics)
     created_at = run.get("created_at")
-    if (
-        isinstance(created_at, bool)
-        or not isinstance(created_at, (int, float))
-        or (isinstance(created_at, float) and not math.isfinite(created_at))
-    ):
-        created_at = None
     voice_seconds = run.get("voice_seconds") if kind == "live_voice" else None
     voice_finalized = run.get("voice_finalized", False)
     if kind == "live_voice" and (
@@ -685,7 +679,7 @@ def _extract_run(
         model_provider=_optional_string(run.get("model_provider")),
         model=_optional_string(run.get("model")),
         metrics=selected_metrics,
-        created_at=created_at,
+        created_at=created_at if _is_timestamp(created_at) else None,
         model_metrics=_extract_model_metrics(run_metrics.get("details")),
         requests=_extract_request_metrics(run.get("requests")),
         kind=cast("UsageKind", kind),
@@ -706,12 +700,7 @@ def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...
             request = cast("dict[str, object]", raw_request)
             created_at = request.get("created_at")
             metrics = request.get("metrics")
-            if (
-                isinstance(created_at, bool)
-                or not isinstance(created_at, (int, float))
-                or (isinstance(created_at, float) and not math.isfinite(created_at))
-                or not isinstance(metrics, dict)
-            ):
+            if not _is_timestamp(created_at) or not isinstance(metrics, dict):
                 return None
             if any(key in request and not _optional_string(request[key]) for key in ("model_provider", "model")):
                 return None
@@ -766,6 +755,12 @@ def _select_metrics(metrics: Mapping[str, object]) -> Mapping[str, _MetricValue]
         if value is not None:
             selected_metrics[metric_name] = value
     return MappingProxyType(selected_metrics)
+
+
+def _is_timestamp(value: object) -> TypeGuard[int | float]:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _optional_string(value: object) -> str | None:
