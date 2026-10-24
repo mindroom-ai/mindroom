@@ -40,7 +40,7 @@ from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApprov
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_usage
-from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
@@ -86,7 +86,7 @@ RESUME_PROBE_TOOL = "compaction_resume_probe"
 def summary_calls(monkeypatch: pytest.MonkeyPatch) -> SummaryCalls:
     calls = SummaryCalls()
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", calls)
-    monkeypatch.setattr("mindroom.history.compaction.build_model_provider", lambda *_args: summary_model())
+    install_model_providers(monkeypatch, {"summary": summary_model()})
     return calls
 
 
@@ -181,7 +181,7 @@ def _resumable(
     }
     paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config.model_validate(authored), paths)
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    install_model_providers(monkeypatch, {"default": model})
     store = (
         seeded_storage(config, paths)
         if replays_history

@@ -13,7 +13,7 @@ from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_state_event
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -93,7 +93,7 @@ Examples:
 
 Generate the topic:"""
 
-    provider = build_model_provider(config, runtime_paths, "default")
+    provider = provider_registry.build_model_provider(config, runtime_paths, "default")
     try:
         response = await complete_prompt(provider, prompt, role="Generate contextual room topics", schema=_RoomTopic)
     except Exception:

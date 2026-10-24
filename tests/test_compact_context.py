@@ -53,6 +53,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_side_effect,
+    install_model_providers,
     install_runtime_journal_support,
     make_conversation_reader_mock,
     make_relation_lookup,
@@ -434,7 +435,10 @@ async def test_compact_context_requires_summary_input_budget_with_retry_headroom
 
 
 @pytest.mark.asyncio
-async def test_compact_context_can_use_compaction_model_window_when_active_model_has_none(tmp_path: Path) -> None:
+async def test_compact_context_can_use_compaction_model_window_when_active_model_has_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Manual compaction should work when only the selected compaction model declares a context window."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -474,16 +478,11 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
     result = await tool.compact_context()
     assert result == COMPACT_CONTEXT_SUCCESS
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(
-                return_value="merged summary",
-            ),
+    install_model_providers(monkeypatch, {"summary-model": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(
+            return_value="merged summary",
         ),
     ):
         lifecycle = RecordingCompactionLifecycle()
@@ -644,7 +643,10 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(tmp_path: Path) -> None:
+async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Forced compaction clears itself when the scope has no visible runs to compact."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
@@ -654,15 +656,10 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
     seed_session(storage, session)
 
     summary_mock = AsyncMock()
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=summary_mock,
-        ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=summary_mock,
     ):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
@@ -685,7 +682,10 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp_path: Path) -> None:
+async def test_prepare_history_for_run_forced_compaction_compacts_single_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Forced compaction of a single run produces a summary and clears the flag."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
@@ -699,16 +699,11 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(
-                return_value="single run summary",
-            ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(
+            return_value="single run summary",
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -734,7 +729,10 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
 
 
 @pytest.mark.asyncio
-async def test_compact_context_persists_pending_force_flag_across_stale_run_save(tmp_path: Path) -> None:
+async def test_compact_context_persists_pending_force_flag_across_stale_run_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Current-run session saves should not erase a compact_context request before the next run."""
     config, runtime_paths = _make_config(tmp_path)
     identity = _execution_identity()
@@ -771,16 +769,11 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
     assert run_context.session_state is live_session_state
     seed_session(storage, stale_live_session)
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(
-                return_value="merged summary",
-            ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(
+            return_value="merged summary",
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -805,7 +798,10 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
 
 
 @pytest.mark.asyncio
-async def test_a_consumed_compaction_request_keeps_metadata_another_writer_stored_meanwhile(tmp_path: Path) -> None:
+async def test_a_consumed_compaction_request_keeps_metadata_another_writer_stored_meanwhile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A reply that consumes a queued request stores the flag over the row's metadata, not the copy it loaded."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
@@ -821,10 +817,8 @@ async def test_a_consumed_compaction_request_keeps_metadata_another_writer_store
     team_scope = HistoryScope(kind="team", scope_id="squad")
     update_scope_seen_event_ids(storage, other, team_scope, ["$consumed"])
 
-    with (
-        patch("mindroom.history.compaction.build_model_provider", return_value=summary_model()),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")),
-    ):
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")):
         await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current question",

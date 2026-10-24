@@ -23,7 +23,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelRequest
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, install_model_providers
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer, calls, tool_call
 
 if TYPE_CHECKING:
@@ -233,8 +233,8 @@ class ScriptedProvider:
             yield event
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Serve this model to every agent ``create_agent`` builds."""
-        monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args: self)
+        """Serve this model as the configured ``default`` model."""
+        install_model_providers(monkeypatch, {"default": self})
 
 
 def offered_tools(request: ModelRequest) -> list[str]:

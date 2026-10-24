@@ -21,7 +21,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
-from tests.conftest import orchestrator_runtime_paths
+from tests.conftest import install_model_providers, orchestrator_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
@@ -221,7 +221,11 @@ class TestDynamicConfigUpdate:
         router_bot._set_presence_with_model_info.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_scheduling_with_dynamically_added_agent(self, tmp_path: Path) -> None:
+    async def test_scheduling_with_dynamically_added_agent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Test that scheduling commands work correctly with dynamically added agents."""
         # Update config to add callagent
         updated_config = Config(
@@ -259,16 +263,16 @@ class TestDynamicConfigUpdate:
             description="Monitor for urgent emails and send text notification",
         )
         model = ScriptedModel([answer(workflow.model_dump_json(exclude_unset=True))])
-        with patch("mindroom.scheduling.tasks.build_model_provider", return_value=model):
-            result = await _parse_workflow_schedule(
-                request,
-                updated_config,
-                runtime_paths,
-                available_responders=[
-                    MatrixID(username="email_assistant", domain="localhost"),
-                    MatrixID(username="callagent", domain="localhost"),
-                ],
-            )
+        install_model_providers(monkeypatch, {"default": model})
+        result = await _parse_workflow_schedule(
+            request,
+            updated_config,
+            runtime_paths,
+            available_responders=[
+                MatrixID(username="email_assistant", domain="localhost"),
+                MatrixID(username="callagent", domain="localhost"),
+            ],
+        )
 
         # Verify the workflow was parsed correctly and includes both agents
         assert isinstance(result, ScheduledWorkflow)

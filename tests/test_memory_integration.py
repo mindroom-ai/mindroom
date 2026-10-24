@@ -22,10 +22,9 @@ from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.hooks import render_transient_context
 from mindroom.memory import ConversationRef, MemoryPromptParts
 from mindroom.session_storage.types import ConversationSession
-from tests.conftest import make_turn_context
+from tests.conftest import install_model_providers, make_turn_context
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
-from tests.scripted_agent_helpers import install_agent_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,7 +44,7 @@ class TestMemoryIntegration:
     def model(self, monkeypatch: pytest.MonkeyPatch) -> ScriptedModel:
         """Answer the agent's one request with the scripted provider."""
         model = ScriptedModel([answer("Test response")])
-        install_agent_model(monkeypatch, model)
+        install_model_providers(monkeypatch, {"default": model})
         return model
 
     @pytest.fixture
@@ -186,7 +185,7 @@ class TestMemoryIntegration:
         # First call - no memories
         mock_memory.search.return_value = {"results": []}
 
-        install_agent_model(monkeypatch, ScriptedModel([answer("First response"), answer("A is 1.")]))
+        install_model_providers(monkeypatch, {"default": ScriptedModel([answer("First response"), answer("A is 1.")])})
         with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             # First interaction
             await ai_response(

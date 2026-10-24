@@ -37,6 +37,7 @@ from tests.ai_run_golden_helpers import GOLDEN_RUN_METADATA, golden_metadata, pu
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
+    install_model_providers,
     make_conversation_reader_mock,
     make_relation_lookup,
     make_turn_context,
@@ -45,7 +46,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls
 from tests.llm.agno_dict_helpers import stored_run_record
 from tests.team_runtime.squad import SQUAD_APPROVED, STORAGE, approval, scripted
-from tests.team_turn_helpers import authored_team_config, build_team_turn, install_team_models
+from tests.team_turn_helpers import authored_team_config, build_team_turn
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "agno_parity"
 _REQUESTER = "@alice:example.org"
@@ -173,7 +174,7 @@ async def _agent_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: 
     replayed = _RUNS["run-native-error"] if run_id == "run-error" else record
     paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config.model_validate(_AUTHORED), paths)
-    install_team_models(monkeypatch, {"code": _model(replayed)})
+    install_model_providers(monkeypatch, {"code": _model(replayed)})
     _prepares(monkeypatch, record)
     assert record.session_id is not None
     room_id, _, thread_id = record.session_id.rpartition(":")

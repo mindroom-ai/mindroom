@@ -19,7 +19,7 @@ from mindroom.history.session_context import resolve_bound_team_scope
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 from mindroom.system_prompt import render_date_context
 from mindroom.teams.formation import (
     not_materializable_team_agents_message,
@@ -403,7 +403,12 @@ def build_team_spec(
     call budget come from the configured team ``configured_team_name``, or the defaults when it is None for an ad
     hoc one.
     """
-    model = build_model_provider(config, runtime_paths, model_name, execution_identity=execution_identity)
+    model = provider_registry.build_model_provider(
+        config,
+        runtime_paths,
+        model_name,
+        execution_identity=execution_identity,
+    )
     team_view = config.resolve_entity(configured_team_name)
     if scope_context is not None:
         team_id = scope_context.scope.scope_id

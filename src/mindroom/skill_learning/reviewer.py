@@ -32,7 +32,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
@@ -290,7 +290,7 @@ async def _replay(
         f"<conversation>\n{transcript}\n</conversation>"
     )
     return _ReviewRequest(
-        model=build_model_provider(config, runtime_paths, model_name, execution_identity=identity),
+        model=provider_registry.build_model_provider(config, runtime_paths, model_name, execution_identity=identity),
         model_name=model_name,
         messages=[Message(role="user", content=f"{evidence}\n\n{_review_prompt(config, catalog, runnable)}")],
         definitions=definitions,

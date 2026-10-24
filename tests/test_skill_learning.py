@@ -69,7 +69,7 @@ from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
-from tests.conftest import seed_session
+from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
 
 if TYPE_CHECKING:
@@ -98,8 +98,6 @@ BOB = replace(ALICE, requester_id="@bob:example.test")
 
 
 _Call = tuple[str, dict[str, object]]
-# Where a review that cannot fork the response's request builds its model.
-_REVIEW_MODEL = "mindroom.skill_learning.reviewer.build_model_provider"
 _SCRIPTED = ModelIdentity(id="scripted", provider="test", provider_name="test")
 
 
@@ -757,7 +755,10 @@ async def test_runs_without_model_replies_add_nothing(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools(tmp_path: Path) -> None:
+async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Without a request to fork, the review replays the stored conversation and offers only the skill tools."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
@@ -781,17 +782,17 @@ async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools
         ("skill_manage", {**patch_step, "name": "deploy-checks", "new_string": "1. Run the smoke test.\n2. Retry."}),
     )
     progress = ReviewProgress()
-    with patch(_REVIEW_MODEL, return_value=model):
-        await review_conversation(
-            config=config,
-            runtime_paths=paths,
-            agent_name="mind",
-            session_id="session",
-            identity=None,
-            skills_root=root,
-            captured=None,
-            progress=progress,
-        )
+    install_model_providers(monkeypatch, {"default": model})
+    await review_conversation(
+        config=config,
+        runtime_paths=paths,
+        agent_name="mind",
+        session_id="session",
+        identity=None,
+        skills_root=root,
+        captured=None,
+        progress=progress,
+    )
     assert progress.changes == {"deploy-checks": "created", "older-lesson": "updated"}
     assert (root / "older-lesson/SKILL.md").read_text().endswith("2. Check logs.\n")
     assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Retry.\n")
@@ -816,7 +817,10 @@ async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools
 
 
 @pytest.mark.asyncio
-async def test_reviewer_patches_and_support_files_refuse_literal_credentials(tmp_path: Path) -> None:
+async def test_reviewer_patches_and_support_files_refuse_literal_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Every learner write is checked for credentials, not only new skills, and the refusal names the line."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
@@ -845,17 +849,17 @@ async def test_reviewer_patches_and_support_files_refuse_literal_credentials(tmp
         ),
     )
     progress = ReviewProgress()
-    with patch(_REVIEW_MODEL, return_value=model):
-        await review_conversation(
-            config=config,
-            runtime_paths=paths,
-            agent_name="mind",
-            session_id="session",
-            identity=None,
-            skills_root=root,
-            captured=None,
-            progress=progress,
-        )
+    install_model_providers(monkeypatch, {"default": model})
+    await review_conversation(
+        config=config,
+        runtime_paths=paths,
+        agent_name="mind",
+        session_id="session",
+        identity=None,
+        skills_root=root,
+        captured=None,
+        progress=progress,
+    )
     patched, written = (json.loads(request[-1]) for request in model.requests[2:4])
     assert "Line 8 of SKILL.md looks like a literal credential" in patched["error"]
     assert "Line 2 of references/login.md looks like a literal credential" in written["error"]
@@ -997,7 +1001,10 @@ _PROVIDER_WIRES = {
 
 
 @pytest.mark.asyncio
-async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(tmp_path: Path) -> None:
+async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """User skills stay read-only, and the review ends before a request once its input reached the budget."""
     config, paths = _learner(tmp_path, context_window=12_000)
     config.agents["mind"].skills = ["mindroom-docs"]
@@ -1013,10 +1020,8 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(tmp_pat
         ),
         *[("get_skill_instructions", {"skill_name": "handwritten"})] * 12,
     )
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
         await _review(config, paths)
     assert "not in its own workspace skill directory and is read-only" in json.loads(model.requests[1][-1])["error"]
     assert "user-owned and read-only" in json.loads(model.requests[3][-1])["error"]
@@ -1026,7 +1031,10 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_claude_review_never_runs_a_call_the_output_limit_cut_off(tmp_path: Path) -> None:
+async def test_a_claude_review_never_runs_a_call_the_output_limit_cut_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A cut-off skill_manage call is answered instead of run, so only the complete retry writes the skill."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
@@ -1037,10 +1045,8 @@ async def test_a_claude_review_never_runs_a_call_the_output_limit_cut_off(tmp_pa
     model.capabilities = Capabilities(claude_family=True)
     model.cut_off_requests = frozenset({1})
     progress = ReviewProgress()
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
         await review_conversation(
             config=config,
             runtime_paths=paths,
@@ -1057,7 +1063,7 @@ async def test_a_claude_review_never_runs_a_call_the_output_limit_cut_off(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_the_budget_counts_what_each_request_sends(tmp_path: Path) -> None:
+async def test_the_budget_counts_what_each_request_sends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Like Hermes, the budget adds the input each request reported, so one reply's tool results share a request."""
     config, paths = _learner(tmp_path, context_window=40_000)
     _seed(config, paths, _run("r1", *[Message(role="user", content="x" * 3_600) for _ in range(8)]))
@@ -1069,27 +1075,23 @@ async def test_the_budget_counts_what_each_request_sends(tmp_path: Path) -> None
         [view, view, view],
         ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check logs."}),
     )
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
         await _review(config, paths)
     assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Check logs.\n")
     assert len(model.requests) == 3
 
 
 @pytest.mark.asyncio
-async def test_reviews_start_at_the_interval_and_post_a_notice(tmp_path: Path) -> None:
+async def test_reviews_start_at_the_interval_and_post_a_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Model replies of completed responses add up across turns; the review and its m.notice arrive at the interval."""
     config, paths = _learner(tmp_path, review_interval=4)
     _seed(config, paths, _tool_turn("r1"))
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
     client = object()
     send = AsyncMock(return_value=object())
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        patch("mindroom.skill_learning.runner.send_message_result", send),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with patch("mindroom.skill_learning.runner.send_message_result", send):
         runner = _runner(paths, client)
         assert await _count(runner, config, identity=ALICE) is None
         assert runner._replies == {"mind:session": 2}
@@ -1110,7 +1112,10 @@ async def test_reviews_start_at_the_interval_and_post_a_notice(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_review_archives_inactive_learned_skills_without_announcing_them(tmp_path: Path) -> None:
+async def test_review_archives_inactive_learned_skills_without_announcing_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The curator pass runs before each review, but the notice names only this conversation's changes."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
@@ -1132,25 +1137,26 @@ async def test_review_archives_inactive_learned_skills_without_announcing_them(t
             },
         )
     send = AsyncMock(return_value=object())
-    with (
-        patch(_REVIEW_MODEL, return_value=_model()),
-        patch("mindroom.skill_learning.runner.send_message_result", send),
-    ):
+    install_model_providers(monkeypatch, {"default": _model()})
+    with patch("mindroom.skill_learning.runner.send_message_result", send):
         await _review_due(config, paths, object(), identity=ALICE)
     assert not (root / "old-habit").exists()
     send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_review_requests_log_the_conversation_and_the_response_that_started_it(tmp_path: Path) -> None:
+async def test_review_requests_log_the_conversation_and_the_response_that_started_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A review's LLM usage and request logs name its conversation and the response's correlation id, as a turn's do."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"), identity=ALICE)
     model = _model()
-    with patch(_REVIEW_MODEL, return_value=model):
-        task = await _count(_runner(paths), config, identity=ALICE, correlation_id="$request")
-        assert task is not None
-        await task
+    install_model_providers(monkeypatch, {"default": model})
+    task = await _count(_runner(paths), config, identity=ALICE, correlation_id="$request")
+    assert task is not None
+    await task
     context = {
         "agent_id": "mind",
         "session_id": "session",
@@ -1165,14 +1171,14 @@ async def test_review_requests_log_the_conversation_and_the_response_that_starte
 
 
 @pytest.mark.asyncio
-async def test_private_reviews_stay_in_the_requester_workspace(tmp_path: Path) -> None:
+async def test_private_reviews_stay_in_the_requester_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A private instance learns only from its own session and publishes only into its own workspace."""
     config, paths = _learner(tmp_path, private=True)
     _seed(config, paths, _tool_turn("r1"), identity=ALICE)
     _seed(config, paths, _tool_turn("b1", result="bob private result"), identity=BOB)
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
-    with patch(_REVIEW_MODEL, return_value=model):
-        await _review_due(config, paths, identity=ALICE)
+    install_model_providers(monkeypatch, {"default": model})
+    await _review_due(config, paths, identity=ALICE)
     assert "tests passed" in model.requests[0][-1]
     assert "bob private result" not in model.requests[0][-1]
     assert (_skills_root(config, paths, ALICE) / "deploy-checks/SKILL.md").exists()
@@ -1189,15 +1195,16 @@ def test_unknown_review_model_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_skill_manage_offers_its_actions_as_a_string_enum(tmp_path: Path) -> None:
+async def test_skill_manage_offers_its_actions_as_a_string_enum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Providers see the action as a string enum, not the empty object a PEP 695 alias produced."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     model = _model()
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
         await _review(config, paths)
     action = model.tool_parameters["skill_manage"]["properties"]["action"]
     assert (action["type"], action["enum"]) == ("string", ["create", "patch", "edit", "write_file", "remove_file"])
@@ -1226,7 +1233,10 @@ def test_archival_skips_unreadable_user_skills(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(tmp_path: Path) -> None:
+async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A skill handed to the learner keeps its directory and name, and the reviewer edits it through both."""
     config, paths = _learner(tmp_path)
     root = _skills_root(config, paths)
@@ -1239,10 +1249,8 @@ async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(tmp
         ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check the logs."}),
     )
     progress = ReviewProgress()
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
         await review_conversation(
             config=config,
             runtime_paths=paths,
@@ -1258,7 +1266,7 @@ async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(tmp
 
 
 @pytest.mark.asyncio
-async def test_unreadable_user_skill_does_not_block_reviews(tmp_path: Path) -> None:
+async def test_unreadable_user_skill_does_not_block_reviews(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An unreadable user skill is left out of the catalog instead of failing every review of the workspace."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
@@ -1266,25 +1274,23 @@ async def test_unreadable_user_skill_does_not_block_reviews(tmp_path: Path) -> N
     locked.chmod(0)
     model = _model()
     try:
-        with patch(_REVIEW_MODEL, return_value=model):
-            await _review_due(config, paths)
+        install_model_providers(monkeypatch, {"default": model})
+        await _review_due(config, paths)
     finally:
         locked.chmod(0o755)
     assert model.requests
 
 
 @pytest.mark.asyncio
-async def test_reviewer_refuses_edits_to_unknown_skills(tmp_path: Path) -> None:
+async def test_reviewer_refuses_edits_to_unknown_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only create may name a skill the reviewer has not been shown."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     model = _model(
         ("skill_manage", {"action": "write_file", "name": "", "file_path": "references/x.md", "file_content": "x"}),
     )
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
         await _review(config, paths)
     assert "Unknown skill" in json.loads(model.requests[1][-1])["error"]
     # Without skills the agent offers no skill readers, so the review is told it can only call skill_manage.
@@ -1340,7 +1346,7 @@ def test_edits_refuse_frontmatter_that_is_not_strict_yaml(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_skill_edits_sent_in_one_reply_both_land(tmp_path: Path) -> None:
+async def test_skill_edits_sent_in_one_reply_both_land(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Providers send several tool calls per reply and the loop runs them together; each edit builds on the last."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
@@ -1354,17 +1360,17 @@ async def test_skill_edits_sent_in_one_reply_both_land(tmp_path: Path) -> None:
             ("skill_manage", {**patch_step, "old_string": "the web service", "new_string": "the web app"}),
         ],
     )
-    with patch(_REVIEW_MODEL, return_value=model):
-        await review_conversation(
-            config=config,
-            runtime_paths=paths,
-            agent_name="mind",
-            session_id="session",
-            identity=None,
-            skills_root=root,
-            captured=None,
-            progress=ReviewProgress(),
-        )
+    install_model_providers(monkeypatch, {"default": model})
+    await review_conversation(
+        config=config,
+        runtime_paths=paths,
+        agent_name="mind",
+        session_id="session",
+        identity=None,
+        skills_root=root,
+        captured=None,
+        progress=ReviewProgress(),
+    )
     content = (root / "deploy-checks/SKILL.md").read_text()
     assert "1. Run smoke." in content
     assert "the web app" in content
@@ -1417,7 +1423,10 @@ def test_archival_keeps_every_record_when_its_scan_stops_early(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary(tmp_path: Path) -> None:
+async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Replies stay counted when compaction deletes their runs, and the summary opens a replayed review's evidence."""
     config, paths = _learner(tmp_path, review_interval=4)
     _seed(config, paths, _tool_turn("r1"))
@@ -1439,10 +1448,10 @@ async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary
         summary_model="summary-model",
     )
     model = _model()
-    with patch(_REVIEW_MODEL, return_value=model):
-        task = await _count(runner, config, run_id="r2")
-        assert task is not None
-        await task
+    install_model_providers(monkeypatch, {"default": model})
+    task = await _count(runner, config, run_id="r2")
+    assert task is not None
+    await task
     assert len(model.requests) == 1
     evidence = model.requests[0][-1]
     assert evidence.index("release notes in the #deploys channel") < evidence.index("deployed to canary")
@@ -1647,7 +1656,11 @@ async def test_the_fork_offers_the_run_s_own_definitions_without_the_wait_budget
         "no capture",
     ],
 )
-async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tmp_path: Path, reason: str) -> None:
+async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(
+    tmp_path: Path,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A request the review cannot use whole, or one too long for several review requests, is replayed instead."""
     config, paths = _learning_agent_with_a_skill(tmp_path)
     config.models["small"] = ModelConfig(provider="openai", id="gpt-6-luna")
@@ -1673,8 +1686,8 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tm
         # The final request already used more than a quarter of the default 120,000-token review budget.
         captured.request.messages[-1].metrics.tokens = TokenCounts(input_tokens=40_000)
     replay = _model()
-    with patch(_REVIEW_MODEL, return_value=replay):
-        await _review(config, paths, captured=None if reason == "no capture" else captured)
+    install_model_providers(monkeypatch, {"default": replay, "small": replay})
+    await _review(config, paths, captured=None if reason == "no capture" else captured)
     assert len(replay.requests) == 1
     assert "<conversation>" in replay.requests[0][-1]
     assert "tests passed" in replay.requests[0][-1]
@@ -1830,7 +1843,10 @@ async def test_no_review_starts_once_shutdown_began(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_review_a_new_response_stops_after_its_writes_still_posts_its_notice(tmp_path: Path) -> None:
+async def test_a_review_a_new_response_stops_after_its_writes_still_posts_its_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A stopped review keeps no changed skill secret: its notice names what landed before the stop."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
@@ -1839,10 +1855,8 @@ async def test_a_review_a_new_response_stops_after_its_writes_still_posts_its_no
     model.released_requests = 1
     send = AsyncMock(return_value=object())
     runner = _runner(paths, object())
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        patch("mindroom.skill_learning.runner.send_message_result", send),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with patch("mindroom.skill_learning.runner.send_message_result", send):
         task = await _count(runner, config, identity=ALICE)
         assert task is not None
         await asyncio.wait_for(model.blocked.get(), timeout=10)
@@ -1854,7 +1868,10 @@ async def test_a_review_a_new_response_stops_after_its_writes_still_posts_its_no
 
 
 @pytest.mark.asyncio
-async def test_a_response_starting_while_the_notice_is_sent_never_stops_it(tmp_path: Path) -> None:
+async def test_a_response_starting_while_the_notice_is_sent_never_stops_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The notice runs on its own, so a new response in the conversation cannot cancel it halfway."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
@@ -1868,10 +1885,8 @@ async def test_a_response_starting_while_the_notice_is_sent_never_stops_it(tmp_p
         return object()
 
     runner = _runner(paths, object())
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        patch("mindroom.skill_learning.runner.send_message_result", send),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with patch("mindroom.skill_learning.runner.send_message_result", send):
         assert await _count(runner, config, identity=ALICE) is not None
         await asyncio.wait_for(sending.wait(), timeout=10)
         runner.cancel(config, agent_name="mind", session_id="session", identity=ALICE)
@@ -1881,16 +1896,14 @@ async def test_a_response_starting_while_the_notice_is_sent_never_stops_it(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_a_review_runs_in_a_fresh_context(tmp_path: Path) -> None:
+async def test_a_review_runs_in_a_fresh_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The response's queued-message state never reaches the review's requests."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
     notice = "Pause tool use and summarize before handling the newer message."
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        queued_message_signal_context(_PendingMessage()),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with queued_message_signal_context(_PendingMessage()):
         await _review_due(config, paths)
     assert len(model.requests) == 2
     assert all(notice not in content for request in model.requests for content in request)
@@ -1916,7 +1929,7 @@ async def test_a_replay_reviews_on_the_model_the_response_used(tmp_path: Path) -
     assert capture.latest is not None
     unforkable = _with_final_request_messages(capture.latest, capture.latest.request.messages[:-1])
     replay = _model()
-    with patch(_REVIEW_MODEL, return_value=replay) as load:
+    with patch("mindroom.providers.registry.build_model_provider", return_value=replay) as load:
         await _review(config, paths, captured=unforkable)
     assert load.call_args.args[2] == "thread"
     assert len(replay.requests) == 1
@@ -1951,7 +1964,10 @@ async def test_the_capture_names_each_attempts_model(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_review_validates_skill_tool_arguments_like_the_agents_tools(tmp_path: Path) -> None:
+async def test_the_review_validates_skill_tool_arguments_like_the_agents_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The review runs its own skill tool methods, which validate their arguments as the agent's tools would."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
@@ -1966,10 +1982,8 @@ async def test_the_review_validates_skill_tool_arguments_like_the_agents_tools(t
         ("skill_manage", {"action": "delete", "name": "deploy-checks", "file_path": "references/notes.md"}),
         ("skill_manage", {**patch_step, "new_string": "1. Smoke.", "replace_all": "false"}),
     )
-    with (
-        patch(_REVIEW_MODEL, return_value=model),
-        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
         await _review(config, paths)
     assert "Input should be 'create', 'patch', 'edit', 'write_file' or 'remove_file'" in model.requests[2][-1]
     assert "occurs 2 times" in json.loads(model.requests[3][-1])["error"]

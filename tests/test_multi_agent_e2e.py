@@ -28,6 +28,7 @@ from tests.conftest import (
     bind_mock_config_event_journal,
     bind_runtime_paths,
     drain_coalescing,
+    install_model_providers,
     install_runtime_journal_support,
     make_matrix_client_mock,
     patch_response_runner_module,
@@ -288,10 +289,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     mock_config = _make_config(tmp_path)
     mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-haiku-4-5")}
     mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
-    # The members build on scripted providers that are never asked; the team's leader answers on its own.
+    # Every model builds as the team's leader, which answers on its own; the members are never asked.
     team_leader = ScriptedModel([answer("Team response")])
-    monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
-    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: team_leader)
+    install_model_providers(monkeypatch, {"default": team_leader})
 
     # Use the actual domain from config (which comes from MATRIX_HOMESERVER env var)
     domain = mock_config.get_domain(runtime_paths_for(mock_config))

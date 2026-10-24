@@ -23,7 +23,7 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, Response
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, make_turn_context
+from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context
 from tests.delegation_helpers import approval_calls_for, approval_executor, resume
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.test_plugins import _preserved_plugin_loader_state
@@ -425,7 +425,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
             answer("Ready"),
         ],
     )
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    install_model_providers(monkeypatch, {"default": model})
     storage = create_session_storage("general", config, paths, identity)
     initial = agents.create_agent(
         "general",

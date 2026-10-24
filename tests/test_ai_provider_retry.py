@@ -18,15 +18,15 @@ from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.provider import TextDelta
 from mindroom.providers.pipeline import wrapped as provider_attempts
 from mindroom.providers.pipeline.compose import wrap_provider
-from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
-from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
-from tests.scripted_agent_helpers import (
-    install_agent_model,
-    raising,
-    registered_toolkit,
-    stored_runs,
-    streamed_text,
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    make_turn_context,
+    runtime_paths_for,
+    test_runtime_paths,
 )
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.scripted_agent_helpers import raising, registered_toolkit, stored_runs, streamed_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
@@ -84,9 +84,9 @@ def _install_agent(
     )
     config.memory.backend = "none"
     model = ScriptedModel([list(turn) for turn in turns])
-    install_agent_model(
+    install_model_providers(
         monkeypatch,
-        wrap_provider(model, idle_timeout_seconds=None, media_fallback_prompt="", request_log=None),
+        {"default": wrap_provider(model, idle_timeout_seconds=None, media_fallback_prompt="", request_log=None)},
     )
     return config, model
 

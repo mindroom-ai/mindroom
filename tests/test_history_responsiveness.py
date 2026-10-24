@@ -30,7 +30,7 @@ from mindroom.llm.messages import Message
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import seed_session
+from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     RecordingCompactionLifecycle,
@@ -245,10 +245,7 @@ async def test_forced_compaction_reuses_canonical_history_count(
         return estimate(self, messages)
 
     monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", record_estimate)
-    monkeypatch.setattr(
-        "mindroom.history.compaction.build_model_provider",
-        lambda *_args: summary_model(model_id="summary"),
-    )
+    install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     monkeypatch.setattr(
         "mindroom.history.compaction.generate_compaction_summary",
         AsyncMock(return_value="Greeting received."),
@@ -314,10 +311,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", controlled_estimate)
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", generate)
     monkeypatch.setattr("mindroom.history.compaction._emit_compaction_hook", hook)
-    monkeypatch.setattr(
-        "mindroom.history.compaction.build_model_provider",
-        lambda *_args: summary_model(model_id="summary"),
-    )
+    install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     task = asyncio.create_task(
         _run_scope_compaction_with_lifecycle(
             mode="manual",

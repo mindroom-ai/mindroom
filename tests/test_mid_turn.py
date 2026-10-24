@@ -25,7 +25,6 @@ from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.history.request_messages import build_resume_request
-from mindroom.judgment import llm as judgment_llm
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
@@ -40,7 +39,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.agent_loop.helpers import collect, context, external, gated, spec, toolkit
-from tests.conftest import make_visible_message, request_envelope, test_runtime_paths
+from tests.conftest import install_model_providers, make_visible_message, request_envelope, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 
@@ -707,7 +706,7 @@ async def test_configured_backends_control_resumed_turns(
             else answer("invalid" if outcome == "invalid" else json.dumps({"decision": outcome != "finish"})),
         ],
     )
-    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
+    install_model_providers(monkeypatch, {"cheap": judge})
     settings = {"provider": backend, "timeout_seconds": 0.02}
     if backend == "llm":
         settings["model"] = "cheap"

@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom import agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -75,14 +74,14 @@ async def test_subagent_model_selection(
         _config: Config,
         _paths: RuntimePaths,
         model_name: str,
-        execution_identity: ToolExecutionIdentity | None,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> ModelProvider:
         if execution_identity is not None and execution_identity.session_id == identity.session_id:
             return parent
         built_models.append(model_name)
         return ScriptedModel([answer(f"Answer from {model_name}")])
 
-    monkeypatch.setattr(agents, "_build_agent_model_provider", build)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", build)
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
         if native:

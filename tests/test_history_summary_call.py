@@ -44,7 +44,7 @@ from mindroom.llm.provider import RequestOverrides
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.session_storage.agent_storage import create_session_storage
-from tests.conftest import prepare_history_for_run_for_test, seed_session
+from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import Await
 from tests.fakes.summary_model import summary_model, summary_steps
 from tests.history_helpers import (
@@ -324,6 +324,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
 @pytest.mark.asyncio
 async def test_compaction_call_timeout_falls_back_in_runtime(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def slow() -> None:
         await asyncio.sleep(0.05)
@@ -350,13 +351,8 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model([Await(slow), *summary_steps("merged summary")]),
-        ),
-        capture_logs() as logs,
-    ):
+    install_model_providers(monkeypatch, {"default": summary_model([Await(slow), *summary_steps("merged summary")])})
+    with capture_logs() as logs:
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current prompt",

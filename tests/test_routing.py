@@ -28,6 +28,7 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_model_providers,
     make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
@@ -215,7 +216,7 @@ class TestAIRouting:
     """Tests for AI routing in multi-agent threads."""
 
     @pytest.mark.asyncio
-    async def test_suggest_responder_for_message_basic(self) -> None:
+    async def test_suggest_responder_for_message_basic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test basic agent suggestion functionality."""
         # Create config with the agents we're testing
         config = _runtime_bound_config(
@@ -229,19 +230,19 @@ class TestAIRouting:
         )
 
         model = _router_model({"entity_name": "calculator", "reasoning": "User is asking about math calculation"})
-        with patch("mindroom.routing.build_model_provider", return_value=model):
-            agents = [
-                MatrixID(username="mindroom_calculator", domain="localhost"),
-                MatrixID(username="mindroom_general", domain="localhost"),
-            ]
-            result = await suggest_responder_for_message("What is 2 + 2?", agents, config)
+        install_model_providers(monkeypatch, {"default": model})
+        agents = [
+            MatrixID(username="mindroom_calculator", domain="localhost"),
+            MatrixID(username="mindroom_general", domain="localhost"),
+        ]
+        result = await suggest_responder_for_message("What is 2 + 2?", agents, config)
 
         assert result == "calculator"
         assert "calculator" in _routing_prompt(model)
         assert "general" in _routing_prompt(model)
 
     @pytest.mark.asyncio
-    async def test_suggest_responder_uses_router_prompt_override(self) -> None:
+    async def test_suggest_responder_uses_router_prompt_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Router selection should use the configured prompt template override."""
         config = _runtime_bound_config(
             Config(
@@ -259,19 +260,19 @@ class TestAIRouting:
         )
 
         model = _router_model({"entity_name": "general", "reasoning": "Custom route"})
-        with patch("mindroom.routing.build_model_provider", return_value=model):
-            agents = [
-                MatrixID(username="mindroom_calculator", domain="localhost"),
-                MatrixID(username="mindroom_general", domain="localhost"),
-            ]
-            result = await suggest_responder_for_message("Hello", agents, config)
+        install_model_providers(monkeypatch, {"default": model})
+        agents = [
+            MatrixID(username="mindroom_calculator", domain="localhost"),
+            MatrixID(username="mindroom_general", domain="localhost"),
+        ]
+        result = await suggest_responder_for_message("Hello", agents, config)
 
         assert result == "general"
         assert _routing_prompt(model).startswith("CUSTOM ROUTER")
         assert "Message=Hello" in _routing_prompt(model)
 
     @pytest.mark.asyncio
-    async def test_suggest_responder_with_thread_context(self) -> None:
+    async def test_suggest_responder_with_thread_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test agent suggestion with thread history."""
         # Create config with the agents we're testing
         config = _runtime_bound_config(
@@ -290,18 +291,18 @@ class TestAIRouting:
         ]
 
         model = _router_model({"entity_name": "finance", "reasoning": "Continuing financial discussion"})
-        with patch("mindroom.routing.build_model_provider", return_value=model):
-            agents = [
-                MatrixID(username="mindroom_calculator", domain="localhost"),
-                MatrixID(username="mindroom_finance", domain="localhost"),
-                MatrixID(username="mindroom_general", domain="localhost"),
-            ]
-            result = await suggest_responder_for_message(
-                "How do I calculate deductions?",
-                agents,
-                config,
-                thread_context,
-            )
+        install_model_providers(monkeypatch, {"default": model})
+        agents = [
+            MatrixID(username="mindroom_calculator", domain="localhost"),
+            MatrixID(username="mindroom_finance", domain="localhost"),
+            MatrixID(username="mindroom_general", domain="localhost"),
+        ]
+        result = await suggest_responder_for_message(
+            "How do I calculate deductions?",
+            agents,
+            config,
+            thread_context,
+        )
 
         assert result == "finance"
         # Check that context was included in prompt
@@ -310,7 +311,7 @@ class TestAIRouting:
         assert "Previous messages:" in prompt
 
     @pytest.mark.asyncio
-    async def test_suggest_responder_unavailable_returns_none(self) -> None:
+    async def test_suggest_responder_unavailable_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that suggesting unavailable agent returns None."""
         # Create config with the agents we're testing
         config = _runtime_bound_config(
@@ -325,21 +326,21 @@ class TestAIRouting:
 
         # The model suggests an agent that is not available.
         model = _router_model({"entity_name": "code", "reasoning": "User asking about programming"})
-        with patch("mindroom.routing.build_model_provider", return_value=model):
-            agents = [
-                MatrixID(username="mindroom_calculator", domain="localhost"),
-                MatrixID(username="mindroom_general", domain="localhost"),
-            ]
-            result = await suggest_responder_for_message(
-                "How do I write a Python function?",
-                agents,
-                config,
-            )
+        install_model_providers(monkeypatch, {"default": model})
+        agents = [
+            MatrixID(username="mindroom_calculator", domain="localhost"),
+            MatrixID(username="mindroom_general", domain="localhost"),
+        ]
+        result = await suggest_responder_for_message(
+            "How do I write a Python function?",
+            agents,
+            config,
+        )
 
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_suggest_responder_error_handling(self) -> None:
+    async def test_suggest_responder_error_handling(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test error handling in agent suggestion."""
         # Create config with the agents we're testing
         config = _runtime_bound_config(
@@ -352,9 +353,9 @@ class TestAIRouting:
         )
 
         failing = ScriptedModel([[Await(_raise_provider_error)]])
-        with patch("mindroom.routing.build_model_provider", return_value=failing):
-            agents = [MatrixID(username="mindroom_general", domain="localhost")]
-            result = await suggest_responder_for_message("Test message", agents, config)
+        install_model_providers(monkeypatch, {"default": failing})
+        agents = [MatrixID(username="mindroom_general", domain="localhost")]
+        result = await suggest_responder_for_message("Test message", agents, config)
 
         assert result is None
         assert len(failing.requests) == 1

@@ -10,7 +10,7 @@ from mindroom.judgment.answers import JudgmentError, JudgmentResponse, JudgmentR
 from mindroom.judgment.execution import run_judgment, run_judgment_thread
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 from mindroom.providers.tool_policy import without_provider_tools
 
 if TYPE_CHECKING:
@@ -60,7 +60,7 @@ async def judge_with_llm(
     async def evaluate(prepared: JudgmentRequest) -> JudgmentResponse[bool]:
         assert prepared.body is not None
         provider = await run_judgment_thread(
-            lambda: build_model_provider(config, runtime_paths, settings.model),
+            lambda: provider_registry.build_model_provider(config, runtime_paths, settings.model),
         )
         messages = (
             Message(role="system", content=_INSTRUCTION),

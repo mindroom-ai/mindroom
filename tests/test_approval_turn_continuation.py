@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom import agents
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.execution import (
@@ -43,7 +42,7 @@ from mindroom.tool_system.events import (
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
 from tests.approval_continuation_helpers import approval_continuation, carries_approval_receipt
-from tests.conftest import bind_runtime_paths, make_turn_context, unwrap_extracted_collaborator
+from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.response_runner_helpers import _bot
 
@@ -156,7 +155,7 @@ async def test_deferred_call_through_call_tool_pauses_under_its_real_name(
         paths,
     )
     model = _CheckedModel([_deferred_call("sum", "add", a=2, b=3)])
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    install_model_providers(monkeypatch, {"default": model})
     with pytest.raises(ResponsePausedForApproval) as raised:
         await ai_response(
             make_turn_context("general", session_id="deferred-approval"),
@@ -263,7 +262,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         _config: Config,
         _paths: RuntimePaths,
         model_name: str,
-        _execution_identity: ToolExecutionIdentity | None = None,
+        **_kwargs: object,
     ) -> ScriptedModel:
         if outcome == "preparation_error" and len(model.requests) == 2:
             msg = "Model preparation failed"
@@ -271,7 +270,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         models.append(model_name)
         return model
 
-    monkeypatch.setattr(agents, "_build_agent_model_provider", build_model)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", build_model)
     executed: list[str] = []
     original_add = CalculatorTools.add
     original_sleep = SleepTools.sleep
@@ -472,7 +471,7 @@ async def test_approval_settlement_preserves_tool_boundary(
         ),
         paths,
     )
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: _CheckedModel([]))
+    install_model_providers(monkeypatch, {"default": _CheckedModel([])})
     identity = _identity("session")
     continuation = approval_continuation(
         approval_id="approval-boundary",
@@ -664,7 +663,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
             ),
         ],
     )
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    install_model_providers(monkeypatch, {"default": model})
     paused = await _paused_turn(config, paths, identity, "Add, then keep going.")
     saved = CollectedStreamPresentation(show_tool_calls=True, response_text="Adding first.")
     saved.start_tool(paused.tools[0].call)
@@ -764,7 +763,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
     )
     identity = _identity("silent-session")
     model = _CheckedModel([calls(tool_call("add", "approved", a=2, b=3), content=before), answer("")])
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    install_model_providers(monkeypatch, {"default": model})
     paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
     continuation = approval_continuation(
         approval_id="approval-silent",
@@ -827,7 +826,7 @@ async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
     )
     identity = _identity("notice-session")
     model = _CheckedModel([_call("add", "approved", a=2, b=3), answer("Five.")])
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    install_model_providers(monkeypatch, {"default": model})
     paused = await _paused_turn(config, paths, identity, "Add them.")
     continuation = approval_continuation(
         approval_id="approval-notice",

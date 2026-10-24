@@ -34,6 +34,7 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.message_target import MessageTarget
+from mindroom.providers import registry as provider_registry
 from mindroom.response_turn import PausedAnswer, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
@@ -125,28 +126,20 @@ class ScriptedAgents:
     built_models: list[str] = field(default_factory=list)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Serve the scripted models from the seams ``create_agent`` and the team envelope build providers at."""
-        monkeypatch.setattr(agents, "_build_agent_model_provider", self._build)
-        if self.team is not None:
-            monkeypatch.setattr("mindroom.teams.members.build_model_provider", self._build_team)
-
-    def _build_team(
-        self,
-        _config: Config,
-        _runtime_paths: RuntimePaths,
-        _model_name: str,
-        **_kwargs: object,
-    ) -> ModelProvider:
-        assert self.team is not None
-        return self.team
+        """Serve the scripted models from the seam every configured model builds at."""
+        monkeypatch.setattr(provider_registry, "build_model_provider", self._build)
 
     def _build(
         self,
-        _config: Config,
+        config: Config,
         _runtime_paths: RuntimePaths,
-        model_name: str,
-        execution_identity: ToolExecutionIdentity | None,
+        model_name: str = "default",
+        *,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> ModelProvider:
+        # A team leader builds with the team's identity; each agent builds with its own.
+        if self.team is not None and execution_identity is not None and execution_identity.agent_name in config.teams:
+            return self.team
         self.built_models.append(model_name)
         if execution_identity is None:
             return self.models[model_name]

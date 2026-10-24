@@ -20,9 +20,8 @@ from mindroom.prompts import DATETIME_CONTEXT_TEMPLATE
 from mindroom.system_prompt import render_date_context
 from mindroom.teams.members import build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
-from tests.scripted_agent_helpers import install_agent_model
 
 if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
@@ -77,7 +76,7 @@ def test_render_date_context_invalid_timezone() -> None:
 
 def _build(config: Config, monkeypatch: pytest.MonkeyPatch) -> AgentBuild:
     """Build the general agent on the scripted provider."""
-    install_agent_model(monkeypatch, ScriptedModel([]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     return create_agent("general", config, runtime_paths_for(config), execution_identity=None)
 
 
@@ -151,8 +150,8 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
     config = _datetime_test_config()
     config.timezone = "UTC"
     runtime_paths = runtime_paths_for(config)
-    install_agent_model(monkeypatch, ScriptedModel([]))
-    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
         members = materialize_exact_team_members(

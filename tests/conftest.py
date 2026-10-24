@@ -143,6 +143,7 @@ from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
+from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
@@ -2248,12 +2249,20 @@ def bind_runtime_paths(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> Config:
-    """Return a runtime-bound copy of a test config."""
+    """Return a runtime-bound copy of a test config.
+
+    Unless the test config authors them, a reply waits no coalescing debounce and starts no automatic thread summary.
+    A summary builds a model by name in the background, usually the reply's own ``default``, so it would take a turn
+    that the test scripted for the reply.
+    """
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     _persist_bound_entity_accounts(bound, runtime_paths)
     authored_coalescing = config.defaults.coalescing
     if "debounce_ms" not in authored_coalescing.model_fields_set:
         bound.defaults.coalescing.debounce_ms = 0
+    if "thread_summary_first_threshold" not in config.defaults.model_fields_set:
+        # No test thread reaches this many messages.
+        bound.defaults.thread_summary_first_threshold = sys.maxsize
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
     return bound
 
@@ -2875,6 +2884,27 @@ def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
     bot._delivery_gateway.edit_text = AsyncMock(side_effect=_edit_text)
     replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
+
+
+def install_model_providers(monkeypatch: pytest.MonkeyPatch, providers: Mapping[str, "ModelProvider"]) -> None:
+    """Build the models ``providers`` names as the providers it maps them to; every other model builds as before.
+
+    ``providers`` is read at every build, so a test may replace a provider between two turns.
+    """
+    earlier = provider_registry.build_model_provider
+
+    def build(
+        config: Config,
+        paths: RuntimePaths,
+        model_name: str = "default",
+        *,
+        execution_identity: "ToolExecutionIdentity | None" = None,
+    ) -> "ModelProvider":
+        if model_name in providers:
+            return providers[model_name]
+        return earlier(config, paths, model_name, execution_identity=execution_identity)
+
+    monkeypatch.setattr(provider_registry, "build_model_provider", build)
 
 
 @pytest.fixture

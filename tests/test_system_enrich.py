@@ -45,6 +45,7 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_model_providers,
     make_turn_context,
     message_origin,
     patch_response_runner_module,
@@ -55,7 +56,6 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.reply_span_helpers import response_span
-from tests.scripted_agent_helpers import install_agent_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -293,7 +293,7 @@ async def test_a_reply_renders_system_enrichment_into_its_system_message(
     )
     rendered = render_system_enrichment_block(system_items)
     model = ScriptedModel([answer("Done.")])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
 
     await ai_response(
         make_turn_context("code", system_enrichment_items=system_items),
@@ -319,7 +319,7 @@ async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_
     config = _config(tmp_path)
     transient_items = (EnrichmentItem(key="location", text="Current location: Amsterdam", persist=False),)
     model = ScriptedModel([answer("Done.")])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
     monkeypatch.setattr(
         "mindroom.ai.build_memory_prompt_parts",
         AsyncMock(return_value=MemoryPromptParts(transient_turn_context="Retrieved memory")),
@@ -349,8 +349,8 @@ async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_
 
 def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedExactTeamMembers:
     """Materialize the code and research members on scripted providers, as a team reply does."""
-    install_agent_model(monkeypatch, ScriptedModel([]))
-    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     members = materialize_exact_team_members(
         ["code", "research"],
         config=config,

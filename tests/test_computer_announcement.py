@@ -12,7 +12,6 @@ from agno.tools import Toolkit
 
 import mindroom.custom_tools.chat_ui as chat_ui_module
 import mindroom.tools  # noqa: F401
-from mindroom import agents
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -29,7 +28,7 @@ from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.chat_ui_contract_fixture import make_chat_ui_context
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers
 from tests.fakes.scripted_model import ScriptedModel
 
 if TYPE_CHECKING:
@@ -346,7 +345,7 @@ def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
     """create_agent gives a chat_ui agent's worker browser functions the announcement as their own policy, alone."""
     config, runtime_paths = _agent(tmp_path, tools)
     config = bind_runtime_paths(config, runtime_paths)
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
 
     build = create_agent("researcher", config, runtime_paths, execution_identity=None)
 
@@ -373,7 +372,7 @@ async def test_a_deferred_browser_a_minimal_turn_builds_later_announces_the_comp
     """
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"], deferred=True)
     config = bind_runtime_paths(config, runtime_paths)
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     build = create_agent("researcher", config, runtime_paths, execution_identity=None, agent_mode="minimal")
     [deferred] = build.surface.deferred
     assert deferred.name == "browser"

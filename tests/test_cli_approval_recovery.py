@@ -65,7 +65,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue
 from tests.approval_continuation_helpers import approval_continuation, carries_approval_receipt
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import install_model_providers, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import store_fold
 from tests.identity_helpers import persist_entity_accounts
@@ -216,7 +216,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     monkeypatch.setattr(approval_execution, "create_agent", build)
     monkeypatch.setattr(ai, "create_agent", build)
     model = ScriptedModel([answer("Recovered with knowledge.")])
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args: model)
+    install_model_providers(monkeypatch, {"default": model})
     resumed_counts = []
 
     def shell_env(_config, _runtime_paths, _agent_name, token):

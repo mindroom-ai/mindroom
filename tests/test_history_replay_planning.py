@@ -42,7 +42,7 @@ from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_text_tokens
-from tests.conftest import bind_runtime_paths, prepare_history_for_run_for_test, seed_session
+from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     _completed_run,
@@ -1483,6 +1483,7 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds_final_budget(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
@@ -1513,11 +1514,8 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
+    install_model_providers(monkeypatch, {"default": summary_model()})
     with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(

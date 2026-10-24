@@ -34,6 +34,7 @@ from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
+    install_model_providers,
     make_turn_context,
     replace_turn_controller_deps,
     request_envelope,
@@ -41,7 +42,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
-from tests.scripted_agent_helpers import install_agent_model, registered_toolkit, stored_runs, streamed_text
+from tests.scripted_agent_helpers import registered_toolkit, stored_runs, streamed_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -94,19 +95,21 @@ def _install_logged_model(
             answer(stream_text, usage(4, 2, time_to_first_token=0.12)),
         ],
     )
-    install_agent_model(
+    install_model_providers(
         monkeypatch,
-        wrap_provider(
-            model,
-            idle_timeout_seconds=None,
-            media_fallback_prompt="",
-            request_log=RequestLog(
-                model_name="default",
-                configured_provider="openai",
-                debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(llm_log_dir)),
-                storage_root=llm_log_dir / "unused",
+        {
+            "default": wrap_provider(
+                model,
+                idle_timeout_seconds=None,
+                media_fallback_prompt="",
+                request_log=RequestLog(
+                    model_name="default",
+                    configured_provider="openai",
+                    debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(llm_log_dir)),
+                    storage_root=llm_log_dir / "unused",
+                ),
             ),
-        ),
+        },
     )
     return model
 

@@ -16,7 +16,6 @@ import pytest
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
-from mindroom import agents
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
 from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
@@ -1093,7 +1092,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
             with tool_runtime_context(tool_context):
                 return await operation()
 
-    def scripted_provider(_config: Config, _runtime_paths: object, model_name: str, _identity: object) -> ScriptedModel:
+    def scripted_provider(_config: Config, _runtime_paths: object, model_name: str, **_kwargs: object) -> ScriptedModel:
         model_id = config.models[model_name].id
         return ScriptedModel(
             [answer("It is sunny.")],
@@ -1101,7 +1100,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         )
 
     create_agent_mock = MagicMock(side_effect=create_agent)
-    monkeypatch.setattr(agents, "_build_agent_model_provider", scripted_provider)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", scripted_provider)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
     monkeypatch.setattr("mindroom.ai.build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
     monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")

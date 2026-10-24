@@ -26,7 +26,7 @@ from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history, with_delivered_response
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.thread_tag_vocabulary import (
     claim_vocabulary_check,
@@ -138,7 +138,7 @@ def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: s
         extra_kwargs = {key: value for key, value in model_config.extra_kwargs.items() if key != "temperature"}
         models = {**config.models, model_name: model_config.model_copy(update={"extra_kwargs": extra_kwargs})}
         config = config.model_copy(update={"models": models})
-    return build_model_provider(config, runtime_paths, model_name)
+    return provider_registry.build_model_provider(config, runtime_paths, model_name)
 
 
 def _normalize_thread_summary_text(raw_text: str) -> str:

@@ -15,7 +15,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import tasks as scheduling
 from mindroom.usage.stats import collect_admin_usage
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.identity_helpers import persist_entity_accounts
 
@@ -74,8 +74,7 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
     model = ScriptedModel(
         [answer(good_answer, usage(20, 2)), answer("PRIVATE MALFORMED MODEL CONTENT", usage(30, 3))],
     )
-    module = {"routing": routing, "schedule": scheduling, "topic": topic_generator, "summary": thread_summary}[caller]
-    monkeypatch.setattr(module, "build_model_provider", lambda *_args: model)
+    install_model_providers(monkeypatch, {"default": model})
 
     if caller == "routing":
 

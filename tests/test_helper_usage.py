@@ -16,7 +16,6 @@ from unittest.mock import MagicMock
 import pytest
 from openai.types import CompletionUsage
 
-from mindroom import agents
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agents import create_agent
 from mindroom.ai import ai_response
@@ -57,7 +56,7 @@ from mindroom.usage.stats import collect_admin_usage, collect_self_usage
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import make_turn_context, unwrap_extracted_collaborator
+from tests.conftest import install_model_providers, make_turn_context, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.fakes.scripted_model import usage as owned_usage
 from tests.history_helpers import (
@@ -146,18 +145,19 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     )
     identity = build_execution_identity_from_runtime_context(context)
     helper_context = replace(context, target=replace(context.target, session_id="ephemeral-participant-session"))
-    models = {
-        "default": ScriptedModel([calls(tool_call("add", "approved", a=2, b=3)), _resumed_turn(outcome)]),
-        "helper": ScriptedModel([answer("Sample helper output.", owned_usage(20, 2))]),
-    }
-    leader = ScriptedModel(
-        [
-            calls(tool_call("delegate_task_to_member", "delegate", member_id="general", task="Add 2 and 3")),
-            _resumed_turn(outcome),
-        ],
+    turns = [calls(tool_call("add", "approved", a=2, b=3)), _resumed_turn(outcome)]
+    if caller == "team":
+        # The leader and its members share the default model: the leader delegates, the member's approved call
+        # pauses the run, and the resume answers as the member, then as the leader.
+        delegate = calls(tool_call("delegate_task_to_member", "delegate", member_id="general", task="Add 2 and 3"))
+        turns = [delegate, *turns, _resumed_turn(outcome)]
+    install_model_providers(
+        monkeypatch,
+        {
+            "default": ScriptedModel(turns),
+            "helper": ScriptedModel([answer("Sample helper output.", owned_usage(20, 2))]),
+        },
     )
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
-    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: leader)
     original_add = CalculatorTools.add
     helper_results: list[object] = []
 
@@ -422,7 +422,7 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     model = ScriptedModel(
         [answer(content, owned_usage(100, 10)), answer("Remember another preference.", owned_usage(50, 5))],
     )
-    monkeypatch.setattr("mindroom.memory.auto_flush.build_model_provider", lambda *_args: model)
+    install_model_providers(monkeypatch, {"default": model})
     for _ in range(2):
         await _extract_memory_summary(
             config=config,
@@ -508,7 +508,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             create_session_if_missing=True,
         )
     model = ScriptedModel([answer("Sample output.", owned_usage(20, 2))])
-    monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args: model)
+    install_model_providers(monkeypatch, {"default": model})
     scope_context = load_scope()
     with helper_usage_context(scope_context):
         assert scope_context is not None
@@ -582,7 +582,7 @@ async def test_workflow_participant_usage_counts_however_its_run_ends(
         if ending == "completed"
         else [UsageReported(owned_usage(30, 3), final=ending == "error"), Await(interrupt)]
     )
-    monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args: ScriptedModel([turn]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([turn])})
     load_scope = partial(
         load_scope_session,
         agent_name="test_agent",

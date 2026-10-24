@@ -41,7 +41,7 @@ from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
 from mindroom.message_target import MessageTarget
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.scheduling import executor as scheduling_executor
 from mindroom.scheduling.recurring_schedule import (
@@ -1367,7 +1367,7 @@ async def _parse_workflow_schedule(
         existing_task_context=_existing_task_parse_context(existing_workflow) if existing_workflow else "",
     )
 
-    provider = build_model_provider(config, runtime_paths, "default")
+    provider = provider_registry.build_model_provider(config, runtime_paths, "default")
 
     try:
         response = await complete_prompt(

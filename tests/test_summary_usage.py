@@ -9,7 +9,7 @@ import sqlite3
 from contextlib import closing
 from functools import partial
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -29,7 +29,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
-from tests.conftest import prepare_history_for_run_for_test
+from tests.conftest import install_model_providers, prepare_history_for_run_for_test
 from tests.fakes.scripted_model import Await
 from tests.fakes.summary_model import Reply, ScriptedSummaryModel, summary_model, summary_steps, summary_turn
 from tests.history_helpers import (
@@ -180,7 +180,7 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
 
 
 @pytest.mark.asyncio
-async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
+async def test_summary_cost_counts_toward_api_requester(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An OpenAI-compatible request has no Matrix conversation, so its summary is charged to the API requester."""
     session = _session("session", runs=[_completed_run("original")])
     config, paths, storage, _scope, _context = _forced_compaction_context(tmp_path, session=session)
@@ -201,10 +201,8 @@ async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
         budget_monitor=None,
     )
     # Through the production preparation path, which wires the summary's usage recorder.
-    with (
-        detached_requester_context(authority),
-        patch("mindroom.history.compaction.build_model_provider", return_value=model),
-    ):
+    install_model_providers(monkeypatch, {"default": model})
+    with detached_requester_context(authority):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current prompt",

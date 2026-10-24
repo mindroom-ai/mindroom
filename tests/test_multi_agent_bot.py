@@ -57,6 +57,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     TEST_PASSWORD,
     drain_coalescing,
+    install_model_providers,
     runtime_paths_for,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -1575,10 +1576,12 @@ class TestAgentBot(AgentBotTestBase):
         mock_load_config.return_value = config
 
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
-        # The members build on scripted providers that are never asked; the team's leader answers on its own.
-        team_leader = ScriptedModel([answer("Team response")])
-        monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_a, **_k: ScriptedModel([]))
-        monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_a, **_k: team_leader)
+        # Every model builds as one scripted model: it chooses the team mode, then answers as the team's leader on
+        # its own; the members are never asked.
+        team_model = ScriptedModel(
+            [answer('{"mode": "collaborate", "reasoning": "Both weigh in"}'), answer("Team response")],
+        )
+        install_model_providers(monkeypatch, {"default": team_model})
 
         bot = make_test_agent_bot(
             mock_agent_user,
@@ -1726,7 +1729,8 @@ class TestAgentBot(AgentBotTestBase):
         # Should form team and send a structured streaming team response
         mock_stream_agent_response.assert_not_called()
         mock_ai_response.assert_not_called()
-        assert len(team_leader.requests) == 1
+        # The team mode was chosen once, then the team formed once.
+        assert [request.output_schema is not None for request in team_model.requests] == [True, False]
         # Structured streaming sends an initial message and one or more edits
         assert bot.client.room_send.call_count >= 1
 

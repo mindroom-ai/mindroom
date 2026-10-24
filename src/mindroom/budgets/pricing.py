@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom.llm.usage import TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import provider_reports_cache_tokens_outside_input
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -65,7 +65,7 @@ def _price_table(config: Config, runtime_paths: RuntimePaths) -> _PriceTable:
         if model_config.pricing is None:
             continue
         try:
-            identity = build_model_provider(config, runtime_paths, model_name).identity
+            identity = provider_registry.build_model_provider(config, runtime_paths, model_name).identity
         except Exception as error:
             # Provider SDKs raise arbitrary construction errors; an unusable model stays unpriced.
             logger.warning("budget_pricing_model_unavailable", model=model_name, error=str(error))

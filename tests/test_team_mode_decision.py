@@ -27,7 +27,7 @@ from mindroom.teams.formation import (
 )
 from mindroom.teams.spec import TeamMode
 from mindroom.usage.stats import collect_admin_usage
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, usage
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
@@ -156,45 +156,43 @@ class TestSelectAdHocTeamMode:
     """Test the AI-powered execution-time team mode selection."""
 
     @pytest.mark.asyncio
-    async def test_select_team_mode_coordinate(self, mock_config):
+    async def test_select_team_mode_coordinate(self, mock_config, monkeypatch: pytest.MonkeyPatch):
         """Test AI correctly identifies coordination tasks (different subtasks)."""
         model = _mode_model("coordinate", "Different agents handle different subtasks")
-        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
-            result = await _select_team_mode_for_test(
-                "Send me an email then call me",
-                ["email", "phone"],
-                mock_config,
-            )
+        install_model_providers(monkeypatch, {"default": model})
+        result = await _select_team_mode_for_test(
+            "Send me an email then call me",
+            ["email", "phone"],
+            mock_config,
+        )
 
         assert result == TeamMode.COORDINATE
         assert len(model.requests) == 1
 
     @pytest.mark.asyncio
-    async def test_select_team_mode_collaborate(self, mock_config):
+    async def test_select_team_mode_collaborate(self, mock_config, monkeypatch: pytest.MonkeyPatch):
         """Test AI correctly identifies collaboration tasks (same task for all)."""
         model = _mode_model("collaborate", "All agents work on the same brainstorming task")
-        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
-            result = await _select_team_mode_for_test(
-                "What do you think about this idea?",
-                ["research", "analyst"],
-                mock_config,
-            )
+        install_model_providers(monkeypatch, {"default": model})
+        result = await _select_team_mode_for_test(
+            "What do you think about this idea?",
+            ["research", "analyst"],
+            mock_config,
+        )
 
         assert result == TeamMode.COLLABORATE
         assert len(model.requests) == 1
 
     @pytest.mark.asyncio
-    async def test_select_team_mode_fallback_on_error(self, mock_config):
+    async def test_select_team_mode_fallback_on_error(self, mock_config, monkeypatch: pytest.MonkeyPatch):
         """Test fallback to collaborate mode on AI error."""
 
         async def fail() -> None:
             msg = "AI service unavailable"
             raise ProviderError(msg, provider="Synthetic")
 
-        with (
-            patch("mindroom.teams.formation.build_model_provider", return_value=ScriptedModel([[Await(fail)]])),
-            patch("mindroom.teams.formation.logger") as mock_logger,
-        ):
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(fail)]])})
+        with patch("mindroom.teams.formation.logger") as mock_logger:
             result = await _select_team_mode_for_test(
                 "Do something",
                 ["email", "phone"],
@@ -207,25 +205,25 @@ class TestSelectAdHocTeamMode:
         mock_logger.warning.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_select_team_mode_unexpected_response(self, mock_config):
+    async def test_select_team_mode_unexpected_response(self, mock_config, monkeypatch: pytest.MonkeyPatch):
         """Test fallback when AI returns unexpected response type."""
         model = ScriptedModel([answer("Just a string, not _TeamModeDecision")])
-        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
-            result = await _select_team_mode_for_test(
-                "Do something",
-                ["email", "phone"],
-                mock_config,
-            )
+        install_model_providers(monkeypatch, {"default": model})
+        result = await _select_team_mode_for_test(
+            "Do something",
+            ["email", "phone"],
+            mock_config,
+        )
 
         # Should fallback to COLLABORATE on unexpected response
         assert result == TeamMode.COLLABORATE
 
     @pytest.mark.asyncio
-    async def test_team_mode_choice_is_counted_as_internal_usage(self, mock_config):
+    async def test_team_mode_choice_is_counted_as_internal_usage(self, mock_config, monkeypatch: pytest.MonkeyPatch):
         """The mode choice is a paid model call, so organization usage reports it under system:internal."""
         model = _mode_model("coordinate", "Different subtasks", metrics=usage(600, 20))
-        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
-            result = await _select_team_mode_for_test("Send me an email then call me", ["email", "phone"], mock_config)
+        install_model_providers(monkeypatch, {"default": model})
+        result = await _select_team_mode_for_test("Send me an email then call me", ["email", "phone"], mock_config)
 
         assert result == TeamMode.COORDINATE
         report = collect_admin_usage(config=mock_config, runtime_paths=runtime_paths_for(mock_config))
@@ -313,7 +311,7 @@ class TestIntegrationScenarios:
     """Test formation plus execution-time mode refinement together."""
 
     @pytest.mark.asyncio
-    async def test_email_then_call_scenario(self, mock_config):
+    async def test_email_then_call_scenario(self, mock_config, monkeypatch: pytest.MonkeyPatch):
         """Test the email-then-call scenario - coordinate mode for different tasks."""
         result = decide_team_formation_for_test(
             tagged_agents=[
@@ -329,18 +327,18 @@ class TestIntegrationScenarios:
         assert set(_agent_names(result.eligible_members, mock_config)) == {"email", "phone"}
 
         model = _mode_model("coordinate", "Different tasks: email agent sends email, phone agent makes call")
-        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
-            mode = await select_ad_hoc_team_mode(
-                "Email me the details, then call me to discuss",
-                result.eligible_members,
-                mock_config,
-                runtime_paths_for(mock_config),
-            )
+        install_model_providers(monkeypatch, {"default": model})
+        mode = await select_ad_hoc_team_mode(
+            "Email me the details, then call me to discuss",
+            result.eligible_members,
+            mock_config,
+            runtime_paths_for(mock_config),
+        )
 
         assert mode == TeamMode.COORDINATE
 
     @pytest.mark.asyncio
-    async def test_brainstorming_scenario(self, mock_config):
+    async def test_brainstorming_scenario(self, mock_config, monkeypatch: pytest.MonkeyPatch):
         """Test brainstorming scenario - collaborate mode for same task."""
         result = decide_team_formation_for_test(
             tagged_agents=[
@@ -356,12 +354,12 @@ class TestIntegrationScenarios:
         assert set(_agent_names(result.eligible_members, mock_config)) == {"research", "analyst"}
 
         model = _mode_model("collaborate", "All agents provide their perspective on the same question")
-        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
-            mode = await select_ad_hoc_team_mode(
-                "What are your thoughts on this approach?",
-                result.eligible_members,
-                mock_config,
-                runtime_paths_for(mock_config),
-            )
+        install_model_providers(monkeypatch, {"default": model})
+        mode = await select_ad_hoc_team_mode(
+            "What are your thoughts on this approach?",
+            result.eligible_members,
+            mock_config,
+            runtime_paths_for(mock_config),
+        )
 
         assert mode == TeamMode.COLLABORATE

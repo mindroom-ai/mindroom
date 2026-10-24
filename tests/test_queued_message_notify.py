@@ -57,7 +57,6 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt
-from mindroom.judgment import llm as judgment_llm
 from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.llm.runs import AnyRunRecord, RunRecord, TeamRunRecord
 from mindroom.llm.runs import RunStatus as OwnedRunStatus
@@ -94,6 +93,7 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_model_providers,
     install_runtime_journal_support,
     make_conversation_reader_mock,
     make_matrix_client_mock,
@@ -897,6 +897,7 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(tmp_path: Path) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)
+    config.defaults.thread_summary_first_threshold = 5
     runtime_paths = runtime_paths_for(config)
     client = make_matrix_client_mock()
     client.room_messages.return_value = nio.RoomMessagesResponse(
@@ -1021,6 +1022,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
 async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_room(tmp_path: Path) -> None:
     """Ad-hoc invited rooms should inherit the responding entity's summary model override."""
     config = _config(tmp_path)
+    config.defaults.thread_summary_first_threshold = 1
     config.room_thread_summary_models["general"] = "qwen"
     config.models["qwen"] = ModelConfig(provider="openai", id="qwen-test-model")
     runtime_paths = runtime_paths_for(config)
@@ -3800,7 +3802,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
         else None
     )
     judge = ScriptedModel([answer('{"decision": false}')])
-    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
+    install_model_providers(monkeypatch, {"default": judge})
     envelope = _envelope(target=MessageTarget.resolve("!room:localhost", "$thread", "$event"))
     prompt = "Question: Install the dependency?\nSelected option: yes (install)" if selection else "hello"
     if selection:

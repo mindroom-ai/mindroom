@@ -18,7 +18,7 @@ from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
-from tests.conftest import test_runtime_paths
+from tests.conftest import install_model_providers, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
@@ -61,7 +61,7 @@ class _FallbackRouter(ScriptedModel):
 def _providers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Serve the LLM router from a fallback model and return the prompts it receives."""
     router = _FallbackRouter(turns=[])
-    monkeypatch.setattr(routing, "build_model_provider", lambda *_: router)
+    install_model_providers(monkeypatch, {"default": router})
     return router.prompts
 
 
@@ -358,7 +358,7 @@ async def test_default_and_jev_fallback_use_same_llm_router(tmp_path: Path, monk
         aliases.append(alias)
         return router
 
-    monkeypatch.setattr(routing, "build_model_provider", load)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load)
     config = _config()
     config.models["cheap_router"] = config.models["default"]
     config.router.model = "cheap_router"

@@ -354,7 +354,7 @@ async def test_runtime_room_override_selects_router_model(tmp_path: Path) -> Non
         selected_models.append(model_name)
         return ScriptedModel([answer(json.dumps({"entity_name": "assistant", "reasoning": "Only candidate"}))])
 
-    with patch("mindroom.routing.build_model_provider", side_effect=load_model):
+    with patch("mindroom.providers.registry.build_model_provider", side_effect=load_model):
         result = await mindroom.routing.suggest_responder(
             "Help me",
             ["assistant"],

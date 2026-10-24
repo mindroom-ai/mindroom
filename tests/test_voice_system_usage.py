@@ -15,7 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.usage.stats import collect_admin_usage
 from mindroom.voice import handler as voice_handler
-from tests.conftest import test_runtime_paths
+from tests.conftest import install_model_providers, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.identity_helpers import persist_actual_entity_accounts
 
@@ -185,7 +185,7 @@ async def test_normalizer_records_usage_before_rejecting_empty_content(
     config = Config(voice=VoiceConfig(enabled=True))
     persist_actual_entity_accounts(config, paths, password="test-password")  # noqa: S106 - local fixture account
     model = ScriptedModel([answer("normalized transcript" if storage_failure else "", usage(7, 2))])
-    monkeypatch.setattr(voice_handler, "build_model_provider", lambda *_args: model)
+    install_model_providers(monkeypatch, {"default": model})
     if storage_failure:
 
         async def fail_write(*_args: object, **_kwargs: object) -> None:

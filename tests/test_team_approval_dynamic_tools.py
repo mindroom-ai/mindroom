@@ -20,7 +20,12 @@ from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval
-from tests.conftest import bind_runtime_paths, test_runtime_paths, unwrap_extracted_collaborator
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    test_runtime_paths,
+    unwrap_extracted_collaborator,
+)
 from tests.fakes.scripted_model import ScriptedModel
 from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
@@ -220,7 +225,7 @@ async def _exercise_team_member_assembly(
         resolved_thread_id="$thread",
         session_id="team-session",
     )
-    monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     if required_resolver is not None:
         monkeypatch.setattr("mindroom.teams.resume.required_approval_tool_names", required_resolver)
 

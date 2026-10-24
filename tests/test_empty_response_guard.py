@@ -24,9 +24,15 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timing import DispatchPipelineTiming
-from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, seed_session
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    make_turn_context,
+    runtime_paths_for,
+    seed_session,
+)
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.scripted_agent_helpers import install_agent_model, stored_runs, streamed_text
+from tests.scripted_agent_helpers import stored_runs, streamed_text
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -218,7 +224,7 @@ async def test_ai_response_retries_once_after_empty_completed_run(
     """One empty completed response triggers exactly one fresh model attempt, and only the answer is kept."""
     config = _config(tmp_path)
     model = ScriptedModel([answer(""), answer("Recovered")])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
     timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
 
     result = await _respond(config, pipeline_timing=timing)
@@ -237,7 +243,7 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(
     """Two consecutive empty responses surface a visible notice, and neither empty run is kept."""
     config = _config(tmp_path)
     model = ScriptedModel([answer(""), answer("  ")])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
 
     result = await _respond(config)
 
@@ -254,7 +260,7 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(
 ) -> None:
     """The delivery-only notice must never be recorded as model text it could replay from history."""
     config = _config(tmp_path)
-    install_agent_model(monkeypatch, ScriptedModel([answer(""), answer("")]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("")])})
     recorder = TurnRecorder(user_message="test")
 
     result = await _respond(config, turn_recorder=recorder)
@@ -272,7 +278,7 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(
     """One empty completed stream triggers exactly one fresh streaming attempt."""
     config = _config(tmp_path)
     model = ScriptedModel([answer(""), answer("Recovered", chunk=len("Recovered"))])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
     timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
 
     chunks = await _stream(config, pipeline_timing=timing)
@@ -291,7 +297,7 @@ async def test_stream_agent_response_yields_fallback_notice_when_retry_is_also_e
     """Two consecutive empty streams end with a visible notice, never a blank edit, and keep neither run."""
     config = _config(tmp_path)
     model = ScriptedModel([answer(""), answer("")])
-    install_agent_model(monkeypatch, model)
+    install_model_providers(monkeypatch, {"default": model})
 
     chunks = await _stream(config)
 
@@ -307,7 +313,7 @@ async def test_stream_agent_response_fallback_notice_stays_out_of_the_turn_recor
 ) -> None:
     """The streamed delivery-only notice must never be recorded as model text either."""
     config = _config(tmp_path)
-    install_agent_model(monkeypatch, ScriptedModel([answer(""), answer("")]))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("")])})
     recorder = TurnRecorder(user_message="test")
 
     chunks = await _stream(config, turn_recorder=recorder)

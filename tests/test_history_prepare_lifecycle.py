@@ -56,7 +56,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
-from tests.conftest import prepare_history_for_run_for_test, seed_session
+from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
 from tests.history_helpers import (
@@ -123,7 +123,10 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_path: Path) -> None:
+async def test_prepare_history_for_run_forced_compaction_rewrites_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -143,16 +146,11 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(
-                return_value="merged summary",
-            ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(
+            return_value="merged summary",
         ),
     ):
         lifecycle = RecordingCompactionLifecycle()
@@ -187,6 +185,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_required_compaction_starts_lifecycle_before_summary_request(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Foreground compaction should make the visible lifecycle notice before the summary call blocks."""
     config, runtime_paths = _make_config(
@@ -211,15 +210,10 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
         assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
         return "merged summary"
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(side_effect=_summary_after_notice),
-        ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=_summary_after_notice),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
@@ -264,7 +258,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
-    with patch("mindroom.history.compaction.build_model_provider", side_effect=ValueError("bad summary model")):
+    with patch("mindroom.providers.registry.build_model_provider", side_effect=ValueError("bad summary model")):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -290,7 +284,10 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_compaction_failure_notice_redacts_credentials(tmp_path: Path) -> None:
+async def test_prepare_history_for_run_compaction_failure_notice_redacts_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Room-visible compaction failure text must not carry credentials from the raised error."""
     config, runtime_paths = _make_config(
         tmp_path,
@@ -307,13 +304,8 @@ async def test_prepare_history_for_run_compaction_failure_notice_redacts_credent
     password = "hunter" + "2secret"
     error = RuntimeError(f"Incorrect API key provided: {api_key} at https://user:{password}@llm.internal/v1")
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch("mindroom.history.runtime.compact_scope_history", new=AsyncMock(side_effect=error)),
-    ):
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch("mindroom.history.runtime.compact_scope_history", new=AsyncMock(side_effect=error)):
         await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -336,6 +328,7 @@ async def test_prepare_history_for_run_compaction_failure_notice_redacts_credent
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_required_compaction_edits_failure_when_cancelled(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancellation should not leave the visible compaction notice stuck as running."""
     config, runtime_paths = _make_config(
@@ -356,11 +349,8 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_ca
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
+    install_model_providers(monkeypatch, {"default": summary_model()})
     with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
         patch("mindroom.history.runtime.compact_scope_history", new=AsyncMock(side_effect=asyncio.CancelledError)),
         pytest.raises(asyncio.CancelledError),
     ):
@@ -387,6 +377,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_ca
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_required_compaction_classifies_provider_timeout(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Provider TimeoutError should use the timeout lifecycle outcome even with an empty message."""
     config, runtime_paths = _make_config(
@@ -407,13 +398,8 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(side_effect=TimeoutError)),
-    ):
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(side_effect=TimeoutError)):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -456,7 +442,10 @@ async def test_prepare_history_for_run_uses_provided_storage_without_reopening_s
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(tmp_path: Path) -> None:
+async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -491,16 +480,11 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
     seed_session(storage, room_session)
     seed_session(storage, thread_session)
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(
-                return_value="thread summary",
-            ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(
+            return_value="thread summary",
         ),
     ):
         lifecycle = RecordingCompactionLifecycle()
@@ -536,6 +520,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_across_multiple_passes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
@@ -641,15 +626,10 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
             second_summary_text,
         ],
     )
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=summary_mock,
-        ),
+    install_model_providers(monkeypatch, {"summary-model": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=summary_mock,
     ):
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
@@ -681,6 +661,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before_reply(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
@@ -765,15 +746,10 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
             second_summary_text,
         ],
     )
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=summary_mock,
-        ),
+    install_model_providers(monkeypatch, {"summary-model": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=summary_mock,
     ):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
@@ -821,6 +797,7 @@ def _native_model() -> ScriptedModel:
 @pytest.mark.asyncio
 async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_alone_exceeds_the_trigger(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compacting cannot bring history under the trigger when the summary alone exceeds it.
 
@@ -872,13 +849,8 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
         execution_plan=execution_plan,
     )
     summary_mock = AsyncMock(return_value=summary.text)
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
-    ):
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
         prepared = await prepare_scope_history(
             compaction_lifecycle=RecordingCompactionLifecycle(),
             model=None,
@@ -905,6 +877,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     *,
     native_model: bool,
     allow_native_compaction: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Above the trigger budget only an active native route may leave history uncompacted.
 
@@ -963,13 +936,8 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         execution_plan=execution_plan,
     )
     summary_mock = AsyncMock(return_value="short summary")
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
-    ):
+    install_model_providers(monkeypatch, {"summary-model": summary_model()})
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
@@ -1013,6 +981,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_auto_required_compaction_finishes_original_previous_runs(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
@@ -1095,15 +1064,10 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
 
     lifecycle = RecordingCompactionLifecycle()
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(side_effect=fake_summary),
-        ),
+    install_model_providers(monkeypatch, {"summary-model": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=fake_summary),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
@@ -1171,6 +1135,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
 async def test_prepare_history_for_run_persists_successful_compaction_chunks_before_later_failure(
     tmp_path: Path,
     second_chunk: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A later chunk's failure, or a writer outrunning it, keeps the chunks already stored."""
     config, runtime_paths = _make_config(
@@ -1273,15 +1238,10 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
 
     summary_mock = AsyncMock(side_effect=summarize)
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=summary_mock,
-        ),
+    install_model_providers(monkeypatch, {"summary-model": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=summary_mock,
     ):
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
@@ -1401,7 +1361,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
 
     with (
         patch(
-            "mindroom.history.compaction.build_model_provider",
+            "mindroom.providers.registry.build_model_provider",
             side_effect=lambda _config, _paths, name, **_kwargs: summary_model(model_id=f"{name}-id"),
         ),
         patch(
@@ -1480,7 +1440,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     lifecycle = RecordingCompactionLifecycle()
 
     with (
-        patch("mindroom.history.compaction.build_model_provider", side_effect=_load_model),
+        patch("mindroom.providers.registry.build_model_provider", side_effect=_load_model),
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
         patch("mindroom.history.compaction.logger.warning") as warning_mock,
     ):
@@ -1519,6 +1479,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_reuses_completed_auto_compaction(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
@@ -1564,15 +1525,10 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
     summary_mock = AsyncMock(
         return_value="all runs summary",
     )
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=summary_mock,
-        ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=summary_mock,
     ):
         first_prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
@@ -1719,7 +1675,10 @@ async def test_prepare_history_for_run_context_window_guard_skips_system_prompts
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_path: Path) -> None:
+async def test_prepare_history_for_run_compaction_failure_clears_force_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -1748,15 +1707,10 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
             flag_at_failure_notice.append(read_scope_state(stored, scope).force_compact_before_next_run)
             await super().complete_failure(event)
 
-    with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(side_effect=RuntimeError("summary failed")),
-        ),
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with patch(
+        "mindroom.history.compaction.generate_compaction_summary",
+        new=AsyncMock(side_effect=RuntimeError("summary failed")),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent_name="test_agent",
@@ -1791,6 +1745,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
 async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_requested(
     tmp_path: Path,
     race: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A redaction landing before or during the summary call voids the chunk; the notice names it and the request stays."""
     config, runtime_paths = _make_config(
@@ -1815,11 +1770,8 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
             storage.delete_run_subtrees(["run-1"])
         return "stale summary"
 
+    install_model_providers(monkeypatch, {"default": summary_model()})
     with (
-        patch(
-            "mindroom.history.compaction.build_model_provider",
-            return_value=summary_model(),
-        ),
         patch("mindroom.history.compaction.read_chunk_basis", new=basis_after_a_redaction_cuts_a_run),
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_while_a_redaction_cuts_a_run),
     ):
@@ -1969,7 +1921,7 @@ async def _prepare_with_reported_usage(
     lifecycle = RecordingCompactionLifecycle()
     with (
         patch(
-            "mindroom.history.compaction.build_model_provider",
+            "mindroom.providers.registry.build_model_provider",
             return_value=summary_model(),
         ),
         patch(

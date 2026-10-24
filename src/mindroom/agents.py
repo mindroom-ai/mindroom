@@ -41,7 +41,7 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, mcp_function_collisions
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
-from mindroom.providers.registry import build_model_provider
+from mindroom.providers import registry as provider_registry
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
@@ -678,7 +678,12 @@ def _build_agent_model_provider(
     execution_identity: ToolExecutionIdentity | None,
 ) -> ModelProvider:
     """Build one agent's model provider while preserving prompt-assembly timing attribution."""
-    return build_model_provider(config, runtime_paths, model_name, execution_identity=execution_identity)
+    return provider_registry.build_model_provider(
+        config,
+        runtime_paths,
+        model_name,
+        execution_identity=execution_identity,
+    )
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")

@@ -26,7 +26,7 @@ from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, replay_basis
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.history_helpers import _team_session, record_native_checkpoint
 from tests.identity_helpers import entity_ids
@@ -170,7 +170,7 @@ async def _resume(
         resolved_thread_id="$thread",
         session_id="session-1",
     )
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    install_model_providers(monkeypatch, {"default": model})
     store = create_session_storage("general", config, paths, identity)
     build = agents.create_agent("general", config, paths, identity, history_storage=store)
     session = new_scope_session(session_id="session-1", scope_id="general", is_team=False)
