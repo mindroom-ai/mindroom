@@ -186,10 +186,11 @@ def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
 
 
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-# The crawl budget, the breadth-first queue, the 1-3 second pause before each fetch, and the 5000-character page
-# documents follow Agno's WebsiteReader, so the tool returns what it always has.
+# The crawl budget, the fetch timeout, the breadth-first queue, the 1-3 second pause before each fetch, and the
+# 5000-character page documents follow Agno's WebsiteReader, so the tool returns what it always has.
 _MAX_DEPTH = 3
 _MAX_LINKS = 10
+_FETCH_TIMEOUT_SECONDS = 10
 _PAGE_CHUNKING = FixedSizeChunking(chunk_size=5000)
 
 
@@ -197,7 +198,6 @@ _PAGE_CHUNKING = FixedSizeChunking(chunk_size=5000)
 class _MindRoomWebsiteReader:
     """Crawls one host through the server-fetch transport and extracts each page's main text, skipping page chrome."""
 
-    timeout: int = 10
     _visited: set[str] = field(default_factory=set, init=False, repr=False)
     _urls_to_crawl: list[tuple[str, int]] = field(default_factory=list, init=False, repr=False)
 
@@ -254,7 +254,7 @@ class _MindRoomWebsiteReader:
         """Fetch a URL while validating every redirect hop before following it."""
         request_url = validate_server_fetch_url(current_url)
         for _redirect_count in range(_MAX_REDIRECTS + 1):
-            response = _server_fetch_get(request_url, timeout=self.timeout, follow_redirects=False)
+            response = _server_fetch_get(request_url, timeout=_FETCH_TIMEOUT_SECONDS, follow_redirects=False)
             if not response.is_redirect:
                 return response, request_url
             request_url = validate_server_fetch_redirect_url(request_url, response.headers.get("location"))

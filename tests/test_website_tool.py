@@ -304,7 +304,7 @@ def test_website_reader_rejects_dns_rebind_at_connect_time(monkeypatch: pytest.M
 
     try:
         with pytest.raises(ServerFetchUrlError) as exc_info:
-            _MindRoomWebsiteReader(timeout=2).read(f"http://rebind.test:{server.server_port}/")
+            _MindRoomWebsiteReader().read(f"http://rebind.test:{server.server_port}/")
     finally:
         server.shutdown()
         server.server_close()
