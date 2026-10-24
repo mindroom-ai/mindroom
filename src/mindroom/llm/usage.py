@@ -195,13 +195,17 @@ class ModelMetrics(_Counts):
             _merge_numeric(self.provider_metrics, other.provider_metrics)
 
 
-def _details_to_dict(details: Mapping[str, list[ModelMetrics]]) -> dict[str, list[dict[str, Any]]]:
-    # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
-    # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
-    return {
-        model_type: [_compact(_flattened(entry), keep_empty=True) for entry in entries]
-        for model_type, entries in details.items()
-    }
+def _detailed_dict(record: RunMetrics | SessionMetrics) -> dict[str, Any]:
+    """Return the stored dict of a usage record with a per-model breakdown, its ``details`` entries flattened too."""
+    values = _flattened(record)
+    if record.details is not None:
+        # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
+        # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
+        values["details"] = {
+            model_type: [_compact(_flattened(entry), keep_empty=True) for entry in entries]
+            for model_type, entries in record.details.items()
+        }
+    return _compact(values)
 
 
 def _details_from_dict(details: Mapping[str, list[Any]]) -> dict[str, list[ModelMetrics]]:
@@ -246,10 +250,7 @@ class RunMetrics(_Counts):
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict shape."""
-        values = _flattened(self)
-        if self.details is not None:
-            values["details"] = _details_to_dict(self.details)
-        return _compact(values)
+        return _detailed_dict(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
@@ -311,10 +312,7 @@ class SessionMetrics(_Counts):
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict shape."""
-        values = _flattened(self)
-        if self.details is not None:
-            values["details"] = _details_to_dict(self.details)
-        return _compact(values)
+        return _detailed_dict(self)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
