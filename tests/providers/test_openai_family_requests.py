@@ -532,7 +532,7 @@ async def test_a_reply_after_the_system_prompt_changes_sends_the_new_prompt(
     follow_up = Message(role="user", content="And tomorrow?")
     history = [_dated_prompt("Tuesday" if scenario == "next day" else "Monday"), question, reply, follow_up]
     if scenario == "approval receipt":
-        history = messages_with_approval_receipt(history, "trusted approval receipt", after_response_id=False)
+        history = messages_with_approval_receipt(history, "trusted approval receipt")
 
     await _reply(adapter, history)
 

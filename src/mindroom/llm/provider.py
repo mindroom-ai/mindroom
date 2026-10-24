@@ -55,7 +55,6 @@ class Capabilities:
     omitted_media: frozenset[MediaKind] = frozenset()
     native_tool_search: bool = False
     native_compaction: bool = False
-    continues_stored_responses: bool = False
     provider_default_sampling: bool = False
     claude_family: bool = False
     streams_only: bool = False

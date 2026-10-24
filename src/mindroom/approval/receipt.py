@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState, RequestDecision
-    from mindroom.llm.provider import Capabilities
 
 _MARKER_KEY = "mindroom_approval_receipt"
 _SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -58,47 +57,20 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
     return "\n".join(lines)
 
 
-def _is_response_chain_boundary(message: Message) -> bool:
-    provider_data = message.provider_data
-    return (
-        message.role == "assistant"
-        and isinstance(provider_data, dict)
-        and isinstance(provider_data.get("response_id"), str)
-    )
-
-
-def messages_with_approval_receipt(
-    messages: Sequence[Message],
-    receipt_text: str,
-    *,
-    after_response_id: bool,
-) -> list[Message]:
+def messages_with_approval_receipt(messages: Sequence[Message], receipt_text: str) -> list[Message]:
     """Return the request's messages with the trusted receipt projected in, leaving ``messages`` as they are.
 
     The receipt is appended to the first prompt message as a copy; a request without one gets a system message of
-    its own, placed after the latest response-chain boundary when the provider continues stored responses, so the
-    provider still sees it.
+    its own, first.
     """
     outbound = list(messages)
-    response_chain_index = (
-        next(
-            (index for index in range(len(outbound) - 1, -1, -1) if _is_response_chain_boundary(outbound[index])),
-            None,
-        )
-        if after_response_id
-        else None
-    )
-    system_index = (
-        None
-        if response_chain_index is not None
-        else next(
-            (
-                index
-                for index, message in enumerate(outbound)
-                if message.role == "system" and isinstance(message.content, str)
-            ),
-            None,
-        )
+    system_index = next(
+        (
+            index
+            for index, message in enumerate(outbound)
+            if message.role == "system" and isinstance(message.content, str)
+        ),
+        None,
     )
     if system_index is None:
         receipt_message = Message(
@@ -107,8 +79,7 @@ def messages_with_approval_receipt(
             provider_data={_MARKER_KEY: True},
             add_to_agent_memory=False,
         )
-        outbound.insert(0 if response_chain_index is None else response_chain_index + 1, receipt_message)
-        return outbound
+        return [receipt_message, *outbound]
     receipt_message = deepcopy(outbound[system_index])
     receipt_message.content = f"{receipt_message.content}\n\n{receipt_text}"
     receipt_message.provider_data = {**(receipt_message.provider_data or {}), _MARKER_KEY: True}
@@ -116,7 +87,7 @@ def messages_with_approval_receipt(
     return outbound
 
 
-def approval_receipt_hook(capabilities: Capabilities) -> BeforeRequestHook:
+def approval_receipt_hook() -> BeforeRequestHook:
     """Return the pre-request hook that sends the bound receipt with a reader run's first request, once per run.
 
     The hook goes on every run; ``approval_receipt_context`` decides which runs read the receipt. It is projected
@@ -127,13 +98,7 @@ def approval_receipt_hook(capabilities: Capabilities) -> BeforeRequestHook:
         receipt_text = take_unsent_receipt(state.run.run_id)
         if receipt_text is None:
             return SendRequest()
-        return SendRequest(
-            messages=messages_with_approval_receipt(
-                state.messages,
-                receipt_text,
-                after_response_id=capabilities.continues_stored_responses,
-            ),
-        )
+        return SendRequest(messages=messages_with_approval_receipt(state.messages, receipt_text))
 
     return hook
 
