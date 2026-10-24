@@ -114,11 +114,11 @@ class _Counts:
         return cls(**_known_counts(cls, data))
 
 
-def _add_counts(target: _Counts, source: _Counts) -> None:
-    """Add the token counters and any cost of ``source`` into ``target`` in place."""
-    target.tokens += source.tokens
+def _add_counts(target: _Counts, source: _Counts, *, sign: int = 1) -> None:
+    """Add the token counters and any cost of ``source``, times ``sign``, into ``target`` in place."""
+    target.tokens = target.tokens + source.tokens if sign > 0 else target.tokens - source.tokens
     if source.cost is not None:
-        target.cost = (target.cost or 0) + source.cost
+        target.cost = (target.cost or 0) + sign * source.cost
 
 
 def _sum_optional(left: float | None, right: float | None) -> float | None:
@@ -298,9 +298,7 @@ class SessionMetrics(_Counts):
         # TODO(simplify): the session ledger passes token counters only, so the cost, additional_metrics, and
         # provider_metrics handling here and in ``_signed_model`` serves only tests/llm/test_codecs.py's full-metrics
         # cases. Count tokens only; only those tests and their goldens would notice.
-        self.tokens = self.tokens + metrics.tokens if sign > 0 else self.tokens - metrics.tokens
-        if metrics.cost is not None:
-            self.cost = (self.cost or 0) + sign * metrics.cost
+        _add_counts(self, metrics, sign=sign)
         if metrics.additional_metrics is not None:
             if self.additional_metrics is None:
                 self.additional_metrics = {}
