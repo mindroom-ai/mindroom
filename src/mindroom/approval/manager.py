@@ -761,16 +761,10 @@ class ApprovalManager:
                 await before_consume()
             self._ensure_deadline_sweep()
             return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
-        transport_sender = None if self.transport_sender is None else self.transport_sender()
-        pending = (
-            None
-            if transport_sender is None
-            else self._trusted_pending_from_card_event(
-                stored.card,
-                room_id=room_id,
-                transport_sender=transport_sender,
-                expected_card_event_id=card_event_id,
-            )
+        pending = self._trusted_pending_from_card_event(
+            stored.card,
+            room_id=room_id,
+            expected_card_event_id=card_event_id,
         )
         if (
             pending is None
@@ -1072,16 +1066,10 @@ class ApprovalManager:
             if recorded.recorded and recorded.continuation_ready:
                 await self._wake_continuation(recorded)
             return False
-        transport_sender = None if self.transport_sender is None else self.transport_sender()
-        pending = (
-            None
-            if transport_sender is None
-            else self._trusted_pending_from_card_event(
-                stored.card,
-                room_id=room_id,
-                transport_sender=transport_sender,
-                expected_card_event_id=stored.card_event_id,
-            )
+        pending = self._trusted_pending_from_card_event(
+            stored.card,
+            room_id=room_id,
+            expected_card_event_id=stored.card_event_id,
         )
         if pending is None:
             return False
@@ -1229,14 +1217,17 @@ class ApprovalManager:
             with self._live_lock:
                 self._resolving_card_event_ids.discard(card_event_id)
 
-    @staticmethod
     def _trusted_pending_from_card_event(
+        self,
         card_event: dict[str, Any],
         *,
         room_id: str,
-        transport_sender: str,
         expected_card_event_id: str,
     ) -> PendingApproval | None:
+        """Return the still-pending card this process's transport account sent, or None without one."""
+        transport_sender = None if self.transport_sender is None else self.transport_sender()
+        if transport_sender is None:
+            return None
         event = dict(card_event)
         event.setdefault("sender", transport_sender)
         try:
