@@ -13,9 +13,10 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class ResponseContext:
-    """The request context one response reported: its size in tokens, and the cache reads and writes it counted.
+    """A request context's size in tokens and its cache reads and writes: one response's report, or an estimate.
 
-    A cache counter is None when the provider did not report it.
+    A cache counter is None when the provider did not report it, and always for an estimate. A zero cache counter
+    among a response's billed counters reads as unreported; Claude's ``context_usage`` reports each one, a zero one too.
     """
 
     tokens: int
@@ -89,7 +90,7 @@ def response_context(
     configured_provider: str | None,
     model_id: str | None,
 ) -> ResponseContext | None:
-    """Return the request context one response reported, or None when its provider reported no usage.
+    """Return the request context one response reported, or None when its usage is absent or sums retried attempts.
 
     A Claude response's ``context_usage`` holds its final iteration's counters, each one reported, a zero one too:
     after a native compaction that iteration alone describes the active context, while the billed counters can

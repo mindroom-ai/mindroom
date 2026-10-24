@@ -217,7 +217,10 @@ class TeamAttempt:
         session_id: str,
         status: RunStatus,
     ) -> dict[str, Any]:
-        """Return the stored run's metadata payload: the leader's identity, the team's usage, and the prepared history."""
+        """Return the stored run's metadata payload: the leader's identity, the team's usage, and the prepared history.
+
+        The context reported is the leader's last request's, since each member's requests held a context of their own.
+        """
         record = self.terminal_record()
         return build_ai_run_metadata_content(
             config=config,

@@ -173,10 +173,11 @@ def _reply_context(
     The estimate stands in when the run holds no request its model answered, and when the last one reported no usage
     of its own: on a route that reports none, or for a retried request whose usage sums its attempts.
     """
-    own = [message for message in run.messages if is_own_model_message(message)] if run is not None else []
-    if own:
+    newest_first = reversed(run.messages) if run is not None else ()
+    last = next((message for message in newest_first if is_own_model_message(message)), None)
+    if last is not None:
         reported = response_context(
-            own[-1],
+            last,
             provider=provider,
             configured_provider=configured_provider,
             model_id=model_id,
