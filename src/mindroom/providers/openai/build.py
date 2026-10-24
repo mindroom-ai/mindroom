@@ -289,7 +289,6 @@ def _route_base_url(
 
 def _chat_client_factory(
     route_key: str,
-    route: _ChatRoute,
     settings: ChatSettings,
     *,
     api_key: str | None,
@@ -298,6 +297,7 @@ def _chat_client_factory(
     runtime: ProviderRuntime,
 ) -> Callable[[], AsyncOpenAI]:
     """Return the SDK client factory of one Chat route; ``alternative_auth`` says it authenticates without a key."""
+    route = _CHAT_ROUTES[route_key]
     http_client = runtime.http_client
     process_env = runtime.runtime_paths.process_env
     options = _client_options(settings, base_url=base_url, organization=route.dialect == "openai")
@@ -419,7 +419,6 @@ def _build_chat(route_key: str, model_id: str, model_config: ModelConfig, runtim
         clients=SDKClients(
             _chat_client_factory(
                 route_key,
-                route,
                 settings,
                 api_key=api_key,
                 alternative_auth=uses_alternative_auth(model_config),
