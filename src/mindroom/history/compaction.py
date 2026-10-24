@@ -487,7 +487,7 @@ async def _rewrite_working_session_for_compaction(
                 storage,
                 persisted_session,
                 scope,
-                [run.run_id for run in remaining if run.run_id],
+                [run.run_id for run in remaining],
                 previous_summary=previous_summary,
             ),
         )
@@ -505,7 +505,7 @@ async def _rewrite_working_session_for_compaction(
             )
             break
         await before_persist(chunk.included_runs)
-        compacted_run_ids = tuple(run.run_id for run in chunk.included_runs if run.run_id)
+        compacted_run_ids = tuple(run.run_id for run in chunk.included_runs)
         appended = await run_session_storage_operation(
             lambda: storage,
             partial(
