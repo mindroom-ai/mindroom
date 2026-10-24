@@ -130,11 +130,6 @@ def format_team_response(record: TeamRunRecord) -> str:
     return "\n\n".join(_with_consensus(contributions, str(record.handover_content or "")))
 
 
-def team_response_text(record: TeamRunRecord) -> str:
-    """Return a finished team run's reply without the header: its runs' text, else the leader's, else the no-reply note."""
-    return format_team_response(record) or finished_run_text(record) or NO_TEAM_RESPONSE
-
-
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
 
 
@@ -419,6 +414,5 @@ __all__ = [
     "publish_team_presentation",
     "render_team_member_slots",
     "strip_team_display",
-    "team_response_text",
     "url_safe_member_id",
 ]

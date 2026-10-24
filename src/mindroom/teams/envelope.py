@@ -85,7 +85,6 @@ from mindroom.teams.presentation import (
     finished_run_text,
     format_team_header,
     format_team_response,
-    team_response_text,
 )
 from mindroom.teams.resume import TeamResume, blocking_team_pause, continued_team_pause, drive_team_delegations
 from mindroom.teams.runtime import leader_tool_specs, run_team
@@ -821,9 +820,10 @@ class _TeamTurn:
         # records the document its events built and its failed member runs' reasons, in the configured member order.
         # The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
+            body_text = format_team_response(record)
             leader_text = finished_run_text(record)
-            has_visible_output = bool(format_team_response(record)) or bool(leader_text.strip())
-            rendered = header + team_response_text(record)
+            has_visible_output = bool(body_text) or bool(leader_text.strip())
+            rendered = header + (body_text or leader_text or NO_TEAM_RESPONSE)
             silent = (
                 self.ctx.allow_no_report_response
                 and is_silent_schedule_no_report_response(leader_text)
