@@ -661,6 +661,19 @@ async def _background_child_outcome(
     def finished(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:
         return delegation_outcome(status, _finalize_delegation_output(text, output_request))
 
+    def failed_unsettled(primary_error: str, stage: str, error: Exception) -> BackgroundOutcome:
+        logger.warning(
+            f"Native delegation {stage} failed after execution failure",
+            delegation_id=child.delegation_id,
+            error=str(error),
+            exc_info=error,
+        )
+        return finished(
+            "failed",
+            f"{primary_error}\n\nDelegation {stage} did not complete; recovery may still be required: "
+            f"{redact_sensitive_text(str(error))}",
+        )
+
     run = partial(
         _run_child,
         child,
@@ -708,34 +721,13 @@ async def _background_child_outcome(
                     status="failed",
                 )
             except Exception as cleanup_error:
-                logger.warning(
-                    "Native delegation cleanup failed after execution failure",
-                    delegation_id=child.delegation_id,
-                    error=str(cleanup_error),
-                    exc_info=True,
-                )
-                return finished(
-                    "failed",
-                    f"{primary_error}\n\nDelegation cleanup did not complete; recovery may still be required: "
-                    f"{redact_sensitive_text(str(cleanup_error))}",
-                )
+                return failed_unsettled(primary_error, "cleanup", cleanup_error)
         try:
             receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
         except Exception as settlement_error:
             if primary_error is None:
                 raise
-            logger.warning(
-                "Native delegation settlement failed after execution failure",
-                delegation_id=child.delegation_id,
-                error=str(settlement_error),
-                exc_info=True,
-            )
-            return finished(
-                "failed",
-                f"{primary_error}\n\n"
-                "Delegation settlement did not complete; recovery may still be required: "
-                f"{redact_sensitive_text(str(settlement_error))}",
-            )
+            return failed_unsettled(primary_error, "settlement", settlement_error)
         status = child.status
         assert status != "running"
         assert status != "paused"
