@@ -825,7 +825,11 @@ async def _schedule_parse(config: Config, runtime_paths: RuntimePaths) -> None:
     assert isinstance(workflow, ScheduledWorkflow), workflow
 
 
-async def _summarize(config: Config, runtime_paths: RuntimePaths, tag_vocabulary: str | None) -> object:
+async def _summarize(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tag_vocabulary: str | None,
+) -> str | _ThreadEnrichment | None:
     """Generate the helper thread's summary as the automatic pass does, with its model and trusted senders."""
     return await _generate_summary(
         _helper_history(),
