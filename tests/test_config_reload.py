@@ -1354,6 +1354,60 @@ async def test_prepare_entity_accounts_retries_transient_create_agent_user_failu
 
 
 @pytest.mark.asyncio
+async def test_prepare_entity_accounts_requests_personal_agent_username(tmp_path: Path) -> None:
+    """A generated agent's stored Matrix username is requested, so a wiped matrix_state recreates the same ID."""
+    paths = test_runtime_paths(tmp_path)
+    append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
+    config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    orchestrator = _MultiAgentOrchestrator(paths)
+    requested: dict[str, str | None] = {}
+
+    async def record_user(
+        _homeserver: str,
+        entity_name: str,
+        display_name: str,
+        *,
+        runtime_paths: object,
+        username: str | None = None,
+    ) -> AgentMatrixUser:
+        del runtime_paths
+        requested[entity_name] = username
+        actual_username = username or f"actual_{entity_name}"
+        state = MatrixState.load(runtime_paths=paths)
+        state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
+        state.save(runtime_paths=paths)
+        return AgentMatrixUser(
+            agent_name=entity_name,
+            user_id=f"@{actual_username}:localhost",
+            display_name=display_name,
+            password=TEST_PASSWORD,
+        )
+
+    with patch("mindroom.orchestrator.create_agent_user", new=record_user):
+        await orchestrator._prepare_entity_accounts(config, [ROUTER_AGENT_NAME, "mind_alice_smith"])
+
+    assert requested == {ROUTER_AGENT_NAME: None, "mind_alice_smith": "alice.mind"}
+
+
+def test_preflight_account_provisioning_checks_personal_agent_username(tmp_path: Path) -> None:
+    """The localpart collision check uses a generated agent's stored Matrix username."""
+    paths = test_runtime_paths(tmp_path)
+    append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
+    config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    state = MatrixState.load(runtime_paths=paths)
+    state.add_account("agent_other", "alice.mind", TEST_PASSWORD, domain="localhost")
+    state.save(runtime_paths=paths)
+    orchestrator = _MultiAgentOrchestrator(paths)
+
+    with pytest.raises(PermanentStartupError, match=r"'alice\.mind'"):
+        orchestrator._preflight_account_provisioning(
+            config,
+            entity_names=["mind_alice_smith"],
+            include_internal_user=False,
+        )
+
+
+@pytest.mark.asyncio
 async def test_prepare_entity_accounts_rejects_duplicate_persisted_matrix_ids(tmp_path: Path) -> None:
     """Account preparation should fail permanently when persisted entity IDs are ambiguous."""
     config = _runtime_bound_config(

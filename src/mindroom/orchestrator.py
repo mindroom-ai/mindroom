@@ -1146,6 +1146,12 @@ class _MultiAgentOrchestrator:
             return config.teams[entity_name].display_name
         return entity_name
 
+    @staticmethod
+    def _entity_requested_username(config: Config, entity_name: str) -> str | None:
+        """Return a generated agent's stored Matrix username, so a wiped matrix_state recreates the same ID."""
+        instance = config.personal_agent_instance(entity_name)
+        return None if instance is None else instance.matrix_username
+
     async def _prepare_entity_accounts(
         self,
         config: Config,
@@ -1166,6 +1172,7 @@ class _MultiAgentOrchestrator:
                     entity_name,
                     self._entity_display_name(config, entity_name),
                     runtime_paths=self.runtime_paths,
+                    username=self._entity_requested_username(config, entity_name),
                 )
             self._validate_entity_accounts(config)
             users = prepared_users
@@ -1201,7 +1208,13 @@ class _MultiAgentOrchestrator:
                     username=config.mindroom_user.username,
                 ),
             )
-        requests.extend(ManagedAccountProvisioningRequest(entity_name) for entity_name in entity_names)
+        requests.extend(
+            ManagedAccountProvisioningRequest(
+                entity_name,
+                username=self._entity_requested_username(config, entity_name),
+            )
+            for entity_name in entity_names
+        )
         preflight_managed_account_provisioning(requests, self.runtime_paths)
 
     def validate_managed_entity_identities(self) -> None:
