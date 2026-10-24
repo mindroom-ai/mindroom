@@ -329,7 +329,6 @@ async def _answer_resumed(
         if requirement.confirmation is True:
             assert execution.tool_name is not None
             function = state.offered.functions[execution.tool_name]
-            assert execution.tool_call_id is not None
             # The decision has been taken: the entry no longer waits, so the dispatcher runs it.
             execution.requires_confirmation = False
             planned = PlannedCall(
