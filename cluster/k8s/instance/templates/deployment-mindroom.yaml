@@ -145,6 +145,8 @@ spec:
         fsGroup: 1000
         runAsNonRoot: true
         fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: mindroom
         image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}

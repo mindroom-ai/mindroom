@@ -289,6 +289,18 @@ def test_instance_chart_pods_satisfy_the_tenant_namespace_pod_security_baseline(
             assert all("hostPort" not in port for port in container.get("ports", []))
 
 
+def test_instance_chart_pods_run_under_the_runtime_default_seccomp_profile() -> None:
+    """Tenant code runs in these pods on a shared node, so none may run without the runtime's syscall filter."""
+    docs = _render_chart(Path("cluster/k8s/instance"), "imagePullSecrets[0].name=ghcr-pull")
+    pods = [doc["spec"]["template"]["spec"] for doc in docs if doc["kind"] == "Deployment"]
+
+    assert len(pods) == 2
+    for pod in pods:
+        assert pod["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
+        for container in [*pod.get("initContainers", []), *pod["containers"]]:
+            assert "seccompProfile" not in container.get("securityContext", {})
+
+
 def _hcl_block(text: str, header: str) -> str:
     start = text.index(header)
     depth = 0
