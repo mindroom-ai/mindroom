@@ -313,7 +313,7 @@ def _validate_authored_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    retired = retired_tool_override(tool_name, overrides)
+    retired = retired_tool_override(overrides)
     if retired is not None:
         field_name, guidance = retired
         path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)

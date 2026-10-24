@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -55,31 +55,24 @@ class ChromaReadProxy:
     embedder: Embedder
     published_settings: IndexingSettings | None = None
 
-    def exists(self) -> bool:
-        """Probe the same compatible publication that a subsequent search resolves."""
-        request = ReadRequest(
-            path=self.path,
-            collection=self.collection_name,
-            published_settings=self.published_settings.to_metadata() if self.published_settings is not None else None,
-        )
-        with read_collection(request) as collection_name:
-            return collection_exists(self.path, collection_name)
-
-    def _request(self, query: str, embedding: list[float], limit: int) -> ReadRequest:
+    def _request(self) -> ReadRequest:
+        """Return the request that selects this handle's compatible publication."""
         return ReadRequest(
             path=self.path,
             collection=self.collection_name,
-            query=query,
-            embedding=embedding,
-            limit=limit,
             published_settings=self.published_settings.to_metadata() if self.published_settings is not None else None,
         )
+
+    def exists(self) -> bool:
+        """Probe the same compatible publication that a subsequent search resolves."""
+        with read_collection(self._request()) as collection_name:
+            return collection_exists(self.path, collection_name)
 
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         """Embed under the caller's credentials, then query outside this process, which starts while the embedding runs."""
 
         async def prepare_request() -> ReadRequest:
             embedding = (await self.embedder.aembed([query], purpose="query"))[0]
-            return self._request(query, embedding, limit)
+            return replace(self._request(), query=query, embedding=embedding, limit=limit)
 
         return (await read_chroma_async(prepare_request)).hits

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from itertools import zip_longest
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
@@ -92,47 +93,7 @@ def _format_search_hits(hits: Sequence[SearchHit]) -> str:
 
 def _interleave(results_by_source: list[list[SearchHit]], limit: int) -> list[SearchHit]:
     """Interleave per-source results so one knowledge base cannot dominate the top hits."""
-    merged: list[SearchHit] = []
-    index = 0
-    while len(merged) < limit:
-        added = False
-        for results in results_by_source:
-            if index < len(results):
-                merged.append(results[index])
-                added = True
-                if len(merged) >= limit:
-                    return merged
-        if not added:
-            break
-        index += 1
-    return merged
-
-
-def _merged(
-    outcomes: Sequence[tuple[KnowledgeSource, list[SearchHit] | Exception]],
-    limit: int,
-) -> list[SearchHit]:
-    """Merge the sources that answered; when every source failed, raise the first failure.
-
-    A partial failure warns and searches on, so one unavailable base does not
-    hide the others' results, but an all-failed search must not look like an
-    empty index (ISSUE-237).
-    """
-    answered: list[list[SearchHit]] = []
-    first_error: Exception | None = None
-    for source, outcome in outcomes:
-        if isinstance(outcome, Exception):
-            first_error = first_error or outcome
-            logger.warning(
-                "Knowledge source search failed",
-                base_id=source.description.base_id,
-                exc_info=outcome,
-            )
-            continue
-        answered.append(outcome)
-    if first_error is not None and not answered:
-        raise first_error
-    return _interleave(answered, limit)
+    return [hit for rank in zip_longest(*results_by_source) for hit in rank if hit is not None][: max(limit, 0)]
 
 
 @dataclass(frozen=True)
@@ -147,15 +108,23 @@ class AgentKnowledge:
         return max(min(len(self.sources), _MAX_MERGED_SOURCE_COVERAGE_RESULTS), _DEFAULT_MAX_RESULTS)
 
     async def asearch(self, query: str, limit: int | None = None) -> list[SearchHit]:
-        """Search sources sequentially, so one query cannot exhaust the native reader slots, and interleave their hits."""
+        """Search sources sequentially, so one query cannot exhaust the native reader slots, and interleave their hits.
+
+        A failed source warns and the search goes on, so one unavailable base does not hide the others' results, but
+        when every source failed the first failure raises, so it never looks like an empty index (ISSUE-237).
+        """
         effective_limit = limit or self.max_results
-        outcomes: list[tuple[KnowledgeSource, list[SearchHit] | Exception]] = []
+        answered: list[list[SearchHit]] = []
+        first_error: Exception | None = None
         for source in self.sources:
             try:
-                outcomes.append((source, await source.index.asearch(query, limit=effective_limit)))
+                answered.append(await source.index.asearch(query, limit=effective_limit))
             except Exception as exc:
-                outcomes.append((source, exc))
-        return _merged(outcomes, effective_limit)
+                first_error = first_error or exc
+                logger.warning("Knowledge source search failed", base_id=source.description.base_id, exc_info=exc)
+        if first_error is not None and not answered:
+            raise first_error
+        return _interleave(answered, effective_limit)
 
     async def _search_tool_result(self, query: str) -> str:
         """Return what ``search_knowledge_base`` tells the model: the hits, no-result text, or the failure's type."""

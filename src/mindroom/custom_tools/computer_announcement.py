@@ -39,10 +39,18 @@ def computer_announcement_middleware(
         or worker_computer_provider(agent_name, config, runtime_paths) != tool_name
     ):
         return None
-    return _announcement_middleware(
-        agent_name,
-        toolkit if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
-    )
+    placement = toolkit if isinstance(toolkit, SupportsPrimaryCallPlacement) else None
+
+    async def announce_computer(call: ToolCall, call_next: ToolNext) -> object:
+        name = call.function.name
+        try:
+            if _runs_as(agent_name) and _uses_computer(name, call.arguments, placement):
+                await show_computer_once()
+        except Exception:
+            logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
+        return await call_next(call.arguments)
+
+    return announce_computer
 
 
 def _uses_computer(name: str, args: dict[str, Any], placement: SupportsPrimaryCallPlacement | None) -> bool:
@@ -61,16 +69,3 @@ def _runs_as(agent_name: str) -> bool:
     # A team member's browser runs under the response owner's context, and the notice would name the owner.
     context = get_tool_runtime_context()
     return context is None or context.agent_name == agent_name
-
-
-def _announcement_middleware(agent_name: str, placement: SupportsPrimaryCallPlacement | None) -> ToolMiddleware:
-    async def announce_computer(call: ToolCall, call_next: ToolNext) -> object:
-        name = call.function.name
-        try:
-            if _runs_as(agent_name) and _uses_computer(name, call.arguments, placement):
-                await show_computer_once()
-        except Exception:
-            logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
-        return await call_next(call.arguments)
-
-    return announce_computer

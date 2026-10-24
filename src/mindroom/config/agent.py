@@ -448,14 +448,8 @@ class AgentConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_legacy_agent_fields(cls, data: object) -> object:
-        """Reject removed legacy fields to prevent silent misconfiguration."""
-        return reject_legacy_agent_fields(data)
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_retired_fields(cls, data: object) -> object:
-        """Ignore retired fields that older configs still set, with a warning."""
-        return drop_retired_fields(data)
+        """Ignore retired fields with a warning, then reject removed legacy fields to prevent silent misconfiguration."""
+        return reject_legacy_agent_fields(drop_retired_fields(data))
 
     @field_validator("thread_exports", mode="before")
     @classmethod

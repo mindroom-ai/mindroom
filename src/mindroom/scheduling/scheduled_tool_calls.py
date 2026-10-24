@@ -53,6 +53,8 @@ _LIVE_FUNCTION_READERS = frozenset({"schedule_tool_call", "run_scheduled_call"})
 # Parameters through which an entrypoint takes the run's media, as Agno's MEDIA_INJECTED_PARAMS names them. A live
 # call gets None for them too, since no run passes a tool media, but scheduling such a call stays refused, as it
 # was when live runs carried media that a stored call lacked.
+# TODO(simplify): Scheduling refuses a tool that takes media although its live calls get none either. Drop the media
+# check. Models could schedule calls of those tools.
 _MEDIA_PARAMETERS = frozenset({"images", "videos", "audios", "files"})
 
 _REFUSALS: dict[ScheduledCallRefusal, str] = {

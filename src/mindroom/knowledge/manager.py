@@ -13,6 +13,7 @@ from contextlib import closing, contextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
@@ -859,19 +860,14 @@ class KnowledgeManager:
         indexed_signatures: dict[str, FileSignature],
     ) -> bool:
         """Replace one prepared file's rows while the caller owns the operation lock."""
-
-        async def _write() -> None:
-            # Embedding the chunks the batch left out and the vector store
-            # write run on a worker thread, so the loop stays responsive to
-            # Matrix sync, tool calls, and cache writes.
-            await asyncio.to_thread(_write_file_rows, collection, embedder, prepared, batch_vectors)
-
         try:
             # A file's rows are replaced only after all of its chunks embedded,
             # so a transient embedding fault costs one retry of this file
-            # instead of the whole refresh.
+            # instead of the whole refresh. Embedding the chunks the batch left
+            # out and the vector store write run on a worker thread, so the
+            # loop stays responsive to Matrix sync, tool calls, and cache writes.
             await run_with_embedding_retry(
-                _write,
+                partial(asyncio.to_thread, _write_file_rows, collection, embedder, prepared, batch_vectors),
                 policy=_EMBEDDING_RETRY_POLICY,
                 sleep=_EMBEDDING_RETRY_SLEEP,
                 on_retry=self._record_embedding_retry,
@@ -965,14 +961,10 @@ class KnowledgeManager:
                 # Without batch requests, each file embeds its own chunks,
                 # concurrently with the rest of the batch.
                 break
-
-            async def _embed(batch: list[str] = planned_batch) -> dict[str, list[float]]:
-                return await asyncio.to_thread(embedder.embed_texts, batch)
-
             try:
                 vectors.update(
                     await run_with_embedding_retry(
-                        _embed,
+                        partial(asyncio.to_thread, embedder.embed_texts, planned_batch),
                         policy=_EMBEDDING_RETRY_POLICY,
                         sleep=_EMBEDDING_RETRY_SLEEP,
                         on_retry=self._record_embedding_retry,
@@ -1906,9 +1898,6 @@ class KnowledgeManager:
                     progress.retrying = self._embedding_retry_count
                     progress.maybe_log()
 
-                async def _record_batch(active_run: _CandidateRun = run) -> None:
-                    await self._compact_candidate_checkpoint(active_run)
-
                 progress.indexed_this_run += await self._reindex_files_locked(
                     list(plan.pending),
                     collection=run.collection,
@@ -1916,7 +1905,7 @@ class KnowledgeManager:
                     indexed_signatures=run.completed,
                     vanished_files=run.vanished,
                     on_file_result=_record_file,
-                    on_batch_complete=_record_batch,
+                    on_batch_complete=partial(self._compact_candidate_checkpoint, run),
                 )
                 progress.completed = len(run.completed)
                 progress.failed = len(run.failed)
