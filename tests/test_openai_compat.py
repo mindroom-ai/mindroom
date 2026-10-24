@@ -1704,6 +1704,33 @@ class TestStreamingCompletion:
         # [DONE] terminator
         assert lines[4] == "data: [DONE]"
 
+    @pytest.mark.parametrize(
+        ("deltas", "expected"),
+        [((), ["Whole answer"]), (("Whole ", "answer"), ["Whole ", "answer"])],
+        ids=["no-deltas", "streamed"],
+    )
+    def test_streaming_sends_a_finished_reply_that_streamed_no_text_once(
+        self,
+        app_client: TestClient,
+        deltas: tuple[str, ...],
+        expected: list[str],
+    ) -> None:
+        """A run that streamed no text sends its finished reply as one chunk; a streamed reply is not repeated."""
+
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta | RunFinished]:
+            for delta in deltas:
+                yield TextDelta(delta)
+            yield RunFinished(RunRecord(run_id="run", status=RunStatus.completed, content="Whole answer"))
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": True},
+            )
+
+        assert response.status_code == 200
+        assert _sse_contents(response.text) == expected
+
     def test_streaming_passes_include_interactive_questions_false(self, app_client: TestClient) -> None:
         """Streaming disables interactive question prompting for OpenAI compatibility."""
 
@@ -3192,7 +3219,7 @@ def _scripted_team(
     leader_identity: ModelIdentity = SYNTHETIC,
     team_id: str = "test-team",
     member_toolkits: tuple[AdaptedToolkit, ...] = (),
-) -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
+) -> BuiltTeam:
     """Return what ``_build_team`` builds: a leader on a scripted provider and ``(id, name, model)`` members.
 
     ``team_id`` is the stored ``team_id`` of the team's runs, which a configured team's scope replays by; every
@@ -3207,13 +3234,17 @@ def _scripted_team(
         [team_member(member_id, name, model, *member_toolkits) for member_id, name, model in members],
         mode=mode,
     )
-    resolved = ResolvedExactTeamMembers(
+    return built_team(spec)
+
+
+def _resolved_members(members: Sequence[tuple[str, str, ScriptedModel]]) -> ResolvedExactTeamMembers:
+    """Return the member set ``materialize_exact_team_members`` resolves for the ``(id, name, model)`` members."""
+    return ResolvedExactTeamMembers(
         requested_agent_names=[member_id for member_id, _name, _model in members],
         builds=[],
         display_names=[name for _member_id, name, _model in members],
         failed_agent_names=[],
     )
-    return resolved, built_team(spec), mode
 
 
 def _finished(content: str) -> RunFinished:
@@ -3376,7 +3407,7 @@ class TestTeamCompletion:
             thread_id=None,
             resolved_thread_id=None,
         )
-        _members, built, _mode = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
+        built = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
 
         with patch(
             "mindroom.api.openai_compat.prepare_materialized_team_execution",
@@ -3466,7 +3497,7 @@ class TestTeamCompletion:
         assert data["choices"][0]["finish_reason"] == "stop"
         assert "Team consensus result" in data["choices"][0]["message"]["content"]
         assert mock_prepare.await_count == 1
-        assert mock_prepare.await_args.kwargs["built"] is team[1]
+        assert mock_prepare.await_args.kwargs["built"] is team
         assert mock_prepare.await_args.kwargs["message"] == "Build a feature"
         [run] = runs
         assert [message.content for message in run.messages] == ["Build a feature"]
@@ -3623,10 +3654,9 @@ class TestTeamCompletion:
                 _ = base_id
                 return False
 
-        members, built, _mode = _scripted_team(
-            answer("Team consensus result", chunk=99),
-            members=[("general", "GeneralAgent", ScriptedModel([])), ("code", "CodeAgent", ScriptedModel([]))],
-        )
+        member_models = [("general", "GeneralAgent", ScriptedModel([])), ("code", "CodeAgent", ScriptedModel([]))]
+        members = _resolved_members(member_models)
+        built = _scripted_team(answer("Team consensus result", chunk=99), members=member_models)
 
         def fake_materialize(
             requested_agent_names: list[str],
@@ -3817,7 +3847,7 @@ class TestTeamCompletion:
         assert "Hello " in content_parts
         assert "world!" in content_parts
         assert mock_prepare.await_count == 1
-        assert mock_prepare.await_args.kwargs["built"] is team[1]
+        assert mock_prepare.await_args.kwargs["built"] is team
         [run] = runs
         assert [message.content for message in run.messages] == ["Build it"]
         assert run.request_template.stream is True
@@ -3913,7 +3943,7 @@ class TestTeamCompletion:
         observed_agent_names: list[str | None] = []
         observed_session_ids: list[str | None] = []
 
-        def fake_build_team(*_args: object, **_kwargs: object) -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
+        def fake_build_team(*_args: object, **_kwargs: object) -> BuiltTeam:
             identity = get_tool_execution_identity()
             observed_agent_names.append(identity.agent_name if identity is not None else None)
             observed_session_ids.append(identity.session_id if identity is not None else None)
@@ -4240,7 +4270,7 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
-        assert mock_prepare.await_args.kwargs["built"] is team[1]
+        assert mock_prepare.await_args.kwargs["built"] is team
         assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
         [run] = runs
         assert [message.content for message in run.messages] == ["Start", "Ack", "Follow-up"]
@@ -4308,7 +4338,7 @@ class TestTeamCompletion:
             [answer("Done", usage(40, 4))],
             identity=ModelIdentity(id="member-model", provider="Synthetic", provider_name="Synthetic"),
         )
-        members, built, mode = _scripted_team(
+        built = _scripted_team(
             calls(
                 tool_call("remember", "call-remember", label="blue"),
                 tool_call("delegate_task_to_member", "call-delegate", member_id="general", task="Go"),
@@ -4322,7 +4352,7 @@ class TestTeamCompletion:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
-            patch("mindroom.api.openai_compat._build_team", return_value=(members, replace(built, spec=spec), mode)),
+            patch("mindroom.api.openai_compat._build_team", return_value=replace(built, spec=spec)),
             _recorded_team_runs() as runs,
             TestClient(app, base_url="http://localhost") as client,
         ):
@@ -4360,13 +4390,13 @@ class TestTeamCompletion:
         cut_off = calls(tool_call("delegate_task_to_member", "call-cut", member_id="general", task="Write it all"))
         cut_off[-1] = replace(cut_off[-1], stop_reason="output_limit")
         member = ScriptedModel([])
-        members, built, mode = _scripted_team(
+        built = _scripted_team(
             cut_off,
             answer("I will split the work."),
             members=[("general", "GeneralAgent", member)],
         )
         leader = replace(built.spec.model, capabilities=Capabilities(claude_family=True))
-        team = (members, replace(built, spec=replace(built.spec, model=leader)), mode)
+        team = replace(built, spec=replace(built.spec, model=leader))
 
         with patch("mindroom.api.openai_compat._build_team", return_value=team):
             response = team_app_client.post(
@@ -4445,7 +4475,7 @@ class TestTeamCompletion:
             router=RouterConfig(model="default"),
         )
         runtime_paths = _runtime_paths()
-        _members, built, _mode = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
+        built = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
         leader = ScriptedModel([], model_params={"temperature": 0.7})
         built = replace(built, spec=replace(built.spec, model=leader))
         prior_response_id = "prior-openai-team-response"
@@ -4605,7 +4635,7 @@ class TestTeamCompletion:
         )
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
         assert scope_context is not None
-        members, built, built_mode = openai_compat._build_team(
+        built = openai_compat._build_team(
             "coord_team",
             config,
             runtime_paths,
@@ -4614,10 +4644,8 @@ class TestTeamCompletion:
             models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
         )
 
-        assert built_mode is expected
         assert (built.spec.id, built.spec.mode) == ("coord_team", expected)
         assert [member.spec.id for member in built.spec.members] == ["general"]
-        assert [build.spec.id for build in members.builds] == ["general"]
 
     def test_build_team_openai_compat_does_not_require_persisted_matrix_accounts(
         self,
@@ -4651,7 +4679,7 @@ class TestTeamCompletion:
         )
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
         assert scope_context is not None
-        members, _built, mode = openai_compat._build_team(
+        built = openai_compat._build_team(
             "super_team",
             team_config,
             runtime_paths,
@@ -4660,8 +4688,8 @@ class TestTeamCompletion:
             models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
         )
 
-        assert mode is TeamMode.COORDINATE
-        assert [build.spec.id for build in members.builds] == ["general", "code"]
+        assert built.spec.mode is TeamMode.COORDINATE
+        assert [member.spec.id for member in built.spec.members] == ["general", "code"]
         assert not constants.matrix_state_file(runtime_paths=runtime_paths).exists()
 
     def test_build_team_propagates_team_build_failures(self) -> None:
@@ -4680,7 +4708,7 @@ class TestTeamCompletion:
             },
         )
         runtime_paths = _runtime_paths()
-        members, _built, _mode = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
+        members = _resolved_members([("general", "GeneralAgent", ScriptedModel([]))])
 
         scope_context = load_bound_scope_session(
             member_names=[],
@@ -4731,7 +4759,7 @@ class TestTeamCompletion:
             knowledge_bases={"docs": KnowledgeBaseConfig(path="./docs")},
         )
         mock_knowledge = MagicMock()
-        _members, built, _mode = _scripted_team()
+        built = _scripted_team()
         with (
             patch("mindroom.teams.members.create_agent") as mock_create,
             patch(

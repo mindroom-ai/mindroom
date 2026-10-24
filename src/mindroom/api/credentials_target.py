@@ -99,10 +99,13 @@ def resolve_request_credentials_target(
 
     base_manager = get_runtime_credentials_manager(runtime_paths)
 
-    def primary_target(paths: RuntimePaths, target_agent_name: str | None) -> RequestCredentialsTarget:
-        """Target the primary runtime's own credential store, unscoped to any worker or requester."""
+    def primary_target(target_agent_name: str | None) -> RequestCredentialsTarget:
+        """Target the primary runtime's own credential store, unscoped to any worker or requester.
+
+        The target carries the current ``runtime_paths``, which is reassigned once the committed config is read.
+        """
         return RequestCredentialsTarget(
-            runtime_paths=paths,
+            runtime_paths=runtime_paths,
             base_manager=base_manager,
             target_manager=base_manager,
             worker_scope=None,
@@ -130,7 +133,7 @@ def resolve_request_credentials_target(
     # Non-global dashboard credential reads/writes with no agent selection retain the
     # legacy primary-runtime target without requiring a persisted config file.
     if agent_name is None and not execution_scope_override_provided:
-        return primary_target(runtime_paths, None)
+        return primary_target(None)
 
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     scope_request = resolve_dashboard_agent_execution_scope_request(
@@ -141,7 +144,7 @@ def resolve_request_credentials_target(
         allow_draft_override=False,
     )
     if scope_request.agent_name is None:
-        return primary_target(runtime_paths, None)
+        return primary_target(None)
     execution_scope = scope_request.requested_execution_scope
     allow_requester_scope = (
         allow_private_scopes
@@ -168,7 +171,7 @@ def resolve_request_credentials_target(
             agent_name=scope_request.agent_name,
         )
     if execution_scope is None:
-        return primary_target(runtime_paths, scope_request.agent_name)
+        return primary_target(scope_request.agent_name)
 
     scope_label = dashboard_scope_label(
         config_labeled_scope=(

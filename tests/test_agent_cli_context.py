@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import agents
-from mindroom.agent_cli.minimal_agent import minimal_turn, prepare_minimal_catalog
+from mindroom.agent_cli.minimal_agent import minimal_context_documents, minimal_turn, prepare_minimal_catalog
 from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig
 from mindroom.error_handling import MinimalModeUnavailableError
 from mindroom.hooks import EnrichmentItem
+from mindroom.knowledge.search import KnowledgeSourceDescription
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -25,12 +26,12 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def _minimal_build(runtime: ToolRuntimeContext) -> AgentBuild:
+def _minimal_build(runtime: ToolRuntimeContext, *, tools: tuple[str, ...] = ("shell",)) -> AgentBuild:
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
         role="Keep the build machine healthy.",
         instructions=["Check the disk before cleaning."],
-        tools=["shell"],
+        tools=list(tools),
         memory_backend="file",
     )
     return agents.create_agent(
@@ -63,6 +64,9 @@ def test_only_the_bootstrap_and_required_context_reach_the_provider(tmp_path: Pa
     system = turn.system_message.get_content_string()
     assert system.startswith("You are Helper (helper) in minimal mode.\nBash starts in your workspace.")
     assert "Assigned task: rotate the logs." in system
+    # The build's turn context, such as the current date, stays inline.
+    assert build.prompt.turn_context
+    assert build.prompt.turn_context in system
     for hidden in ("Keep the build machine healthy.", "Check the disk", "nearly full", "sunny", "lunch"):
         assert hidden not in system
     assert "Reply in the thread." in turn.transient_context
@@ -74,6 +78,38 @@ def test_only_the_bootstrap_and_required_context_reach_the_provider(tmp_path: Pa
     assert "short answers" in documents["memory"]
     assert "sunny" in documents["enrichment"]
     assert "lunch" in documents["enrichment"]
+
+
+def test_a_toolkit_s_instructions_are_a_context_document_not_part_of_the_bootstrap(tmp_path: Path) -> None:
+    """Minimal mode leaves a toolkit's instructions out of the provider prompt and offers them as a document."""
+    build = _minimal_build(_runtime_context(tmp_path), tools=("shell", "todo"))
+    turn = minimal_turn(
+        build,
+        session_preamble="",
+        transient_memory="",
+        system_enrichment=(),
+        transient_enrichment=(),
+    )
+
+    [guidance] = [toolkit.guidance for toolkit in build.spec.toolkits if toolkit.name == "todo"]
+    assert guidance is not None
+    assert "per-thread work plan" in guidance
+    assert guidance in turn.context_documents.values()
+    assert guidance not in turn.system_message.get_content_string()
+
+
+def test_the_knowledge_document_lists_each_base_the_agent_s_search_reaches(tmp_path: Path) -> None:
+    """`mindroom-agent context` describes each knowledge base the agent can search, one per line."""
+    build = _minimal_build(_runtime_context(tmp_path))
+    sources = (
+        KnowledgeSourceDescription(base_id="handbook", description="The team handbook."),
+        KnowledgeSourceDescription(base_id="runbooks", description="Operations runbooks."),
+    )
+    build = replace(build, surface=replace(build.surface, knowledge_sources=sources))
+
+    documents = minimal_context_documents(build)
+
+    assert documents["knowledge"] == "handbook: The team handbook.\nrunbooks: Operations runbooks."
 
 
 @pytest.mark.asyncio

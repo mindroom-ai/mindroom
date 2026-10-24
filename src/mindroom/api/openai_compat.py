@@ -76,7 +76,6 @@ from mindroom.run_storage import TerminalRecord
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
 from mindroom.teams.members import (
     BuiltTeam,
-    ResolvedExactTeamMembers,
     TeamTurnModelSelection,
     build_team_spec,
     materialize_exact_team_members,
@@ -984,13 +983,12 @@ def _build_team(
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     *,
     models: TeamTurnModelSelection,
-) -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
+) -> BuiltTeam:
     """Create member builds and build one team for a configured team.
 
     Raises when the configured team cannot be materialized.
     """
     team_config = config.teams[team_name]
-    mode = TeamMode(team_config.mode)
     config.assert_team_agents_supported(team_config.agents, team_name=team_name)
 
     team_members = materialize_exact_team_members(
@@ -1004,9 +1002,9 @@ def _build_team(
         reason_prefix=f"Team '{team_name}'",
         active_model_names=models.member_model_names,
     )
-    built = build_team_spec(
+    return build_team_spec(
         members=team_members,
-        mode=mode,
+        mode=TeamMode(team_config.mode),
         config=config,
         runtime_paths=runtime_paths,
         scope_context=scope_context,
@@ -1014,7 +1012,6 @@ def _build_team(
         model_name=models.team_model_name,
         configured_team_name=team_name,
     )
-    return team_members, built, mode
 
 
 async def _prepare_openai_team_execution(
@@ -1053,17 +1050,24 @@ async def _prepare_team_turn(
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     team_models: TeamTurnModelSelection,
-    scope_context: ScopeSessionContext | None,
     *,
     execution_identity: ToolExecutionIdentity | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     stream: bool,
-) -> tuple[BuiltTeam, PreparedTeamExecution] | JSONResponse:
-    """Build the team and prepare its turn, or return the error response a failure of either gets."""
+) -> tuple[ScopeSessionContext | None, BuiltTeam, PreparedTeamExecution] | JSONResponse:
+    """Load the team's session scope, build the team, and prepare its turn, or return the error response a failure gets."""
+    scope_context = load_bound_scope_session(
+        member_names=[],
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        team_name=team_name,
+    )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         with tool_execution_identity(execution_identity):
-            members, built, mode = await asyncio.to_thread(
+            built = await asyncio.to_thread(
                 _build_team,
                 team_name,
                 config,
@@ -1083,8 +1087,8 @@ async def _prepare_team_turn(
     logger.info(
         "Team streaming request" if stream else "Team completion request",
         team=team_name,
-        mode=mode.value,
-        members=len(members.builds),
+        mode=built.spec.mode.value,
+        members=len(built.spec.members),
         session_id=session_id,
     )
 
@@ -1103,7 +1107,7 @@ async def _prepare_team_turn(
     except Exception:
         logger.exception("Team member preparation failed", team=team_name)
         return error_response(500, "Team execution failed", error_type="server_error")
-    return built, prepared
+    return scope_context, built, prepared
 
 
 async def _non_stream_team_completion(
@@ -1120,14 +1124,6 @@ async def _non_stream_team_completion(
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
     requester_id = execution_identity.requester_id if execution_identity is not None else None
-    scope_context = load_bound_scope_session(
-        member_names=[],
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        team_name=team_name,
-    )
     turn = await _prepare_team_turn(
         team_name,
         prompt,
@@ -1136,14 +1132,13 @@ async def _non_stream_team_completion(
         runtime_paths,
         thread_history,
         team_models,
-        scope_context,
         execution_identity=execution_identity,
         refresh_scheduler=refresh_scheduler,
         stream=False,
     )
     if isinstance(turn, JSONResponse):
         return turn
-    built, prepared = turn
+    scope_context, built, prepared = turn
     records = TerminalRecord(TeamRunRecord)
     try:
         with (
@@ -1219,14 +1214,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         if stream is not None:
             await stream.aclose()
 
-    scope_context = load_bound_scope_session(
-        member_names=[],
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        team_name=team_name,
-    )
     turn = await _prepare_team_turn(
         team_name,
         prompt,
@@ -1235,14 +1222,13 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         runtime_paths,
         thread_history,
         team_models,
-        scope_context,
         execution_identity=execution_identity,
         refresh_scheduler=refresh_scheduler,
         stream=True,
     )
     if isinstance(turn, JSONResponse):
         return turn
-    built, prepared = turn
+    scope_context, built, prepared = turn
     try:
         request_log_context = _openai_team_request_log_context(
             team_name=team_name,
