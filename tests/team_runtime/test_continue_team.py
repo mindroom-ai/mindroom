@@ -348,6 +348,34 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
     assert leader.requests[-1].messages[-1].content == "hello"
 
 
+async def test_a_resume_refuses_an_approved_leader_call_the_team_no_longer_offers() -> None:
+    gated_team = squad(
+        scripted("leader-model", calls(tool_call("echo", "call-echo", text="hello"))),
+        scripted("writer-model"),
+        scripted("checker-model"),
+        leader_toolkits=(gated(echo, name="job_controls"),),
+    )
+    _, paused = await collect(
+        run_team(gated_team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    assert paused.status is RunStatus.paused
+    before = paused.to_dict()
+    leader = scripted("leader-model")
+    ungated_team = squad(leader, scripted("writer-model"), scripted("checker-model"))
+
+    with pytest.raises(ValueError, match="no longer offered"):
+        continue_team(
+            ungated_team,
+            paused,
+            _resume_request(paused),
+            approved={(None, "call-echo"): approval("call-echo", "echo", {"text": "hello"}, agent="squad")},
+            context=lambda run_id: run_context(run_id, SQUAD),
+        )
+
+    assert paused.to_dict() == before
+    assert leader.requests == []
+
+
 def calling_run(run_context: AgnoRunContext) -> str:
     """Return the id of the run that makes the call.
 
