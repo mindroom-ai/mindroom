@@ -677,7 +677,7 @@ class _TeamTurn:
                 completed_tools=partial.completed_tools,
                 interrupted_tools=partial.interrupted_tools,
                 run_id=attempt.run_id,
-                metadata_content=self.failure_metadata(attempt),
+                metadata_content=self.run_metadata_content(attempt, RunStatus.error),
             )
         finally:
             # The run stores its record before its events end, however they end, so a stop from here until the turn
@@ -710,7 +710,7 @@ class _TeamTurn:
             logger.exception("team_streaming_failed", agents=attempt.members.display_names)
             self.sync_live_turn_recorder(run, attempt)
             yield self.error_text(error)
-            yield AttemptResolved(HandledAttempt(metadata_content=self.failure_metadata(attempt)))
+            yield AttemptResolved(HandledAttempt(metadata_content=self.run_metadata_content(attempt, RunStatus.error)))
             return
         record = attempt.records.terminal(self.entity_name)
         # A failed member run's deltas never show why it failed; the document adds its reason now the team run ended.
@@ -736,15 +736,15 @@ class _TeamTurn:
             await self.resolve_completed(run, attempt, record, blocking=False, mark_seen=emitted_output),
         )
 
-    def failure_metadata(self, attempt: TeamAttempt) -> dict[str, Any] | None:
-        """Return the run metadata of a failed attempt when the caller collects metadata and the run was stored."""
+    def run_metadata_content(self, attempt: TeamAttempt, status: RunStatus) -> dict[str, Any] | None:
+        """Return the attempt's run metadata when the caller collects metadata and the run stored its record."""
         if self.run_metadata_collector is None or attempt.records.record is None:
             return None
         return attempt.metadata_content(
             self.config,
             runtime_paths=self.runtime_paths,
             session_id=self.session_id,
-            status=RunStatus.error,
+            status=status,
         )
 
     async def finalize_attempt(self, scope_context: ScopeSessionContext | None) -> None:
@@ -847,16 +847,6 @@ class _TeamTurn:
         )
         if len(rendered) > _MAX_LOG_MESSAGE_LENGTH:
             logger.debug("team_response_full", agents=attempt.members.display_names, response=rendered)
-        metadata_content = (
-            attempt.metadata_content(
-                self.config,
-                runtime_paths=self.runtime_paths,
-                session_id=self.session_id,
-                status=record.status,
-            )
-            if self.run_metadata_collector is not None
-            else None
-        )
         return CompletedAttempt(
             response_text=response_text,
             replayable_text=replayable_text,
@@ -869,7 +859,7 @@ class _TeamTurn:
             output_tokens=record.metrics.output_tokens if record.metrics is not None else None,
             tool_executions=tuple(tool_executions),
             completed_tools=tuple(attempt.presentation.tool_tracker.completed_tools),
-            metadata_content=metadata_content,
+            metadata_content=self.run_metadata_content(attempt, record.status),
         )
 
     def error_text(self, error: Exception) -> str:
