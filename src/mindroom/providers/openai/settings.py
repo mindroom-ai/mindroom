@@ -14,8 +14,6 @@ from mindroom.providers.extra_kwargs import SECRET
 __all__ = [
     "CEREBRAS_FIELDS",
     "CHAT_FIELDS",
-    "CHAT_REQUEST_FIELDS",
-    "CLIENT_FIELDS",
     "CODEX_FIELDS",
     "CODEX_REJECTED_FIELDS",
     "GROQ_FIELDS",
@@ -24,7 +22,7 @@ __all__ = [
     "ResponsesSettings",
 ]
 
-CLIENT_FIELDS = frozenset(
+_CLIENT_FIELDS = frozenset(
     {
         "api_key",
         "organization",
@@ -216,18 +214,15 @@ class ResponsesSettings:
 
 # Each route accepts the request fields its wire sends and the settings the wire or client reads otherwise. Agno
 # OpenAIChat's ``modalities`` and ``audio`` (audio output) are retired.
-CHAT_REQUEST_FIELDS = frozenset(
-    {*ChatSettings().openai_request_fields(), "strict_output", "request_params", "role_map"},
-)
-CHAT_FIELDS = CHAT_REQUEST_FIELDS | CLIENT_FIELDS
-GROQ_FIELDS = CLIENT_FIELDS - {"organization"} | {*ChatSettings().groq_request_fields(), "request_params"}
-CEREBRAS_FIELDS = CLIENT_FIELDS - {"organization"} | {
+CHAT_FIELDS = _CLIENT_FIELDS | {*ChatSettings().openai_request_fields(), "strict_output", "request_params", "role_map"}
+GROQ_FIELDS = _CLIENT_FIELDS - {"organization"} | {*ChatSettings().groq_request_fields(), "request_params"}
+CEREBRAS_FIELDS = _CLIENT_FIELDS - {"organization"} | {
     *ChatSettings().cerebras_request_fields(),
     "parallel_tool_calls",
     "strict_output",
     "request_params",
 }
-RESPONSES_FIELDS = CLIENT_FIELDS | {
+RESPONSES_FIELDS = _CLIENT_FIELDS | {
     *ResponsesSettings().request_fields(),
     "reasoning",
     "verbosity",

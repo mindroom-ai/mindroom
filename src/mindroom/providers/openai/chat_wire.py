@@ -70,13 +70,14 @@ _CHAT_STOP_REASONS: dict[str, StopReason] = {
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChatWire:
-    """How one route shapes Chat Completions requests and reads responses."""
+    """How one route shapes Chat Completions requests and reads responses.
+
+    Besides its dialect, the route selects rules of its own, such as ``openai`` sending the system prompt as
+    ``developer`` and ``deepseek`` and ``openrouter`` replaying their reasoning fields.
+    """
 
     route: str
     dialect: ChatDialect
-    developer_system_role: bool = False
-    replay_reasoning_content: bool = False
-    replay_reasoning_details: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -118,7 +119,7 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
         "tool_call_id": message.tool_call_id,
         "tool_calls": message.tool_calls,
     }
-    if wire.replay_reasoning_content:
+    if wire.route == "deepseek":
         values["reasoning_content"] = message.reasoning_content
     formatted = {key: value for key, value in values.items() if value is not None}
     if (message.images or message.audio) and isinstance(message.content, str):
@@ -134,7 +135,7 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
     if message.content is None:
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None
-    if wire.replay_reasoning_details and reasoning_details:
+    if wire.route == "openrouter" and reasoning_details:
         formatted["reasoning_details"] = reasoning_details
     return formatted
 
@@ -190,7 +191,7 @@ def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSe
     if wire.dialect == "cerebras":
         return [_cerebras_message(message) for message in messages]
     role_map = settings.role_map or {
-        "system": "developer" if wire.developer_system_role else "system",
+        "system": "developer" if wire.route == "openai" else "system",
         "model": "assistant",
     }
     canonical = reformat_tool_call_ids(messages, "chat")
@@ -204,6 +205,8 @@ def function_definition(tool: ToolSpec) -> dict[str, Any]:
         "description": tool.description,
         "parameters": deepcopy(dict(tool.parameters)),
         "strict": tool.strict,
+        # TODO(simplify): Tool definitions still send Agno's approval flags, which no OpenAI-family API reads. Send
+        # only the name, description, parameters, and strict. Provider request bodies and prompt caches (#3075).
         "requires_confirmation": tool.requires_confirmation,
         "external_execution": tool.external_execution,
         "approval_type": tool.approval_type,
@@ -264,18 +267,6 @@ def _close_cerebras_objects(schema: Any) -> None:  # noqa: ANN401 - any JSON sch
         _close_cerebras_objects(child)
 
 
-def _cerebras_response_format(response_format: Mapping[str, Any], *, strict: bool) -> dict[str, Any]:
-    """Return the JSON-schema format with every object closed, as Cerebras structured output requires.
-
-    Cerebras advertises ``json_schema`` structured output, so the format always carries a JSON schema.
-    """
-    prepared = deepcopy(dict(response_format))
-    schema = prepared["json_schema"]
-    schema.setdefault("strict", strict)
-    _close_cerebras_objects(schema["schema"])
-    return prepared
-
-
 def _deepseek_thinking(params: dict[str, Any], settings: ChatSettings, model_id: str) -> None:
     """Enable thinking for thinking-capable DeepSeek ids unless the config turns it off."""
     thinking = settings.use_thinking if settings.use_thinking is not None else model_id != "deepseek-chat"
@@ -324,15 +315,12 @@ def _dialect_params(
     response_format: type[BaseModel] | Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Return the route dialect's request parameters that are set, structured output included."""
-    if response_format is None:
-        prepared: dict[str, Any] | None = None
-    elif wire.dialect == "cerebras":
-        prepared = _cerebras_response_format(
-            _json_schema_format(response_format, strict=settings.strict_output),
-            strict=settings.strict_output,
-        )
-    else:
-        prepared = _json_schema_format(response_format, strict=settings.strict_output)
+    prepared = None if response_format is None else _json_schema_format(response_format, strict=settings.strict_output)
+    if prepared is not None and wire.dialect == "cerebras":
+        # Cerebras advertises ``json_schema`` structured output, which needs every object of the schema closed.
+        prepared = deepcopy(prepared)
+        prepared["json_schema"].setdefault("strict", settings.strict_output)
+        _close_cerebras_objects(prepared["json_schema"]["schema"])
     if wire.dialect == "groq":
         fields = settings.groq_request_fields()
     elif wire.dialect == "cerebras":
@@ -351,13 +339,11 @@ def _add_tools(
     settings: ChatSettings,
     wire: ChatWire,
 ) -> None:
-    if wire.dialect == "groq":
-        # Groq always received the tool list, empty included.
-        params["tools"] = tool_dicts
-    elif not tool_dicts:
+    # TODO(simplify): Groq always receives the tool list, so a request without tools sends `tools: []`. Leave it out,
+    # as the other dialects do. Groq request bodies.
+    if not tool_dicts and wire.dialect != "groq":
         return
-    else:
-        params["tools"] = tool_dicts
+    params["tools"] = tool_dicts
     if wire.dialect != "cerebras":
         if tool_choice is not None:
             params["tool_choice"] = tool_choice
@@ -474,8 +460,11 @@ def _detail(usage: Mapping[str, Any], section: str, name: str) -> int:
     return value if isinstance(value, int) else 0
 
 
-def _counted_usage(usage: Mapping[str, Any], *, timing_keys: tuple[str, ...], keep_zero: bool) -> MessageMetrics:
-    """Read Groq and Cerebras usage: totals recomputed and timing counters kept as provider metrics."""
+def _counted_usage(usage: Mapping[str, Any], dialect: Literal["groq", "cerebras"]) -> MessageMetrics:
+    """Read Groq and Cerebras usage: totals recomputed and timing counters kept as provider metrics.
+
+    Cerebras keeps its zero counters; Groq keeps only the counters that are set.
+    """
     input_tokens = usage.get("prompt_tokens") or 0
     output_tokens = usage.get("completion_tokens") or 0
     metrics = MessageMetrics(
@@ -485,22 +474,15 @@ def _counted_usage(usage: Mapping[str, Any], *, timing_keys: tuple[str, ...], ke
         cache_read_tokens=_detail(usage, "prompt_tokens_details", "cached_tokens"),
         reasoning_tokens=_detail(usage, "completion_tokens_details", "reasoning_tokens"),
     )
-    timings = {key: usage[key] for key in timing_keys if (usage.get(key) is not None if keep_zero else usage.get(key))}
+    if dialect == "cerebras":
+        timings = {key: usage[key] for key in ("time_system", "time_prompt") if usage.get(key) is not None}
+    else:
+        timings = {
+            key: usage[key] for key in ("completion_time", "prompt_time", "queue_time", "total_time") if usage.get(key)
+        }
     if timings:
         metrics.provider_metrics = timings
     return metrics
-
-
-def _groq_usage(usage: Mapping[str, Any]) -> MessageMetrics:
-    return _counted_usage(
-        usage,
-        timing_keys=("completion_time", "prompt_time", "queue_time", "total_time"),
-        keep_zero=False,
-    )
-
-
-def _cerebras_usage(usage: Mapping[str, Any]) -> MessageMetrics:
-    return _counted_usage(usage, timing_keys=("time_system", "time_prompt"), keep_zero=True)
 
 
 def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> None:
@@ -540,11 +522,9 @@ def _reasoning_field(fields: Mapping[str, Any]) -> object:
 
 
 def _usage_metrics(usage: CompletionUsage, wire: ChatWire) -> MessageMetrics:
-    if wire.dialect == "groq":
-        return _groq_usage(usage.model_dump())
-    if wire.dialect == "cerebras":
-        return _cerebras_usage(usage.model_dump())
-    return _openai_usage(usage)
+    if wire.dialect == "openai":
+        return _openai_usage(usage)
+    return _counted_usage(usage.model_dump(), wire.dialect)
 
 
 @dataclass(slots=True)
@@ -585,7 +565,7 @@ class ChatStream:
         return [TextDelta(content)] if content else []
 
     def _add_reasoning(self, fields: Mapping[str, Any]) -> list[StreamEvent]:
-        if self.wire.replay_reasoning_details and (details := fields.get("reasoning_details")):
+        if self.wire.route == "openrouter" and (details := fields.get("reasoning_details")):
             _merge_provider_data(self.parts.provider_data, {"reasoning_details": list(details)})
         reasoning = _reasoning_field(fields)
         if not isinstance(reasoning, str):
@@ -624,7 +604,7 @@ class ChatStream:
             # Groq streams its usage in its own chunk extension.
             groq = _extra(chunk).get("x_groq")
             usage = groq.get("usage") if isinstance(groq, Mapping) else None
-            metrics = _groq_usage(usage) if isinstance(usage, Mapping) else None
+            metrics = _counted_usage(usage, "groq") if isinstance(usage, Mapping) else None
         else:
             metrics = _usage_metrics(chunk.usage, self.wire) if chunk.usage is not None else None
         if metrics is None:
@@ -682,7 +662,9 @@ def parse_chat_completion(completion: ChatCompletion, wire: ChatWire, *, provide
     if isinstance(reasoning_field := _reasoning_field(message_extra), str):
         parts.reasoning = reasoning_field
     parts.provider_data = _reply_metadata(completion)
-    if wire.replay_reasoning_details and (details := message_extra.get("reasoning_details")):
+    if wire.route == "openrouter" and (details := message_extra.get("reasoning_details")):
         parts.provider_data["reasoning_details"] = details
+    # TODO(simplify): Only a blocking reply stores its finish_reason in provider_data, and nothing reads it.
+    # Store it on neither path. Stored data.
     parts.provider_data["finish_reason"] = choice.finish_reason
     return parts

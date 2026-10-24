@@ -28,7 +28,6 @@ from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
-from mindroom.providers.openai.prompt_cache import formatted_input_with_shared_system_prefix
 from mindroom.providers.openai.response_replay import (
     RESPONSE_OUTPUT_KEY,
     TOOL_SEARCH_ITEMS_KEY,
@@ -39,6 +38,7 @@ from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
 from mindroom.providers.openai.tool_search import request_params_with_deferred_tool_search
 from mindroom.providers.tool_policy import disable_tool_selection
+from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -194,6 +194,27 @@ def _agno_input(messages: Sequence[Message], *, store: bool | None) -> list[Any]
     return items
 
 
+def _with_shared_system_prefix(formatted_input: list[Any], *, explicit_breakpoint: bool) -> list[Any]:
+    """Split MindRoom's initial system text so the shared agent instructions stay a cacheable prefix."""
+    first_message = formatted_input[0] if formatted_input else None
+    if not isinstance(first_message, dict) or first_message.get("role") not in {"system", "developer"}:
+        return formatted_input
+    content = first_message.get("content")
+    if not isinstance(content, str):
+        return formatted_input
+    shared_text, boundary, session_text = content.partition(SESSION_CONTEXT_BOUNDARY)
+    if not boundary or not shared_text.strip():
+        return formatted_input
+    shared_block: dict[str, Any] = {"type": "input_text", "text": shared_text}
+    if explicit_breakpoint:
+        shared_block["prompt_cache_breakpoint"] = {"mode": "explicit"}
+    return [
+        {**first_message, "content": [shared_block]},
+        {**first_message, "content": boundary + session_text},
+        *formatted_input[1:],
+    ]
+
+
 def responses_input(
     messages: Sequence[Message],
     *,
@@ -222,7 +243,7 @@ def responses_input(
         replay_reasoning=replay_store is False,
     )
     if cache_system_prompt:
-        formatted = formatted_input_with_shared_system_prefix(formatted, explicit_breakpoint=explicit_breakpoint)
+        formatted = _with_shared_system_prefix(formatted, explicit_breakpoint=explicit_breakpoint)
     return formatted
 
 
@@ -234,6 +255,8 @@ def _tool_dicts(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
     functions: list[dict[str, Any]] = []
     for tool in tools:
         definition: dict[str, Any] = {**function_definition(tool), "type": "function"}
+        # TODO(simplify): A top-level parameter's list `type` keeps only its first entry, so ["string", "null"] loses
+        # null, while nested schemas and Chat routes send the list. Send the schema unchanged. Models.
         for property_schema in definition.get("parameters", {}).get("properties", {}).values():
             if isinstance(property_schema, dict) and isinstance(property_schema.get("type"), list):
                 property_schema["type"] = property_schema["type"][0]
@@ -279,7 +302,7 @@ def _codex_params(params: dict[str, Any], settings: ResponsesSettings, wire: Res
         params.pop(name, None)
 
 
-def _base_params(settings: ResponsesSettings, request: ModelRequest, store: bool | None) -> dict[str, Any]:
+def _base_params(settings: ResponsesSettings, request: ModelRequest) -> dict[str, Any]:
     """Return the configured request parameters that are set, with reasoning and the text format."""
     reasoning = dict(settings.reasoning or {})
     if settings.reasoning_effort is not None:
@@ -296,7 +319,6 @@ def _base_params(settings: ResponsesSettings, request: ModelRequest, store: bool
     params = {
         **settings.request_fields(),
         "include": copy.deepcopy(settings.include),
-        "store": store,
         "reasoning": reasoning,
         "text": text or None,
     }
@@ -305,11 +327,10 @@ def _base_params(settings: ResponsesSettings, request: ModelRequest, store: bool
 
 def _add_continuation(params: dict[str, Any], request: ModelRequest, store: bool | None) -> None:
     """Continue the last stored response, or replay with encrypted reasoning when nothing is stored."""
+    params["store"] = store is not False
     if store is False:
-        params["store"] = False
         _with_encrypted_reasoning(params)
         return
-    params["store"] = True
     prepared, _ = _prepare_continuation(request.messages, explicit_replay=request.portable_replay)
     if (latest := _latest_response_data(prepared)) is not None:
         params["previous_response_id"] = latest["response_id"]
@@ -339,7 +360,7 @@ def responses_request_kwargs(
     Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
     store = request_store(wire, request)
-    params = _base_params(settings, request, store)
+    params = _base_params(settings, request)
     if tools := _tool_dicts(request.tools):
         params["tools"] = tools
     if request.tool_choice is not None:
@@ -399,23 +420,6 @@ class _ProviderDataRecord:
     provider_data: dict[str, Any] | None
 
 
-def _record_completed_output(
-    parts: ResponsesTurnParts,
-    items: list[dict[str, Any]],
-    *,
-    store: bool | None,
-    portable_replay: bool,
-    native_compaction: NativeCompactionReplay | None,
-) -> None:
-    """Record the replay mode, the native checkpoint, and ordered output when replay will need it."""
-    parts.provider_data[_PORTABLE_KEY] = portable_replay
-    record = _ProviderDataRecord(provider_data=parts.provider_data)
-    record_native_checkpoint(record, items, native_compaction)
-    parts.provider_data = record.provider_data or {}
-    if (store is False or portable_replay) and any(item.get("type") == "reasoning" for item in items):
-        parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
-
-
 def _record_tool_search_items(parts: ResponsesTurnParts, output_items: Sequence[Any]) -> None:
     items = [item.model_dump(exclude_none=True) for item in output_items if item.type in _TOOL_SEARCH_ITEM_TYPES]
     if items:
@@ -452,14 +456,14 @@ def _read_ended_response(
             if output.type == "reasoning":
                 parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
     parts.provider_data[_STORED_KEY] = store is not False
-    if response.status == "completed":
-        _record_completed_output(
-            parts,
-            items,
-            store=store,
-            portable_replay=portable_replay,
-            native_compaction=native_compaction,
-        )
+    if response.status != "completed":
+        return
+    parts.provider_data[_PORTABLE_KEY] = portable_replay
+    record = _ProviderDataRecord(provider_data=parts.provider_data)
+    record_native_checkpoint(record, items, native_compaction)
+    parts.provider_data = record.provider_data or {}
+    if (store is False or portable_replay) and any(item.get("type") == "reasoning" for item in items):
+        parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
 
 
 def responses_stop_reason(status: str | None, incomplete_reason: str | None, *, tool_calls: bool) -> StopReason | None:
@@ -630,6 +634,8 @@ def parse_response(
                 },
             )
     parts.reasoning = _reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
+    # TODO(simplify): Only a blocking response stores response_status and incomplete_reason in provider_data, and
+    # nothing reads them. Store them on neither path. Stored data.
     parts.provider_data["response_status"] = response.status
     parts.provider_data["incomplete_reason"] = _incomplete_reason(response)
     _record_tool_search_items(parts, response.output)

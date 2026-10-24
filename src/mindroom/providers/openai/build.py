@@ -96,7 +96,6 @@ class _ChatRoute:
     accepted: frozenset[str]
     structured_output: Literal["native", "json_schema", "json_mode"] = "native"
     omitted_media: frozenset[MediaKind] = _CHAT_OMITTED_MEDIA
-    developer_system_role: bool = False
     # The runtime env variable that sets the endpoint when the config sets none.
     base_url_variable: str | None = None
 
@@ -109,7 +108,6 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         api_key_env="OPENAI_API_KEY",
         dialect="openai",
         accepted=CHAT_FIELDS,
-        developer_system_role=True,
         base_url_variable=_OPENAI_BASE_URL_VARIABLE,
     ),
     "azure": _ChatRoute(
@@ -428,17 +426,10 @@ def _build_chat(route_key: str, model_id: str, model_config: ModelConfig, runtim
         omitted_media=route.omitted_media,
         provider_default_sampling=_provider_default_sampling(model_id),
     )
-    wire = ChatWire(
-        route=route_key,
-        dialect=route.dialect,
-        developer_system_role=route.developer_system_role,
-        replay_reasoning_content=route_key == "deepseek",
-        replay_reasoning_details=route_key == "openrouter",
-    )
     return ChatAdapter(
         identity=identity,
         capabilities=capabilities,
-        wire=wire,
+        wire=ChatWire(route=route_key, dialect=route.dialect),
         settings=settings,
         clients=SDKClients(
             _chat_client_factory(
@@ -548,28 +539,18 @@ def _build_responses(
                 headers["ChatGPT-Account-ID"] = account_id
             return _openai_client(token, {**options, "default_headers": headers or None}, settings, http_client)
 
-        return ResponsesAdapter(
-            identity=identity,
-            capabilities=capabilities,
-            wire=wire,
-            settings=settings,
-            clients=SDKClients(codex_client, per_request=True),
-        )
-    api_key_env = "OPENAI_API_KEY"
-    api_key = _configured_key("openai", model_config, runtime) or runtime.runtime_paths.process_env.get(api_key_env)
+        clients = SDKClients(codex_client, per_request=True)
+    else:
+        api_key_env = "OPENAI_API_KEY"
+        api_key = _configured_key("openai", model_config, runtime) or runtime.runtime_paths.process_env.get(api_key_env)
 
-    def openai_client() -> AsyncOpenAI:
-        if not api_key:
-            raise missing_api_key_error(api_key_env, provider=provider_name)
-        return _openai_client(api_key, options, settings, http_client)
+        def openai_client() -> AsyncOpenAI:
+            if not api_key:
+                raise missing_api_key_error(api_key_env, provider=provider_name)
+            return _openai_client(api_key, options, settings, http_client)
 
-    return ResponsesAdapter(
-        identity=identity,
-        capabilities=capabilities,
-        wire=wire,
-        settings=settings,
-        clients=SDKClients(openai_client),
-    )
+        clients = SDKClients(openai_client)
+    return ResponsesAdapter(identity=identity, capabilities=capabilities, wire=wire, settings=settings, clients=clients)
 
 
 def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatAdapter | ResponsesAdapter:

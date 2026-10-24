@@ -23,7 +23,6 @@ from mindroom.providers.openai.replay_estimate import (
 )
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
-    ResponsesTurnParts,
     ResponsesWire,
     parse_response,
     request_store,
@@ -150,36 +149,20 @@ class ResponsesAdapter:
         finally:
             await sdk_stream.close()
 
-    async def _completed(
-        self,
-        client: AsyncOpenAI,
-        kwargs: dict[str, Any],
-        request: ModelRequest,
-    ) -> ResponsesTurnParts:
-        """Send one request without streaming and return its finished turn."""
-        try:
-            response = await client.responses.create(**kwargs)
-        except sdk_failures() as error:
-            raise provider_error(error, provider=self.identity.provider_name) from error
-        return parse_response(
-            response,
-            wire=self.wire,
-            store=request_store(self.wire, request),
-            portable_replay=request.portable_replay,
-            native_compaction=request.native_compaction,
-            text_as_reasoning=self.settings.reasoning is not None,
-        )
-
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one Responses request and yield its deltas, usage, and finished turn."""
         started = time.monotonic()
         first_token: float | None = None
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
         client = await self.clients.client(request.overrides)
+        store = request_store(self.wire, request)
+        # TODO(simplify): With `reasoning` authored, the reply text is also stored as its reasoning (streamed only
+        # without `reasoning_summary`, blocking only without a returned summary). Store only returned reasoning
+        # summaries. Stored data and anything that replays or shows reasoning.
         if request.stream or self.capabilities.streams_only:
             accumulator = ResponsesStream(
                 wire=self.wire,
-                store=request_store(self.wire, request),
+                store=store,
                 portable_replay=request.portable_replay,
                 native_compaction=request.native_compaction,
                 text_as_reasoning=self.settings.reasoning is not None and self.settings.reasoning_summary is None,
@@ -194,7 +177,18 @@ class ResponsesAdapter:
                 return
             parts = accumulator.finish()
         else:
-            parts = await self._completed(client, kwargs, request)
+            try:
+                response = await client.responses.create(**kwargs)
+            except sdk_failures() as error:
+                raise provider_error(error, provider=self.identity.provider_name) from error
+            parts = parse_response(
+                response,
+                wire=self.wire,
+                store=store,
+                portable_replay=request.portable_replay,
+                native_compaction=request.native_compaction,
+                text_as_reasoning=self.settings.reasoning is not None,
+            )
             first_token = time.monotonic()
         message = finished_assistant_message(
             self.identity,
