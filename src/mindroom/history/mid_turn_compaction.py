@@ -41,7 +41,7 @@ from mindroom.history.summary_message import (
 )
 from mindroom.history.summary_rows import Segment, folded_tool_call_ids
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import PROMPT_MESSAGE_ROLES, is_own_model_message
+from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_items, native_replay_messages
@@ -491,7 +491,7 @@ def _layout(messages: list[Message], prompt_id: str | None, *, scoped: bool) -> 
     the snapshots instead, since the scope summary never saw it.
     """
     leading = next(
-        (index for index, message in enumerate(messages) if message.role not in PROMPT_MESSAGE_ROLES),
+        (index for index, message in enumerate(messages) if message.role != "system"),
         len(messages),
     )
     prompt = _current_prompt(messages[leading:], prompt_id)

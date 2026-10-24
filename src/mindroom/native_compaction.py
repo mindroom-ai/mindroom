@@ -10,7 +10,6 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.llm.messages import PROMPT_MESSAGE_ROLES
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.logging_config import get_logger
 
@@ -179,7 +178,7 @@ def native_replay_messages(messages: Sequence[Message], route: str | None) -> li
     )
     if last is None:
         return list(messages)
-    return [message for index, message in enumerate(messages) if index >= last or message.role in PROMPT_MESSAGE_ROLES]
+    return [message for index, message in enumerate(messages) if index >= last or message.role == "system"]
 
 
 def checkpoint_estimated_tokens(items: Sequence[dict[str, Any]]) -> int:

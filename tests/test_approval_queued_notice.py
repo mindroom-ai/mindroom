@@ -120,7 +120,7 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
 
 @pytest.mark.parametrize(
     "boundary",
-    ["resolved", "system", "developer", "unresolved", "newer-input", "no-queue"],
+    ["resolved", "system", "unresolved", "newer-input", "no-queue"],
 )
 @pytest.mark.asyncio
 async def test_resume_entry_only_notifies_a_resolved_current_batch(boundary: str) -> None:
@@ -132,8 +132,8 @@ async def test_resume_entry_only_notifies_a_resolved_current_batch(boundary: str
     ]
     if boundary != "unresolved":
         messages.append(Message(role="tool", tool_call_id="call-2", content="Result 2"))
-    if boundary in {"system", "developer"}:
-        messages.insert(2, Message(role=boundary, content="Trusted runtime context."))
+    if boundary == "system":
+        messages.insert(2, Message(role="system", content="Trusted runtime context."))
     if boundary == "newer-input":
         messages.append(Message(role="user", content="A different request."))
 
@@ -141,7 +141,7 @@ async def test_resume_entry_only_notifies_a_resolved_current_batch(boundary: str
         await queued_notice_on_resume_entry(_NOTICE)(messages, messages[-1:])
 
     notices = [message for message in messages if message.content == _NOTICE]
-    assert len(notices) == (1 if boundary in {"resolved", "system", "developer"} else 0)
+    assert len(notices) == (1 if boundary in {"resolved", "system"} else 0)
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 if TYPE_CHECKING:
     from mindroom.llm.messages import Message
@@ -16,7 +16,7 @@ _SUMMARY_FOLLOWS_KEY = "mindroom_compaction_summary_follows"
 class _CompactionSummaryFields(TypedDict):
     """The fields of the user message one compaction summary renders as."""
 
-    role: str
+    role: Literal["user"]
     content: str
     provider_data: dict[str, Any]
     from_history: bool

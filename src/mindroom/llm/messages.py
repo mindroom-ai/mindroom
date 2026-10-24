@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from time import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from mindroom.llm.media import Audio, File, Image, Video
@@ -42,8 +42,6 @@ AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # (``usage/storage.py``, ``memory/_mem0_usage.py``). It also tells a run's own model messages from the replies its
 # input carries (``is_own_model_message``).
 MODEL_PROVENANCE_KEY = "mindroom_model"
-# The roles of the prompt messages MindRoom writes: history never replays them, and only a paused run stores them.
-PROMPT_MESSAGE_ROLES = frozenset({"system", "developer"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,11 +92,12 @@ def is_own_model_message(message: Message) -> bool:
 class Message:
     """One message in a model conversation.
 
-    ``from_history`` marks a copy replayed from a stored run (never stored again), and
-    ``add_to_agent_memory=False`` marks a message sent to the model but never stored.
+    A ``system`` message is a prompt, which history never replays and only a paused run stores. ``from_history``
+    marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks a message
+    sent to the model but never stored.
     """
 
-    role: str
+    role: Literal["system", "user", "assistant", "tool"]
     content: str | list[Any] | None = None
     id: str = field(default_factory=_new_id)
     compressed_content: str | None = None
@@ -236,7 +235,6 @@ def split_thinking(content: str) -> tuple[str | None, str]:
 __all__ = [
     "AGGREGATE_USAGE_KEY",
     "MODEL_PROVENANCE_KEY",
-    "PROMPT_MESSAGE_ROLES",
     "Message",
     "ModelProvenance",
     "is_own_model_message",

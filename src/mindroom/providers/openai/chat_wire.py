@@ -184,10 +184,7 @@ def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSe
         return [_groq_message(message) for message in messages]
     if wire.dialect == "cerebras":
         return [_cerebras_message(message) for message in messages]
-    role_map = settings.role_map or {
-        "system": "developer" if wire.route == "openai" else "system",
-        "model": "assistant",
-    }
+    role_map = settings.role_map or {"system": "developer" if wire.route == "openai" else "system"}
     canonical = reformat_tool_call_ids(messages, "chat")
     return [_openai_message(message, wire, role_map) for message in canonical]
 

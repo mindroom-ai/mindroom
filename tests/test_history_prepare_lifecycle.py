@@ -1666,7 +1666,7 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_context_window_guard_skips_developer_prompts(
+async def test_prepare_history_for_run_context_window_guard_skips_system_prompts(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path, context_window=40)
@@ -1677,7 +1677,7 @@ async def test_prepare_history_for_run_context_window_guard_skips_developer_prom
             _completed_run(
                 "run-1",
                 messages=[
-                    Message(role="developer", content="d" * 120),
+                    Message(role="system", content="s" * 120),
                     Message(role="user", content="u" * 15),
                     Message(role="assistant", content="a" * 15),
                 ],
@@ -1685,7 +1685,7 @@ async def test_prepare_history_for_run_context_window_guard_skips_developer_prom
             _completed_run(
                 "run-2",
                 messages=[
-                    Message(role="developer", content="d" * 120),
+                    Message(role="system", content="s" * 120),
                     Message(role="user", content="u" * 15),
                     Message(role="assistant", content="a" * 15),
                 ],

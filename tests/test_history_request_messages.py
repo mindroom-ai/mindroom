@@ -289,7 +289,6 @@ def test_prompt_roles_and_stored_history_copies_never_replay() -> None:
             "run",
             messages=[
                 Message(role="system", content="old system prompt"),
-                Message(role="developer", content="old developer prompt"),
                 stored_copy,
                 *_exchange("run"),
             ],
