@@ -337,15 +337,17 @@ def _chat_client_factory(
 
         return kimi_client
     if route_key == "azure":
+        api_key_env = route.api_key_env
+        assert api_key_env is not None
 
         def azure_client() -> AsyncOpenAI:
             from openai import AsyncAzureOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
-            key = api_key or process_env.get(PROVIDER_ENV_KEYS["azure"])
+            key = api_key or process_env.get(api_key_env)
             if not (key or alternative_auth):
                 msg = (
                     "Azure OpenAI authentication not configured. Please provide one of: "
-                    "AZURE_OPENAI_API_KEY environment variable, azure_ad_token, or azure_ad_token_provider"
+                    f"{api_key_env} environment variable, azure_ad_token, or azure_ad_token_provider"
                 )
                 raise AuthenticationFailed(msg, provider=route.provider_name, status_code=401, code=MISSING_API_KEY)
             # TODO(simplify): Azure accepts `timeout` and `max_retries` but leaves them out of its client. Build it from
