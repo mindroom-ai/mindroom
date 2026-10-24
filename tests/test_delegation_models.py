@@ -6,26 +6,27 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
 
-from mindroom.agents import apply_tool_approval_capability
-from mindroom.ai import run_delegated_child_response
+from mindroom import agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.execution import drive_delegations
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths, respond
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import ModelProvider
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @pytest.mark.asyncio
@@ -49,7 +50,7 @@ async def test_subagent_model_selection(
             "default": ModelConfig(provider="openai", id="gpt-6-astra"),
             "alternate": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)
@@ -62,57 +63,45 @@ async def test_subagent_model_selection(
         entity_names=("leader", "worker"),
         config=config,
     )
-    toolkit = DelegateTools("leader", ["leader", "worker"], paths, config, execution_identity=identity)
-    models = {
-        name: DelegationModel(id=name, responses=[ModelResponse(content=f"Answer from {name}")])
-        for name in ("default", "alternate")
-    }
-    monkeypatch.setattr(
-        "mindroom.agents._load_agent_model_instance",
-        lambda _config, _paths, name, *_args: models[name],
+    parent = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate", task="Report", agent_name=agent_name, model=model)),
+            answer("Parent done"),
+        ],
     )
+    built_models: list[str] = []
+
+    def build(
+        _config: Config,
+        _paths: RuntimePaths,
+        model_name: str,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> ModelProvider:
+        if execution_identity is not None and execution_identity.session_id == identity.session_id:
+            return parent
+        built_models.append(model_name)
+        return ScriptedModel([answer(f"Answer from {model_name}")])
+
+    monkeypatch.setattr(agents, "_build_agent_model_provider", build)
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
         if native:
-            apply_tool_approval_capability(
-                toolkit,
-                config,
-                supports_native_tool_approval=True,
-                registered_tool_name="delegate",
+            text = await respond(
+                "leader",
+                "Delegate",
+                config=config,
+                runtime_paths=paths,
+                identity=identity,
+                run_id="parent-run",
             )
-            storage = create_session_storage("leader", config, paths, identity)
-            parent = Agent(
-                id="leader",
-                db=storage,
-                tools=[toolkit],
-                model=DelegationModel(
-                    id="parent",
-                    responses=[
-                        ModelResponse(
-                            tool_calls=[
-                                _call("run_subagent", "delegate", task="Report", agent_name=agent_name, model=model),
-                            ],
-                        ),
-                        ModelResponse(content="Parent done"),
-                    ],
-                ),
-            )
-            try:
-                response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-                response = await drive_delegations(
-                    parent,
-                    response,
-                    agent_name="leader",
-                    run_child=run_delegated_child_response,
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=identity,
-                )
-                assert response.status == RunStatus.completed
-                result = next(str(tool.result) for tool in response.tools or () if tool.tool_name == "run_subagent")
-            finally:
-                storage.close()
+            assert isinstance(text, str)
+            assert text.startswith("Parent done")
+            stored = create_session_storage("leader", config, paths, identity).get_run("parent-run")
+            assert isinstance(stored, RunRecord)
+            assert stored.status is RunStatus.completed
+            result = next(str(tool.result) for tool in stored.tools or () if tool.tool_name == "run_subagent")
         else:
+            toolkit = DelegateTools("leader", ["leader", "worker"], paths, config, execution_identity=identity)
             result = await toolkit.run_subagent(task="Report", agent_name=agent_name, model=model)
 
     records = list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
@@ -120,6 +109,7 @@ async def test_subagent_model_selection(
     if model in (None, "alternate"):
         expected_model = model or "default"
         assert f"Answer from {expected_model}" in result
+        assert built_models == [expected_model]
         assert len(records) == len(handles) == 1
         record = json.loads(records[0].read_text())
         assert record["model_name"] == expected_model
@@ -130,6 +120,7 @@ async def test_subagent_model_selection(
         assert "Unknown model" in result
         assert "alternate" in result
         assert "default" in result
+        assert built_models == []
         assert not records
         assert not handles
     assert config.agents["leader"].model == config.agents["worker"].model == "default"

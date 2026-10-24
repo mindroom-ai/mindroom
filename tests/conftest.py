@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import ipaddress
+import json
 import os
 import re
 import shutil
@@ -43,8 +44,6 @@ import pytest
 import pytest_asyncio
 import structlog
 import yaml
-from agno.models.base import Model
-from agno.models.response import ModelResponse
 from agno.utils import log as agno_log
 from aioresponses import aioresponses
 from openai import AsyncOpenAI, OpenAI
@@ -82,7 +81,7 @@ from mindroom.dispatch_handoff import (
 )
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
-from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.event_journal import (
     AdmissionResult,
@@ -108,7 +107,7 @@ from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
-from mindroom.history.prompt_tokens import agent_static_token_estimator
+from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
@@ -116,8 +115,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.session_context import (
     ScopeSessionContext,
-    open_resolved_scope_session_context,
-    resolve_history_scope,
+    load_scope_session,
 )
 from mindroom.history.types import (
     CompactionLifecycle,
@@ -131,6 +129,7 @@ from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
 from mindroom.legacy_delivery_payloads import _inline_final_result
+from mindroom.llm.messages import Message
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
@@ -144,7 +143,7 @@ from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
-from mindroom.providers.media_fallback import reset_model_media_capability_cache
+from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -153,13 +152,13 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore
+from mindroom.usage.storage import quote_identifier
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
@@ -168,18 +167,18 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
-    from agno.agent import Agent
-    from agno.db.base import BaseDb
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
     from xdist.workermanage import WorkerController
 
     from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
+    from mindroom.llm.provider import ModelProvider
     from mindroom.matrix_rtc.call_manager import CallManager
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from tests.team_turn_helpers import ProbeToolkit
 
 
 _STRUCTLOG_CONFIGURE = structlog.configure
@@ -501,15 +500,15 @@ TestFunction = Callable[..., object]
 
 async def prepare_history_for_run_for_test(
     *,
-    agent: "Agent",
     agent_name: str,
     full_prompt: str,
     session_id: str | None,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: "ToolExecutionIdentity | None",
-    storage: "BaseDb | None" = None,
-    session: "AgentSession | TeamSession | None" = None,
+    model: "ModelProvider | None" = None,
+    storage: "ConversationStore | None" = None,
+    session: "ConversationSession | None" = None,
     history_settings: ResolvedHistorySettings | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
@@ -519,21 +518,23 @@ async def prepare_history_for_run_for_test(
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
 ) -> PreparedHistoryState:
-    """Compose the production history-preparation seams for one test run."""
-    resolved_scope = scope or resolve_history_scope(agent)
-    static_token_estimator = agent_static_token_estimator(agent)
+    """Compose the production history-preparation seams for one test run of an agent without instructions or tools.
+
+    ``model`` is the provider the run's requests go to; None sizes history by estimate alone, as a test double does.
+    """
+    resolved_scope = scope or HistoryScope(kind="agent", scope_id=agent_name)
+    static_token_estimator = build_static_token_estimator(Message(role="system", content=""), (), frozenset())
     if static_prompt_tokens is None:
         static_prompt_tokens = static_token_estimator.estimate(full_prompt)
     resolved_inputs = resolve_agent_preparation_inputs(
-        agent=agent,
         agent_name=agent_name,
+        history_settings=history_settings
+        or config.resolve_entity(agent_name if agent_name in config.agents else None).history_settings,
         config=config,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
-    if history_settings is not None:
-        resolved_inputs = replace(resolved_inputs, history_settings=history_settings)
     if execution_plan is not None:
         resolved_inputs = replace(resolved_inputs, execution_plan=execution_plan)
     if available_history_budget is not None:
@@ -548,23 +549,17 @@ async def prepare_history_for_run_for_test(
             ),
         )
     scope_history_kwargs = {
-        "agent": agent,
-        "agent_name": agent_name,
+        "model": model,
         "resolved_inputs": resolved_inputs,
         "non_prompt_tokens": static_token_estimator.non_prompt_tokens(),
         "runtime_paths": runtime_paths,
         "config": config,
-        "scope": resolved_scope,
         "compaction_lifecycle": compaction_lifecycle,
     }
-    if storage is not None and resolved_scope is not None and session_id is not None:
+    if storage is not None and session_id is not None:
         persisted_session = session
         if persisted_session is None:
-            persisted_session = (
-                get_team_session(storage, session_id)
-                if resolved_scope.kind == "team"
-                else get_agent_session(storage, session_id)
-            )
+            persisted_session = storage.load_session(session_id, resolved_scope.kind)
         scope_context = ScopeSessionContext(
             scope=resolved_scope,
             storage=storage,
@@ -573,15 +568,15 @@ async def prepare_history_for_run_for_test(
         )
         prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
     else:
-        with open_resolved_scope_session_context(
+        scope_context = load_scope_session(
             agent_name=agent_name,
             session_id=session_id,
             runtime_paths=runtime_paths,
             config=config,
             execution_identity=execution_identity,
             scope=resolved_scope,
-        ) as scope_context:
-            prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
+        )
+        prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
     return finalize_history_preparation(
         prepared_scope_history=prepared_scope_history,
         config=config,
@@ -2106,37 +2101,6 @@ class _ExtractedCollaboratorProxy[CollaboratorT]:
         raise AttributeError(msg)
 
 
-class FakeModel(Model):
-    """Minimal model returning one canned response, for deterministic agent tests."""
-
-    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        """Return one successful fake response."""
-        return ModelResponse(content="ok")
-
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        """Return one successful fake async response."""
-        return ModelResponse(content="ok")
-
-    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
-        """Yield one successful fake streaming response."""
-        yield ModelResponse(content="ok")
-
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        """Yield one successful fake async streaming response."""
-        yield ModelResponse(content="ok")
-
-    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
-        return response
-
-    def _parse_provider_response_delta(
-        self,
-        response: ModelResponse,
-        *_args: object,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        return response
-
-
 class FakeCredentialsManager:
     """Stub credentials manager for tests that need credential lookup."""
 
@@ -3079,23 +3043,23 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # Captured before any test patches them, so the offline clients below still start from the production ones.
-_PRODUCTION_EMBEDDER_CLIENT = MindRoomOpenAIEmbedder.client
-_PRODUCTION_EMBEDDER_ACLIENT = MindRoomOpenAIEmbedder.aclient
+_PRODUCTION_EMBEDDER_CLIENT = OpenAIEmbedder._sdk_client
+_PRODUCTION_EMBEDDER_ACLIENT = OpenAIEmbedder._async_sdk_client
 
 
-def _offline_sync_client(embedder: MindRoomOpenAIEmbedder) -> OpenAI:
-    if embedder.openai_client is None:
+def _offline_sync_client(embedder: OpenAIEmbedder) -> OpenAI:
+    if embedder.client is None:
         # Without retries, because the SDK would back off for seconds before reporting the refusal.
-        embedder.openai_client = _PRODUCTION_EMBEDDER_CLIENT.fget(embedder).with_options(
+        embedder.client = _PRODUCTION_EMBEDDER_CLIENT(embedder).with_options(
             http_client=httpx.Client(transport=httpx.MockTransport(_refuse_connection)),
             max_retries=0,
         )
-    return embedder.openai_client
+    return embedder.client
 
 
-def _offline_async_client(embedder: MindRoomOpenAIEmbedder) -> AsyncOpenAI:
+def _offline_async_client(embedder: OpenAIEmbedder) -> AsyncOpenAI:
     if embedder.async_client is None:
-        embedder.async_client = _PRODUCTION_EMBEDDER_ACLIENT.fget(embedder).with_options(
+        embedder.async_client = _PRODUCTION_EMBEDDER_ACLIENT(embedder).with_options(
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(_refuse_connection)),
             max_retries=0,
         )
@@ -3121,8 +3085,8 @@ def _offline_openai_embedders(request: pytest.FixtureRequest, monkeypatch: pytes
     """
     if "real_embedder_clients" in request.fixturenames:
         return
-    monkeypatch.setattr(MindRoomOpenAIEmbedder, "client", property(_offline_sync_client))
-    monkeypatch.setattr(MindRoomOpenAIEmbedder, "aclient", property(_offline_async_client))
+    monkeypatch.setattr(OpenAIEmbedder, "_sdk_client", _offline_sync_client)
+    monkeypatch.setattr(OpenAIEmbedder, "_async_sdk_client", _offline_async_client)
 
 
 _OLLAMA_DEFAULT_PORT = urlsplit(OLLAMA_HOST_DEFAULT).port
@@ -3313,11 +3277,9 @@ def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_model_media_capabilities() -> Generator[None, None, None]:
+def _reset_model_media_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep process-local learned media support isolated per test."""
-    reset_model_media_capability_cache()
-    yield
-    reset_model_media_capability_cache()
+    monkeypatch.setattr(media_pipeline, "_LEARNED_UNSUPPORTED", {})
 
 
 @pytest.fixture(autouse=True)
@@ -3487,16 +3449,41 @@ def enforce_turn_authorization() -> None:
     """Keep final TurnPolicy authorization active for tests that exercise it."""
 
 
-def seed_session[SessionT: "AgentSession | TeamSession"](storage: "BaseDb", session: SessionT) -> SessionT:
-    """Persist a session row and every run it holds, in order, and return the session.
+@pytest.fixture
+def squad_probe() -> Iterator[type["ProbeToolkit"]]:
+    """Register the probe toolkit the team suites' ``squad`` members offer, with cleared records, for the test."""
+    from tests.team_turn_helpers import registered_probe  # noqa: PLC0415 - team_turn_helpers imports this module
 
-    Production code writes runs explicitly (``save_runs``/``delete_runs``);
-    tests seed whole histories with this instead.
+    with registered_probe() as toolkit:
+        yield toolkit
+
+
+def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":
+    """Create the session's row from its fields, then persist every run it holds, in order, and return the session.
+
+    Production code writes runs one at a time as they finish; tests seed whole histories with this instead. Each
+    run is saved with its usage, as the run's own save would. A row that already exists keeps its fields; change
+    them through the store's field writers.
     """
-    storage.upsert_session(session)
-    for run in session.runs or []:
-        storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
+    storage.ensure_session_row(session)
+    for run in session.runs:
+        storage.save_run(session, run, record_usage=True)
     return session
+
+
+def seed_session_metrics(storage: "ConversationStore", session_id: str, totals: "Mapping[str, object]") -> None:
+    """Write ``totals`` as the session row's stored usage totals, as an older release's run saves left them."""
+    with storage.transaction(write=True) as connection:
+        (raw,) = connection.execute(
+            f"SELECT session_data FROM {quote_identifier(storage.names.sessions)} WHERE session_id = ?",  # noqa: S608
+            (session_id,),
+        ).fetchone()
+        session_data = json.loads(raw) if raw else {}
+        session_data["session_metrics"] = dict(totals)
+        connection.execute(
+            f"UPDATE {quote_identifier(storage.names.sessions)} SET session_data = ? WHERE session_id = ?",  # noqa: S608
+            (json.dumps(session_data), session_id),
+        )
 
 
 def create_agno_2_sessions_db(path: "Path") -> "Path":

@@ -1,149 +1,119 @@
 """Real provider request construction preserves paired history across mode changes."""
 
-# ruff: noqa: ANN001, ANN202, D103, PLC0415
 from __future__ import annotations
 
 import base64
-import json
-from types import SimpleNamespace
+import copy
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.media import Image
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.tools.function import Function
-from pydantic import BaseModel
+
+from mindroom.llm.media import Image
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, ToolSpec, complete
+from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES, scrub_provider_env
+from tests.providers.golden_support import Wire
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+pytestmark = pytest.mark.filterwarnings(CLAUDE_DEPRECATION_FILTER)
+
+_PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+)
 
 
-def _assert_pairs(request, provider):  # noqa: C901, PLR0912
-    calls = set()
-    results = set()
-    if provider == "openai":
-        for message in request["messages"]:
-            calls.update(tool["id"] for tool in message.get("tool_calls", []))
-            if message.get("tool_call_id"):
-                results.add(message["tool_call_id"])
-    elif provider == "anthropic":
-        for message in request["messages"]:
-            for item in message["content"] if isinstance(message["content"], list) else []:
-                block = item.model_dump() if isinstance(item, BaseModel) else item
-                if block["type"] == "tool_use":
-                    calls.add(block["id"])
-                elif block["type"] == "tool_result":
-                    results.add(block["tool_use_id"])
-    else:
-        for message in request["contents"]:
-            for part in message.parts:
-                if part.function_call:
-                    calls.add(part.function_call.id or part.function_call.name)
-                elif part.function_response:
-                    results.add(part.function_response.id or part.function_response.name)
-    assert results == calls, "Fake provider rejects dangling tool results"
-    assert len(results) == 2
+def _call(call_id: str, name: str, arguments: str) -> dict[str, Any]:
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
+def _history(family: str, image_path: Path) -> list[Message]:
+    """A standard-mode tool pair, a minimal-mode Bash pair, and a new prompt with an image."""
+    standard_call = _call("old", "read_file", '{"path":"notes.txt"}')
+    standard_turn = Message(role="assistant", tool_calls=[standard_call], from_history=True)
+    if family == "gemini":
+        standard_call["thought_signature"] = base64.b64encode(b"retained signature").decode()
+    if family == "anthropic":
+        standard_turn.provider_data = {
+            "content_blocks": [{"type": "tool_use", "id": "old", "name": "read_file", "input": {"path": "notes.txt"}}],
+        }
+    return [
+        Message(role="user", content="Earlier task", from_history=True),
+        standard_turn,
+        Message(role="tool", tool_call_id="old", tool_name="read_file", content="old contents", from_history=True),
+        Message(
+            role="assistant",
+            tool_calls=[_call("minimal", "bash", '{"command":"agent tools call"}')],
+            from_history=True,
+        ),
+        Message(role="tool", tool_call_id="minimal", tool_name="bash", content="current result", from_history=True),
+        Message(role="user", content="Continue", images=[Image(filepath=str(image_path), mime_type="image/png")]),
+    ]
+
+
+# Each reader returns the tool-call ids, the tool-result ids, and whether an image went out in one request body.
+type _Sent = tuple[set[str], set[str], bool]
+
+
+def _chat_sent(body: dict[str, Any]) -> _Sent:
+    messages = body["messages"]
+    calls = {call["id"] for message in messages for call in message.get("tool_calls", [])}
+    results = {message["tool_call_id"] for message in messages if "tool_call_id" in message}
+    blocks = [block for message in messages if isinstance(message["content"], list) for block in message["content"]]
+    return calls, results, any(block["type"] == "image_url" for block in blocks)
+
+
+def _claude_sent(body: dict[str, Any]) -> _Sent:
+    blocks = [
+        block for message in body["messages"] if isinstance(message["content"], list) for block in message["content"]
+    ]
+    calls = {block["id"] for block in blocks if block["type"] == "tool_use"}
+    results = {block["tool_use_id"] for block in blocks if block["type"] == "tool_result"}
+    return calls, results, any(block["type"] == "image" for block in blocks)
+
+
+def _gemini_sent(body: dict[str, Any]) -> _Sent:
+    parts = [part for content in body["contents"] for part in content["parts"]]
+    calls = {part["functionCall"].get("id") or part["functionCall"]["name"] for part in parts if "functionCall" in part}
+    results = {
+        part["functionResponse"].get("id") or part["functionResponse"]["name"]
+        for part in parts
+        if "functionResponse" in part
+    }
+    return calls, results, any("inlineData" in part for part in parts)
+
+
+_SENT = {"openai_chat": _chat_sent, "anthropic": _claude_sent, "gemini": _gemini_sent}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ["openai", "anthropic", "gemini"])
-async def test_standard_minimal_standard_actual_provider_requests_preserve_history(
-    provider,
-    monkeypatch,
-    tmp_path,
+@pytest.mark.parametrize("family", sorted(_SENT))
+async def test_standard_minimal_standard_requests_keep_paired_history(
+    family: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agno.models.anthropic import Claude
-    from agno.models.google import Gemini
-    from agno.models.openai import OpenAIChat
-
-    model = {"openai": OpenAIChat, "anthropic": Claude, "gemini": Gemini}[provider]()
-    requests = []
-
-    async def send(**request):  # noqa: ANN003
-        _assert_pairs(request, provider)
-        requests.append(request)
-        return object()
-
-    client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=send)),
-        messages=SimpleNamespace(create=send),
-        aio=SimpleNamespace(models=SimpleNamespace(generate_content=send)),
-    )
-    monkeypatch.setattr(type(model), "get_client" if provider == "gemini" else "get_async_client", lambda _self: client)
-    monkeypatch.setattr(type(model), "_parse_provider_response", lambda *_args, **_kwargs: ModelResponse(content="ok"))
+    """Each mode offers one tool, yet every request carries both stored pairs and the image, and history is untouched."""
+    scrub_provider_env(monkeypatch)
+    spec = FAMILIES[family]
+    wire = Wire(lambda _request: spec.reply())
+    provider = spec.adapter(tmp_path, wire)
     image_path = tmp_path / "pixel.png"
-    image_path.write_bytes(
-        base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
-        ),
-    )
-    history = [
-        Message(role="user", content="Earlier task"),
-        Message(
-            role="assistant",
-            tool_calls=[
-                {
-                    "id": "old",
-                    "type": "function",
-                    "function": {
-                        "name": "read_file",
-                        "arguments": '{"path":"notes.txt"}',
-                    },
-                },
-            ],
-        ),
-        Message(role="tool", tool_call_id="old", tool_name="read_file", content="old contents"),
-        Message(
-            role="assistant",
-            tool_calls=[
-                {
-                    "id": "minimal",
-                    "type": "function",
-                    "function": {
-                        "name": "bash",
-                        "arguments": '{"command":"agent tools call"}',
-                    },
-                },
-            ],
-        ),
-        Message(role="tool", tool_call_id="minimal", tool_name="bash", content="current result"),
-        Message(role="user", content="Continue", images=[Image(filepath=image_path, mime_type="image/png")]),
-    ]
-    if provider == "gemini":
-        history[1].tool_calls[0]["thought_signature"] = base64.b64encode(b"retained signature").decode()
-    if provider == "anthropic":
-        history[1].provider_data = {
-            "content_blocks": [{"type": "tool_use", "id": "old", "name": "read_file", "input": {"path": "notes.txt"}}],
-        }
-    for message in history[:-1]:
-        message.from_history = True
-    before = json.dumps([message.model_dump(mode="json") for message in history], sort_keys=True)
-    for name in ("read_file", "bash", "read_file"):
-        await model.ainvoke(
-            history,
-            Message(role="assistant"),
-            tools=[
-                {
-                    "type": "function",
-                    "function": Function(name=name, description="available").to_dict(),
-                },
-            ],
-        )
-        after = json.dumps([message.model_dump(mode="json") for message in history], sort_keys=True)
-        assert after == before
-    for request, name in zip(requests, ("read_file", "bash", "read_file"), strict=True):
-        if provider == "gemini":
-            declarations = request["config"].tools[0].function_declarations
-            assert [item.name for item in declarations] == [name]
-            assert any(part.inline_data for message in request["contents"] for part in message.parts)
-        elif provider == "openai":
-            assert [item["function"]["name"] for item in request["tools"]] == [name]
-            assert any(
-                block.get("type") == "image_url"
-                for message in request["messages"]
-                for block in (message["content"] if isinstance(message["content"], list) else [])
-            )
-        else:
-            assert [item["name"] for item in request["tools"]] == [name]
-            assert any(
-                (block.type if hasattr(block, "type") else block.get("type")) == "image"
-                for message in request["messages"]
-                for block in (message["content"] if isinstance(message["content"], list) else [])
-            )
+    image_path.write_bytes(_PIXEL_PNG)
+    history = _history(family, image_path)
+    before = copy.deepcopy(history)
+    tool_names = ("read_file", "bash", "read_file")
+
+    for name in tool_names:
+        tool = ToolSpec(name=name, description="available", parameters={"type": "object", "properties": {}})
+        await complete(provider, ModelRequest(messages=history, tools=[tool]))
+        assert history == before
+
+    for index, name in enumerate(tool_names):
+        body = wire.body(index)
+        assert list(spec.wire_tools(body)) == [name]
+        calls, results, image = _SENT[family](body)
+        assert len(calls) == 2, "both stored tool calls are sent"
+        assert results == calls, "every stored tool result keeps its call"
+        assert image

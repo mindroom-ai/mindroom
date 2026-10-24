@@ -6,14 +6,17 @@ import gzip
 import json
 import socket
 import threading
-from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import httpx
 import pytest
 from bs4 import BeautifulSoup
+from structlog.testing import capture_logs
 
+from mindroom.config import legacy_fields
+from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import website
 from mindroom.custom_tools.website import (
     _MAX_PAGE_BYTES,
@@ -24,6 +27,11 @@ from mindroom.custom_tools.website import (
     _safe_url_for_log,
 )
 from mindroom.server_fetch_url import ServerFetchUrlError
+from mindroom.tool_system.metadata import (
+    ToolConfigOverrideError,
+    get_tool_by_name,
+    validate_authored_tool_entry_overrides,
+)
 from mindroom.tools.website import website_tools
 
 
@@ -96,9 +104,8 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -161,9 +168,8 @@ def test_website_reader_revalidates_redirect_targets(monkeypatch: pytest.MonkeyP
         msg = "private redirect target should be rejected before fetching"
         raise AssertionError(msg)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -229,9 +235,8 @@ def test_website_reader_records_safe_public_cross_host_redirect(monkeypatch: pyt
         assert url == final_url
         return httpx.Response(200, content=html.encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -291,9 +296,8 @@ def test_website_reader_rejects_dns_rebind_at_connect_time(monkeypatch: pytest.M
             return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, port))]
         return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -350,9 +354,8 @@ def test_website_reader_does_not_record_cross_host_redirect_content(
             return httpx.Response(302, headers={"Location": offsite_url}, request=request)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -395,9 +398,8 @@ def test_website_reader_skips_discovered_redirect_to_private_url(monkeypatch: py
             return httpx.Response(302, headers={"Location": private_url}, request=request)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -434,9 +436,8 @@ def test_website_reader_skips_discovered_url_with_invalid_port(monkeypatch: pyte
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -469,9 +470,8 @@ def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.Monkey
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -531,9 +531,8 @@ def test_website_reader_rejects_public_suffix_sibling_hosts(monkeypatch: pytest.
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -575,11 +574,6 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
     </html>
     """
 
-    class FakeKnowledge:
-        def insert(self, *, url: str, reader: object) -> None:
-            assert url == full_url
-            assert isinstance(reader, _MindRoomWebsiteReader)
-
     def fake_log_debug(message: str) -> None:
         logged_messages.append(message)
 
@@ -590,23 +584,19 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website.log_debug", fake_log_debug)
-    monkeypatch.setattr("agno.knowledge.reader.website_reader.log_debug", fake_log_debug)
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     WebsiteTools().read_url(full_url)
-    WebsiteTools(knowledge=FakeKnowledge()).add_website_to_knowledge(full_url)
 
     assert logged_messages == [
         "Reading website: https://example.test/docs",
         "Reading: https://example.test/docs",
         "Crawling: https://example.test/docs",
-        "Adding to knowledge base: https://example.test/docs",
     ]
     joined_messages = " ".join(logged_messages)
     assert full_url not in joined_messages
@@ -615,29 +605,59 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
     assert "frag-secret" not in joined_messages
 
 
-def test_website_tool_adds_urls_to_knowledge_with_mindroom_reader() -> None:
-    """Knowledge ingestion should use the same fixed website reader as read_url."""
+def test_website_tool_always_offers_read_url(tmp_path: Path) -> None:
+    """A configured toolkit reads URLs; no authored option swaps read_url for a knowledge-base insert."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
 
-    @dataclass
-    class CapturedInsert:
-        url: str
-        reader: object
+    tool = get_tool_by_name("website", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
 
-    class FakeKnowledge:
-        def __init__(self) -> None:
-            self.captured: CapturedInsert | None = None
+    assert list(tool.functions) == ["read_url"]
+    with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
+        validate_authored_tool_entry_overrides("website", {"knowledge": "docs"})
 
-        def insert(self, *, url: str, reader: object) -> None:
-            self.captured = CapturedInsert(url=url, reader=reader)
 
-    knowledge = FakeKnowledge()
+def test_a_retired_knowledge_option_loads_with_one_warning_and_reads_urls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Website entries that still set ``knowledge`` load with one warning, and the configured tool reads URLs."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    entry = {"website": {"knowledge": "docs"}}
+    legacy_fields._warn_retired_field.cache_clear()
+    with capture_logs() as logs:
+        config = Config.validate_with_runtime(
+            {
+                "defaults": {"tools": [entry]},
+                "agents": {"researcher": {"display_name": "Researcher", "tools": [entry]}},
+            },
+            runtime_paths,
+        )
 
-    result = WebsiteTools(knowledge=knowledge).add_website_to_knowledge("https://example.test")
+    warned = [
+        log["field"] for log in logs if log["event"] == "Ignoring a retired config field; remove it from the config"
+    ]
+    assert warned == ["tools.website.knowledge"]
+    [default_entry] = config.defaults.tools
+    [agent_entry] = config.agents["researcher"].tools
+    assert default_entry.overrides == agent_entry.overrides == {}
 
-    assert result == "Success"
-    assert knowledge.captured is not None
-    assert knowledge.captured.url == "https://example.test"
-    assert isinstance(knowledge.captured.reader, _MindRoomWebsiteReader)
+    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+        del timeout, follow_redirects
+        return httpx.Response(200, content=b"<main><p>Guide text.</p></main>", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", lambda _reader: None)
+    tool = get_tool_by_name(
+        "website",
+        runtime_paths,
+        tool_config_overrides=agent_entry.overrides,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert list(tool.functions) == ["read_url"]
+    [document] = json.loads(tool.functions["read_url"].entrypoint("https://example.test/"))
+    assert "Guide text." in document["content"]
 
 
 def test_website_tool_factory_uses_mindroom_reader() -> None:

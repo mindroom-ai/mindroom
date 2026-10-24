@@ -8,8 +8,6 @@ from unittest.mock import MagicMock
 
 import nio
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import (
@@ -19,6 +17,8 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client import edit_message_result, send_message_result
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
@@ -667,15 +667,15 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
 
 @pytest.mark.asyncio
 async def test_replacement_streaming_preserves_text_on_tool_completion() -> None:
-    """ToolCallCompletedEvent through ReplacementStreamingResponse must not wipe accumulated_text."""
+    """A completed tool event through ReplacementStreamingResponse must not wipe accumulated_text."""
     client = MockClient()
     config = MockConfig()
 
     tool = ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}, result="ok")
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
-        yield ToolCallCompletedEvent(tool=tool, content="ok")
+        yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
+        yield ToolCompleted(call=tool.call)
 
     outcome = await send_streaming_response(
         client=client,
@@ -703,7 +703,7 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
         yield "hello"
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+        yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
 
     outcome = await send_streaming_response(
         client=client,
@@ -734,9 +734,9 @@ async def test_replacement_streaming_preserves_visible_tool_marker_across_snapsh
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
         yield "hello"
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
+        yield ToolStarted(call=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}).call)
         yield "hello world"
-        yield ToolCallCompletedEvent(tool=tool, content="ok")
+        yield ToolCompleted(call=tool.call)
 
     outcome = await send_streaming_response(
         client=client,
@@ -766,9 +766,9 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
     config = MockConfig()
 
     async def stream() -> AsyncIterator[StreamInputChunk]:
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="first_tool", tool_args={}))
+        yield ToolStarted(call=ToolExecution(tool_name="first_tool", tool_args={}).call)
         await asyncio.sleep(0)
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="second_tool", tool_args={}))
+        yield ToolStarted(call=ToolExecution(tool_name="second_tool", tool_args={}).call)
         await asyncio.sleep(0)
         yield "Done"
 

@@ -1,0 +1,121 @@
+{
+  "family": "groq",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "Route the message to the best agent.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api_key": "parity-test-key",
+      "id": "openai/gpt-oss-120b",
+      "provider": "groq"
+    },
+    "portable_replay": null,
+    "response_format": {
+      "type": "dict",
+      "value": {
+        "type": "json_object"
+      }
+    },
+    "stream": false,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "openai/gpt-oss-120b",
+          "provider": "Groq"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "completion_time": 0.021,
+        "prompt_time": 0.004,
+        "queue_time": 0.011,
+        "total_time": 0.025
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "Route the message to the best agent."
+        },
+        {
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
+        }
+      ],
+      "model": "openai/gpt-oss-120b",
+      "response_format": {
+        "type": "json_object"
+      },
+      "tools": []
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.groq.com/openai/v1/chat/completions"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "json": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1792540800,
+      "id": "chatcmpl-parity",
+      "model": "openai/gpt-oss-120b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_parity",
+      "usage": {
+        "completion_time": 0.021,
+        "completion_tokens": 12,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_time": 0.004,
+        "prompt_tokens": 42,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "queue_time": 0.011,
+        "total_time": 0.025,
+        "total_tokens": 54
+      }
+    },
+    "status": 200
+  },
+  "scenario": "structured_output"
+}

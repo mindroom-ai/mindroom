@@ -13,11 +13,21 @@ import yaml
 from mindroom.cli.config import _model_template_block, _write_env_file
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.providers.model_loading import get_model_instance
-from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.providers.anthropic.messages import ClaudeProvider, native_compaction_endpoint
+from mindroom.providers.registry import build_model_provider
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+
+
+def _vertex_adapter(config: Config, runtime_paths: RuntimePaths) -> ClaudeProvider:
+    adapter = bare_adapter(build_model_provider(config, runtime_paths))
+    assert isinstance(adapter, ClaudeProvider)
+    assert adapter.route == "vertexai_claude"
+    return adapter
 
 
 @pytest.fixture(autouse=True)
@@ -62,16 +72,17 @@ def test_generated_vertex_environment_reaches_runtime_endpoint(
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     config = Config(models={"default": yaml.safe_load(_model_template_block("vertexai_claude"))})
 
-    model = get_model_instance(config, runtime_paths)
-    assert isinstance(model, MindroomVertexAIClaude)
-    assert model.id == "claude-sonnet-5-5"
-    assert model.region == expected_region
+    model = _vertex_adapter(config, runtime_paths)
+    assert model.identity.id == "claude-sonnet-5-5"
+    assert model.settings.region == expected_region
     if authored_region is not None and not replace_existing:
-        assert model.project_id == "authored-project"
-        assert model.native_compaction_endpoint() == f"{expected_endpoint}|authored-project|{expected_region}"
+        assert model.settings.project_id == "authored-project"
+        assert native_compaction_endpoint("vertexai_claude", model.settings) == (
+            f"{expected_endpoint}|authored-project|{expected_region}"
+        )
     else:
         # The generated project ID is a starter placeholder, which counts as unset.
-        assert model.project_id is None
+        assert model.settings.project_id is None
 
 
 @pytest.mark.parametrize(
@@ -98,6 +109,4 @@ def test_vertex_generated_environment_keeps_override_precedence(
     if model_region is not None:
         config.models["default"].extra_kwargs = {"region": model_region}
 
-    model = get_model_instance(config, runtime_paths)
-    assert isinstance(model, MindroomVertexAIClaude)
-    assert model.region == expected_region
+    assert _vertex_adapter(config, runtime_paths).settings.region == expected_region

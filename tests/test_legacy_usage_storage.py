@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import closing
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -14,6 +15,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.session_storage.schema import TableNames
 from mindroom.usage import legacy_usage_storage
 from tests.conftest import create_agno_2_sessions_db
 
@@ -61,9 +63,9 @@ def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
                 1,
             ),
         )
-    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    legacy_usage_storage.migrate_usage_database(path, TableNames("code"))
     before = path.read_bytes()
-    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    legacy_usage_storage.migrate_usage_database(path, TableNames("code"))
 
     assert path.read_bytes() == before
     rows = dict(_usage(path))
@@ -73,6 +75,25 @@ def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
     assert "created_at" not in rows[None]
     assert "user_id" not in rows[None]
     assert "private history" not in json.dumps(rows)
+
+
+def test_migration_reads_the_agno_runs_table_beside_agno_sessions(tmp_path: Path) -> None:
+    """Agno names the runs table beside ``agno_sessions`` ``agno_runs``, so an entity named agno keeps its run usage."""
+    path = tmp_path / "agno.db"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("CREATE TABLE agno_sessions (session_id TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO agno_sessions VALUES ('session-1')")
+        connection.execute("CREATE TABLE agno_runs (session_id TEXT, run_id TEXT, run_data TEXT, created_at INTEGER)")
+        connection.execute(
+            "INSERT INTO agno_runs VALUES (?, ?, ?, ?)",
+            ("session-1", "run", json.dumps({"metrics": {"total_tokens": 7}}), 1),
+        )
+
+    legacy_usage_storage.migrate_usage_database(path, TableNames("agno"))
+
+    with closing(sqlite3.connect(path)) as connection:
+        rows = connection.execute("SELECT run_id, usage_data FROM agno_sessions_usage").fetchall()
+    assert [(run_id, json.loads(data)["metrics"]["total_tokens"]) for run_id, data in rows] == [("run", 7)]
 
 
 def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,11 +113,11 @@ def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, mo
     with monkeypatch.context() as patch:
         patch.setattr(legacy_usage_storage, "project_usage", interrupt)
         with pytest.raises(RuntimeError, match="interrupted seed"):
-            legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+            legacy_usage_storage.migrate_usage_database(path, TableNames("code"))
     with sqlite3.connect(path) as connection:
         assert not connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'code_sessions_usage'").fetchall()
 
-    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    legacy_usage_storage.migrate_usage_database(path, TableNames("code"))
     assert len(_usage(path)) == 3
 
 
@@ -115,7 +136,7 @@ def test_malformed_history_keeps_valid_records_and_a_gap(tmp_path: Path) -> None
                 ),
             ),
         )
-    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    legacy_usage_storage.migrate_usage_database(path, TableNames("code"))
     rows = _usage(path)
     assert rows[0][1]["metrics"]["total_tokens"] == 5
     assert rows[1] == (None, None)
@@ -154,11 +175,11 @@ async def test_startup_migrates_dormant_stores_and_skips_aliases(tmp_path: Path)
 def test_missing_database_and_empty_database_stay_empty(tmp_path: Path) -> None:
     """Migration must not create new stores or force Agno's lazy tables into existence."""
     path = tmp_path / "code.db"
-    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    legacy_usage_storage.migrate_usage_database(path, TableNames("code"))
     assert not path.exists()
     with sqlite3.connect(path):
         pass
-    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    legacy_usage_storage.migrate_usage_database(path, TableNames("code"))
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []
 
@@ -243,7 +264,7 @@ async def test_locked_store_is_skipped_quickly_and_imported_by_its_owner(tmp_pat
 
     assert elapsed < 10
     assert _skipped_paths(logs) == [str(locked)]
-    legacy_usage_storage.migrate_usage_database(locked, "code_sessions")
+    legacy_usage_storage.migrate_usage_database(locked, TableNames("code"))
     assert len(_usage(locked)) == 3
 
 
@@ -261,7 +282,7 @@ def test_migration_keeps_invalid_parent_as_a_gap(tmp_path: Path) -> None:
                 ),
             ),
         )
-    legacy_usage_storage.migrate_usage_database(path, "code_sessions")
+    legacy_usage_storage.migrate_usage_database(path, TableNames("code"))
     payload = _usage(path)[0][1]
     assert payload["parent_run_id"] is False
     assert "private" not in json.dumps(payload)

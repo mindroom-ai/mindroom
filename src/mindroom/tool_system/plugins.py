@@ -25,7 +25,6 @@ from mindroom.tool_system.registry_state import (
     synchronize_plugin_tools,
 )
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
-from mindroom.tool_system.tool_schema_cache import clear_tool_schema_cache
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -40,7 +39,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_PluginValidationError = plugin_imports.PluginValidationError
 _CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE = 128
 
 
@@ -160,7 +158,7 @@ def load_plugins(
                     if not skip_broken_plugins:
                         if isinstance(exc, SystemExit):
                             msg = f"Plugin materialization failed for {plugin_base.root}: {exc}"
-                            raise _PluginValidationError(msg) from exc
+                            raise plugin_imports.PluginValidationError(msg) from exc
                         raise
                     plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
                     continue
@@ -209,9 +207,7 @@ def isolated_plugin_runtime(
         previous_snapshot = capture_tool_registry_snapshot()
         previous_skill_roots = tuple(get_plugin_skill_roots())
         previous_manifest_cache = plugin_imports._PLUGIN_CACHE.copy()
-        previous_package_roots = {
-            cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
-        }
+        previous_package_roots = _cached_package_roots()
         try:
             _clear_plugin_reload_caches()
             _evict_synthetic_plugin_subtrees(previous_package_roots)
@@ -221,9 +217,7 @@ def isolated_plugin_runtime(
                 skip_broken_plugins=skip_broken_plugins,
             )
         finally:
-            current_package_roots = {
-                cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
-            }
+            current_package_roots = _cached_package_roots()
             _cancel_plugin_module_tasks(current_package_roots)
             # This also restores _MODULE_IMPORT_CACHE and the prior synthetic modules.
             restore_tool_registry_snapshot(previous_snapshot)
@@ -232,7 +226,6 @@ def isolated_plugin_runtime(
             plugin_imports._PLUGIN_CACHE.update(previous_manifest_cache)
             _clear_configured_plugin_roots_cache()
             _clear_oauth_provider_cache_after_plugin_change()
-            clear_tool_schema_cache()
 
 
 def get_configured_plugin_roots(
@@ -251,7 +244,7 @@ def get_configured_plugin_roots(
             continue
         try:
             roots.append(plugin_imports._resolve_plugin_root(plugin_entry.path, runtime_paths))
-        except _PluginValidationError:
+        except plugin_imports.PluginValidationError:
             continue
     configured_roots = tuple(dict.fromkeys(roots))
     if len(_CONFIGURED_PLUGIN_ROOT_CACHE) >= _CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE:
@@ -293,7 +286,7 @@ def prepare_plugin_reload(
 ) -> _PreparedPluginReload:
     """Build one fresh plugin snapshot without mutating the live runtime."""
     with locked_tool_registry_state():
-        package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
+        package_roots = _cached_package_roots()
         previous_snapshot = capture_tool_registry_snapshot()
         previous_plugin_skill_roots = tuple(get_plugin_skill_roots())
         try:
@@ -320,9 +313,7 @@ def apply_prepared_plugin_reload(
     """Commit one previously prepared plugin runtime snapshot."""
     with locked_tool_registry_state():
         if cancel_existing_tasks:
-            package_roots = {
-                cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
-            }
+            package_roots = _cached_package_roots()
             cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
         restore_tool_registry_snapshot(prepared_reload.tool_registry_snapshot)
         set_plugin_skill_roots(prepared_reload.plugin_skill_roots)
@@ -340,7 +331,7 @@ def reload_plugins(
     skip_broken_plugins: bool = False,
 ) -> PluginReloadResult:
     """Tear down the live plugin runtime and rebuild it from the current config."""
-    package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
+    package_roots = _cached_package_roots()
     cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
     prepared_reload = prepare_plugin_reload(
         config,
@@ -351,6 +342,11 @@ def reload_plugins(
         prepared_reload,
         cancelled_task_count=cancelled_task_count,
     )
+
+
+def _cached_package_roots() -> set[str]:
+    """Return the synthetic top-level package of every plugin module imported so far."""
+    return {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
 
 
 def _cancel_plugin_module_tasks(package_roots: set[str]) -> int:
@@ -388,7 +384,6 @@ def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
 
 def _clear_plugin_reload_caches() -> None:
     """Drop cached plugin manifests and imported plugin modules before one rebuild."""
-    clear_tool_schema_cache()
     _clear_configured_plugin_roots_cache()
     plugin_imports._PLUGIN_CACHE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.clear()
@@ -408,12 +403,12 @@ def _materialize_plugin(
     plugin_order: int,
 ) -> _Plugin:
     tools_module = load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
-    hooks_module_path = plugin.hooks_module_path or plugin.tools_module_path
+    # Without its own hooks module, a plugin's hooks live in its tools module.
     hooks_module = (
-        load_plugin_module(plugin.name, plugin.root, hooks_module_path, kind="hooks") if hooks_module_path else None
+        tools_module
+        if plugin.hooks_module_path is None
+        else load_plugin_module(plugin.name, plugin.root, plugin.hooks_module_path, kind="hooks")
     )
-    if hooks_module is None and plugin.hooks_module_path is None:
-        hooks_module = tools_module
     discovered_hooks = tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else ()
     discovered_automations = tuple(iter_module_automations(hooks_module)) if hooks_module is not None else ()
     return _Plugin(
@@ -430,31 +425,19 @@ def _materialize_plugin(
     )
 
 
-def _prepare_plugin_tool_module_reload(
-    module_name: str,
-) -> dict[str, dict[str, ToolMetadata]]:
-    """Snapshot one tool module's cached registrations before reload."""
-    # Nested plugin roots can import one physical file under different owners.
-    # Only the owner being re-executed is replacing its registrations.
-    previous_registrations = snapshot_plugin_tool_registrations(module_name)
-    clear_plugin_tool_registrations(module_name)
-    return {module_name: previous_registrations}
-
-
 def _restore_failed_plugin_tool_module_reload(
     module_path: Path,
     module_name: str,
     cached: plugin_imports._ModuleCacheEntry | None,
     previous_module: ModuleType | None,
-    previous_registrations_by_module_name: dict[str, dict[str, ToolMetadata]],
+    previous_registrations: dict[str, ToolMetadata],
 ) -> None:
     """Restore cached tool registrations and module imports after one failed reload."""
     if previous_module is None:
         sys.modules.pop(module_name, None)
     else:
         sys.modules[module_name] = previous_module
-    for restored_module_name, registrations in previous_registrations_by_module_name.items():
-        restore_plugin_tool_registrations(restored_module_name, registrations)
+    restore_plugin_tool_registrations(module_name, previous_registrations)
     if cached is not None:
         plugin_imports._MODULE_IMPORT_CACHE[module_path] = cached
     else:
@@ -479,22 +462,24 @@ def load_plugin_module(
     except OSError as exc:
         msg = f"Failed to stat plugin {kind} module {module_path}: {exc}"
         logger.exception("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
-        raise _PluginValidationError(msg) from exc
+        raise plugin_imports.PluginValidationError(msg) from exc
 
     module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path)
     cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_path)
     if cached is not None and cached.mtime == mtime and cached.module_name == module_name:
         return cached.module
 
-    previous_registrations_by_module_name = _prepare_plugin_tool_module_reload(module_name)
-
+    # Nested plugin roots can import one physical file under different owners.
+    # Only the owner being re-executed is replacing its registrations.
+    previous_registrations = snapshot_plugin_tool_registrations(module_name)
+    clear_plugin_tool_registrations(module_name)
     previous_module = sys.modules.get(module_name)
 
     prepared_module = plugin_imports._prepare_module(plugin_name, plugin_root, module_path, module_name)
     if prepared_module is None:
         msg = f"Failed to load plugin {kind} module: {module_path}"
         logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
-        raise _PluginValidationError(msg)
+        raise plugin_imports.PluginValidationError(msg)
     module, _, previous_packages = prepared_module
 
     try:
@@ -508,13 +493,13 @@ def load_plugin_module(
             module_name,
             cached,
             previous_module,
-            previous_registrations_by_module_name,
+            previous_registrations,
         )
         plugin_imports._restore_plugin_package_chain(previous_packages)
         _raise_if_host_control_exception(exc)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
-        raise _PluginValidationError(msg) from exc
+        raise plugin_imports.PluginValidationError(msg) from exc
 
     plugin_imports._MODULE_IMPORT_CACHE[module_path] = plugin_imports._ModuleCacheEntry(
         mtime=mtime,

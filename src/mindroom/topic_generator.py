@@ -5,17 +5,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import nio
-from agno.agent import Agent
-from agno.run.base import RunStatus
 from pydantic import BaseModel, Field
 
-from mindroom.ai_runtime import cached_agent_run
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.entity_resolution import configured_routable_entity_names_for_room
 from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_state_event
-from mindroom.providers import model_loading
+from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -57,18 +55,7 @@ async def generate_room_topic_ai(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str | None:
-    """Generate a contextual topic for a room using AI based on its purpose and configured entities.
-
-    Args:
-        room_key: The room key/alias (e.g., 'dev', 'analysis', 'lobby')
-        room_name: Display name for the room
-        config: Configuration with agent settings
-        runtime_paths: Explicit runtime context for model selection and session scoping
-
-    Returns:
-        A contextual topic string for the room
-
-    """
+    """Generate a contextual topic for a room from its key, name, and configured agents and teams, or None on failure."""
     configured_entity_list = ", ".join(
         _configured_entity_display_names_for_room(room_key, config, runtime_paths),
     )
@@ -106,32 +93,14 @@ Examples:
 
 Generate the topic:"""
 
-    model = model_loading.get_model_instance(config, runtime_paths, "default")
-
-    agent = Agent(
-        name="TopicGenerator",
-        role="Generate contextual room topics",
-        model=model,
-        output_schema=_RoomTopic,
-        telemetry=False,
-    )
-
-    session_id = f"topic_{room_key}"
+    provider = build_model_provider(config, runtime_paths, "default")
     try:
-        response = await cached_agent_run(
-            agent=agent,
-            run_input=prompt,
-            session_id=session_id,
-        )
+        response = await complete_prompt(provider, prompt, role="Generate contextual room topics", schema=_RoomTopic)
     except Exception:
-        logger.exception("room_topic_generation_failed", room_key=room_key, session_id=session_id)
+        logger.exception("room_topic_generation_failed", room_key=room_key)
         return None
-    await record_system_usage(response, runtime_paths=runtime_paths, kind="room_topic")
+    await record_system_usage(response.record, runtime_paths=runtime_paths, kind="room_topic")
     content = response.content
-    if response.status == RunStatus.error:
-        # Agno returns a provider failure as the run's content, which must never become the topic.
-        logger.warning("room_topic_generation_failed", room_key=room_key, session_id=session_id, error=str(content))
-        return None
     if not isinstance(content, _RoomTopic):
         logger.warning(
             "room_topic_generation_unexpected_type",
@@ -154,18 +123,8 @@ async def ensure_room_has_topic(
 ) -> bool:
     """Ensure a room has a topic, using the configured description or generating one if needed.
 
-    Args:
-        client: Matrix client
-        room_id: The room ID
-        room_key: The room key/alias
-        room_name: Display name for the room
-        config: Configuration with agent settings
-        runtime_paths: Explicit runtime context for topic generation
-        snapshot: Complete pass-local room state, if already read by reconciliation
-
-    Returns:
-        True if topic was set or already exists, False on error
-
+    ``snapshot`` is the complete pass-local room state when reconciliation already read it. Returns True when the
+    topic was set or already exists, and False on error.
     """
     response = await read_state_event(client, room_id, "m.room.topic", snapshot=snapshot)
     if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("topic"):

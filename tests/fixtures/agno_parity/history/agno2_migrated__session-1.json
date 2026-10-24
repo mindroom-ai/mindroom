@@ -1,0 +1,651 @@
+{
+  "store": "agno2_migrated",
+  "session_id": "session-1",
+  "get_messages": {
+    "all": {
+      "params": {},
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000077",
+          "content": "q1",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000078",
+          "content": "a1",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "last_run": {
+      "params": {
+        "last_n_runs": 1
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "last_two_runs": {
+      "params": {
+        "last_n_runs": 2
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "no_runs": {
+      "params": {
+        "last_n_runs": 0
+      },
+      "messages": []
+    },
+    "limit_1": {
+      "params": {
+        "limit": 1
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "limit_3": {
+      "params": {
+        "limit": 3
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "limit_4": {
+      "params": {
+        "limit": 4
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "last_three_runs_limit_5": {
+      "params": {
+        "last_n_runs": 3,
+        "limit": 5
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000078",
+          "content": "a1",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "skip_prompt_roles": {
+      "params": {
+        "skip_roles": [
+          "system",
+          "developer"
+        ]
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000077",
+          "content": "q1",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000078",
+          "content": "a1",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "every_status_limit_6": {
+      "params": {
+        "skip_statuses": [],
+        "limit": 6
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000077",
+          "content": "q1",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000078",
+          "content": "a1",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "every_status": {
+      "params": {
+        "skip_statuses": []
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000077",
+          "content": "q1",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000078",
+          "content": "a1",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    }
+  },
+  "filter_tool_calls": {
+    "all/max_tool_calls_0": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 0,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000077",
+          "content": "q1",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000078",
+          "content": "a1",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "all/max_tool_calls_1": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000077",
+          "content": "q1",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000078",
+          "content": "a1",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "all/max_tool_calls_2": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 2,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000077",
+          "content": "q1",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000078",
+          "content": "a1",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    },
+    "every_status/max_tool_calls_1": {
+      "selection": "every_status",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000077",
+          "content": "q1",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000078",
+          "content": "a1",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000079",
+          "content": "q2",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007a",
+          "content": "a2",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007b",
+          "content": "q3",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1788430272
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000007c",
+          "content": "a3",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "created_at": 1788430272
+        }
+      ]
+    }
+  }
+}

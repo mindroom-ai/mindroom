@@ -1,44 +1,32 @@
 """The final model request of a response that counts toward skill learning, kept for the review to fork.
 
-Like Hermes' review fork, the review replays that request with its tools unchanged and appends the review prompt,
-so the provider serves the conversation from its prompt cache. Only the ordinary response path records requests, and
-it builds its agent and model for that one response, so the review owns the model once the response has ended.
+Like Hermes' review fork, the review replays that request with its request settings unchanged and appends the review
+prompt. Its tools are the definitions the run's functions declare, so the provider serves the conversation from its
+prompt cache when the request offered those same definitions; the fork of a request that offered a wait budget for
+calls that could become jobs differs in its tools and misses the cache. Only the ordinary response path records
+requests, and it builds its provider for that one response, so the review owns the provider once the response has
+ended.
 """
 
 from __future__ import annotations
 
 import copy
-from contextlib import nullcontext
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
-
-from agno.compression.manager import CompressionManager
-from agno.run.agent import RunOutput
-
-from mindroom.agno_compat_model_hooks import temporary_response_observer
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from contextlib import AbstractContextManager
-
-    from agno.models.base import Model
-    from agno.models.message import Message
-    from agno.tools.function import Function
-    from pydantic import BaseModel
+    from mindroom.agent_loop.model_loop import LoopEndHook, LoopState
+    from mindroom.llm.provider import ModelProvider, ModelRequest
 
 
 @dataclass(frozen=True)
 class CapturedRequest:
-    """One response loop's last model request, whose messages end with the model's final answer."""
+    """One run's last model request, its messages continued with the model's final answer."""
 
-    model: Model
+    model: ModelProvider
     model_name: str
     run_id: str
-    messages: tuple[Message, ...]
-    tools: tuple[Function | dict[str, Any], ...]
-    tool_choice: str | dict[str, Any] | None
-    response_format: dict[str, Any] | type[BaseModel] | None
-    # Agents that compress tool results sent the compressed text, which the fork must send the same way.
-    compressed_tool_results: bool
+    request: ModelRequest
 
 
 @dataclass
@@ -48,37 +36,32 @@ class SkillReviewCapture:
     latest: CapturedRequest | None = None
 
 
-def observe_final_request(
-    capture: SkillReviewCapture | None,
-    model: Model | None,
+def capture_final_request(
+    capture: SkillReviewCapture,
+    model: ModelProvider,
     *,
     run_id: str,
     model_name: str,
-) -> AbstractContextManager[None]:
-    """Record one primary attempt's final request when its response counts toward skill learning.
+) -> LoopEndHook:
+    """Return the loop-end hook that records one primary attempt's final request for the skill review.
 
     Each attempt names its own configured ``model_name``, because a same-turn continuation can switch models within one
-    response.
+    response. The request keeps the run's own messages and tool definitions, as its functions declare them: what a
+    pre-request hook projected for that request alone, such as the approval receipt or the wait budget job admission
+    accepts, belongs to the run's own calls, and the review answers its calls with other functions.
     """
-    if capture is None or model is None:
-        return nullcontext()
 
-    def record(kwargs: dict[str, object]) -> None:
-        run_response = kwargs.get("run_response")
-        messages = kwargs.get("messages")
-        if not isinstance(run_response, RunOutput) or run_response.run_id != run_id or not isinstance(messages, list):
-            return
-        compression = kwargs.get("compression_manager")
+    def record(state: LoopState, request: ModelRequest) -> None:
+        # The run keeps using its messages after the loop, so copies keep the conversation exactly as it ended.
+        messages = tuple(copy.copy(message) for message in state.messages)
         capture.latest = CapturedRequest(
             model=model,
             model_name=model_name,
             run_id=run_id,
-            # The run keeps using these messages after the loop, so copies keep the request exactly as sent.
-            messages=tuple(copy.copy(message) for message in cast("list[Message]", messages)),
-            tools=tuple(cast("list[Function | dict[str, Any]]", kwargs.get("tools") or [])),
-            tool_choice=cast("str | dict[str, Any] | None", kwargs.get("tool_choice")),
-            response_format=cast("dict[str, Any] | type[BaseModel] | None", kwargs.get("response_format")),
-            compressed_tool_results=isinstance(compression, CompressionManager) and compression.compress_tool_results,
+            request=replace(request, messages=messages, tools=state.offered.specs()),
         )
 
-    return temporary_response_observer(model, record)
+    return record
+
+
+__all__ = ["CapturedRequest", "SkillReviewCapture", "capture_final_request"]

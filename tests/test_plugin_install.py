@@ -339,8 +339,10 @@ def test_plugins_install_cli_reports_failure_without_traceback(
     )
 
     assert result.exit_code == 1
-    assert "Plugin install failed:" in result.stdout
-    assert "plugin exploded" in result.stdout
+    # Rich wraps the long staging path in the message, so compare on whitespace-collapsed output.
+    output = " ".join(result.stdout.split())
+    assert "Plugin install failed:" in output
+    assert "plugin exploded" in output
     assert "Traceback (most recent call last)" not in result.output
 
 

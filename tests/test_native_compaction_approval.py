@@ -1,343 +1,309 @@
-"""Approval reconstruction preserves the paused provider's native replay policy."""
+"""An approval resume sends the native replay policy the paused request ran with, when its route still holds.
+
+Under that policy the request replays the stored checkpoint in place of the transcript it covers. The agent cases
+resume a stored paused run; the team case pauses a ``squad`` turn on its checker's approval and resumes it.
+"""
 
 from __future__ import annotations
 
 import json
-from contextlib import nullcontext
-from copy import deepcopy
-from types import SimpleNamespace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
 
-import httpx
 import pytest
-from agno.agent import Agent
-from agno.db.sqlite import SqliteDb
-from agno.session import TeamSession
-from agno.team import Team
-from agno.tools.function import Function
-from openai import AsyncOpenAI
 
-from mindroom.event_journal import ApprovalCall
-from mindroom.history.session_context import ScopeSessionContext
+from mindroom import agents
+from mindroom.approval.resume import ResumeDecisions, ResumeRunner
+from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.main import Config
+from mindroom.config.models import CompactionConfig
+from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
-from mindroom.providers.openai_models import MindRoomOpenAIResponses
-from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
-from mindroom.session_storage.agent_storage import create_session_storage, save_runs
-from mindroom.team_exact_members import ResolvedExactTeamMembers
-from mindroom.teams import TeamMode, _TeamStreamPresentation, continue_paused_team_run
-from mindroom.tool_system.runtime_context import ToolDispatchContext
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TurnCompleted
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, replay_basis
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import runtime_paths_for, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot, _config, _noop_typing
-from tests.test_openai_native_compaction import _ANSWER, _CALL, _CHECKPOINT, _REASONING, _event, _response
-from tests.test_team_response import _build_test_config
+from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.history_helpers import _team_session, record_native_checkpoint
+from tests.identity_helpers import entity_ids
+from tests.providers.openai_family_support import responses_adapter
+from tests.team_turn_helpers import SESSION_ID, delegate, member_approval, squad_turn
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
     from pathlib import Path
 
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.llm.provider import ModelRequest, StreamEvent
 
-async def _resume_approval(
-    actor: Agent | Team,
-    *,
-    identity: ToolExecutionIdentity,
-    run_id: str,
-    tool_call_id: str,
-    tmp_path: Path,
-) -> CompletedApprovalRun | PausedAttempt:
-    """Enter the production agent or team approval boundary with a fresh actor."""
-    calls = (
-        ApprovalCall(
-            tool_call_id=tool_call_id,
-            tool_name="lookup",
-            invoking_agent=identity.agent_name,
-            expires_at_ns=2**62,
-        ),
+pytestmark = pytest.mark.asyncio
+
+_TRANSCRIPT = "Original canonical transcript"
+_CHECKPOINT = {"type": "compaction", "id": "cmp_1", "encrypted_content": "checkpoint-bytes"}
+
+
+@dataclass(frozen=True)
+class _Compaction:
+    """A route that compacts natively; ``route`` is what the rebuilt model would replay."""
+
+    route: str
+
+    def native_compaction_settings(
+        self,
+        *,
+        threshold: int | None,
+        history_generation: str,
+        allow_authored: bool,
+    ) -> NativeCompactionReplay | None:
+        del history_generation, allow_authored
+        if threshold is None:
+            return None
+        return NativeCompactionReplay(route=self.route, threshold=threshold)
+
+
+class _RecordingModel(ScriptedModel):
+    """A scripted provider that records each response's replay policy on it, as the Responses adapter does."""
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Yield the next scripted turn, its completed response carrying the request's native settings."""
+        async for event in super().stream(request):
+            if isinstance(event, TurnCompleted):
+                event.message.provider_data = {"mindroom_portable_replay": request.portable_replay}
+                record_native_checkpoint(event.message, [], request.native_compaction)
+            yield event
+
+
+def _compacting_model(
+    route: str = "route-a",
+    turns: Sequence[Sequence[ScriptStep]] = (answer("Ready"),),
+) -> _RecordingModel:
+    """Return a scripted provider whose route compacts natively and records each response's replay policy."""
+    return _RecordingModel(
+        list(turns),
+        capabilities=Capabilities(native_compaction=True),
+        native_history_route=_Compaction(route),
     )
-    if isinstance(actor, Agent):
-        continuation = approval_continuation(
-            approval_id="approval-native",
-            run_id=run_id,
-            entity_name=identity.agent_name,
-            calls=calls,
-            execution_identity={},
-            state="claimed",
-        )
-        runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-        with (
-            patch.object(
-                runner.deps.knowledge_access,
-                "resolve_for_agent_async",
-                new_callable=AsyncMock,
-                return_value=SimpleNamespace(knowledge=None),
+
+
+def _paused_record(*, saved: dict[str, object] | None, portable: object = None) -> RunRecord:
+    """Return a run paused on ``lookup`` whose last response recorded the given native provenance."""
+    provider_data: dict[str, object] = {}
+    if saved is not None:
+        provider_data[NATIVE_CHECKPOINT_KEY] = saved
+    if portable is not None:
+        provider_data["mindroom_portable_replay"] = portable
+    tool = ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={}, requires_confirmation=True)
+    return RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        messages=[
+            Message(role="system", content="You are General."),
+            Message(role="user", content="Look up the port"),
+            Message(
+                role="assistant",
+                tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+                provider_data=provider_data,
             ),
-            patch("mindroom.approval.execution.create_agent", return_value=actor),
-            patch("mindroom.approval.execution.typing_indicator", _noop_typing),
-            patch("mindroom.approval.execution.close_agent_runtime_state_dbs"),
-        ):
-            result = await runner._approval_execution.continue_run(
-                continuation,
-                paused_answer=PausedAnswer(),
-                execution_identity=identity,
-                tool_dispatch=ToolDispatchContext(execution_identity=identity),
-                decisions={tool_call_id: False},
-                denial_reasons={tool_call_id: None},
-                tool_trace_collector=[],
-                typing_log_context={},
-                progress=None,
-            )
-    else:
-        config = _build_test_config()
-        members = ResolvedExactTeamMembers(
-            requested_agent_names=[],
-            agents=[],
-            display_names=[],
-            materialized_agent_names=set(),
-            failed_agent_names=[],
-        )
-        session = await actor.aget_session(session_id="session-1", user_id="@user:localhost")
-        assert isinstance(session, TeamSession)
-        assert actor.db is not None
-        scope = ScopeSessionContext(
-            scope=HistoryScope(kind="team", scope_id=identity.agent_name),
-            storage=actor.db,
-            session=session,
-            session_id="session-1",
-            storage_factory=lambda: actor.db,
-        )
-        with (
-            patch("mindroom.teams.materialize_exact_team_members", return_value=members),
-            patch("mindroom.teams.open_resolved_scope_session_context", return_value=nullcontext(scope)),
-            patch("mindroom.teams.build_materialized_team_instance", return_value=actor),
-            patch("mindroom.teams.close_team_runtime_state_dbs"),
-        ):
-            result = await continue_paused_team_run(
-                member_names=(),
-                approval_calls=calls,
-                mode=TeamMode.COORDINATE,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                execution_identity=identity,
-                session_id="session-1",
-                run_id=run_id,
-                user_id="@user:localhost",
-                configured_team_name=identity.agent_name,
-                model_name="default",
-                decisions={tool_call_id: False},
-                denial_reasons={tool_call_id: None},
-                refresh_scheduler=None,
-                prior_presentation_state=_TeamStreamPresentation.new([], [], show_tool_calls=True).to_state(),
-                progress=None,
-            )
-
-    return result
+        ],
+        tools=[tool],
+        requirements=[RunRequirement(tool)],
+    )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("entity", ["agent", "team"])
-@pytest.mark.parametrize("disable_before_pause", [False, True])
-async def test_rebuilt_approval_resumes_latest_native_policy(  # noqa: PLR0915
+def _checkpointed_messages() -> list[Message]:
+    """Return an earlier finished exchange whose answer route-a compacted natively, after the transcript it covers."""
+    checkpoint = {"route": "route-a", "threshold": 1024, "checkpoint_prefix": True, "items": [_CHECKPOINT]}
+    return [
+        Message(role="user", content=_TRANSCRIPT),
+        Message(role="assistant", content="Noted.", provider_data={NATIVE_CHECKPOINT_KEY: checkpoint}),
+    ]
+
+
+def _checkpointed_run() -> RunRecord:
+    """Return an earlier finished run of ``general`` holding the checkpointed exchange."""
+    return RunRecord(
+        run_id="run-0",
+        agent_id="general",
+        session_id="session-1",
+        status=RunStatus.completed,
+        messages=_checkpointed_messages(),
+    )
+
+
+def _responses_input(tmp_path: Path, request: ModelRequest) -> list[Any]:
+    """Return the ``input`` a Responses route sends for ``request``, the projection that replays checkpoints."""
+    return responses_adapter(tmp_path)._request_kwargs(request)["input"]
+
+
+async def _resume(
     tmp_path: Path,
-    entity: str,
+    monkeypatch: pytest.MonkeyPatch,
+    model: ScriptedModel,
+    paused: RunRecord,
+    *,
+    history: tuple[RunRecord, ...] = (),
+) -> AgentBuild:
+    paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": []},
+                "memory": {"backend": "none"},
+                "agents": {"general": {"display_name": "General", "tools": ["calculator"]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+            },
+        ),
+        paths,
+    )
+    entity_ids(config, paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    store = create_session_storage("general", config, paths, identity)
+    build = agents.create_agent("general", config, paths, identity, history_storage=store)
+    session = new_scope_session(session_id="session-1", scope_id="general", is_team=False)
+    for run in (*history, paused):
+        store.save_run(session, run, record_usage=False)
+    runner = ResumeRunner(
+        build=build,
+        config=config,
+        runtime_paths=paths,
+        agent_name="general",
+        model_name="default",
+        store=store,
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="general"),
+        user_id=identity.requester_id,
+    )
+    await runner.continue_run(paused, ResumeDecisions(denied={"call-1": "Declined"}), None)
+    return build
+
+
+@pytest.mark.parametrize("disable_before_pause", [False, True])
+async def test_a_rebuilt_approval_resumes_the_paused_requests_native_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     disable_before_pause: bool,
 ) -> None:
-    """Losing settings on rebuild replays the full prefix instead of the checkpoint."""
-    requests: list[dict[str, Any]] = []
-    executed: list[str] = []
+    """The resume compacts at the paused request's threshold; a request that ran without compaction stays without.
 
-    def lookup() -> str:
-        executed.append("lookup")
-        return "Port 4321"
+    Compacting, it replays the stored checkpoint in place of the transcript it covers; without, the full transcript.
+    """
+    saved = {"route": "route-a", "threshold": None if disable_before_pause else 1024}
+    model = _compacting_model()
 
-    def respond(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        requests.append(payload)
-        if payload.get("stream"):
-            events = _event("response.output_text.delta", delta="Ready", output_index=0, content_index=0)
-            events += _event("response.completed", response=_response([_ANSWER]))
-            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=events)
-        return httpx.Response(200, json=_response([_CHECKPOINT, _ANSWER] if len(requests) == 1 else [_CALL]))
+    await _resume(tmp_path, monkeypatch, model, _paused_record(saved=saved), history=(_checkpointed_run(),))
 
-    name = "general" if entity == "agent" else "research"
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name=name,
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-    config = _config(tmp_path)
-    db = (
-        create_session_storage(name, config, runtime_paths_for(config), identity)
-        if entity == "agent"
-        else SqliteDb(db_file=str(tmp_path / "approval.db"))
-    )
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
-        client = AsyncOpenAI(api_key="test-key", http_client=http_client)
-
-        def build_actor(*, threshold: int | None) -> Agent | Team:
-            model = MindRoomOpenAIResponses(id="gpt-6-astra", async_client=client, store=False)
-            model.configure_native_compaction(threshold=threshold)
-            kwargs = {
-                "id": name,
-                "model": model,
-                "db": db,
-                "tools": [Function(name="lookup", entrypoint=lookup, requires_confirmation=True)],
-                "add_history_to_context": True,
-                "store_history_messages": False,
-                "telemetry": False,
-            }
-            return Agent(**kwargs) if entity == "agent" else Team(members=[], **kwargs)
-
-        actor = build_actor(threshold=1024)
-        await actor.arun("Original canonical transcript", session_id="session-1", user_id="@user:localhost")
-        actor = build_actor(threshold=None if disable_before_pause else 1024)
-        paused = await actor.arun("Look up the port", session_id="session-1", user_id="@user:localhost")
-        requirement = (paused.requirements or [])[0]
-        assert requirement.tool_execution is not None
-        tool_call_id = requirement.tool_execution.tool_call_id
-        assert tool_call_id is not None
-        rebuilt = build_actor(threshold=None)
-
-        result = await _resume_approval(
-            rebuilt,
-            identity=identity,
-            run_id=paused.run_id,
-            tool_call_id=tool_call_id,
-            tmp_path=tmp_path,
-        )
-
-        assert isinstance(result, CompletedApprovalRun)
-        assert executed == []
-        assert len(requests) == 3
-        resumed = requests[-1]
-        replay = resumed["input"]
-        if disable_before_pause:
-            assert "context_management" not in resumed
-            assert _CHECKPOINT not in replay
-            assert "Original canonical transcript" in json.dumps(replay)
-        else:
-            assert resumed.get("context_management") == [{"type": "compaction", "compact_threshold": 1024}]
-            assert _CHECKPOINT in replay
-            assert "Original canonical transcript" not in json.dumps(replay)
-        assert sum(item.get("type") == "function_call" for item in replay) == 1
-        assert sum(item.get("type") == "function_call_output" for item in replay) == 1
-        session = await rebuilt.aget_session(session_id="session-1", user_id="@user:localhost")
-        assert session is not None
-        assert len(session.runs or []) == 2
-        assert any(
-            message.content == "Original canonical transcript"
-            for run in session.runs or []
-            for message in run.messages or []
-        )
-    db.close()
+    [request] = model.requests
+    expected = None if disable_before_pause else NativeCompactionReplay(route="route-a", threshold=1024)
+    assert request.native_compaction == expected
+    replay = _responses_input(tmp_path, request)
+    assert (_CHECKPOINT in replay) is not disable_before_pause
+    assert (_TRANSCRIPT in json.dumps(replay)) is disable_before_pause
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("entity", ["agent", "team"])
-@pytest.mark.parametrize("portable_before_pause", [False, True], ids=["unbounded", "bounded"])
-@pytest.mark.parametrize("provenance", ["saved", "legacy", "malformed"])
-async def test_rebuilt_approval_preserves_reasoning_context(  # noqa: PLR0915
+async def test_a_route_change_on_rebuild_replays_without_the_stored_checkpoints(
     tmp_path: Path,
-    entity: str,
-    provenance: str,
-    *,
-    portable_before_pause: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Approval rebuilds must retain stored continuation or complete canonical reasoning."""
-    requests: list[dict[str, Any]] = []
-    executed: list[str] = []
+    """A rebuilt model on another route cannot replay the paused route's checkpoints, so the resume sends none."""
+    model = _compacting_model("route-b")
+    paused = _paused_record(saved={"route": "route-a", "threshold": 1024})
 
-    def lookup() -> str:
-        executed.append("lookup")
-        return "Port 4321"
+    await _resume(tmp_path, monkeypatch, model, paused, history=(_checkpointed_run(),))
 
-    def respond(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        requests.append(payload)
-        if len(requests) == 1:
-            return httpx.Response(200, json=_response([_REASONING, _CALL]))
-        events = _event("response.output_text.delta", delta="Ready", output_index=0, content_index=0)
-        events += _event("response.completed", response=_response([_ANSWER]))
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=events)
+    [request] = model.requests
+    assert request.native_compaction is None
+    replay = _responses_input(tmp_path, request)
+    assert _CHECKPOINT not in replay
+    assert _TRANSCRIPT in json.dumps(replay)
 
-    name = "general" if entity == "agent" else "research"
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name=name,
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
+
+@pytest.mark.parametrize(
+    ("portable", "expected"),
+    [(True, True), (False, False), (None, False), ("false", False)],
+    ids=["bounded", "unbounded", "legacy", "malformed"],
+)
+async def test_a_rebuilt_approval_keeps_the_paused_requests_replay_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    portable: object,
+    *,
+    expected: bool,
+) -> None:
+    """Portable replay follows the provenance the paused response recorded; without it, stored continuation holds."""
+    model = _compacting_model()
+
+    await _resume(tmp_path, monkeypatch, model, _paused_record(saved=None, portable=portable))
+
+    [request] = model.requests
+    assert request.portable_replay is expected
+
+
+@pytest.mark.usefixtures("squad_probe")
+async def test_a_team_approval_resumes_the_paused_leader_requests_native_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed leader request runs under its paused request's native policy and replays the same checkpoint.
+
+    The leader's route compacts at the team's threshold, and the team's earlier answer holds that route's checkpoint;
+    both leader requests replay it in place of the transcript it covers. The threshold the team's config holds at
+    resume differs from the paused request's, so the resumed request proves the policy is restored, not re-derived.
+    """
+    leader = _compacting_model(
+        turns=[delegate("call-team", "checker", "Touch it"), answer("The checker touched it.")],
     )
-    config = _config(tmp_path)
-    db = (
-        create_session_storage(name, config, runtime_paths_for(config), identity)
-        if entity == "agent"
-        else SqliteDb(db_file=str(tmp_path / "approval.db"))
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=(),
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous")), answer("Touched.")],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
-        client = AsyncOpenAI(api_key="test-key", http_client=http_client)
+    team.models["default"] = leader
+    team.config.models["default"].context_window = 200_000
+    team.config.defaults.compaction = CompactionConfig(threshold_tokens=30_000)
+    earlier = TeamRunRecord(
+        run_id="run-0",
+        team_id="squad",
+        status=RunStatus.completed,
+        messages=_checkpointed_messages(),
+    )
+    seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=[earlier]))
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    team.config.defaults.compaction = CompactionConfig(threshold_tokens=50_000)
 
-        def build_actor(*, portable: bool) -> Agent | Team:
-            model = MindRoomOpenAIResponses(
-                id="gpt-6-astra",
-                async_client=client,
-                store=True,
-                include=["reasoning.encrypted_content"],
-            )
-            model.configure_portable_replay(enabled=portable)
-            kwargs = {
-                "id": name,
-                "model": model,
-                "db": db,
-                "tools": [Function(name="lookup", entrypoint=lookup, requires_confirmation=True)],
-                "add_history_to_context": True,
-                "store_history_messages": False,
-                "telemetry": False,
-            }
-            return Agent(**kwargs) if entity == "agent" else Team(members=[], **kwargs)
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
 
-        actor = build_actor(portable=portable_before_pause)
-        paused = await actor.arun("Look up the port", session_id="session-1", user_id="@user:localhost")
-        requirement = (paused.requirements or [])[0]
-        assert requirement.tool_execution is not None
-        tool_call_id = requirement.tool_execution.tool_call_id
-        assert tool_call_id is not None
-        if provenance != "saved":
-            session = await actor.aget_session(session_id="session-1", user_id="@user:localhost")
-            assert session is not None
-            persisted = deepcopy(session.get_run(paused.run_id))
-            assert persisted is not None
-            latest = next(message for message in reversed(persisted.messages or []) if message.role == "assistant")
-            assert latest.provider_data is not None
-            latest.provider_data.pop("mindroom_portable_replay", None)
-            if provenance == "malformed":
-                latest.provider_data["mindroom_portable_replay"] = "false"
-            save_runs(db, session, [persisted])
-        result = await _resume_approval(
-            build_actor(portable=not portable_before_pause),
-            identity=identity,
-            run_id=paused.run_id,
-            tool_call_id=tool_call_id,
-            tmp_path=tmp_path,
-        )
-        assert isinstance(result, CompletedApprovalRun)
-        assert executed == []
-        assert len(requests) == 2
-        resumed = requests[-1]
-        assert resumed["store"] is True
-        assert sum(item.get("type") == "function_call_output" for item in resumed["input"]) == 1
-        if portable_before_pause:
-            assert "previous_response_id" not in resumed
-            assert _REASONING in resumed["input"]
-            assert sum(item.get("type") == "function_call" for item in resumed["input"]) == 1
-        else:
-            assert resumed["previous_response_id"] == "resp_done"
-            assert not any(item.get("type") in {"reasoning", "function_call"} for item in resumed["input"])
-    db.close()
+    assert isinstance(result, CompletedApprovalRun)
+    paused, resumed = leader.requests
+    assert paused.native_compaction == NativeCompactionReplay(
+        route="route-a",
+        threshold=30_000,
+        basis=replay_basis(None, [earlier]),
+    )
+    assert paused.portable_replay is True
+    assert (resumed.native_compaction, resumed.portable_replay) == (paused.native_compaction, paused.portable_replay)
+    for request in (paused, resumed):
+        replay = _responses_input(tmp_path, request)
+        assert _CHECKPOINT in replay
+        assert _TRANSCRIPT not in json.dumps(replay)

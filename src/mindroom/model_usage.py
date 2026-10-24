@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from agno.models.message import Message
+    from mindroom.llm.messages import Message
 
 
 def provider_reports_cache_tokens_outside_input(
@@ -90,9 +90,9 @@ def response_context_tokens(
         usage
         if isinstance(usage, dict)
         else {
-            "input_tokens": metrics.input_tokens,
-            "cache_read_tokens": metrics.cache_read_tokens,
-            "cache_write_tokens": metrics.cache_write_tokens,
+            "input_tokens": metrics.tokens.input_tokens,
+            "cache_read_tokens": metrics.tokens.cache_read_tokens,
+            "cache_write_tokens": metrics.tokens.cache_write_tokens,
         }
     )
     tokens = context_input_tokens_from_counts(

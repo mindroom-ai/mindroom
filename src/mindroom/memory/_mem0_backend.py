@@ -43,10 +43,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from agno.models.message import Message
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.messages import Message
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -375,7 +374,7 @@ class Mem0MemoryBackend:
                 await record_helper_usage(
                     run,
                     owner=owner,
-                    invocation_id=run.run_id or "",
+                    invocation_id=run.run_id,
                     kind="memory_extraction",
                     requester_id=requester_id,
                 )

@@ -3,23 +3,16 @@
 from __future__ import annotations
 
 from itertools import takewhile
-from typing import TYPE_CHECKING, cast
-
-from agno.db.base import SessionType
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
+from typing import TYPE_CHECKING
 
 from mindroom.history.storage import run_event_ids
+from mindroom.llm.runs import RunRecord, RunStatus
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agno.db.base import BaseDb
-    from agno.run.team import TeamRunOutput
-    from agno.run.workflow import WorkflowRunOutput
-    from agno.session.agent import AgentSession
-
     from mindroom.config.main import Config
+    from mindroom.session_storage.store import ConversationStore
 
 # Which of a room's events an agent saw redacted, or None until that agent's running bot has finished its first sync.
 type RedactedEventIds = Callable[[str, str, tuple[str, ...]], Awaitable[frozenset[str] | None]]
@@ -32,46 +25,32 @@ _DAY_SECONDS = 86_400
 _APPROVAL_GRACE_SECONDS = 3600
 
 
-def run_key(run: RunOutput) -> tuple[int, str]:
+def run_key(run: RunRecord) -> tuple[int, str]:
     """Return a run's position in its session."""
-    return (run.created_at or 0, run.run_id or "")
+    return (run.created_at, run.run_id)
 
 
-def updated_sessions(storage: BaseDb, agent_name: str, *, since: int) -> list[tuple[str, int]]:
+def updated_sessions(storage: ConversationStore, agent_name: str, *, since: int) -> list[tuple[str, int]]:
     """Return ``(session_id, updated_at)`` for the agent's conversations updated after ``since``, oldest first."""
-    # Agno filters by creation time only, so the update cursor is applied here.
-    sessions = cast(
-        "list[AgentSession]",
-        storage.get_sessions(
-            session_type=SessionType.AGENT,
-            component_id=agent_name,
-            sort_by="updated_at",
-            sort_order="asc",
-            include_runs=False,
-        ),
-    )
-    listed: list[tuple[str, int]] = []
-    for session in sessions:
-        updated_at = session.updated_at or session.created_at or 0
-        if updated_at > since and _WORKFLOW_SESSION_MARKER not in session.session_id:
-            listed.append((session.session_id, updated_at))
-    return listed
+    return [
+        (session_id, updated_at)
+        for session_id, updated_at in storage.list_updated_sessions("agent", agent_name, since=since)
+        if _WORKFLOW_SESSION_MARKER not in session_id
+    ]
 
 
-def session_runs(storage: BaseDb, session_id: str) -> list[RunOutput]:
+def session_runs(storage: ConversationStore, session_id: str) -> list[RunRecord]:
     """Return the session's top-level Matrix turns that finished or wait for approval, live and compacted, oldest first.
 
     A turn waiting for approval finishes in place later, so callers stop at it rather than skip it.
     """
     # A loaded session holds only the runs after the latest summary row, so the whole run log is read instead.
-    runs = cast("list[RunOutput | TeamRunOutput | WorkflowRunOutput]", storage.get_runs(session_id=session_id))
     return sorted(
         (
             run
-            for run in runs
-            if isinstance(run, RunOutput)
+            for run in storage.list_runs(session_id)
+            if isinstance(run, RunRecord)
             and run.parent_run_id is None
-            and run.run_id
             and run.status in (RunStatus.completed, RunStatus.paused)
             and (run.metadata or {}).get("room_id")
         ),
@@ -87,18 +66,18 @@ def _approval_window_seconds(config: Config) -> float:
     return days * _DAY_SECONDS + _APPROVAL_GRACE_SECONDS
 
 
-def finished_runs(runs: list[RunOutput], config: Config, *, now: float) -> tuple[list[RunOutput], float | None]:
+def finished_runs(runs: list[RunRecord], config: Config, *, now: float) -> tuple[list[RunRecord], float | None]:
     """Return the finished runs before the first one that can still finish later, and when that one stops waiting.
 
     A turn waiting for approval finishes in place with its original, earlier creation time, so nothing after it is
     read yet; once its approval window has passed it can no longer finish and is skipped.
     """
     approval_window = _approval_window_seconds(config)
-    finished: list[RunOutput] = []
+    finished: list[RunRecord] = []
     for run in runs:
         if run.status == RunStatus.paused:
             # Its newest message is the call waiting for approval, whose card expires counting from when it was posted.
-            asked_at = max([run.created_at or 0, *((message.created_at or 0) for message in run.messages or [])])
+            asked_at = max([run.created_at, *(message.created_at for message in run.messages)])
             expires_at = asked_at + approval_window
             if now < expires_at:
                 return finished, expires_at
@@ -108,10 +87,10 @@ def finished_runs(runs: list[RunOutput], config: Config, *, now: float) -> tuple
 
 
 async def unredacted_runs(
-    runs: list[RunOutput],
+    runs: list[RunRecord],
     agent_name: str,
     redacted_event_ids: RedactedEventIds,
-) -> list[RunOutput] | None:
+) -> list[RunRecord] | None:
     """Return the runs before the first that derives from a redacted event, or None while the agent cannot tell.
 
     ``runs`` are one conversation's, oldest first. A redaction removes that turn and every later one, which may build

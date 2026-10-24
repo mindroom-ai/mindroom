@@ -405,6 +405,24 @@ def test_unsupported_queries_rejected(client: TestClient, query: dict[str, str])
     assert client.get(BASE + "/Users", params=query).status_code == 400
 
 
+@pytest.mark.parametrize(
+    ("headers", "status"),
+    [
+        ({"Content-Type": "Application/SCIM+JSON ; charset=utf-8"}, 400),
+        ({"Content-Type": "application/json;charset=utf-8"}, 400),
+        ({"Content-Type": "application/xml"}, 415),
+        ({}, 415),
+    ],
+)
+def test_the_request_media_type_ignores_parameters_and_case(
+    client: TestClient,
+    headers: dict[str, str],
+    status: int,
+) -> None:
+    """A body is read only for a JSON media type, however its parameters and case are written; a bad body is a 400."""
+    assert client.post(BASE + "/Users", content="{", headers=headers).status_code == status
+
+
 def test_limits_errors_discovery_and_groups(client: TestClient) -> None:
     """Discovery reports actual features and rejects unsupported provisioning surfaces."""
     assert (

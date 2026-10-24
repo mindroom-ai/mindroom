@@ -1014,7 +1014,6 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Display name**, **Role description**, **Model**, **Instructions**, and **Rooms**
 - **Memory backend** - inherit the global backend or override it per agent (`mem0`, `file`, or `none`)
 - **Tools** - configured tools (green badge) and tools that need no setup
-- **Learning** and **Learning mode** (`always` or `agentic`); see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/)
 - **Deferred tools** - open a checked tool's settings and enable **Defer until searched** (`defer`) or **Send on every request** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/))
 - **More settings** - every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
 
@@ -1289,7 +1288,6 @@ Not included:
         model: default
         rooms: [personal]
         include_default_tools: false
-        learning: false
         memory_backend: file
 
         instructions:
@@ -1714,16 +1712,14 @@ agents:
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
 | `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
 | `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
-| `learning` | bool | `null` | Enable [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning), a persistent profile of user preferences |
-| `learning_mode` | string | `null` | `always` learns after every turn; `agentic` lets the agent decide through a tool call |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
-| `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory but not `learning`. See [Memory](https://docs.mindroom.chat/memory/) |
+| `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory. See [Memory](https://docs.mindroom.chat/memory/) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
 | `knowledge_bases` | list | `[]` | Keys under top-level `knowledge_bases`, each at most once; see [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
 | `context_files` | list | `[]` | Workspace files preloaded into the prompt; see [File-Based Context Loading](#file-based-context-loading) |
 | `private` | object | `null` | Give each requester a separate copy of the agent's state; see [Private Instances](#private-instances) |
-| `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history` | | | See [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings) |
+| `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | | | See [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings) |
 | `compaction` | object | `defaults.compaction` | Per-agent compaction overrides; `enabled: false` turns automatic compaction off. See [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
 | `max_tool_calls_per_turn` | int, >= 1 | `null` | Tool calls one turn may execute. Further calls return a tool error, and after this many plus two model requests the turn ends with the text produced so far, which also stops loops of unknown or malformed tool calls |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages; see [Tool Calls During Streaming](https://docs.mindroom.chat/streaming/#tool-calls-during-streaming) |
@@ -1829,7 +1825,6 @@ The `defaults` section sets values every agent inherits unless it sets its own, 
 ```yaml
 defaults:
   tools: [scheduler]
-  learning_mode: agentic
   max_tool_calls_per_turn: 200
   worker_tools: [shell, file, python]
   enable_streaming: true
@@ -1841,12 +1836,9 @@ These defaults apply to each agent that leaves the same field unset:
 | Field | Default |
 |-------|---------|
 | `markdown` | `true` |
-| `learning` | `true` |
-| `learning_mode` | `always` |
 | `cheap_model` | `null`; ignored for an agent whose `model` is the same. See [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `knowledge_graph` | `false` |
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
-| `compress_tool_results` | `false` |
 | `compaction` | enabled; see [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
 | `max_tool_calls_per_turn` | `1000` |
 | `show_tool_calls` | `true` |
@@ -2324,13 +2316,34 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 
 ## Extra Kwargs
 
-`extra_kwargs` sets additional parameters on the underlying [Agno](https://docs.agno.com/) model class.
-Common options include:
+`extra_kwargs` sets provider-specific options for the model's requests and API client.
+Each provider accepts only the keys in the table below.
+A model with any other key fails to load with an `Unsupported extra_kwargs` error that names the unknown keys and lists the accepted ones.
+Retired Agno model settings that older configs still set, such as `retries`, load with a warning and are ignored.
 
-- `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
-- `temperature` - Sampling temperature
-- `max_tokens` - Maximum tokens in response
-- `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., [OpenRouter provider routing](#openrouter-provider-routing))
+- `base_url` sends requests to a custom endpoint, such as an OpenAI-compatible server.
+- `api_key` is the same as the model's `api_key` field.
+- `request_params` holds request body fields that MindRoom merges over its own.
+- `extra_body` adds JSON body fields, for example for [OpenRouter provider routing](#openrouter-provider-routing).
+- `client_params` passes options to the provider's API client.
+
+| Provider | Accepted keys |
+|----------|---------------|
+| `openai` with Chat Completions, `zai`, `llama_cpp` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_completion_tokens`, `max_retries`, `max_tokens`, `metadata`, `organization`, `presence_penalty`, `reasoning_effort`, `request_params`, `role_map`, `seed`, `service_tier`, `stop`, `store`, `strict_output`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user`, `verbosity` |
+| `azure` | The Chat Completions keys, plus `api_version`, `azure_endpoint`, `azure_deployment`, and `azure_ad_token` |
+| `openrouter` | The Chat Completions keys, plus `models`, `cache_system_prompt`, and `extended_cache_time` |
+| `deepseek` | The Chat Completions keys, plus `use_thinking` |
+| `kimi` | The Chat Completions keys, plus `kimi_home` and `prompt_cache_key` |
+| `groq` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_retries`, `max_tokens`, `presence_penalty`, `request_params`, `seed`, `stop`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user` |
+| `cerebras` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `max_completion_tokens`, `max_retries`, `parallel_tool_calls`, `repetition_penalty`, `request_params`, `strict_output`, `temperature`, `timeout`, `top_k`, `top_p` |
+| `openai` with Responses | `api_key`, `base_url`, `cache_system_prompt`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `include`, `max_output_tokens`, `max_retries`, `max_tool_calls`, `metadata`, `organization`, `parallel_tool_calls`, `reasoning`, `reasoning_effort`, `reasoning_summary`, `request_params`, `service_tier`, `store`, `strict_output`, `temperature`, `timeout`, `top_p`, `truncation`, `user`, `verbosity` |
+| `codex` | The Responses keys without `max_output_tokens` and `temperature`, which the Codex endpoint rejects, plus `codex_home`, `default_instructions`, `prompt_cache_key`, and `session_id` |
+| `anthropic` | `api_key`, `auth_token`, `betas`, `cache_system_prompt`, `client_params`, `context_management`, `default_headers`, `extended_cache_time`, `max_tokens`, `output_config`, `request_params`, `stop_sequences`, `temperature`, `thinking`, `timeout`, `top_k`, `top_p` |
+| `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `base_url`, `project_id`, and `region` |
+| `bedrock_claude` | The `anthropic` keys without `auth_token`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
+| `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `safety_settings`, `search`, `seed`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
+| `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `timeout` |
+| `synthetic` | `chars_per_second`, `chunk_chars`, `max_response_chars`, `min_response_chars`, `seed`, `tool_call_probability` (see [Built-In Synthetic Model](#built-in-synthetic-model)) |
 
 When a Claude response reaches `max_tokens`, its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 
@@ -2412,13 +2425,14 @@ Each decision logs `Cold cache model selected` with a `reason`: `no_earlier_repl
 
 A provider sometimes accepts a streamed request and then sends nothing more, which would leave the agent busy and queue every follow-up message behind it.
 MindRoom ends a streamed request when the provider sends no event for `stream_idle_timeout_seconds`.
-If nothing was streamed yet, MindRoom sends the request once more; a second silent attempt, or a stall after text already appeared, ends the turn with "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
+If nothing was streamed yet, MindRoom sends the request once more, unless a provider-hosted tool such as web search or code execution had started, since resending would run that tool again.
+A second silent attempt, or a stall after text appeared or such a tool started, ends the turn with "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 The limit measures the gap between provider events, so long replies and slow tool calls are unaffected.
 It applies only to streamed responses (`defaults.enable_streaming: true`, the default).
 
 By default the limit is 300 seconds for hosted providers on their built-in endpoint.
 Local servers can stay silent for minutes while a request waits in a queue or a model loads, so `ollama`, `llama_cpp`, and any model with a configured endpoint get no limit unless you set one.
-A configured endpoint is a `base_url` anywhere in `extra_kwargs` (such as `extra_kwargs.base_url` or `extra_kwargs.client_params.base_url`) or one read from `OPENAI_BASE_URL` or `ANTHROPIC_VERTEX_BASE_URL`.
+A configured endpoint is a `base_url` anywhere in `extra_kwargs` (such as `extra_kwargs.base_url` or `extra_kwargs.client_params.base_url`) or one read from `OPENAI_BASE_URL`, `GROQ_BASE_URL`, `CEREBRAS_BASE_URL`, or `ANTHROPIC_VERTEX_BASE_URL`.
 Set the limit explicitly for a hosted service behind a custom endpoint, such as OrcaRouter or the Z.ai coding endpoint.
 Endpoint variables that only a provider SDK reads, such as `ANTHROPIC_BASE_URL`, are not detected; set `0` when one points at a local server.
 For a local model, pick a value above its slowest queue wait plus model load; set `0` to turn the limit off for a hosted model:
@@ -2946,18 +2960,18 @@ Use it to tune replay depth, set up or disable compaction, or explain why an age
 
 ## History Settings
 
-Set these fields in `defaults` or on an agent; teams use the same fields except `compress_tool_results` (see [Team History and Compaction](#team-history-and-compaction)).
+Set these fields in `defaults`, on an agent, or on a team (see [Team History and Compaction](#team-history-and-compaction)).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `num_history_runs` | int, >= 1 | `null` | Number of prior runs to replay as history (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int, >= 1 | `null` | Maximum messages replayed from history (`null` = no limit). Mutually exclusive with `num_history_runs` |
-| `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits `defaults.compress_tool_results` (default `false`). On Anthropic and Vertex AI Claude models, `true` can invalidate prompt caching |
 | `max_tool_calls_from_history` | int, >= 0 | `null` | Maximum tool-call messages replayed from history. `null` inherits `defaults.max_tool_calls_from_history`; no limit when that is also `null` |
 | `compaction` | object | `defaults.compaction` | Compaction overrides; see [Agent Compaction Settings](#agent-compaction-settings) |
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
+The retired `compress_tool_results` field is ignored with a warning, and tool results replay unchanged.
 
 ## Context Window
 
@@ -3079,13 +3093,13 @@ Team members keep no history of their own.
 # Memory System
 
 Memory lets agents remember facts, preferences, and context across conversations.
-This page covers choosing a memory backend, configuring embeddings and extraction, file-based memory, the `memory` tool, and Agno Learning.
+This page covers choosing a memory backend, configuring embeddings and extraction, file-based memory, and the `memory` tool.
 
 | Backend | What it does | Use it when |
 |---|---|---|
 | `mem0` (default) | Vector memory: relevant memories are retrieved before each reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
-| `none` | No built-in memory | The agent should keep no memories ([Agno Learning](#agno-learning) stays on unless disabled) |
+| `none` | No built-in memory | The agent should keep no memories |
 
 <video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
   <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -3113,9 +3127,8 @@ agents:
 ```
 
 With `none`, the agent gets no memories in its prompt, stores none after its turns, and does not receive the `memory` tool.
-`none` does not turn off [Agno Learning](#agno-learning); set `learning: false` as well to disable all built-in memory and learning.
 Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
-What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written, and [Agno Learning](#agno-learning) reads conversations without this removal.
+What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written.
 Conversation history is separate and stays in the session; see [History & Compaction](https://docs.mindroom.chat/configuration/history/).
 OpenClaw-compatible agents use this same backend selection.
 
@@ -3447,24 +3460,8 @@ Save from the Memory page to write the changes to `config.yaml`.
 
 ## Agno Learning
 
-Agno Learning builds a persistent profile of user preferences from conversations, separately from the memory backends above.
-It is on by default for every agent, and `memory_backend: none` does not disable it.
-
-```yaml
-defaults:
-  learning: true          # default
-  learning_mode: always   # learn after every turn; agentic lets the agent decide via a tool
-
-agents:
-  assistant:
-    learning: false       # disable for one agent
-  research:
-    learning_mode: agentic
-```
-
-See [Agent fields](https://docs.mindroom.chat/configuration/agents/#defaults) for how `learning` and `learning_mode` inherit from `defaults`.
-Disabled agents create and update no learning data.
-Learning data is stored in `learning/<agent>.db` under the agent's state root (`agents/<agent>/` in the storage directory for shared agents), so it survives container restarts when the storage directory is mounted.
+Agno Learning is retired: configs that still set `learning` or `learning_mode` load with a warning and the values are ignored.
+Its existing `learning/<agent>.db` databases under agent state roots stay on disk unused, and you can delete them.
 
 # Knowledge Bases
 
@@ -4055,7 +4052,7 @@ When ingestion fails, `/api/health` includes a `knowledge_graph` block naming th
 # Skills
 
 Skills are instruction packs: a `SKILL.md` file with optional scripts and reference documents that guide an agent through a task without adding new code capabilities.
-MindRoom uses Agno's skills system with OpenClaw-compatible metadata.
+Skills use OpenClaw-compatible metadata.
 This page covers writing, installing, and allowlisting skills, skills agents keep in their own workspace, and opt-in automatic skill learning.
 
 ## Skill directory structure
@@ -6142,7 +6139,7 @@ Totals support cost estimates, but provider-specific charging rules and calls ou
 
 With [prices](https://docs.mindroom.chat/configuration/models/#model-config-fields) set on a model, each agent or team reply that uses it records its cost in USD, priced the same way as [budget spend](https://docs.mindroom.chat/budgets/#how-spend-is-counted).
 In MindRoom Chat, open **Reply details** from a reply's ⓘ button or message menu to see its cost and the conversation's cost up to that reply.
-A reply's cost covers every model call made within the reply, including team members on other models, [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction), and [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning) updates.
+A reply's cost covers every model call made within the reply, including team members on other models and [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction).
 Subagents it delegates to and separate helper work, such as text compaction summaries, memory-backend extraction, and thread titles, are left out of it but still count toward budgets.
 The conversation cost adds up the replies MindRoom Chat has loaded and reads "at least" while older messages are not loaded.
 A regenerated reply shows the cost of its latest run only.
@@ -10068,10 +10065,6 @@ WebRTC cannot send UDP from these browsers.
 `website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
 Pages larger than 2 MiB fail, as do pages a server sends compressed.
 
-| Option | Type | Default | Notes |
-| --- | --- | --- | --- |
-| `knowledge` | `object` | `null` | Programmatic `Knowledge` object only; it replaces `read_url()` with `add_website_to_knowledge(url)`. |
-
 ```yaml
 agents:
   assistant:
@@ -13435,7 +13428,7 @@ The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
 Tools that stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
-Knowledge search, skill access, learning, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `background_after`.
+Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `background_after`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 
@@ -13766,7 +13759,7 @@ The tool exposes four functions:
   `dry_run=True` validates a patch without saving it.
   The receipt lists the changed paths without echoing their values.
   When `config.yaml` uses `!include`, inspection works but patching is refused; edit the source files instead.
-- **`manage_agent(operation, agent_name, ...)`**: `operation` is `create`, `update`, or `validate`, and the optional fields are `display_name`, `role`, `tools`, `instructions`, `model`, `rooms`, `knowledge_bases`, `include_default_tools`, `markdown`, `learning`, and `learning_mode`.
+- **`manage_agent(operation, agent_name, ...)`**: `operation` is `create`, `update`, or `validate`, and the optional fields are `display_name`, `role`, `tools`, `instructions`, `model`, `rooms`, `knowledge_bases`, `include_default_tools`, and `markdown`.
   Creating requires `display_name`, takes a lowercase name of letters, digits, and underscores, defaults `model` to `default`, and defaults `include_default_tools` to `true`.
   Tool names and knowledge base IDs must exist.
 - **`manage_team(team_name, display_name, role, agents, mode="coordinate")`**: Creates a new team in `coordinate` or `collaborate` mode; it rejects unknown member agents and existing team names, and it cannot update a team.
@@ -13828,7 +13821,7 @@ agents:
 ```
 
 `get_own_config()` returns the agent's redacted YAML.
-`update_own_config()` changes only the fields you pass: `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
+`update_own_config()` changes only the fields you pass: `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history`, and `context_files`.
 Every `update_own_config()` call shows an approval card, even when `tool_approval.default` is `auto_approve`.
 An agent cannot give itself `config_manager`, and `include_default_tools=True` is refused when `defaults.tools` contains `config_manager`.
 Access, redaction, and saving follow the [shared rules above](#access-redaction-and-saving).
@@ -14055,8 +14048,8 @@ agents:
 
 `daytona` runs code and shell commands in a remote Daytona sandbox.
 It provides `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
-With `persistent: true`, the same sandbox is reused across calls in one agent session; set `sandbox_id` to use a known sandbox across sessions.
-The working directory persists in the session, so later relative paths resolve from it.
+With `persistent: true`, the same sandbox is reused across calls within one reply, and each new reply creates a new sandbox unless `sandbox_id` is set.
+The working directory persists only within one reply, so later relative paths in that reply resolve from it and the next reply starts in `/home/daytona`.
 Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
 When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
 
@@ -14067,7 +14060,7 @@ Set it only for a self-hosted Daytona API whose certificate you cannot otherwise
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Daytona API key. |
 | `api_url` | `url` | `null` | Daytona API URL. |
-| `sandbox_id` | `text` | `null` | Existing sandbox to use instead of a session sandbox. |
+| `sandbox_id` | `text` | `null` | Existing sandbox to use for every reply instead of creating one. |
 | `sandbox_language` | `text` | `python` | `python`, `javascript`, or `typescript`. |
 | `sandbox_target` | `text` | `null` | Daytona target. |
 | `sandbox_os` | `text` | `null` | Accepted but not applied to created sandboxes. |
@@ -14079,7 +14072,7 @@ Set it only for a self-hosted Daytona API whose certificate you cannot otherwise
 | `timeout` | `number` | `300` | Timeout in seconds for sandbox operations. |
 | `auto_create_sandbox` | `boolean` | `true` | Create a replacement sandbox when finding, creating, or starting one fails. |
 | `verify_ssl` | `boolean` | `true` | Verify Daytona TLS certificates; see the warning above. |
-| `persistent` | `boolean` | `true` | Reuse one sandbox across calls in the current agent session. |
+| `persistent` | `boolean` | `true` | Reuse one sandbox across calls within one reply. |
 | `sandbox_public` | `boolean` | `null` | Make created sandboxes public. |
 | `instructions` | `text` | `null` | Custom toolkit instructions replacing the bundled write, run, and show-results guidance. |
 | `add_instructions` | `boolean` | `false` | Add the toolkit instructions to the agent prompt. |
@@ -14472,7 +14465,7 @@ Accepting an invitation never grants permission to interact; every later message
 ### Agents mentioning other agents
 
 When an agent or team reply, including a message an agent sends with `matrix_api`, mentions another agent or team, the mentioned entity acts for the person or configured bot account who requested the reply.
-It responds only when its own `access` admits that requester, and it uses the requester's credentials, private instances, memory, learning, and approvals.
+It responds only when its own `access` admits that requester, and it uses the requester's credentials, private instances, memory, and approvals.
 A mention wakes the mentioned entity only after the reply finishes (not when it was stopped or failed) and only while the requester is a joined member of the room.
 Agents stop waking each other once a conversation has [`defaults.max_consecutive_agent_replies`](https://docs.mindroom.chat/configuration/agents/#defaults) consecutive agent or team messages since a person last wrote there, and resume after the next message from a person.
 In a room-level conversation, the count covers the room's messages outside threads.
@@ -14648,7 +14641,7 @@ Have the agent retry with a smaller payload, such as saving large content to a w
 ## Tools That Cannot Pause for Approval
 
 The [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) has no approval cards, so it hides every tool function that matches a required-approval rule, including script rules.
-Skill, knowledge-search, and learning functions such as `get_skill_script`, `search_knowledge_base`, and `update_user_memory` cannot pause for approval on any channel, so they are hidden when a required-approval rule or `default: require_approval` applies to them.
+Skill and knowledge-search functions such as `get_skill_script` and `search_knowledge_base` cannot pause for approval on any channel, so they are hidden when a required-approval rule or `default: require_approval` applies to them.
 Add an `auto_approve` rule for such a function to keep it available.
 
 ## When the Router Is Missing
@@ -15254,7 +15247,7 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
-Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
+Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
 The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
@@ -15475,7 +15468,7 @@ Do not report or "fix" these; they are deliberate.
 - The egress broker's check for stray bytes on a reused tunnel upstream cannot see bytes that reach the socket just after the check polls it.
   Such bytes can only come from that tunnel's own upstream, and no other tunnel, host, or requester is affected.
 - A team approval continuation checks only that each approved call keeps the arguments its card showed, not whether the saved team run holds other calls ready to run, because team runs live below `teams/`, which no worker mounts.
-- The Kubernetes `static_runner` sidecar mounts `agents`, `private_instances`, and `shared_directories` read-write as the primary's user, so tool code it runs can read and change every agent's sessions, memory, learning data, shared directories, and private-instance contents; the shared sidecar is not an isolation boundary between agents or requesters, and dedicated Kubernetes workers are the option that is.
+- The Kubernetes `static_runner` sidecar mounts `agents`, `private_instances`, and `shared_directories` read-write as the primary's user, so tool code it runs can read and change every agent's sessions, memory, learning data left on disk from before Learning was retired, shared directories, and private-instance contents; the shared sidecar is not an isolation boundary between agents or requesters, and dedicated Kubernetes workers are the option that is.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the [upgrade check](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts).
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
@@ -16070,6 +16063,42 @@ def needs_runtime_tools() -> type[Toolkit]:
 Inside a Matrix-connected agent run, `mindroom.tool_system.runtime_context.get_tool_runtime_context()` returns the current `ToolRuntimeContext`, or `None` outside one.
 It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` is the thread the inbound message named, while `resolved_thread_id` is the conversation thread after plain replies are resolved to their thread.
+
+### Calling a configured model
+
+A tool that runs its own model calls, such as a research loop, builds a provider for a model named in `config.yaml` and sends it one prompt at a time:
+
+```python
+from pydantic import BaseModel
+
+from mindroom.agent_loop.helper import complete_prompt
+from mindroom.providers.registry import build_model_provider
+from mindroom.tool_system.runtime_context import (
+    build_execution_identity_from_runtime_context,
+    get_tool_runtime_context,
+)
+
+
+class Finding(BaseModel):
+    claim: str
+    source_url: str
+
+
+async def find(question: str) -> Finding | str:
+    context = get_tool_runtime_context()
+    provider = build_model_provider(
+        context.config,
+        context.runtime_paths,
+        "default",
+        execution_identity=build_execution_identity_from_runtime_context(context),
+    )
+    result = await complete_prompt(provider, question, instructions=["Cite one source."], schema=Finding)
+    return result.content
+```
+
+The provider uses the model entry's credentials, base URL, and request settings.
+With `schema`, `result.content` is an instance of that model, or the raw text when the answer does not parse; without it, `result.content` is the answer text.
+Each call is one request with no tools and no conversation history.
 
 ### Dispatch-time worker targets
 
@@ -16695,7 +16724,7 @@ Custom events default to 1000 ms.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
-  In compaction hooks, `ctx.messages` holds the raw `agno.models.message.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, citations, reasoning, and metrics.
+  In compaction hooks, `ctx.messages` holds the raw `mindroom.llm.messages.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, reasoning, and metrics.
 - **`schedule:fired`**: `ctx.thread_id` is the thread the message will be delivered to, which can differ from `ctx.workflow.thread_id` when the task starts a new thread or posts at room level.
   The event fires for visible and silent schedules.
   Set `ctx.suppress = True` to cancel the fire; an empty or whitespace-only `ctx.message_text` produces a visible scheduled-task failure notice instead.
@@ -18682,7 +18711,7 @@ The runtime chart rejects a file-sourced config inside `agents`, `private_instan
 
 > [!WARNING]
 > The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
-> All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
+> All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, and memory.
 > The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication.
 > Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY`.
 > Use dedicated Kubernetes workers through the runtime chart when per-agent filesystem and credential isolation are required.
@@ -18788,7 +18817,7 @@ A `user`-scope tool call whose `base_dir` points at an agent on another scope fa
 
 ### Filesystem isolation and agent data
 
-Each non-private agent's data (context files, workspace, memory, sessions, learning) lives in `agents/<name>/` whatever its `worker_scope`, and every runtime for that agent reads and writes the same directory.
+Each non-private agent's data (context files, workspace, memory, sessions) lives in `agents/<name>/` whatever its `worker_scope`, and every runtime for that agent reads and writes the same directory.
 Private agents keep one state root per requester under `private_instances/<scope-key>/<agent>/`.
 Worker runtimes also keep their own virtualenvs, caches, and scratch files, which are not agent data.
 
@@ -18796,7 +18825,7 @@ What a worker can see depends on the backend:
 
 - **Local execution** shares the primary process filesystem.
 - **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory, and every shared directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
-- **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions, memory, or learning data beside the workspaces.
+- **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
 When an agent has a workspace (the `file` memory backend or `private`), `shell`, `file`, `python`, and `coding` use it as their default working directory (`base_dir`); this is a convenience, not a boundary.
@@ -20126,7 +20155,6 @@ This page covers where MindRoom keeps its data, what to back up, how to configur
 MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `MINDROOM_STORAGE_PATH` to use another directory.
 
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite)
-- `agents/*/learning/` - Per-agent Agno Learning state when learning is enabled
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
 - `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
@@ -20144,7 +20172,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 - `sync_continuity/` - Per-agent Matrix rooms still being joined and decrypted, kept across restarts
 
-Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to a separate root; learning and memory stay under the storage directory.
+Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to a separate root; memory stays under the storage directory.
 
 ### Backups
 
@@ -20157,7 +20185,7 @@ See [Bot Runtime Architecture](https://docs.mindroom.chat/architecture/bot-runti
 
 ### Incompatible session databases
 
-If an upgraded Agno version requires session columns that an agent's or team's session database lacks, MindRoom moves that `sessions/` directory aside to `sessions.incompatible-<id>/` and starts a fresh conversation history.
+If an upgraded MindRoom release requires session columns that an agent's or team's session database lacks, MindRoom moves that `sessions/` directory aside to `sessions.incompatible-<id>/` and starts a fresh conversation history.
 The archive is kept intact for inspection or manual recovery; back it up and delete it when you no longer need it.
 
 ## Event Journal
@@ -22061,15 +22089,15 @@ Collect everything the backend stored about one conversation into a single JSON 
 The input is the JSON file a MindRoom Chat **Report a bug** message carries, or plain identifiers.
 See [Bug Reports](https://docs.mindroom.chat/bug-reports/) for how users send those reports and how administrators receive them.
 
-The report includes the event journal's turn records, admitted events, and outbound deliveries, the conversation's Agno runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
+The report includes the event journal's turn records, admitted events, and outbound deliveries, the conversation's stored runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
 Each source lists the files it read under `paths` and has a `status` of `ok`, `missing` (nothing to read there), or `error` with the message under `error`; a source that cannot be read, such as a locked or corrupt database, does not stop the others.
 Successful tool calls and LLM requests are only logged when `debug.log_llm_requests` is enabled.
-Nothing is redacted, and the newest matches are kept: up to 100 Agno runs, 1,000 records per JSONL source, and 2,000 log lines of 4,000 characters each, with `dropped` and `truncated` counting what was left out or shortened.
+Nothing is redacted, and the newest matches are kept: up to 100 runs, 1,000 records per JSONL source, and 2,000 log lines of 4,000 characters each, with `dropped` and `truncated` counting what was left out or shortened.
 
 Run it on the MindRoom host with the same `--config` and `--storage-path` the service uses, and hand the bug report and the output to whoever debugs the issue.
 When `debug.llm_request_log_dir` is relative, run the command from the service's working directory.
 The command never writes the config and reads only its `event_journal` and `debug.llm_request_log_dir` settings, so a config the runtime would reject still locates the data; a PostgreSQL journal URL comes from `event_journal.database_url`, the config directory's `.env`, or the environment, and an unresolved URL reports the journal sources as errors.
-`--event` alone does not reach Agno runs or outbound deliveries; pass `--room` and `--thread`, or a bug report file.
+`--event` alone does not reach stored runs or outbound deliveries; pass `--room` and `--thread`, or a bug report file.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -22094,7 +22122,7 @@ The command never writes the config and reads only its `event_journal` and `debu
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --event         -e      TEXT  Matrix event ID; repeatable. Conversation-wide sources   │
-│                               (Agno sessions, deliveries) need --room/--thread, or a   │
+│                               (stored runs, deliveries) need --room/--thread, or a     │
 │                               report file.                                             │
 │ --room          -r      TEXT  Matrix room ID.                                          │
 │ --thread        -t      TEXT  Thread root event ID.                                    │

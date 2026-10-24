@@ -13,16 +13,15 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
-from mindroom.history.replay import is_compaction_summary
 from mindroom.history.run_visibility import is_model_history_visible_run, is_queued_notice_message
+from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks.enrichment import strip_enrichment_blocks
 from mindroom.prompt_message_tags import parse_msg_tags
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
-    from agno.models.message import Message
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
+    from mindroom.llm.messages import Message
+    from mindroom.llm.runs import AnyRunRecord
 
 
 @dataclass(frozen=True)
@@ -30,6 +29,8 @@ class Utterance:
     """One message of a stored turn: who said it and what, before redaction or clipping."""
 
     # `said` is a message in a prompt, `reply` the run's agent, `runtime` a prompt MindRoom wrote, `tool_result` a tool's.
+    # A `reply` names who spoke, not which model answered: an earlier reply of the agent that the turn's input carried,
+    # which the turn stores because its scope had not, is a `reply` too.
     kind: Literal["said", "reply", "runtime", "tool_result"]
     # The Matrix ID behind a `said` message; None for the agent, MindRoom, or a tool.
     sender: str | None
@@ -46,7 +47,7 @@ def one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-def run_requester(run: RunOutput | TeamRunOutput) -> str | None:
+def run_requester(run: AnyRunRecord) -> str | None:
     """Return the person a stored turn answered."""
     requester = (run.metadata or {}).get("requester_id") or run.user_id
     return requester if isinstance(requester, str) else None
@@ -66,7 +67,7 @@ def _prompt_utterances(message: Message, content: str, requester: str, *, mindro
     return found
 
 
-def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> list[Utterance]:
+def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance]:
     """Return what was said in one stored turn, oldest first.
 
     Only turns the agent's own history shows count, never copies of earlier turns. A prompt MindRoom wrote is nobody's
@@ -84,7 +85,10 @@ def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> l
     keeps_reply = agent_work or not is_interrupted_replay_run(run)
     requester = run_requester(run) or "unknown"
     said: list[Utterance] = []
-    for message in run.messages or []:
+    # TODO(simplify): Turns are read without the legacy tool-call repair replay applies, so an agent-work transcript shows
+    # legacy calls as stored, placeholders and their results included. Read the turn through replayable_messages.
+    # Skill-review models would notice on runs stored by v2026.9.43 or earlier (#3075).
+    for message in run.messages:
         content = message.content if isinstance(message.content, str) else ""
         if message.from_history:
             continue

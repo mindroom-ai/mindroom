@@ -3,48 +3,48 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
-from agno.agent import _messages as agent_messages
-from agno.db.in_memory import InMemoryDb
-from agno.models.anthropic import Claude
-from agno.models.aws.claude import Claude as BedrockClaude
-from agno.models.vertexai.claude import Claude as VertexClaude
-from agno.run import RunContext
-from agno.run.agent import RunOutput
-from agno.session import AgentSession
-from agno.session.summary import SessionSummary
-from agno.utils.models.claude import format_messages
 
+from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.history.request_messages import TurnMessages, build_request
+from mindroom.history.types import ScopeSummary
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
-from mindroom.providers.claude_prompt_cache import (
-    _count_cache_markers,
-    _prepare_claude_request_kwargs,
-)
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
+from mindroom.providers.anthropic.messages import ClaudeProvider
+from mindroom.providers.anthropic.prompt_cache import _count_cache_markers, prepare_request_body
 from mindroom.system_prompt import render_session_context
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.providers.anthropic.settings import ClaudeRouteKind
 
-async def _agent_request(
+
+def _agent_request(
     tmp_path: Path,
     *,
-    session_id: str,
     date: str,
     summary: str | None,
     instructions: str = "Follow the shared writing guidelines.",
-    async_mode: bool = False,
-    extra_context: str = "",
+    system_enrichment: str = "",
 ) -> tuple[str, dict[str, Any]]:
+    """Return one turn's system prompt and the Claude request body it goes out in.
+
+    The request is assembled from the production pieces a reply composes: the built agent's prompt with the turn's
+    system enrichment, the scope summary ahead of the prompt, and the Claude adapter's wire preparation.
+    """
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config(
         agents={
@@ -55,7 +55,7 @@ async def _agent_request(
                 instructions=[instructions],
             ),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         models={
             "default": ModelConfig(
                 provider="anthropic",
@@ -66,59 +66,29 @@ async def _agent_request(
     )
     persist_entity_accounts(config, runtime_paths)
     with patch("mindroom.agents.render_date_context", return_value=f"Current date: {date}"):
-        agent = create_agent(
-            "writer",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            history_storage=InMemoryDb(),
-        )
-    if extra_context:
-        agent.additional_context = f"{agent.additional_context or ''}\n{extra_context}"
-    session = AgentSession(
-        session_id=session_id,
-        agent_id=agent.id,
-        summary=SessionSummary(summary=summary) if summary is not None else None,
+        build = create_agent("writer", config, runtime_paths, execution_identity=None)
+    system = prompt_for_turn(build, system_enrichment)
+    messages = build_request(
+        system=(system,),
+        summary=None if summary is None else ScopeSummary(text=summary, updated_at=datetime.now(UTC)),
+        history=(),
+        turn=TurnMessages(prompt=Message(role="user", content="Write an introduction.")),
     )
-    kwargs = {
-        "run_response": RunOutput(),
-        "run_context": RunContext(run_id="run", session_id=session_id, session_state={}),
-        "input": "Write an introduction.",
-        "session": session,
-        "add_history_to_context": True,
-    }
-    # Module attributes, so the requests go through MindRoom's message-builder patch as live runs do.
-    run_messages = (
-        await agent_messages.aget_run_messages(agent, **kwargs)
-        if async_mode
-        else agent_messages.get_run_messages(agent, **kwargs)
-    )
-    chat_messages, system_text = format_messages(run_messages.messages)
-    model = agent.model
-    assert isinstance(model, Claude)
-    request = model._prepare_request_kwargs(system_text, messages=run_messages.messages)
-    request["messages"] = chat_messages
-    return system_text, _prepare_claude_request_kwargs(model, request)
+    claude = bare_adapter(build.spec.model)
+    assert isinstance(claude, ClaudeProvider)
+    body = claude._prepare(ModelRequest(messages=tuple(messages))).kwargs
+    assert isinstance(system.content, str)
+    return system.content, body
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("async_mode", [False, True])
-async def test_agent_cache_prefix_survives_date_and_compaction_changes(tmp_path: Path, *, async_mode: bool) -> None:
+def test_agent_cache_prefix_survives_date_and_compaction_changes(tmp_path: Path) -> None:
     """Fresh and compacted threads must write the same shared system boundary."""
-    original_text, original = await _agent_request(
+    original_text, original = _agent_request(tmp_path, date="Monday", summary=None)
+    compacted_text, compacted = _agent_request(
         tmp_path,
-        session_id="thread-a",
-        date="Monday",
-        summary=None,
-        async_mode=async_mode,
-    )
-    compacted_text, compacted = await _agent_request(
-        tmp_path,
-        session_id="thread-b",
         date="Tuesday",
         summary="The user approved chapter one.",
-        async_mode=async_mode,
-        extra_context=render_system_enrichment_block(
+        system_enrichment=render_system_enrichment_block(
             [EnrichmentItem(key="current_project", text="Editing chapter two.", cache_policy="volatile")],
         ),
     )
@@ -140,13 +110,11 @@ async def test_agent_cache_prefix_survives_date_and_compaction_changes(tmp_path:
     assert _count_cache_markers(compacted) <= 4
 
 
-@pytest.mark.asyncio
-async def test_changed_agent_instructions_change_the_cache_prefix(tmp_path: Path) -> None:
+def test_changed_agent_instructions_change_the_cache_prefix(tmp_path: Path) -> None:
     """A changed instruction must invalidate the shared system prefix."""
-    _, original = await _agent_request(tmp_path, session_id="a", date="Monday", summary=None)
-    _, changed = await _agent_request(
+    _, original = _agent_request(tmp_path, date="Monday", summary=None)
+    _, changed = _agent_request(
         tmp_path,
-        session_id="b",
         date="Monday",
         summary=None,
         instructions="Use the revised writing guidelines.",
@@ -156,21 +124,16 @@ async def test_changed_agent_instructions_change_the_cache_prefix(tmp_path: Path
     assert "Use the revised writing guidelines." in changed["system"][0]["text"]
 
 
-@pytest.mark.parametrize("model_type", [Claude, BedrockClaude, VertexClaude])
+@pytest.mark.parametrize("route", ["anthropic", "bedrock_claude", "vertexai_claude"])
 @pytest.mark.parametrize("extended_cache_time", [False, True])
 @pytest.mark.parametrize("cache_enabled", [False, True])
 def test_system_boundary_preserves_custom_blocks_and_cache_budget(
-    model_type: type[Claude],
+    route: ClaudeRouteKind,
     *,
     extended_cache_time: bool,
     cache_enabled: bool,
 ) -> None:
     """Splitting must preserve custom blocks, TTL, input ownership, and the API marker limit."""
-    model = model_type(
-        id="claude-sonnet-5",
-        cache_system_prompt=cache_enabled,
-        extended_cache_time=extended_cache_time,
-    )
     cache_control = {"type": "ephemeral", **({"ttl": "1h"} if extended_cache_time else {})}
     original_system = {
         "type": "text",
@@ -189,12 +152,23 @@ def test_system_boundary_preserves_custom_blocks_and_cache_budget(
     }
     original = deepcopy(request)
 
-    prepared = _prepare_claude_request_kwargs(model, request)
+    def prepare(body: dict[str, Any]) -> dict[str, Any]:
+        return prepare_request_body(
+            body,
+            system="",
+            route=route,
+            deferred_tool_names=frozenset(),
+            tool_choice=None,
+            extended_cache_time=extended_cache_time,
+            cache_system_prompt=cache_enabled,
+        )
+
+    prepared = prepare(request)
 
     assert request == original
     assert prepared["system"][-1] == custom_block
     assert _count_cache_markers(prepared) <= 4
-    assert _prepare_claude_request_kwargs(model, prepared) == prepared
+    assert prepare(prepared) == prepared
     if cache_enabled:
         assert len(prepared["system"]) == 3
         assert prepared["system"][0] == {

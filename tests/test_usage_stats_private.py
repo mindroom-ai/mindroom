@@ -8,15 +8,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import RunMetrics
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.usage_stats import UsageStatsTools
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.private_storage.legacy_private_storage_aliases import historical_private_instance_worker_key
 from mindroom.private_storage.private_instance_identity_store import (
     ensure_private_instance_identity,
@@ -24,9 +23,10 @@ from mindroom.private_storage.private_instance_identity_store import (
 )
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_tool_execution_identity, private_instance_scope_root_path
 from mindroom.usage import stats as usage_stats
-from tests.conftest import seed_session
+from tests.conftest import seed_session, seed_session_metrics
 from tests.test_usage_stats import _config, _metrics, _model_metrics, _paths, _row, _run, _source, _wire
 from tests.test_usage_stats_tool import _context
 
@@ -99,28 +99,22 @@ def seed_private_usage(
             worker_key=resolved.execution.worker_key,
             requester_id=requester,
         )
-    storage = create_state_storage(
-        agent,
-        resolved.session_state_root,
-        subdir="sessions",
-        session_table=f"{agent}_sessions",
-    )
-    try:
-        seed_session(
-            storage,
-            AgentSession(
-                session_id="same-session-id",
-                agent_id=agent,
-                user_id=stored_requester,
-                session_data={"session_metrics": {"total_tokens": session_tokens}},
-                runs=[
-                    RunOutput(
-                        run_id="same-run-id",
-                        user_id=stored_requester,
-                        model_provider="test-provider",
-                        model="test-model",
-                        created_at=1_700_000_000 if agent == "code" else 1_700_086_400,
-                        metrics=RunMetrics(
+    storage = create_state_storage(agent, resolved.session_state_root)
+    seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id="same-session-id",
+            owner_id=agent,
+            runs=[
+                RunRecord(
+                    run_id="same-run-id",
+                    user_id=stored_requester,
+                    model_provider="test-provider",
+                    model="test-model",
+                    created_at=1_700_000_000 if agent == "code" else 1_700_086_400,
+                    metrics=RunMetrics(
+                        tokens=TokenCounts(
                             input_tokens=run_tokens - 3,
                             output_tokens=3,
                             total_tokens=run_tokens,
@@ -128,11 +122,11 @@ def seed_private_usage(
                             cache_write_tokens=1,
                         ),
                     ),
-                ],
-            ),
-        )
-    finally:
-        storage.close()
+                ),
+            ],
+        ),
+    )
+    seed_session_metrics(storage, "same-session-id", {"total_tokens": session_tokens})
     return resolved.session_state_root / "sessions" / f"{agent}.db"
 
 

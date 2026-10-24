@@ -88,7 +88,6 @@ def resolve_request_credentials_target(
     request: Request,
     *,
     agent_name: str | None = None,
-    credentials_manager: CredentialsManager | None = None,
     service_names: tuple[str, ...] = (),
     execution_scope_override_provided: bool | None = None,
     execution_scope_override: WorkerScope | None = None,
@@ -98,7 +97,20 @@ def resolve_request_credentials_target(
     _reject_raw_worker_targeting(request)
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
 
-    base_manager = credentials_manager or get_runtime_credentials_manager(runtime_paths)
+    base_manager = get_runtime_credentials_manager(runtime_paths)
+
+    def primary_target(paths: RuntimePaths, target_agent_name: str | None) -> RequestCredentialsTarget:
+        """Target the primary runtime's own credential store, unscoped to any worker or requester."""
+        return RequestCredentialsTarget(
+            runtime_paths=paths,
+            base_manager=base_manager,
+            target_manager=base_manager,
+            worker_scope=None,
+            agent_name=target_agent_name,
+            execution_identity=None,
+            allowed_shared_services=None,
+        )
+
     if execution_scope_override_provided is None:
         execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(
             request,
@@ -118,15 +130,7 @@ def resolve_request_credentials_target(
     # Non-global dashboard credential reads/writes with no agent selection retain the
     # legacy primary-runtime target without requiring a persisted config file.
     if agent_name is None and not execution_scope_override_provided:
-        return RequestCredentialsTarget(
-            runtime_paths=runtime_paths,
-            base_manager=base_manager,
-            target_manager=base_manager,
-            worker_scope=None,
-            agent_name=None,
-            execution_identity=None,
-            allowed_shared_services=None,
-        )
+        return primary_target(runtime_paths, None)
 
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     scope_request = resolve_dashboard_agent_execution_scope_request(
@@ -137,15 +141,7 @@ def resolve_request_credentials_target(
         allow_draft_override=False,
     )
     if scope_request.agent_name is None:
-        return RequestCredentialsTarget(
-            runtime_paths=runtime_paths,
-            base_manager=base_manager,
-            target_manager=base_manager,
-            worker_scope=None,
-            agent_name=None,
-            execution_identity=None,
-            allowed_shared_services=None,
-        )
+        return primary_target(runtime_paths, None)
     execution_scope = scope_request.requested_execution_scope
     allow_requester_scope = (
         allow_private_scopes
@@ -172,15 +168,7 @@ def resolve_request_credentials_target(
             agent_name=scope_request.agent_name,
         )
     if execution_scope is None:
-        return RequestCredentialsTarget(
-            runtime_paths=runtime_paths,
-            base_manager=base_manager,
-            target_manager=base_manager,
-            worker_scope=None,
-            agent_name=scope_request.agent_name,
-            execution_identity=None,
-            allowed_shared_services=None,
-        )
+        return primary_target(runtime_paths, scope_request.agent_name)
 
     scope_label = dashboard_scope_label(
         config_labeled_scope=(

@@ -1,26 +1,22 @@
 """Approved tool calls that a scheduled task stores and its agent later runs by reference.
 
-The scheduling agent names a function on one of its own configured toolkits. When the
-task fires, the agent calls ``run_scheduled_call`` with the task ID, and the stored
-call runs through that same live function, so the turn's worker routing, credentials,
-file access, output files, and tool hooks all apply. The requester's approval is spent
-once, and the stored arguments run as stored unless any arguments were approved.
+The scheduling agent names a function its run offers. When the task fires, the agent calls
+``run_scheduled_call`` with the task ID, and the stored call runs through that same live function under the
+run's tool-call policy, so the turn's worker routing, credentials, file access, output files, and tool hooks all
+apply. The requester's approval is spent once, and the stored arguments run as stored unless any arguments were
+approved. An agent build that offers the scheduler binds its run's functions to every call it runs
+(``bind_live_tools``); a scheduled call outside such a run finds nothing bound and runs nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import time
-from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from agno.tools.function import Function, entrypoint_accepts_media
-from agno.tools.toolkit import Toolkit
-
-from mindroom.agno_compat_prepared_tools import OwnedAgentFunctionCall, prepare_live_agent_function
 from mindroom.approval.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     claim_scheduled_call,
@@ -31,23 +27,30 @@ from mindroom.approval.tool_approval import (
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
-from mindroom.tool_system.declarations import tool_schema_source
-from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
+from mindroom.tool_system.agno_toolkits import MEDIA_INJECTED_PARAMS
+from mindroom.tool_system.invocation import run_tool_call
+from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 
 if TYPE_CHECKING:
-    from agno.agent import Agent
-    from agno.run import RunContext
-    from agno.tools.function import FunctionExecutionResult
+    from collections.abc import Mapping, Sequence
 
     from mindroom.event_journal import ScheduledCall, ScheduledCallRefusal
+    from mindroom.tool_system.invocation import ToolCall, ToolCallContext, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
     "LiveFunction",
+    "bind_live_tools",
     "prepare_scheduled_call",
     "run_scheduled_call",
 ]
+
+# The scheduler's own functions are never a scheduled call; its runner spends approvals itself.
+_SCHEDULER_TOOLKIT = "scheduler"
+# The scheduler's functions that read the run's live functions: one stores a call to one, one runs it.
+_LIVE_FUNCTION_READERS = frozenset({"schedule_tool_call", "run_scheduled_call"})
 
 _REFUSALS: dict[ScheduledCallRefusal, str] = {
     "missing": "this task has no stored call",
@@ -71,9 +74,52 @@ class LiveFunction:
     """One of a live agent's functions that a scheduled call can run."""
 
     toolkit_name: str
-    function: Function
+    function: ToolFunction
     # A tool that asks for its own confirmation is approved only for the exact call the requester saw.
     authored_confirmation: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveTools:
+    """The functions one agent's run offers, their authored toolkits, and how the run calls them.
+
+    ``middleware`` is the run's tool-call policy, and ``context`` is the run's context for the call that is
+    running, so a stored call runs exactly as the model's own call of it would.
+    """
+
+    functions: Mapping[str, ToolFunction]
+    owners: Mapping[str, str]
+    middleware: tuple[ToolMiddleware, ...]
+    context: ToolCallContext
+
+
+_LIVE_TOOLS: ContextVar[_LiveTools | None] = ContextVar("mindroom_scheduled_call_live_tools", default=None)
+
+
+def bind_live_tools(
+    functions: Mapping[str, ToolFunction],
+    owners: Mapping[str, str],
+    middleware: Sequence[ToolMiddleware],
+) -> tuple[ToolMiddleware, ...]:
+    """Return ``middleware`` behind a first step that shows each call the run's functions, for scheduled calls.
+
+    ``functions`` are the ones the run offers, by name, and ``owners`` maps each to its authored toolkit; a generated
+    function has none, so no stored call can name it; a stored call runs under the returned policy, this step
+    included. A run that offers no scheduler function reading them gets ``middleware`` as it is.
+    """
+    if _LIVE_FUNCTION_READERS.isdisjoint(functions):
+        return tuple(middleware)
+    policy: tuple[ToolMiddleware, ...]
+
+    async def bind_live_functions(call: ToolCall, call_next: ToolNext) -> object:
+        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, owners=owners, middleware=policy, context=call.context))
+        try:
+            return await call_next(call.arguments)
+        finally:
+            _LIVE_TOOLS.reset(token)
+
+    policy = (bind_live_functions, *middleware)
+    return policy
 
 
 def _parse_arguments(text: str) -> dict[str, object] | str:
@@ -94,35 +140,25 @@ def _parse_arguments(text: str) -> dict[str, object] | str:
     return arguments
 
 
-def _resolve_live_function(agent: Agent, tool_name: str, toolkit_name: str | None = None) -> LiveFunction | str:
-    """Find the one configured function a scheduled call can run, or return why it cannot."""
-    candidates: dict[str, Function] = {}
-    # MindRoom builds each turn's tools as a list of configured toolkits.
-    for tool in agent.tools if isinstance(agent.tools, list) else ():
-        # The scheduler's own functions are never a scheduled call; its runner spends approvals itself.
-        if not isinstance(tool, Toolkit) or tool.name == "scheduler":
-            continue
-        function = tool.get_async_functions().get(tool_name)
-        if function is None or function.owning_toolkit is None:
-            continue
-        if toolkit_name is None or function.owning_toolkit == toolkit_name:
-            candidates.setdefault(function.owning_toolkit, function)
-    if not candidates:
+def _resolve_live_function(
+    live: _LiveTools | None,
+    tool_name: str,
+    toolkit_name: str | None = None,
+) -> LiveFunction | str:
+    """Find the function a scheduled call can run, the one the run offers by that name, or return why it cannot."""
+    function = None if live is None else live.functions.get(tool_name)
+    owner = None if live is None else live.owners.get(tool_name)
+    if function is None or owner is None or owner == _SCHEDULER_TOOLKIT:
         return f"`{tool_name}` is not one of this agent's tools in this conversation"
-    if len(candidates) > 1:
-        return f"more than one of this agent's tools is named `{tool_name}`"
-    [(owner, function)] = candidates.items()
-    # The output-file wrapper declares the function it wraps; look through it to the real body.
-    entrypoint = None if function.entrypoint is None else inspect.unwrap(tool_schema_source(function.entrypoint))
-    if (
-        function.requires_user_input
-        or function.external_execution
-        or function.stop_after_tool_call
-        or (entrypoint is not None and entrypoint_accepts_media(entrypoint))
-    ):
+    if toolkit_name is not None and owner != toolkit_name:
+        return f"`{tool_name}` now comes from another toolkit than the one the call was stored for"
+    # A tool that takes the run's media gets None for it in a live call too, but scheduling it stays refused, as it
+    # was when live runs carried media that a stored call lacked.
+    # TODO(simplify): Scheduling refuses a tool that takes media although its live calls get none either. Drop the
+    # media check. Models could schedule calls of those tools.
+    takes_media = not function.injected_params.isdisjoint(MEDIA_INJECTED_PARAMS)
+    if function.external_execution or function.stop_after_call or takes_media:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
-    if entrypoint is not None and (inspect.isgeneratorfunction(entrypoint) or inspect.isasyncgenfunction(entrypoint)):
-        return f"`{tool_name}` streams its result, which a scheduled call cannot"
     return LiveFunction(
         toolkit_name=owner,
         function=function,
@@ -131,43 +167,36 @@ def _resolve_live_function(agent: Agent, tool_name: str, toolkit_name: str | Non
     )
 
 
-def prepare_scheduled_call(
-    agent: Agent,
-    tool_name: str,
-    arguments_json: str,
-) -> tuple[LiveFunction, dict[str, object]] | str:
+def prepare_scheduled_call(tool_name: str, arguments_json: str) -> tuple[LiveFunction, dict[str, object]] | str:
     """Resolve the function and arguments a new scheduled call stores, or return why it cannot."""
-    live = _resolve_live_function(agent, tool_name)
-    if isinstance(live, str):
-        return _sentence(live)
+    resolved = _resolve_live_function(_LIVE_TOOLS.get(), tool_name)
+    if isinstance(resolved, str):
+        return _sentence(resolved)
     arguments = _parse_arguments(arguments_json)
     if isinstance(arguments, str):
         return _sentence(arguments)
-    invalid = _invalid_arguments(live.function, arguments)
+    invalid = _invalid_arguments(resolved.function, arguments)
     if invalid is not None:
         return _sentence(invalid)
-    return live, arguments
+    return resolved, arguments
 
 
 async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken condition
     context: ToolRuntimeContext,
-    agent: Agent | None,
-    run_context: RunContext | None,
     task_id: str,
     arguments_json: str | None,
 ) -> object:
     """Spend a scheduled task's approval once and run its stored call in this turn."""
-    if agent is None or run_context is None or context.agent_name not in context.config.agents:
+    live = _LIVE_TOOLS.get()
+    if live is None or context.agent_name not in context.config.agents:
         return _refused(task_id, "scheduled calls run only in their agent's own conversation turn")
     call = await scheduled_call(task_id)
     if call is None:
         return _refused(task_id, _REFUSALS["missing"])
-    prepared = _prepare_run(context, call, agent, arguments_json)
+    prepared = _prepare_run(context, call, live, arguments_json)
     if isinstance(prepared, str):
         return _refused(task_id, prepared)
-    live, arguments_text, approver_id = prepared
-    # Prepare before claiming, so a function that cannot be prepared spends nothing.
-    function = prepare_live_agent_function(agent, live.function, run_context)
+    function, arguments_text, approver_id = prepared
     claimed = await claim_scheduled_call(call, arguments_json=arguments_text, approver_user_id=approver_id)
     if claimed is None:
         return _refused(task_id, "the approval runtime is not ready")
@@ -182,22 +211,21 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
             return _refused(task_id, f"{_REFUSALS[claimed]}; it runs when its task fires")
         return _refused(task_id, _REFUSALS[claimed])
     # The approval is spent; a call interrupted from here leaves its outcome unknown and is never retried.
-    execution = await _execute(function, json.loads(arguments_text), call_id=f"scheduled-{task_id}")
-    if execution.status == "success" and not isinstance(execution.result, Iterator | AsyncIterator):
-        await record_scheduled_call_outcome(task_id, "completed")
-        return execution.result
-    await record_scheduled_call_outcome(task_id, "failed")
-    if execution.status == "success":
-        return f"❌ Scheduled call `{task_id}` failed: `{call.tool_name}` streams its result, which a scheduled call cannot."
-    return f"❌ Scheduled call `{task_id}` failed: {execution.error or 'the tool raised an error'}"
+    try:
+        result = await _execute(live, function, json.loads(arguments_text), call_id=f"scheduled-{task_id}")
+    except Exception as error:
+        await record_scheduled_call_outcome(task_id, "failed")
+        return f"❌ Scheduled call `{task_id}` failed: {str(error) or 'the tool raised an error'}"
+    await record_scheduled_call_outcome(task_id, "completed")
+    return result
 
 
 def _prepare_run(  # noqa: PLR0911 - one refusal per broken condition
     context: ToolRuntimeContext,
     call: ScheduledCall,
-    agent: Agent,
+    live: _LiveTools,
     arguments_json: str | None,
-) -> tuple[LiveFunction, str, str] | str:
+) -> tuple[ToolFunction, str, str] | str:
     """Check a claim request before spending anything: who asks, the live function, and the arguments."""
     if (call.room_id, call.thread_id, call.requester_id, call.agent_name) != (
         context.room_id,
@@ -206,9 +234,9 @@ def _prepare_run(  # noqa: PLR0911 - one refusal per broken condition
         context.agent_name,
     ):
         return _REFUSALS["elsewhere"]
-    live = _resolve_live_function(agent, call.tool_name, call.toolkit_name)
-    if isinstance(live, str):
-        return live
+    resolved = _resolve_live_function(live, call.tool_name, call.toolkit_name)
+    if isinstance(resolved, str):
+        return resolved
     arguments_text = call.arguments_json
     if arguments_json is not None:
         replacement = _parse_arguments(arguments_json)
@@ -216,21 +244,21 @@ def _prepare_run(  # noqa: PLR0911 - one refusal per broken condition
             return replacement
         arguments_text = canonical_arguments(replacement)
         if arguments_text != call.arguments_json and (
-            call.approved_scope != ANY_ARGUMENTS or live.authored_confirmation
+            call.approved_scope != ANY_ARGUMENTS or resolved.authored_confirmation
         ):
             return _REFUSALS["arguments"]
-    invalid = _invalid_arguments(live.function, json.loads(arguments_text))
+    invalid = _invalid_arguments(resolved.function, json.loads(arguments_text))
     if invalid is not None:
         return invalid
     approver_id = resolve_tool_approval_approver(context.config, context.runtime_paths, call.requester_id)
     if approver_id is None:
         return "only a human requester's approval can run a scheduled call"
-    return live, arguments_text, approver_id
+    return resolved.function, arguments_text, approver_id
 
 
-def _invalid_arguments(function: Function, arguments: dict[str, object]) -> str | None:
+def _invalid_arguments(function: ToolFunction, arguments: dict[str, object]) -> str | None:
     """Return why arguments do not fit the function's current schema, or None."""
-    schema = function_schema(function)
+    schema = dict(function.parameters)
     unknown = set(arguments) - set(schema.get("properties", {}))
     try:
         validate_tool_arguments(schema, arguments)
@@ -242,27 +270,23 @@ def _invalid_arguments(function: Function, arguments: dict[str, object]) -> str 
     return None
 
 
-async def _execute(
-    function: Function,
-    arguments: dict[str, object],
-    *,
-    call_id: str,
-) -> FunctionExecutionResult:
-    """Run one prepared function with its hooks, owning a synchronous body until it finishes."""
-    # A spent approval runs the tool body; a cached result would skip it and its hooks.
-    function.cache_results = False
-    call = OwnedAgentFunctionCall(function=function, call_id=call_id, arguments=arguments)
+async def _execute(live: _LiveTools, function: ToolFunction, arguments: dict[str, object], *, call_id: str) -> object:
+    """Run one live function under the run's tool-call policy, owning a synchronous body until it finishes."""
     tracker = SyncToolCompletionTracker()
 
     async def settle() -> None:
-        await call.close_result()
         pending = tracker.started_task()
         if pending is not None:
             await pending
 
     try:
         with track_sync_tool_completion(tracker):
-            return await call.aexecute()
+            return await run_tool_call(
+                function,
+                arguments,
+                replace(live.context, call_id=call_id),
+                middleware=live.middleware,
+            )
     finally:
         await wait_for_future_until_complete(asyncio.create_task(settle(), name="scheduled-tool-call-cleanup"))
 

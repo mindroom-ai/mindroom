@@ -7,23 +7,22 @@ import json
 import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
 
 import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
+from mindroom.llm.errors import ProviderError
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.memory import MemoryAutoFlushWorker, add_agent_memory, auto_flush
 from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
@@ -32,7 +31,9 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     tool_execution_identity,
 )
-from tests.conftest import FakeModel, bind_runtime_paths, runtime_paths_for, seed_session
+from mindroom.usage.storage import quote_identifier
+from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -93,7 +94,7 @@ def _run(
     status: RunStatus = RunStatus.completed,
     hook_source: str | None = None,
     messages: list[Message] | None = None,
-) -> RunOutput:
+) -> RunRecord:
     metadata: dict[str, object] = {
         "room_id": session_id.rsplit(":$", 1)[0],
         "requester_id": ALICE,
@@ -101,7 +102,7 @@ def _run(
     }
     if hook_source is not None:
         metadata[HOOK_SOURCE_RUN_METADATA_KEY] = hook_source
-    return RunOutput(
+    return RunRecord(
         run_id=run_id,
         session_id=session_id,
         agent_id="general",
@@ -119,7 +120,7 @@ def _run(
 def _seed(
     config: Config,
     session_id: str,
-    runs: list[RunOutput],
+    runs: list[RunRecord],
     *,
     agent: str = "general",
     identity: ToolExecutionIdentity | None = None,
@@ -127,18 +128,15 @@ def _seed(
 ) -> None:
     """Store a conversation, last updated a second after its newest run unless told otherwise."""
     storage = create_session_storage(agent, config, runtime_paths_for(config), execution_identity=identity)
-    try:
-        for run in runs:
-            run.agent_id = agent
-        seed_session(storage, AgentSession(session_id=session_id, agent_id=agent, runs=runs))
-        newest = max((run.created_at or 0 for run in runs), default=T0)
-        with storage.db_engine.begin() as connection:
-            connection.exec_driver_sql(
-                f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-                (updated_at if updated_at is not None else newest + 1, session_id),
-            )
-    finally:
-        storage.close()
+    for run in runs:
+        run.agent_id = agent
+    seed_session(storage, ConversationSession(session_id=session_id, kind="agent", owner_id=agent, runs=runs))
+    newest = max((run.created_at or 0 for run in runs), default=T0)
+    with storage.transaction(write=True) as connection:
+        connection.execute(
+            f"UPDATE {quote_identifier(storage.names.sessions)} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+            (updated_at if updated_at is not None else newest + 1, session_id),
+        )
 
 
 async def _no_redactions(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
@@ -597,7 +595,7 @@ async def test_a_conversation_still_active_is_not_read_and_reads_happen_off_the_
     reads: list[bool] = []
     real_session_runs = auto_flush.session_runs
 
-    def session_runs(storage: object, session_id: str) -> list[RunOutput]:
+    def session_runs(storage: object, session_id: str) -> list[RunRecord]:
         reads.append(threading.get_ident() != loop_thread)
         return real_session_runs(storage, session_id)
 
@@ -786,7 +784,7 @@ async def test_an_unreadable_conversation_backs_off_without_blocking_the_others(
     _seed(config, fine, [_run("f1", fine, T0 + 20)])
     real_session_runs = auto_flush.session_runs
 
-    def session_runs(storage: object, session_id: str) -> list[RunOutput]:
+    def session_runs(storage: object, session_id: str) -> list[RunRecord]:
         if session_id == broken:
             msg = "session database is locked"
             raise OSError(msg)
@@ -1065,11 +1063,11 @@ async def test_extraction_runs_on_the_extractor_model_when_one_is_set(
     _seed(config, session, [_run("r1", session, T0 + 10)])
     requested: list[str] = []
 
-    def model_instance(_config: object, _runtime_paths: object, model_name: str) -> FakeModel:
+    def model_provider(_config: object, _runtime_paths: object, model_name: str) -> ScriptedModel:
         requested.append(model_name)
-        return FakeModel(id=model_name, provider="fake")
+        return ScriptedModel([answer("NO_REPLY")])
 
-    monkeypatch.setattr(auto_flush.model_loading, "get_model_instance", model_instance)
+    monkeypatch.setattr(auto_flush, "build_model_provider", model_provider)
 
     await auto_flush._extract_memory_summary(
         config=config,
@@ -1089,23 +1087,16 @@ async def test_a_failed_extraction_run_is_a_failure_not_a_memory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Agno returns a provider failure as the run's content; raising backs the pass off instead of saving the error."""
+    """A provider failure raises out of extraction, so the pass backs off instead of saving the error as a memory."""
     config = _config(tmp_path)
     session = _thread("t1")
-    monkeypatch.setattr(
-        auto_flush.model_loading,
-        "get_model_instance",
-        lambda *_args: FakeModel(id="m", provider="fake"),
-    )
-    agent = MagicMock()
-    agent.arun = AsyncMock(
-        return_value=RunOutput(
-            content="Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}",
-            status=RunStatus.error,
-        ),
-    )
-    monkeypatch.setattr(auto_flush, "Agent", MagicMock(return_value=agent))
-    with pytest.raises(RuntimeError, match=r"^Memory extraction failed: Error code: 401"):
+
+    async def fail() -> None:
+        message = "Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}"
+        raise ProviderError(message, provider="Synthetic")
+
+    monkeypatch.setattr(auto_flush, "build_model_provider", lambda *_args: ScriptedModel([[Await(fail)]]))
+    with pytest.raises(ProviderError, match=r"^Error code: 401"):
         await auto_flush._extract_memory_summary(
             config=config,
             runtime_paths=runtime_paths_for(config),

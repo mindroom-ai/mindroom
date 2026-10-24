@@ -1,4 +1,4 @@
-"""Small read-only adapter for retained Agno SQLite sessions."""
+"""Small read-only adapter for retained conversation SQLite sessions."""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, TypeGuard, cast
 
 from mindroom.constants import RuntimePaths, resolve_session_state_root
+from mindroom.llm.usage import TOKEN_FIELDS
 from mindroom.private_storage.legacy_private_storage_aliases import is_verified_private_instance_alias
 from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentityError,
@@ -21,13 +22,12 @@ from mindroom.private_storage.private_instance_identity import (
 )
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.session_storage.legacy_session_storage import decode_persisted_session_json
+from mindroom.session_storage.legacy_agno2_runs import decode_session_json
+from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
-    SYSTEM_USAGE_RELATIVE_PATH,
-    SYSTEM_USAGE_SESSION_TABLE,
-    TOKEN_FIELDS,
+    SYSTEM_USAGE_STORAGE_NAME,
     USAGE_KINDS,
     quote_identifier,
 )
@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     from mindroom.usage.storage import UsageKind
 
 __all__ = [
-    "TOKEN_FIELDS",
     "UsageModelMetrics",
     "UsageRequestMetrics",
     "UsageRunNode",
@@ -74,12 +73,12 @@ _USAGE_SINCE_CONDITION = (
 
 @dataclass(frozen=True, slots=True)
 class UsageStorageSource:
-    """One fixed-layout Agno session database."""
+    """One fixed-layout conversation database."""
 
     path: Path
     path_label: str
     scope: _UsageStorageScope
-    expected_session_table: str
+    names: TableNames
     source_agent_id: str | None
     allowed_agent_ids: frozenset[str]
     requester_isolated: bool
@@ -133,7 +132,7 @@ class UsageRunNode:
 
 @dataclass(frozen=True, slots=True)
 class UsageSessionRow:
-    """Usage runs from one retained Agno session."""
+    """Usage runs from one retained session."""
 
     source: UsageStorageSource
     entity_id: str
@@ -189,27 +188,25 @@ def discover_self_usage_sources(
         runtime_paths,
         execution_identity=execution_identity,
     )
-    database = resolved.session_state_root / "sessions" / f"{agent_name}.db"
+    names = TableNames(agent_name)
+    database = names.database_path(resolved.session_state_root)
     if resolved.execution.is_private:
         worker_key = resolved.execution.worker_key
         if worker_key is None:
-            return (_diagnostic("self", "partial", "source discovery unavailable"),)
-        relative = (
-            Path("private_instances") / worker_dir_name(worker_key) / agent_name / "sessions" / f"{agent_name}.db"
-        )
+            return (_discovery_unavailable("self"),)
+        relative = names.database_path(Path("private_instances") / worker_dir_name(worker_key) / agent_name)
         scope: _UsageStorageScope = "private_agent"
     else:
-        relative = Path("agents") / agent_name / "sessions" / f"{agent_name}.db"
+        relative = names.database_path(Path("agents") / agent_name)
         scope = "shared_agent"
     candidate = _safe_candidate(session_root, relative)
     if candidate is None or candidate != database.expanduser().resolve():
-        return (_diagnostic("self", "partial", "source discovery unavailable"),)
+        return (_discovery_unavailable("self"),)
     return (
         _source(
             path=candidate,
             root=session_root,
             scope=scope,
-            table=f"{agent_name}_sessions",
             agent_name=agent_name,
             config=config,
             requester_isolated=resolved.execution.is_private,
@@ -244,7 +241,7 @@ def discover_private_usage_sources(
                     execution_identity=identity,
                 )
             except (OSError, ValueError):
-                agent_sources = (_diagnostic("self", "partial", "source discovery unavailable"),)
+                agent_sources = (_discovery_unavailable("self"),)
             for source in agent_sources:
                 if isinstance(source, UsageStorageDiagnostic):
                     diagnostic = replace(
@@ -268,14 +265,16 @@ def discover_admin_usage_sources(
     sources = _shared_agent_sources(root, config)
     sources.extend(_private_agent_sources(root, config, runtime_paths.storage_root))
     sources.extend(_team_sources(root, config))
-    system_path = _safe_candidate(root, Path(SYSTEM_USAGE_RELATIVE_PATH))
+    system_path = _safe_candidate(
+        root,
+        TableNames(SYSTEM_USAGE_STORAGE_NAME).database_path(Path(SYSTEM_USAGE_STORAGE_NAME)),
+    )
     if system_path is not None and system_path.is_file():
         sources.append(
             _source(
                 path=system_path,
                 root=root,
                 scope="system",
-                table=SYSTEM_USAGE_SESSION_TABLE,
                 agent_name=None,
                 config=config,
                 requester_isolated=False,
@@ -296,19 +295,16 @@ def _shared_agent_sources(
     for agent_name, agent_config in config.agents.items():
         if agent_config.private is not None:
             continue
-        relative = Path("agents") / agent_name / "sessions" / f"{agent_name}.db"
+        relative = TableNames(agent_name).database_path(Path("agents") / agent_name)
         candidate = _safe_candidate(root, relative)
         if candidate is None:
-            sources.append(
-                _diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="shared_agent"),
-            )
+            sources.append(_discovery_unavailable(relative.as_posix(), "shared_agent"))
             continue
         sources.append(
             _source(
                 path=candidate,
                 root=root,
                 scope="shared_agent",
-                table=f"{agent_name}_sessions",
                 agent_name=agent_name,
                 config=config,
                 requester_isolated=False,
@@ -322,11 +318,9 @@ def _private_agent_sources(
     config: Config,
     state_root: Path,
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
-    private_root = root / "private_instances"
-    directory_entries = _directory_entries(private_root)
-    if isinstance(directory_entries, UsageStorageDiagnostic):
-        return [replace(directory_entries, scope="private_agent")]
-    entries = directory_entries
+    entries = _directory_entries(root / "private_instances")
+    if isinstance(entries, UsageStorageDiagnostic):
+        return [replace(entries, scope="private_agent")]
     private_agents = tuple(name for name, agent in config.agents.items() if agent.private is not None)
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     for worker_directory in entries:
@@ -335,14 +329,7 @@ def _private_agent_sources(
         if worker_directory.is_symlink() and is_verified_private_instance_alias(state_root, worker_directory):
             continue  # Its canonical directory is scanned separately.
         if worker_directory.is_symlink() or not worker_directory.is_dir():
-            sources.append(
-                _diagnostic(
-                    worker_directory.relative_to(root).as_posix(),
-                    "partial",
-                    "source discovery unavailable",
-                    scope="private_agent",
-                ),
-            )
+            sources.append(_discovery_unavailable(worker_directory.relative_to(root).as_posix(), "private_agent"))
             continue
         # Ownership lives with runtime state, even when sessions use a separate root.
         try:
@@ -353,12 +340,12 @@ def _private_agent_sources(
         except (PrivateInstanceIdentityError, OSError):
             owner = None
         for agent_name in private_agents:
-            relative = Path("private_instances") / worker_directory.name / agent_name / "sessions" / f"{agent_name}.db"
+            relative = TableNames(agent_name).database_path(
+                Path("private_instances") / worker_directory.name / agent_name,
+            )
             candidate = _safe_candidate(root, relative)
             if candidate is None:
-                sources.append(
-                    _diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="private_agent"),
-                )
+                sources.append(_discovery_unavailable(relative.as_posix(), "private_agent"))
                 continue
             if not candidate.is_file():
                 continue
@@ -367,7 +354,6 @@ def _private_agent_sources(
                     path=candidate,
                     root=root,
                     scope="private_agent",
-                    table=f"{agent_name}_sessions",
                     agent_name=agent_name,
                     config=config,
                     requester_isolated=True,
@@ -381,19 +367,18 @@ def _team_sources(
     root: Path,
     config: Config,
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
-    directory_entries = _directory_entries(root / "teams")
-    if isinstance(directory_entries, UsageStorageDiagnostic):
-        return [directory_entries]
-    entries = directory_entries
+    entries = _directory_entries(root / "teams")
+    if isinstance(entries, UsageStorageDiagnostic):
+        return [entries]
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     for directory in entries:
         storage_name = directory.name
         if _IDENTIFIER.fullmatch(storage_name) is None:
             continue
-        relative = Path("teams") / storage_name / "sessions" / f"{storage_name}.db"
+        relative = TableNames(storage_name).database_path(Path("teams") / storage_name)
         candidate = _safe_candidate(root, relative)
         if candidate is None:
-            sources.append(_diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="team"))
+            sources.append(_discovery_unavailable(relative.as_posix(), "team"))
             continue
         if not directory.is_dir() or not candidate.is_file():
             continue
@@ -402,7 +387,6 @@ def _team_sources(
                 path=candidate,
                 root=root,
                 scope="team",
-                table=f"{storage_name}_sessions",
                 agent_name=None,
                 config=config,
                 requester_isolated=False,
@@ -417,13 +401,13 @@ def _directory_entries(path: Path) -> tuple[Path, ...] | UsageStorageDiagnostic:
     except FileNotFoundError:
         return ()
     except OSError:
-        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
+        return _discovery_unavailable("admin discovery")
     if path.is_symlink() or not path.is_dir():
-        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
+        return _discovery_unavailable("admin discovery")
     try:
         entries = tuple(path.iterdir())
     except OSError:
-        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
+        return _discovery_unavailable("admin discovery")
     return tuple(sorted(entries, key=lambda entry: entry.name))
 
 
@@ -448,7 +432,6 @@ def _source(
     path: Path,
     root: Path,
     scope: _UsageStorageScope,
-    table: str,
     agent_name: str | None,
     config: Config,
     requester_isolated: bool,
@@ -458,7 +441,7 @@ def _source(
         path=path,
         path_label=path.relative_to(root).as_posix(),
         scope=scope,
-        expected_session_table=table,
+        names=TableNames.of_database(path),
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset(config.agents),
         requester_isolated=requester_isolated,
@@ -490,9 +473,9 @@ def iter_usage_storage_rows(
             if diagnostic is not None:
                 yield diagnostic
                 return
-            table = quote_identifier(source.expected_session_table)
-            usage_table = f"{source.expected_session_table}_usage"
-            has_usage = _table_exists(connection, usage_table)
+            table = quote_identifier(source.names.sessions)
+            usage_table = source.names.usage
+            has_usage = usage_table in table_names(connection)
             # Session counters cover all history, so a run-only read skips their payload.
             session_data = "session_data" if mode == "both" else "NULL AS session_data"
             query = (
@@ -519,27 +502,18 @@ def iter_usage_storage_rows(
 
 
 def _validate_schema(connection: sqlite3.Connection, source: UsageStorageSource) -> UsageStorageDiagnostic | None:
-    table = source.expected_session_table
-    if _IDENTIFIER.fullmatch(table) is None or not _table_exists(connection, table):
+    table = source.names.sessions
+    tables = table_names(connection)
+    if _IDENTIFIER.fullmatch(table) is None or table not in tables:
         return _source_diagnostic(source, "unsupported_schema", "session table unavailable")
     if not _REQUIRED_COLUMNS.issubset(_table_columns(connection, table)):
         return _source_diagnostic(source, "unsupported_schema", "session schema unsupported")
-    usage_table = f"{table}_usage"
-    if _table_exists(connection, usage_table) and not _USAGE_REQUIRED_COLUMNS.issubset(
+    usage_table = source.names.usage
+    if usage_table in tables and not _USAGE_REQUIRED_COLUMNS.issubset(
         _table_columns(connection, usage_table),
     ):
         return _source_diagnostic(source, "unsupported_schema", "usage schema unsupported")
     return None
-
-
-def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
-    return (
-        connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (table,),
-        ).fetchone()
-        is not None
-    )
 
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
@@ -611,7 +585,7 @@ def _read_runs(
 ) -> tuple[list[UsageRunNode], bool]:
     """Read one session's usage snapshots, reporting whether every snapshot was usable."""
     query = (
-        f"SELECT usage_data FROM {quote_identifier(source.expected_session_table + '_usage')} "  # noqa: S608
+        f"SELECT usage_data FROM {quote_identifier(source.names.usage)} "  # noqa: S608
         "WHERE session_id = ?"
     )
     parameters: tuple[object, ...] = (session_id,)
@@ -637,7 +611,7 @@ def _read_runs(
 def _decode_session_usage(
     raw_value: object,
 ) -> tuple[Mapping[str, _MetricValue], tuple[UsageModelMetrics, ...] | None]:
-    decoded = decode_persisted_session_json(raw_value)
+    decoded = decode_session_json(raw_value)
     if decoded is None:
         return MappingProxyType({}), ()
     if not isinstance(decoded, dict):
@@ -682,12 +656,6 @@ def _extract_run(
     run_metrics = cast("dict[str, object]", metrics)
     selected_metrics = _select_metrics(run_metrics)
     created_at = run.get("created_at")
-    if (
-        isinstance(created_at, bool)
-        or not isinstance(created_at, (int, float))
-        or (isinstance(created_at, float) and not math.isfinite(created_at))
-    ):
-        created_at = None
     voice_seconds = run.get("voice_seconds") if kind == "live_voice" else None
     voice_finalized = run.get("voice_finalized", False)
     if kind == "live_voice" and (
@@ -711,7 +679,7 @@ def _extract_run(
         model_provider=_optional_string(run.get("model_provider")),
         model=_optional_string(run.get("model")),
         metrics=selected_metrics,
-        created_at=created_at,
+        created_at=created_at if _is_timestamp(created_at) else None,
         model_metrics=_extract_model_metrics(run_metrics.get("details")),
         requests=_extract_request_metrics(run.get("requests")),
         kind=cast("UsageKind", kind),
@@ -732,12 +700,7 @@ def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...
             request = cast("dict[str, object]", raw_request)
             created_at = request.get("created_at")
             metrics = request.get("metrics")
-            if (
-                isinstance(created_at, bool)
-                or not isinstance(created_at, (int, float))
-                or (isinstance(created_at, float) and not math.isfinite(created_at))
-                or not isinstance(metrics, dict)
-            ):
+            if not _is_timestamp(created_at) or not isinstance(metrics, dict):
                 return None
             if any(key in request and not _optional_string(request[key]) for key in ("model_provider", "model")):
                 return None
@@ -755,7 +718,7 @@ def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...
 
 
 def _extract_model_metrics(details: object) -> tuple[UsageModelMetrics, ...] | None:
-    """Read Agno's per-role model lists without discarding usable run totals."""
+    """Read the per-role model lists of stored metrics details without discarding usable run totals."""
     if details is None:
         return ()
     if not isinstance(details, dict):
@@ -794,6 +757,12 @@ def _select_metrics(metrics: Mapping[str, object]) -> Mapping[str, _MetricValue]
     return MappingProxyType(selected_metrics)
 
 
+def _is_timestamp(value: object) -> TypeGuard[int | float]:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _optional_string(value: object) -> str | None:
     return _bounded_string(value) if isinstance(value, str) and value else None
 
@@ -804,14 +773,8 @@ def _bounded_string(value: str) -> str:
     return value
 
 
-def _diagnostic(
-    path_label: str,
-    status: Literal["partial"],
-    detail: str,
-    *,
-    scope: _UsageStorageScope | None = None,
-) -> UsageStorageDiagnostic:
-    return UsageStorageDiagnostic(path_label=path_label, status=status, detail=detail, scope=scope)
+def _discovery_unavailable(path_label: str, scope: _UsageStorageScope | None = None) -> UsageStorageDiagnostic:
+    return UsageStorageDiagnostic(path_label, "partial", "source discovery unavailable", scope)
 
 
 def _source_diagnostic(

@@ -2,21 +2,13 @@
 
 from __future__ import annotations
 
-import sys
-from contextlib import contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, get_type_hints
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from agno.agent import Agent
 from agno.run import RunContext
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -27,20 +19,31 @@ from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.session_context import (
     ScopeSessionContext,
-    open_resolved_scope_session_context,
-    resolve_history_scope,
+    load_scope_session,
 )
-from mindroom.history.storage import read_scope_state, set_force_compaction_state
+from mindroom.history.storage import (
+    _with_scope_state,
+    add_pending_force_compaction_scope,
+    has_queued_force_compaction,
+    read_scope_seen_event_ids,
+    read_scope_state,
+    update_scope_seen_event_ids,
+)
 from mindroom.history.types import (
     CompactionLifecycleStart,
     CompactionOutcome,
     HistoryScope,
     HistoryScopeState,
 )
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -48,7 +51,6 @@ from tests.authorization_helpers import (
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
-    FakeModel,
     bind_runtime_paths,
     delivered_matrix_side_effect,
     install_runtime_journal_support,
@@ -57,10 +59,10 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
     seed_session,
 )
+from tests.fakes.summary_model import summary_model
 from tests.history_helpers import RecordingCompactionLifecycle, completed_outcome, folded_run_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -104,19 +106,20 @@ def _make_config_with_context_window(
     return config, runtime_paths
 
 
-def _completed_run(run_id: str, *, agent_id: str) -> RunOutput:
-    return RunOutput(
+def _completed_run(run_id: str, *, agent_id: str) -> RunRecord:
+    return RunRecord(
         run_id=run_id,
         agent_id=agent_id,
         status=RunStatus.completed,
     )
 
 
-def _session(session_id: str, *, runs: list[RunOutput] | None = None) -> AgentSession:
-    return AgentSession(
+def _session(session_id: str, *, runs: list[RunRecord] | None = None) -> ConversationSession:
+    return ConversationSession(
         session_id=session_id,
-        agent_id="test_agent",
-        runs=runs or [],
+        kind="agent",
+        owner_id="test_agent",
+        runs=list(runs or []),
         created_at=1,
         updated_at=1,
     )
@@ -136,66 +139,62 @@ def _execution_identity(session_id: str = "session-1", *, agent_name: str = "tes
     )
 
 
-def _agent(*, team_id: str | None = None) -> Agent:
-    agent = Agent(id="test_agent", model=FakeModel(id="fake-model", provider="fake"))
-    agent.team_id = team_id
-    return agent
+_AGENT_SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 
 
-@contextmanager
-def _open_scope_context(
+def _member_runtime_context(
+    config: Config,
+    runtime_paths: RuntimePaths,
     *,
-    agent: Agent,
+    agent_name: str = "test_agent",
+) -> ToolRuntimeContext:
+    """Return the tool context of a team member's turn; the team scope travels on each call's context instead."""
+    return make_test_tool_runtime_context(
+        agent_name=agent_name,
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id="thread-1",
+            resolved_thread_id="thread-1",
+            reply_to_event_id=None,
+            session_id="session-1",
+        ),
+        requester_id="@alice:localhost",
+        client=SimpleNamespace(),
+        config=config,
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+
+
+async def _compact_as_team_member(tool: CompactContextTools, team_scope: HistoryScope) -> object:
+    """Call ``compact_context`` as the team runtime runs a member's call: with the team scope on its context."""
+    [function] = adapt_toolkit(tool).functions
+    context = ToolCallContext(run_id="member-run", session_id="session-1", history_scope=team_scope)
+    return await run_tool_call(function, {}, context)
+
+
+def _load_scope_context(
+    *,
+    scope: HistoryScope,
     agent_name: str,
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None = None,
     create_session_if_missing: bool = False,
-) -> Iterator[ScopeSessionContext]:
-    with open_resolved_scope_session_context(
-        scope=resolve_history_scope(agent),
+) -> ScopeSessionContext:
+    scope_context = load_scope_session(
+        scope=scope,
         agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
         create_session_if_missing=create_session_if_missing,
-    ) as scope_context:
-        assert scope_context is not None
-        yield scope_context
-
-
-@contextmanager
-def _patched_scope_context(scope_context: ScopeSessionContext | SimpleNamespace) -> Iterator[object]:
-    try:
-        yield scope_context
-    finally:
-        scope_context.storage.close()
-
-
-@pytest.fixture(autouse=True)
-def _close_test_storages(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Close temporary SQLite handles created directly by compact-context tests."""
-    storages: list[object] = []
-    module = sys.modules[__name__]
-    original_create_session_storage = create_session_storage
-
-    def _tracked_create_session_storage(*args: object, **kwargs: object) -> object:
-        storage = original_create_session_storage(*args, **kwargs)
-        storages.append(storage)
-        return storage
-
-    monkeypatch.setattr(module, "create_session_storage", _tracked_create_session_storage)
-    yield
-
-    seen_storage_ids: set[int] = set()
-    for storage in storages:
-        storage_id = id(storage)
-        if storage_id in seen_storage_ids:
-            continue
-        seen_storage_ids.add(storage_id)
-        storage.close()
+    )
+    assert scope_context is not None
+    return scope_context
 
 
 def test_compact_context_runtime_annotations_resolve_for_agno_registration(tmp_path: Path) -> None:
@@ -232,9 +231,9 @@ async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -
         execution_identity=identity,
     )
 
-    result = await tool.compact_context(agent=_agent())
+    result = await tool.compact_context()
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is True
@@ -247,10 +246,33 @@ def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Pa
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
+
+    result = request_compaction_before_next_reply(
+        scope=_AGENT_SCOPE,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=identity,
+    )
+
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    assert state.force_compact_before_next_run is True
+    assert result == COMPACT_CONTEXT_SUCCESS
+
+
+def test_a_manual_compaction_request_is_recorded_in_the_session_state_it_is_given(tmp_path: Path) -> None:
+    """The dict the run's tools share records the request in place, so the run's own save keeps it."""
+    config, runtime_paths = _make_config(tmp_path)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
     session_state: dict[str, object] = {}
 
     result = request_compaction_before_next_reply(
-        agent=_agent(),
+        scope=_AGENT_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
@@ -259,12 +281,8 @@ def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Pa
         session_state=session_state,
     )
 
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
-    assert state.force_compact_before_next_run is True
-    assert result.message == COMPACT_CONTEXT_SUCCESS
-    assert result.session_state is session_state
+    assert result == COMPACT_CONTEXT_SUCCESS
+    assert session_state == add_pending_force_compaction_scope(None, _AGENT_SCOPE)
 
 
 @pytest.mark.asyncio
@@ -282,9 +300,9 @@ async def test_compact_context_requires_compaction_window(tmp_path: Path) -> Non
         execution_identity=identity,
     )
 
-    result = await tool.compact_context(agent=_agent())
+    result = await tool.compact_context()
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
@@ -294,10 +312,10 @@ async def test_compact_context_requires_compaction_window(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_compact_context_closes_scope_storage_after_budget_error(tmp_path: Path) -> None:
-    """Temporary scope storage should always be closed after manual validation fails."""
+async def test_compact_context_saves_nothing_after_budget_error(tmp_path: Path) -> None:
+    """A request that manual validation refuses leaves the stored session untouched."""
     config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=None)
-    storage = SimpleNamespace(upsert_session=Mock(), close=Mock())
+    storage = Mock(spec=ConversationStore)
     scope_context = SimpleNamespace(
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         storage=storage,
@@ -312,22 +330,22 @@ async def test_compact_context_closes_scope_storage_after_budget_error(tmp_path:
     )
 
     with patch(
-        "mindroom.history.manual.open_resolved_scope_session_context",
-        return_value=_patched_scope_context(scope_context),
+        "mindroom.history.manual.load_scope_session",
+        return_value=scope_context,
     ):
-        result = await tool.compact_context(agent=_agent())
+        result = await tool.compact_context()
 
     assert result == (
         "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
     )
-    storage.close.assert_called_once_with()
+    assert storage.method_calls == []
 
 
 @pytest.mark.asyncio
-async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path) -> None:
-    """Temporary scope storage should be closed after a successful scheduling request."""
+async def test_compact_context_saves_only_the_scope_metadata(tmp_path: Path) -> None:
+    """Scheduling writes only the session metadata, so it cannot overwrite runs or tool state a reply saves."""
     config, runtime_paths = _make_config(tmp_path)
-    storage = SimpleNamespace(upsert_session=Mock(), close=Mock())
+    storage = Mock(spec=ConversationStore)
     scope_context = SimpleNamespace(
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         storage=storage,
@@ -341,14 +359,21 @@ async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path
     )
 
     with patch(
-        "mindroom.history.manual.open_resolved_scope_session_context",
-        return_value=_patched_scope_context(scope_context),
+        "mindroom.history.manual.load_scope_session",
+        return_value=scope_context,
     ):
-        result = await tool.compact_context(agent=_agent())
+        result = await tool.compact_context()
 
     assert result == COMPACT_CONTEXT_SUCCESS
-    storage.upsert_session.assert_called_once_with(scope_context.session)
-    storage.close.assert_called_once_with()
+    assert [call[0] for call in storage.method_calls] == ["update_metadata"]
+    ((session, update), _) = storage.update_metadata.call_args
+    assert session is scope_context.session
+    forced = update({"other": "kept"})
+    assert forced == _with_scope_state(
+        {"other": "kept"},
+        scope_context.scope,
+        HistoryScopeState(force_compact_before_next_run=True),
+    )
 
 
 @pytest.mark.asyncio
@@ -366,9 +391,9 @@ async def test_compact_context_requires_positive_summary_input_budget(tmp_path: 
         execution_identity=identity,
     )
 
-    result = await tool.compact_context(agent=_agent())
+    result = await tool.compact_context()
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
@@ -396,9 +421,9 @@ async def test_compact_context_requires_summary_input_budget_with_retry_headroom
         execution_identity=identity,
     )
 
-    result = await tool.compact_context(agent=_agent())
+    result = await tool.compact_context()
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
@@ -446,25 +471,24 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
         execution_identity=identity,
     )
 
-    result = await tool.compact_context(agent=_agent())
+    result = await tool.compact_context()
     assert result == COMPACT_CONTEXT_SUCCESS
 
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            "mindroom.history.compaction.build_model_provider",
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+                return_value="merged summary",
             ),
         ),
     ):
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
             compaction_lifecycle=lifecycle,
-            agent=_agent(),
             agent_name="test_agent",
             full_prompt="Current question",
             session_id="session-1",
@@ -474,10 +498,10 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
             storage=storage,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "merged summary"
+    assert persisted.summary.text == "merged summary"
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
     assert prepared.compaction_reply_outcome == "success"
@@ -587,33 +611,34 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
         execution_identity=identity,
     )
 
-    team_agent = _agent(team_id="team-123")
-    with _open_scope_context(
-        agent=team_agent,
+    team_scope = HistoryScope(kind="team", scope_id="team-123")
+    team_context = _load_scope_context(
+        scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
         create_session_if_missing=True,
-    ) as team_context:
-        assert team_context.session is not None
-        seed_session(team_context.storage, team_context.session)
-    await tool.compact_context(agent=team_agent)
+    )
+    assert team_context.session is not None
+    seed_session(team_context.storage, team_context.session)
+    with tool_runtime_context(_member_runtime_context(config, runtime_paths)):
+        await _compact_as_team_member(tool, team_scope)
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     direct_state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
-    with _open_scope_context(
-        agent=team_agent,
+    reloaded_team_context = _load_scope_context(
+        scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-    ) as reloaded_team_context:
-        assert reloaded_team_context.session is not None
-        team_state = read_scope_state(reloaded_team_context.session, HistoryScope(kind="team", scope_id="team-123"))
+    )
+    assert reloaded_team_context.session is not None
+    team_state = read_scope_state(reloaded_team_context.session, team_scope)
     assert direct_state.force_compact_before_next_run is False
     assert team_state.force_compact_before_next_run is True
 
@@ -625,14 +650,14 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
     session = _session("session-1")
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
     summary_mock = AsyncMock()
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            "mindroom.history.compaction.build_model_provider",
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -640,7 +665,6 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(),
             agent_name="test_agent",
             full_prompt="Current question",
             session_id="session-1",
@@ -651,7 +675,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     state = read_scope_state(persisted, scope)
@@ -672,24 +696,22 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
-    agent = _agent()
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            "mindroom.history.compaction.build_model_provider",
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=SessionSummary(summary="single run summary", updated_at=datetime.now(UTC)),
+                return_value="single run summary",
             ),
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=agent,
             agent_name="test_agent",
             full_prompt="Current question",
             session_id="session-1",
@@ -700,10 +722,10 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "single run summary"
+    assert persisted.summary.text == "single run summary"
     assert persisted.runs == []
     state = read_scope_state(persisted, scope)
     assert state.force_compact_before_next_run is False
@@ -742,27 +764,26 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
         ],
     )
     stale_live_session.metadata = {}
-    stale_live_session.session_data = {"session_state": live_session_state}
+    stale_live_session.session_state = live_session_state
 
-    result = await tool.compact_context(agent=_agent(), run_context=run_context)
+    result = await tool.compact_context(run_context=run_context)
     assert result == COMPACT_CONTEXT_SUCCESS
     assert run_context.session_state is live_session_state
     seed_session(storage, stale_live_session)
 
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            "mindroom.history.compaction.build_model_provider",
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+                return_value="merged summary",
             ),
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(),
             agent_name="test_agent",
             full_prompt="Current question",
             session_id="session-1",
@@ -772,13 +793,82 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
             storage=storage,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
     assert persisted.summary is not None
-    assert persisted.summary.summary == "merged summary"
+    assert persisted.summary.text == "merged summary"
     assert prepared.compaction_reply_outcome == "success"
+    # The request was consumed, so the reply after this one does not compact again.
+    assert not has_queued_force_compaction(storage, "session-1", HistoryScope(kind="agent", scope_id="test_agent"))
+
+
+@pytest.mark.asyncio
+async def test_a_consumed_compaction_request_keeps_metadata_another_writer_stored_meanwhile(tmp_path: Path) -> None:
+    """A reply that consumes a queued request stores the flag over the row's metadata, not the copy it loaded."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    seeded = _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")])
+    seeded.session_state = add_pending_force_compaction_scope(None, scope)
+    seed_session(storage, seeded)
+    session = storage.load_session("session-1", "agent")
+    assert session is not None
+    # A team turn records the events it consumed on the row after this reply loaded it.
+    other = storage.load_session("session-1", "agent")
+    assert other is not None
+    team_scope = HistoryScope(kind="team", scope_id="squad")
+    update_scope_seen_event_ids(storage, other, team_scope, ["$consumed"])
+
+    with (
+        patch("mindroom.history.compaction.build_model_provider", return_value=summary_model()),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")),
+    ):
+        await prepare_history_for_run_for_test(
+            agent_name="test_agent",
+            full_prompt="Current question",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    stored = storage.load_session("session-1", "agent")
+    assert stored is not None
+    assert read_scope_seen_event_ids(storage, stored, team_scope) == {"$consumed"}
+    assert not has_queued_force_compaction(storage, "session-1", scope)
+
+
+def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_after_the_copy_loaded(tmp_path: Path) -> None:
+    """A team turn's consumed ids merge into the row's metadata, not its loaded copy's, so a later request stays."""
+    config, runtime_paths = _make_config(tmp_path)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
+    team_copy = storage.load_session("session-1", "agent")
+    assert team_copy is not None
+    # The user asks for compaction after the team turn loaded its copy of the session.
+    result = request_compaction_before_next_reply(
+        scope=_AGENT_SCOPE,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=identity,
+    )
+    assert result == COMPACT_CONTEXT_SUCCESS
+    team_scope = HistoryScope(kind="team", scope_id="squad")
+
+    update_scope_seen_event_ids(storage, team_copy, team_scope, ["$consumed"])
+
+    stored = storage.load_session("session-1", "agent")
+    assert stored is not None
+    assert read_scope_state(stored, _AGENT_SCOPE).force_compact_before_next_run is True
+    assert read_scope_seen_event_ids(storage, stored, team_scope) == {"$consumed"}
+    assert team_copy.metadata == stored.metadata
 
 
 @pytest.mark.asyncio
@@ -806,22 +896,21 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    agent = Agent(id="beta", model=FakeModel(id="fake-model", provider="fake"))
-    agent.team_id = "team-123"
-    agent.__dict__["_mindroom_team_scope_owner_agent_name"] = "alpha"
+    team_scope = HistoryScope(kind="team", scope_id="team-123")
 
-    result = await tool.compact_context(agent=agent)
+    with tool_runtime_context(_member_runtime_context(config, runtime_paths, agent_name="beta")):
+        result = await _compact_as_team_member(tool, team_scope)
 
-    with _open_scope_context(
-        agent=agent,
+    team_context = _load_scope_context(
+        scope=team_scope,
         agent_name="beta",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-    ) as team_context:
-        assert team_context.session is not None
-        team_state = read_scope_state(team_context.session, HistoryScope(kind="team", scope_id="team-123"))
+    )
+    assert team_context.session is not None
+    team_state = read_scope_state(team_context.session, team_scope)
     assert team_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -855,19 +944,19 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    team_agent = _agent(team_id="team_123")
-    with _open_scope_context(
-        agent=team_agent,
+    team_scope = HistoryScope(kind="team", scope_id="team_123")
+    team_context = _load_scope_context(
+        scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
         create_session_if_missing=True,
-    ) as team_context:
-        assert team_context.session is not None
-        team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
-        seed_session(team_context.storage, team_context.session)
+    )
+    assert team_context.session is not None
+    team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
+    seed_session(team_context.storage, team_context.session)
 
     runtime_context = make_test_tool_runtime_context(
         agent_name="test_agent",
@@ -888,18 +977,18 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
     )
 
     with tool_runtime_context(runtime_context):
-        result = await tool.compact_context(agent=team_agent)
+        result = await _compact_as_team_member(tool, team_scope)
 
-    with _open_scope_context(
-        agent=team_agent,
+    reloaded_team_context = _load_scope_context(
+        scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-    ) as reloaded_team_context:
-        assert reloaded_team_context.session is not None
-        team_state = read_scope_state(reloaded_team_context.session, HistoryScope(kind="team", scope_id="team_123"))
+    )
+    assert reloaded_team_context.session is not None
+    team_state = read_scope_state(reloaded_team_context.session, team_scope)
     assert team_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -940,19 +1029,19 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    team_agent = _agent(team_id="team_123")
-    with _open_scope_context(
-        agent=team_agent,
+    team_scope = HistoryScope(kind="team", scope_id="team_123")
+    team_context = _load_scope_context(
+        scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
         create_session_if_missing=True,
-    ) as team_context:
-        assert team_context.session is not None
-        team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
-        seed_session(team_context.storage, team_context.session)
+    )
+    assert team_context.session is not None
+    team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
+    seed_session(team_context.storage, team_context.session)
 
     runtime_context = make_test_tool_runtime_context(
         agent_name="test_agent",
@@ -973,18 +1062,18 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
     )
 
     with tool_runtime_context(runtime_context):
-        result = await tool.compact_context(agent=team_agent)
+        result = await _compact_as_team_member(tool, team_scope)
 
-    with _open_scope_context(
-        agent=team_agent,
+    reloaded_team_context = _load_scope_context(
+        scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-    ) as reloaded_team_context:
-        assert reloaded_team_context.session is not None
-        team_state = read_scope_state(reloaded_team_context.session, HistoryScope(kind="team", scope_id="team_123"))
+    )
+    assert reloaded_team_context.session is not None
+    team_state = read_scope_state(reloaded_team_context.session, team_scope)
     assert team_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -1022,18 +1111,18 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    with _open_scope_context(
-        agent=_agent(),
+    scope_context = _load_scope_context(
+        scope=_AGENT_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
         create_session_if_missing=True,
-    ) as scope_context:
-        assert scope_context.session is not None
-        scope_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
-        seed_session(scope_context.storage, scope_context.session)
+    )
+    assert scope_context.session is not None
+    scope_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
+    seed_session(scope_context.storage, scope_context.session)
 
     runtime_context = make_test_tool_runtime_context(
         agent_name="test_agent",
@@ -1054,20 +1143,20 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
     )
 
     with tool_runtime_context(runtime_context):
-        result = await tool.compact_context(agent=_agent())
+        result = await tool.compact_context()
 
-    with _open_scope_context(
-        agent=_agent(),
+    reloaded_scope_context = _load_scope_context(
+        scope=_AGENT_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-    ) as reloaded_scope_context:
-        assert reloaded_scope_context.session is not None
-        agent_state = read_scope_state(
-            reloaded_scope_context.session,
-            HistoryScope(kind="agent", scope_id="test_agent"),
-        )
+    )
+    assert reloaded_scope_context.session is not None
+    agent_state = read_scope_state(
+        reloaded_scope_context.session,
+        HistoryScope(kind="agent", scope_id="test_agent"),
+    )
     assert agent_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS

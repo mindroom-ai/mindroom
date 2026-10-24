@@ -9,10 +9,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom.budgets.pricing import _price_table
 from mindroom.budgets.spend import _UnpricedModelUsage, collect_monthly_spend, month_bounds
@@ -20,8 +16,13 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.providers.model_loading import get_model_instance
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.schema import TableNames
+from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
 from tests.conftest import seed_session
 
@@ -70,7 +71,7 @@ def _source(scope: str = "shared_agent") -> UsageStorageSource:
         path=Path("/not-read.db"),
         path_label=f"{scope}.db",
         scope=scope,  # type: ignore[arg-type]
-        expected_session_table="sessions",
+        names=TableNames(agent or "team"),
         source_agent_id=agent,
         allowed_agent_ids=frozenset({"code"}),
         requester_isolated=False,
@@ -78,7 +79,7 @@ def _source(scope: str = "shared_agent") -> UsageStorageSource:
 
 
 def _provider(config: Config, tmp_path: Path, model_name: str) -> str:
-    return get_model_instance(config, _paths(tmp_path), model_name).get_provider()
+    return build_model_provider(config, _paths(tmp_path), model_name).identity.provider_name
 
 
 def _run(
@@ -266,49 +267,38 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
     """Usage written by real session storage must match the price table's model identities."""
     config = _config()
     paths = _paths(tmp_path)
-    model = get_model_instance(config, paths, "astra")
-    storage = create_state_storage(
-        "code",
-        paths.storage_root / "agents" / "code",
-        subdir="sessions",
-        session_table="code_sessions",
-    )
+    model = build_model_provider(config, paths, "astra").identity
+    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
     metrics = RunMetrics(
-        input_tokens=1_000_000,
-        output_tokens=100_000,
-        total_tokens=1_100_000,
+        tokens=TokenCounts(input_tokens=1_000_000, output_tokens=100_000, total_tokens=1_100_000),
         details={
             "model": [
                 ModelMetrics(
+                    tokens=TokenCounts(input_tokens=1_000_000, output_tokens=100_000, total_tokens=1_100_000),
                     id=model.id,
-                    provider=model.get_provider(),
-                    input_tokens=1_000_000,
-                    output_tokens=100_000,
-                    total_tokens=1_100_000,
+                    provider=model.provider_name,
                 ),
             ],
         },
     )
-    try:
-        seed_session(
-            storage,
-            AgentSession(
-                session_id="session-1",
-                agent_id="code",
-                user_id=ALICE,
-                runs=[
-                    RunOutput(
-                        run_id="run-1",
-                        model_provider=model.provider,
-                        model=model.id,
-                        created_at=int(datetime(2026, 10, 3, tzinfo=UTC).timestamp()),
-                        metrics=metrics,
-                    ),
-                ],
-            ),
-        )
-    finally:
-        storage.close()
+    seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id="session-1",
+            owner_id="code",
+            runs=[
+                RunRecord(
+                    run_id="run-1",
+                    user_id=ALICE,
+                    model_provider=model.provider,
+                    model=model.id,
+                    created_at=int(datetime(2026, 10, 3, tzinfo=UTC).timestamp()),
+                    metrics=metrics,
+                ),
+            ],
+        ),
+    )
 
     snapshot = collect_monthly_spend(config, paths, NOW, _price_table(config, paths).prices)
 
@@ -323,7 +313,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
     """A run paused last month and resumed this month is charged for its requests made this month."""
     config = _config()
     paths = _paths(tmp_path)
-    model = get_model_instance(config, paths, "astra")
+    model = build_model_provider(config, paths, "astra").identity
     started = int(datetime(2026, 9, 24, tzinfo=UTC).timestamp())
     resumed = int(datetime(2026, 10, 2, tzinfo=UTC).timestamp())
 
@@ -331,43 +321,41 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         return Message(
             role="assistant",
             created_at=created_at,
-            provider_data={"mindroom_model": {"id": model.id, "provider": model.get_provider()}},
-            metrics=MessageMetrics(input_tokens=1_000_000, total_tokens=1_000_000),
+            provider_data={"mindroom_model": {"id": model.id, "provider": model.provider_name}},
+            metrics=MessageMetrics(tokens=TokenCounts(input_tokens=1_000_000, total_tokens=1_000_000)),
         )
 
     def metrics(tokens: int) -> RunMetrics:
         model_metrics = ModelMetrics(
+            tokens=TokenCounts(input_tokens=tokens, total_tokens=tokens),
             id=model.id,
-            provider=model.get_provider(),
-            input_tokens=tokens,
-            total_tokens=tokens,
+            provider=model.provider_name,
         )
-        return RunMetrics(input_tokens=tokens, total_tokens=tokens, details={"model": [model_metrics]})
+        return RunMetrics(
+            tokens=TokenCounts(input_tokens=tokens, total_tokens=tokens),
+            details={"model": [model_metrics]},
+        )
 
-    run = RunOutput(
+    run = RunRecord(
         run_id="run-1",
+        user_id=ALICE,
         model_provider=model.provider,
         model=model.id,
         created_at=started,
         messages=[request(started)],
         metrics=metrics(1_000_000),
     )
-    storage = create_state_storage(
-        "code",
-        paths.storage_root / "agents" / "code",
-        subdir="sessions",
-        session_table="code_sessions",
-    )
-    try:
-        with monkeypatch.context() as clock:
-            clock.setattr("agno.db.utils.time.time", lambda: started)
-            seed_session(storage, AgentSession(session_id="session-1", agent_id="code", user_id=ALICE, runs=[run]))
-            run.messages = [*(run.messages or []), request(resumed)]
-            run.metrics = metrics(2_000_000)
-            clock.setattr("agno.db.utils.time.time", lambda: resumed)
-            storage.upsert_run(run=run, session_id="session-1")
-    finally:
-        storage.close()
+    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
+    with monkeypatch.context() as clock:
+        clock.setattr("mindroom.session_storage.store.time", lambda: started)
+        session = seed_session(
+            storage,
+            ConversationSession(kind="agent", session_id="session-1", owner_id="code", runs=[run]),
+        )
+        run.messages = [*run.messages, request(resumed)]
+        run.metrics = metrics(2_000_000)
+        clock.setattr("mindroom.session_storage.store.time", lambda: resumed)
+        storage.save_run(session, run, record_usage=True)
 
     snapshot = collect_monthly_spend(config, paths, NOW, _price_table(config, paths).prices)
 

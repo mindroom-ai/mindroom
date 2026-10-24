@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from agno.models.message import Message
-
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.answers import JudgmentError, JudgmentResponse, JudgmentResult, TokenUsage
 from mindroom.judgment.execution import run_judgment, run_judgment_thread
-from mindroom.providers import model_loading
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, complete
+from mindroom.providers.registry import build_model_provider
 from mindroom.providers.tool_policy import without_provider_tools
 
 if TYPE_CHECKING:
@@ -59,31 +59,26 @@ async def judge_with_llm(
 
     async def evaluate(prepared: JudgmentRequest) -> JudgmentResponse[bool]:
         assert prepared.body is not None
-        model = await run_judgment_thread(
-            lambda: model_loading.get_model_instance(config, runtime_paths, settings.model),
+        provider = await run_judgment_thread(
+            lambda: build_model_provider(config, runtime_paths, settings.model),
         )
-        messages = [
+        messages = (
             Message(role="system", content=_INSTRUCTION),
             Message(role="user", content=prepared.body.decode()),
-        ]
+        )
         with without_provider_tools():
-            response = await model.ainvoke(
-                messages=messages,
-                assistant_message=Message(role=model.assistant_message_role),
-                tools=[],
-                tool_choice="none",
-            )
-        if response.tool_calls or not isinstance(response.content, str):
+            turn = await complete(provider, ModelRequest(messages=messages, tool_choice="none", stream=False))
+        if turn.tool_calls or not isinstance(turn.message.content, str):
             raise JudgmentError(failure="invalid_response")
-        decision = _parse_decision(response.content)
-        usage = response.response_usage
+        usage = turn.usage
         return JudgmentResponse(
-            model=model.id,
-            decision=decision,
+            model=provider.identity.id,
+            decision=_parse_decision(turn.message.content),
             probability=None,
-            usage=None
-            if usage is None
-            else TokenUsage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens),
+            # A provider that reported no usage leaves the counts unknown rather than zero.
+            usage=TokenUsage(input_tokens=usage.tokens.input_tokens, output_tokens=usage.tokens.output_tokens)
+            if usage.to_dict()
+            else None,
         )
 
     return await run_judgment(

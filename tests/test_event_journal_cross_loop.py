@@ -1,10 +1,9 @@
 """A journal write issued from a second event loop has to come back.
 
-Agno runs a synchronous tool as ``await asyncio.to_thread(function_call.execute)``,
-so its hook chain lands on a worker thread with no loop of its own, and
-``_run_coroutine_from_sync`` (``tool_system/tool_hooks.py``) gives it one with
-``asyncio.run``. Any journal write that chain triggers is therefore issued
-from a loop that is not the one the store's writer task lives on. The runtime
+A synchronous tool runs on a worker thread with no loop of its own, and code
+there that needs a coroutine gives itself a loop with ``asyncio.run``. Any
+journal write that coroutine triggers is therefore issued from a loop that is
+not the one the store's writer task lives on. The runtime
 loop is still running, so the write itself is fine -- the writer commits it --
 but the caller has to be woken on its own loop, and a loop whose only pending
 work is that write has no reason to wake unless something tells it to.

@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from agno.db.base import SessionType
-
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.handled_turns import (
     HandledTurnLedger,
@@ -20,7 +18,6 @@ from mindroom.handled_turns import (
 from mindroom.history.storage import remove_history_of_redacted_events, remove_runs_answering
 from mindroom.legacy_revision_replay import summary_source_id
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionReplay,
@@ -36,8 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from agno.db.base import BaseDb
-
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.event_journal import RelationView
@@ -45,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.message_target import MessageTarget
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_policy import ResponseAction
 
@@ -845,7 +841,7 @@ class TurnStore:
         *,
         additional_discovery_event_ids: tuple[str, ...] = (),
     ) -> dict[str, Any] | None:
-        """Project one record into versioned recoverable Agno run metadata.
+        """Project one record into versioned recoverable run metadata.
 
         ``additional_discovery_event_ids`` lets one anchored run stay discoverable by
         extra triggering events, such as a numeric interactive reply whose response
@@ -857,8 +853,7 @@ class TurnStore:
                 turn_record,
                 discovery_event_ids=(*turn_record.discovery_event_ids, *additional_discovery_event_ids),
             )
-        metadata = TurnRecordCodec.to_run_metadata(projected_record)
-        return dict(metadata) if metadata else None
+        return TurnRecordCodec.to_run_metadata(projected_record) or None
 
     async def load_turn(self, original_event_id: str) -> TurnRecord | None:
         """Return the settled turn record a message belongs to."""
@@ -870,21 +865,7 @@ class TurnStore:
         turn_record: TurnRecord,
         requester_user_id: str,
     ) -> None:
-        """Remove stale persisted runs before regenerating one edited turn."""
-        await self._remove_stale_runs_for_turn_record(
-            turn_record=turn_record,
-            requester_user_id=requester_user_id,
-            reason="edited",
-        )
-
-    async def _remove_stale_runs_for_turn_record(
-        self,
-        *,
-        turn_record: TurnRecord,
-        requester_user_id: str,
-        reason: str,
-    ) -> bool:
-        """Remove persisted runs using the exact recorded target and history scope.
+        """Remove an edited turn's persisted runs from its recorded target and history scope before it regenerates.
 
         History derived from redacted events goes first, so a loaded run holding a
         redacted event still retires a legacy summary before the edit removes that run.
@@ -892,47 +873,38 @@ class TurnStore:
         target = turn_record.conversation_target
         scope = turn_record.history_scope
         if target is None or scope is None:
-            return False
+            return
         storage = self.deps.state_writer.create_storage(
             self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
             scope=scope,
         )
-        session_type = self.deps.state_writer.session_type_for_scope(scope)
-        try:
-            session = await run_blocking_until_complete(
-                get_team_session if session_type is SessionType.TEAM else get_agent_session,
+        session = await run_blocking_until_complete(storage.load_session, target.session_id, scope.kind)
+        if session is not None:
+            await remove_history_of_redacted_events(
                 storage,
-                target.session_id,
-            )
-            if session is not None:
-                await remove_history_of_redacted_events(
-                    storage,
-                    session,
-                    scope,
-                    partial(self.redacted_history_events, target),
-                )
-            removed_any = await run_blocking_until_complete(
-                _remove_runs_for_sources,
-                storage,
-                target.session_id,
+                session,
                 scope,
-                turn_record.indexed_event_ids,
+                partial(self.redacted_history_events, target),
             )
-        finally:
-            storage.close()
+        removed_any = await run_blocking_until_complete(
+            _remove_runs_for_sources,
+            storage,
+            target.session_id,
+            scope,
+            turn_record.indexed_event_ids,
+        )
         if removed_any:
             self.deps.state_writer.deps.logger.info(
                 "Removed stale persisted history for handled turn",
-                reason=reason,
+                reason="edited",
                 source_event_ids=list(turn_record.source_event_ids),
                 session_id=target.session_id,
                 history_scope=scope.key,
             )
-        return removed_any
 
 
 def _remove_runs_for_sources(
-    storage: BaseDb,
+    storage: ConversationStore,
     session_id: str,
     scope: HistoryScope,
     source_event_ids: tuple[str, ...],

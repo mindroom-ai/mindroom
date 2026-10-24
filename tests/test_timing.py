@@ -397,12 +397,12 @@ def _timing_probe_labels(
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-def test_load_agent_model_instance_preserves_prompt_assembly_subspan() -> None:
-    """Agent model init should keep its dedicated system-prompt timing label."""
+def test_build_agent_model_provider_preserves_prompt_assembly_subspan() -> None:
+    """Agent model provider construction should keep its dedicated system-prompt timing label."""
     labels = _timing_probe_labels(
         module_name="mindroom.agents",
-        call_expression='target_module._load_agent_model_instance(object(), object(), "agent-model")',
-        patch_target="mindroom.agents.model_loading.get_model_instance",
+        call_expression='target_module._build_agent_model_provider(object(), object(), "agent-model", None)',
+        patch_target="mindroom.agents.build_model_provider",
     )
     assert labels == ["system_prompt_assembly.agent_create.model_instance"]
 
@@ -410,9 +410,9 @@ def test_load_agent_model_instance_preserves_prompt_assembly_subspan() -> None:
 def test_load_compaction_model_preserves_history_prepare_subspan() -> None:
     """History compaction model init should keep its dedicated timing label."""
     labels = _timing_probe_labels(
-        module_name="mindroom.history.runtime",
+        module_name="mindroom.history.compaction",
         call_expression='target_module._load_compaction_model(object(), object(), "compaction-model")',
-        patch_target="mindroom.history.runtime.model_loading.get_model_instance",
+        patch_target="mindroom.history.compaction.build_model_provider",
     )
     assert labels == ["system_prompt_assembly.history_prepare.compaction_model_init"]
 

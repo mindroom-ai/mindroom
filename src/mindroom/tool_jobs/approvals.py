@@ -12,8 +12,6 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from agno.models.response import ToolExecution
-
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.response import plan_approval_calls, timed_grant_operation
 from mindroom.approval.tool_approval import (
@@ -23,6 +21,7 @@ from mindroom.approval.tool_approval import (
 )
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.event_journal import ApprovalDecision
+from mindroom.llm.runs import ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import BackgroundOutcome
@@ -30,11 +29,10 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-    from agno.tools.function import FunctionCall
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
+    from mindroom.tool_jobs.execution_authority import JobCall
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -84,7 +82,7 @@ async def ask_job_approvals(
 async def ask_tool_call_approval(
     runtime: ToolJobRuntime,
     job_id: str,
-    call: FunctionCall,
+    call: JobCall,
     *,
     owner: ToolExecutionIdentity,
     config: Config,
@@ -94,20 +92,22 @@ async def ask_tool_call_approval(
 
     The policy, the card, and the execution all read the same frozen arguments.
     """
-    assert call.call_id is not None, "a managed call has its exact call identity"
+    call_id = call.context.call_id
+    assert call_id is not None, "a managed call has its exact call identity"
+    name = call.tool.function.name
     # Only the approval policy gates a call that asks as its job; a tool's own confirmation keeps pausing the reply.
     tool = ToolExecution(
-        tool_call_id=call.call_id,
-        tool_name=call.function.name,
-        tool_args=dict(call.arguments or {}),
+        tool_call_id=call_id,
+        tool_name=name,
+        tool_args=dict(call.arguments),
         approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE,
     )
     plan = await plan_approval_calls(
-        ((tool, call.call_id, call.function.name, owner.agent_name),),
+        ((tool, call_id, name, owner.agent_name),),
         config=config,
         runtime_paths=runtime_paths,
         requester_id=owner.requester_id or "",
-        toolkit_owners={(owner.agent_name, call.function.name): call.function.owning_toolkit},
+        toolkit_owners={(owner.agent_name, name): call.tool.toolkit_name},
         room_id=owner.room_id,
         thread_id=owner.resolved_thread_id,
     )

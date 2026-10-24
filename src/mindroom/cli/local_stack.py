@@ -29,11 +29,11 @@ _CINNY_DEFAULT_IMAGE = "ghcr.io/mindroom-ai/mindroom-chat:latest"
 _CINNY_DEFAULT_CONTAINER = "mindroom-cinny-local"
 
 
-def _httpx_get(url: str, *, timeout: float, verify: bool) -> httpx.Response:
+def _httpx_get(url: str) -> httpx.Response:
     """Call httpx.get without importing httpx during CLI help rendering."""
     import httpx  # noqa: PLC0415
 
-    return httpx.get(url, timeout=timeout, verify=verify)
+    return httpx.get(url, timeout=3, verify=False)  # noqa: S501 - probes the local stack's own services
 
 
 def local_stack_setup(
@@ -83,14 +83,16 @@ def local_stack_setup(
     """Start local Synapse + MindRoom Chat using Docker only."""
     runtime_paths = activate_cli_runtime()
     _require_supported_platform()
-    _require_binary("docker", "Docker is required but was not found in PATH.")
+    if shutil.which("docker") is None:
+        console.print("[red]Error:[/red] Docker is required but was not found in PATH.")
+        raise typer.Exit(1)
 
     inferred_server_name = server_name or _infer_server_name(homeserver_url)
     synapse_dir = synapse_dir.expanduser().resolve()
     if not skip_synapse:
         _start_synapse_stack(synapse_dir)
 
-    _wait_for_matrix_homeserver(homeserver_url)
+    _wait_for_service(matrix_versions_url(homeserver_url), "Synapse", response_has_matrix_versions)
 
     cinny_config_path = _write_local_cinny_config(
         homeserver_url,
@@ -184,14 +186,6 @@ def _require_supported_platform() -> None:
     raise typer.Exit(1)
 
 
-def _require_binary(name: str, message: str) -> None:
-    """Ensure a required binary is present in PATH."""
-    if shutil.which(name) is not None:
-        return
-    console.print(f"[red]Error:[/red] {message}")
-    raise typer.Exit(1)
-
-
 def _start_synapse_stack(synapse_dir: Path) -> None:
     """Start Synapse via docker compose in the provided directory."""
     compose_file = synapse_dir / "docker-compose.yml"
@@ -200,7 +194,7 @@ def _start_synapse_stack(synapse_dir: Path) -> None:
         raise typer.Exit(1)
 
     console.print(f"Starting Synapse stack from [bold]{synapse_dir}[/bold]...")
-    result = _run_command(["docker", "compose", "up", "-d"], cwd=synapse_dir, check=False)
+    result = _run_command(["docker", "compose", "up", "-d"], cwd=synapse_dir)
     if result.returncode != 0:
         _print_command_failure(result, "Failed to start Synapse stack")
         raise typer.Exit(1)
@@ -214,7 +208,7 @@ def _start_cinny_container(
     cinny_image: str,
 ) -> None:
     """Start (or replace) the local MindRoom Chat container."""
-    _run_command(["docker", "rm", "-f", cinny_container_name], check=False)
+    _run_command(["docker", "rm", "-f", cinny_container_name])
 
     run_cmd = [
         "docker",
@@ -230,33 +224,31 @@ def _start_cinny_container(
         f"{cinny_config_path}:/app/config.json:ro",
         cinny_image,
     ]
-    result = _run_command(run_cmd, check=False)
+    result = _run_command(run_cmd)
     if result.returncode != 0:
         _print_command_failure(result, "Failed to start MindRoom Chat container")
         raise typer.Exit(1)
 
 
-def _wait_for_service(url: str, service_name: str) -> None:
-    """Wait for a service URL to become healthy."""
+def _wait_for_service(
+    url: str,
+    service_name: str,
+    response_matches: Callable[[httpx.Response], bool] | None = None,
+) -> None:
+    """Wait up to 60 seconds for a service URL to answer with success, or with a response ``response_matches``."""
+    import httpx  # noqa: PLC0415
+
     console.print(f"Waiting for {service_name}: [dim]{url}[/dim]")
-    if _wait_for_http_success(url, timeout_seconds=60, verify=False):
-        return
+    deadline = time.monotonic() + 60
+    matcher = response_matches or (lambda response: response.is_success)
+    while time.monotonic() < deadline:
+        try:
+            if matcher(_httpx_get(url)):
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(1)
     console.print(f"[red]Error:[/red] {service_name} did not become healthy at {url}")
-    raise typer.Exit(1)
-
-
-def _wait_for_matrix_homeserver(homeserver_url: str) -> None:
-    """Wait for the local Synapse `/versions` endpoint to return Matrix metadata."""
-    url = matrix_versions_url(homeserver_url)
-    console.print(f"Waiting for Synapse: [dim]{url}[/dim]")
-    if _wait_for_http_success(
-        url,
-        timeout_seconds=60,
-        verify=False,
-        response_matches=response_has_matrix_versions,
-    ):
-        return
-    console.print(f"[red]Error:[/red] Synapse did not become healthy at {url}")
     raise typer.Exit(1)
 
 
@@ -295,46 +287,12 @@ def _print_local_stack_summary(
         console.print(f"  cd {synapse_dir} && docker compose down")
 
 
-def _run_command(
-    cmd: list[str],
-    *,
-    cwd: Path | None = None,
-    check: bool = False,
-) -> subprocess.CompletedProcess[str]:
+def _run_command(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command and return CompletedProcess."""
-    return subprocess.run(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        check=check,
-        capture_output=True,
-        text=True,
-    )
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=False, capture_output=True, text=True)
 
 
 def _print_command_failure(result: subprocess.CompletedProcess[str], prefix: str) -> None:
     """Print a compact subprocess failure summary."""
     details = result.stderr.strip() or result.stdout.strip() or "no error details"
     console.print(f"[red]Error:[/red] {prefix}: {details}")
-
-
-def _wait_for_http_success(
-    url: str,
-    *,
-    timeout_seconds: int,
-    verify: bool,
-    response_matches: Callable[[httpx.Response], bool] | None = None,
-) -> bool:
-    """Wait until an HTTP GET request returns success."""
-    import httpx  # noqa: PLC0415
-
-    deadline = time.monotonic() + timeout_seconds
-    matcher = response_matches or (lambda response: response.is_success)
-    while time.monotonic() < deadline:
-        try:
-            response = _httpx_get(url, timeout=3, verify=verify)
-            if matcher(response):
-                return True
-        except httpx.HTTPError:
-            pass
-        time.sleep(1)
-    return False

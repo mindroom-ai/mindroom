@@ -2,451 +2,89 @@
 
 from __future__ import annotations
 
-import base64
-import json
-from base64 import b64encode
 from dataclasses import replace
-from io import BytesIO
-from random import Random
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
-from agno.db.sqlite import SqliteDb
-from agno.media import Image
-from agno.metrics import MessageMetrics
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.session.summary import SessionSummary
-from agno.team import Team
-from PIL import Image as PillowImage
-from structlog.testing import capture_logs
 
 from mindroom.config.agent import TeamConfig
-from mindroom.config.models import CompactionConfig, ModelConfig
-from mindroom.history.native import configure_native_history, restore_native_history
-from mindroom.history.policy import classify_compaction_decision
-from mindroom.history.replay import (
-    compaction_marker,
-    compaction_summary_message,
-    estimate_prompt_visible_history_tokens,
-)
+from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig
+from mindroom.history.native import configure_native_history, restore_native_history, with_native_history
+from mindroom.history.replay import compaction_marker, compaction_summary_message
+from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.runtime import (
+    _ScopeCompactionLifecycleResult,
     finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
     resolve_agent_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.storage import set_force_compaction_state
-from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
-from mindroom.native_compaction import (
-    checkpoint_estimated_tokens,
-    checkpoint_summary,
-    record_native_checkpoint,
-    replay_basis,
-)
-from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
-from mindroom.providers.openai_models import MindRoomOpenAIResponses
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
-from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
-from tests.conftest import FakeModel, seed_session
+from mindroom.history.storage import _with_scope_state
+from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
+from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.native_compaction import checkpoint_summary, replay_basis
+from mindroom.providers.registry import build_model_provider
+from mindroom.session_storage.agent_storage import create_state_storage
+from tests.conftest import seed_session
+from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
-    _agent,
     _completed_run,
     _completed_team_run,
     _make_config,
     _session,
     _team_session,
     compact_runs,
+    record_native_checkpoint,
 )
+from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
+from tests.providers.bare_adapter import bare_adapter
+from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
-    from agno.run.agent import RunOutput
+    from mindroom.config.main import Config
+    from mindroom.history.runtime import HistoryPreparationInputs
+    from mindroom.history.types import NativeHistory
+    from mindroom.llm.provider import ModelProvider, NativeCompactionReplay
+    from mindroom.llm.runs import RunRecord
+    from mindroom.providers.openai.responses import ResponsesAdapter
+
+_SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
+_CHECKPOINT = [{"type": "compaction", "id": "cmp", "encrypted_content": "small-checkpoint"}]
 
 
-@pytest.mark.parametrize("representation", ["bytes", "path", "data_url", "content_block"])
-def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_bytes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    representation: str,
-) -> None:
-    """One uncompressed PNG must fit as visual input after a saved summary."""
-    image_file = tmp_path / "image.png"
-    PillowImage.new("RGB", (256, 256), "blue").save(image_file, compress_level=0)
-    image_bytes = image_file.read_bytes()
-    data_url = "data:image/png;base64," + b64encode(image_bytes).decode()
-    if representation == "content_block":
-        message = Message(
-            role="user",
-            content=[
-                {"type": "input_text", "text": "Describe this image."},
-                {"type": "input_image", "image_url": data_url},
-            ],
-        )
-    else:
-        image = {
-            "bytes": Image(content=image_bytes, format="png"),
-            "path": Image(filepath=str(image_file)),
-            "data_url": Image(url=data_url),
-        }[representation]
-        message = Message(role="user", content="Describe this image.", images=[image])
-    session = _session("session", runs=[_completed_run("recent", messages=[message])])
-    session.summary = SessionSummary(summary="Earlier work is complete.")
-    config, _ = _make_config(
-        tmp_path,
-        defaults_compaction=CompactionConfig(reserve_tokens=1000, replay_window_tokens=10_000),
-        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=20_000)},
-    )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
-    resolved = resolve_agent_preparation_inputs(
-        agent=_agent(model=model),
+@pytest.fixture(autouse=True)
+def _no_provider_environment() -> Iterator[None]:
+    with isolated_provider_environment():
+        yield
+
+
+def _inputs(config: Config) -> HistoryPreparationInputs:
+    """Resolve the configured test agent's history inputs for a 100-token static prompt."""
+    return resolve_agent_preparation_inputs(
         agent_name="test_agent",
+        history_settings=config.resolve_entity("test_agent").history_settings,
         config=config,
         static_prompt_tokens=100,
     )
-    before = session.to_dict()
-    request_before = model._format_messages([message])
-    serialized_sizes = []
-    serialize = json.dumps
-
-    def record_serialization(value: object, **kwargs: Any) -> str:  # noqa: ANN401
-        result = serialize(value, **kwargs)
-        serialized_sizes.append(len(result))
-        return result
-
-    monkeypatch.setattr(json, "dumps", record_serialization)
-    for _ in range(2):
-        tokens = estimate_prompt_visible_history_tokens(
-            session=session,
-            scope=HistoryScope(kind="agent", scope_id="test_agent"),
-            history_settings=resolved.history_settings,
-            replay_model=model,
-        )
-        decision = classify_compaction_decision(
-            plan=resolved.execution_plan,
-            force_compact_before_next_run=False,
-            current_history_tokens=tokens,
-        )
-        assert decision.mode == "none", (tokens, decision.reason)
-        assert 77 < tokens < 2000
-    assert serialized_sizes
-    # Estimation must not serialize image transport even for a discarded fallback.
-    assert max(serialized_sizes) < 10_000
-    assert session.to_dict() == before
-    assert model._format_messages([message]) == request_before
 
 
-@pytest.mark.parametrize("floor", ["canonical", "provider"])
-@pytest.mark.parametrize("native", [False, True])
-def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: str, *, native: bool) -> None:
-    """Unknown models retain content-block floors and conservatively price viewed images."""
-    buffer = BytesIO()
-    # Seeded pixels keep the provider-dominant transport fixture reproducible.
-    pixels = (
-        PillowImage.new("RGB", (256, 256), "blue")
-        if floor == "canonical"
-        else PillowImage.frombytes("RGB", (256, 256), Random(0).randbytes(256 * 256 * 3))  # noqa: S311
-    )
-    pixels.save(buffer, format="PNG", compress_level=0)
-    if floor == "canonical":
-        block = {"type": "input_image", "image_url": "data:image/png;base64," + b64encode(buffer.getvalue()).decode()}
-        message = Message(role="user", content=[block])
-        expected_tokens = (len(stable_serialize(block)) + (3 if native else 0)) // 4
-    else:
-        message = Message(
-            role="user",
-            content="Describe.",
-            images=[Image(id="mindroom_viewed_fixture", content=buffer.getvalue(), format="png")],
-        )
-    model = MindRoomOpenAIResponses(id="unrecognized-image-model")
-    request_before = model._format_messages([message])
-    provider_tokens = approximate_o200k_tokens(stable_serialize(request_before))
-    if floor == "canonical":
-        assert expected_tokens > provider_tokens
-    else:
-        # Historical viewed images use a bounded visual fallback rather than encoded transport text.
-        assert provider_tokens > 100_000
-        expected_tokens = model.estimate_portable_replay_tokens([Message(role="user", content="Describe.")]) + 5_000
-    messages = [message]
-    route = "unknown-image-route" if native else None
-    if native:
-        messages.insert(
-            0,
-            Message(
-                role="assistant",
-                provider_data={
-                    "mindroom_native_compaction": {
-                        "route": route,
-                        "items": [{"type": "compaction", "encrypted_content": "checkpoint"}],
-                    },
-                },
-            ),
-        )
-        expected_tokens += 15  # Serialized checkpoint is 59 characters, rounded up.
-    session = _session("session", runs=[_completed_run("recent", messages=messages)])
-    config, _ = _make_config(tmp_path)
-    resolved = resolve_agent_preparation_inputs(
-        agent=_agent(model=model),
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
-    before = session.to_dict()
-    tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=resolved.history_settings,
-        native_route=route,
-        replay_model=model,
-    )
-    assert tokens == expected_tokens
-    assert session.to_dict() == before
-    assert model._format_messages([message]) == request_before
+def _sent(adapter: ResponsesAdapter, messages: Sequence[Message], native: NativeHistory | None) -> dict[str, Any]:
+    """Return the ``responses.create`` arguments a request of ``messages`` sends under ``native``."""
+    return adapter._request_kwargs(with_native_history(ModelRequest(messages=tuple(messages)), native))
 
 
-def test_responses_image_budget_preserves_visual_cost_and_ignores_png_encoding_size() -> None:
-    """The same pixels cost the same budget across lossless encodings."""
-    model = MindRoomOpenAIResponses(id="gpt-6-astra")
-    estimates = []
-    for compression in (0, 9):
-        buffer = BytesIO()
-        PillowImage.new("RGB", (256, 256), "blue").save(buffer, format="PNG", compress_level=compression)
-        estimates.append(
-            model.estimate_portable_replay_tokens(
-                [Message(role="user", content="Describe.", images=[Image(content=buffer.getvalue(), format="png")])],
-            ),
-        )
-    assert estimates[0] == estimates[1]
-    assert 77 <= estimates[0] < 500
-    assert estimates[0] > model.estimate_portable_replay_tokens([Message(role="user", content="Describe.")])
-
-
-def test_responses_image_budget_reads_only_bounded_header_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Estimating a large image must not allocate another full decoded image."""
-    buffer = BytesIO()
-    PillowImage.new("RGB", (256, 256), "blue").save(buffer, format="PNG", compress_level=0)
-    payload = "data:image/png;base64," + b64encode(buffer.getvalue()).decode()
-    decoded_sizes = []
-    decode = base64.b64decode
-
-    def record_decode(value: str, *, validate: bool = False) -> bytes:
-        result = decode(value, validate=validate)
-        decoded_sizes.append(len(result))
-        return result
-
-    monkeypatch.setattr(base64, "b64decode", record_decode)
-    tokens = MindRoomOpenAIResponses(id="gpt-6-astra").estimate_portable_replay_tokens(
-        [
-            Message(role="user", content=[{"type": "input_image", "image_url": payload}]),
-        ],
-    )
-    assert 77 <= tokens < 200
-    assert decoded_sizes
-    assert max(decoded_sizes) <= 64 * 1024
-
-
-def test_responses_jpeg_header_beyond_scan_budget_uses_conservative_allowance() -> None:
-    """Valid JPEG metadata can push dimensions beyond the bounded header scan."""
-    buffer = BytesIO()
-    PillowImage.new("RGB", (1024, 1024), "blue").save(buffer, format="JPEG")
-    image = buffer.getvalue()
-    metadata = b"metadata" * 8000
-    segment = b"\xff\xef" + (len(metadata) + 2).to_bytes(2, "big") + metadata
-    image = image[:2] + segment + image[2:]
-    with PillowImage.open(BytesIO(image)) as decoded:
-        decoded.load()
-        assert decoded.size == (1024, 1024)
-    tokens = MindRoomOpenAIResponses(id="gpt-6-astra").estimate_portable_replay_tokens(
-        [
-            Message(role="user", content="Describe.", images=[Image(content=image, format="jpeg")]),
-        ],
-    )
-    assert 36_000 <= tokens < 36_100
-
-
-def test_responses_unrecognized_webp_header_uses_conservative_allowance() -> None:
-    """Agno's silent default dimensions must not become measured dimensions."""
-    header = b"RIFF\x10\x00\x00\x00WEBPJUNK\x04\x00\x00\x00test"
-    tokens = MindRoomOpenAIResponses(id="gpt-6-astra").estimate_portable_replay_tokens(
-        [
-            Message(
-                role="user",
-                content=[
-                    {
-                        "type": "input_image",
-                        "image_url": "data:image/webp;base64," + b64encode(header).decode(),
-                    },
-                ],
-            ),
-        ],
-    )
-    assert 36_000 <= tokens < 36_100
-
-
-def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(tmp_path: Path) -> None:
-    """A checkpoint keeps its opaque budget while new image input uses visual tokens."""
-    config, _ = _make_config(tmp_path)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    model.configure_native_compaction(threshold=1024)
-    assert model.native_compaction is not None
-    response = ModelResponse(content="Ready")
-    record_native_checkpoint(
-        response,
-        [{"type": "compaction", "id": "cmp", "encrypted_content": "opaque-checkpoint" * 100}],
-        model.native_compaction,
-    )
-    checkpoint = Message(role="assistant", content=response.content, provider_data=response.provider_data)
-    resolved = resolve_agent_preparation_inputs(
-        agent=_agent(model=model),
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
-    estimates = []
-    for compression in (0, 9):
-        buffer = BytesIO()
-        PillowImage.new("RGB", (256, 256), "blue").save(buffer, format="PNG", compress_level=compression)
-        tail = Message(
-            role="user",
-            content=[
-                {
-                    "type": "input_image",
-                    "image_url": "data:image/png;base64," + b64encode(buffer.getvalue()).decode(),
-                },
-            ],
-        )
-        session = _session("session", runs=[_completed_run("recent", messages=[checkpoint, tail])])
-        estimates.append(
-            estimate_prompt_visible_history_tokens(
-                session=session,
-                scope=HistoryScope(kind="agent", scope_id="test_agent"),
-                history_settings=resolved.history_settings,
-                native_route=model.native_compaction.route,
-                replay_model=model,
-            ),
-        )
-    assert estimates[0] == estimates[1]
-    assert 500 < estimates[0] < 2000
-
-
-@pytest.mark.parametrize("image_format", ["PNG", "JPEG", "GIF", "WEBP"])
-@pytest.mark.parametrize("detail", ["low", "high", "original", "auto"])
-def test_responses_image_header_dimensions_keep_nonzero_visual_budget(image_format: str, detail: str) -> None:
-    """Supported image headers all describe the same visual patch area."""
-    buffer = BytesIO()
-    PillowImage.new("RGB", (1024, 1024), "blue").save(buffer, format=image_format)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra")
-    tokens = model.estimate_portable_replay_tokens(
-        [
-            Message(
-                role="user",
-                content="Describe.",
-                images=[Image(content=buffer.getvalue(), format=image_format, detail=detail)],
-            ),
-        ],
-    )
-    visual_tokens = 308 if detail == "low" else 1229
-    assert visual_tokens <= tokens < visual_tokens + 100
-
-
-@pytest.mark.parametrize(
-    "source",
-    ["https://example.test/image.png", "data:image/png;base64,invalid", "data:image/png;base64,aGVsbG8="],
-)
-@pytest.mark.parametrize(
-    ("detail", "visual_tokens"),
-    [("low", 308), ("high", 3000), ("original", 36_000), ("auto", 36_000)],
-)
-def test_responses_unknown_image_dimensions_use_documented_allowance(
-    source: str,
-    detail: str,
-    visual_tokens: int,
-) -> None:
-    """Remote or unreadable images retain cost without fetching or parsing arbitrary text."""
-    model = MindRoomOpenAIResponses(id="gpt-6-astra")
-    tokens = model.estimate_portable_replay_tokens(
-        [
-            Message(role="user", content=[{"type": "input_image", "image_url": source, "detail": detail}]),
-        ],
-    )
-    assert visual_tokens <= tokens < visual_tokens + 100
-
-
-@pytest.mark.parametrize(
-    ("model_id", "size", "detail", "visual_tokens"),
-    [
-        ("gpt-6-astra", (2048, 2048), "high", 3000),
-        ("gpt-6-astra", (2048, 2048), "original", 4916),
-        ("gpt-6-astra", (4096, 512), "high", 2458),
-        ("gpt-5.6-sol", (2048, 2048), "auto", 4916),
-        ("gpt-5.5", (2048, 2048), "auto", 4916),
-        ("gpt-5.4", (2048, 2048), "auto", 3000),
-    ],
-)
-def test_responses_image_budget_obeys_documented_patch_bounds(
-    model_id: str,
-    size: tuple[int, int],
-    detail: str,
-    visual_tokens: int,
-) -> None:
-    """Documented patch examples and default detail policies constrain image sizing."""
-    buffer = BytesIO()
-    PillowImage.new("RGB", size, "blue").save(buffer, format="PNG")
-    tokens = MindRoomOpenAIResponses(id=model_id).estimate_portable_replay_tokens(
-        [
-            Message(
-                role="user",
-                content="Describe.",
-                images=[Image(content=buffer.getvalue(), format="png", detail=detail)],
-            ),
-        ],
-    )
-    assert visual_tokens <= tokens < visual_tokens + 100
-
-
-def test_responses_image_file_id_retains_unknown_dimension_allowance() -> None:
-    """An uploaded image has visual cost even without locally available bytes."""
-    tokens = MindRoomOpenAIResponses(id="gpt-6-astra").estimate_portable_replay_tokens(
-        [
-            Message(role="user", content=[{"type": "input_image", "file_id": "file_image", "detail": "high"}]),
-        ],
-    )
-    assert 3000 <= tokens < 3100
-
-
-def test_responses_budget_preserves_literal_data_urls_files_and_tool_arguments() -> None:
-    """Only typed Responses image input is discounted, never similar-looking text."""
-    literal = "data:image/png;base64," + "aGVsbG8=" * 1000
-    messages = [
-        Message(
-            role="user",
-            content=[
-                {"type": "input_text", "text": literal},
-                {"type": "input_file", "filename": "example.txt", "file_data": literal},
-            ],
-        ),
-        Message(
-            role="assistant",
-            tool_calls=[
-                {
-                    "id": "call_example",
-                    "type": "function",
-                    "function": {
-                        "name": "example",
-                        "arguments": stable_serialize({"type": "input_image", "image_url": literal}),
-                    },
-                },
-            ],
-        ),
-        Message(role="tool", tool_call_id="call_example", content=literal),
-    ]
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    assert model.estimate_portable_replay_tokens(messages) == approximate_o200k_tokens(
-        stable_serialize(model._format_messages(messages)),
-    )
+def _continues(sent: dict[str, Any]) -> str | None:
+    """Return the stored response a request continues, if any."""
+    return sent.get("previous_response_id")
 
 
 @pytest.mark.asyncio
@@ -476,7 +114,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         ),
         Message(role="tool", tool_call_id="fc_status", content="ready"),
     ]
-    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(
         db,
         _session(
@@ -487,28 +125,20 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
             ],
         ),
     )
-    db.close()
-    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
-    session = get_agent_session(db, "session")
+    db = create_state_storage("test_agent", tmp_path)
+    session = db.load_session("session", "agent")
     assert session is not None
-    original = [run.to_dict() for run in session.runs or []]
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
-    agent = _agent(model=model, db=db)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
+    original = [run.to_dict() for run in session.runs]
+    model = responses_adapter(tmp_path, store=True)
+    resolved = _inputs(config)
 
     prepared = await prepare_scope_history(
-        agent=agent,
-        agent_name="test_agent",
+        model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -519,11 +149,18 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
     assert final.replay_plan is not None
     assert final.replay_plan.mode == "limited"
     assert final.replay_plan.num_history_runs == 1
-    messages = session.get_messages(agent_id="test_agent", last_n_runs=final.replay_plan.num_history_runs)
+    messages = scope_history_messages(
+        session.runs,
+        scope=_SCOPE,
+        num_history_runs=final.replay_plan.num_history_runs,
+        num_history_messages=None,
+        max_tool_calls_from_history=None,
+    )
     assert model.estimate_portable_replay_tokens(messages) <= final.replay_plan.estimated_tokens <= 1000
     messages.append(Message(role="user", content="Continue"))
-    assert "previous_response_id" not in model.get_request_params(messages=messages)
-    assert model._format_messages(messages) == [
+    sent = _sent(model, messages, final.native_history)
+    assert _continues(sent) is None
+    assert sent["input"] == [
         {"role": "user", "content": "Check the service."},
         {
             "type": "function_call",
@@ -535,86 +172,78 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         {"type": "function_call_output", "call_id": "call_status", "output": "ready"},
         {"role": "user", "content": "Continue"},
     ]
-    persisted = get_agent_session(db, "session")
+    persisted = db.load_session("session", "agent")
     assert persisted is not None
-    assert [run.to_dict() for run in persisted.runs or []] == original
-    assert [run.to_dict() for run in session.runs or []] == original
-    db.close()
+    assert [run.to_dict() for run in persisted.runs] == original
+    assert [run.to_dict() for run in session.runs] == original
 
 
-def test_reused_responses_model_uses_current_replay_budget(tmp_path: Path) -> None:
-    """An unbounded plan must not inherit portable replay from a prior bounded plan."""
+def test_portable_replay_follows_each_plans_replay_budget(tmp_path: Path) -> None:
+    """An unbounded plan continues the stored response; a bounded one replays its history explicitly."""
     config, _ = _make_config(tmp_path)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
-    resolved = resolve_agent_preparation_inputs(
-        agent=_agent(model=model),
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
+    model = responses_adapter(tmp_path, store=True)
+    resolved = _inputs(config)
     messages = [
         Message(role="assistant", content="Previous answer", provider_data={"response_id": "resp_previous"}),
         Message(role="user", content="Continue"),
     ]
     for budget in (1000, None, 2000):
-        configure_native_history(
+        native = configure_native_history(
             model,
             plan=replace(resolved.execution_plan, hard_replay_budget_tokens=budget),
             history_settings=resolved.history_settings,
             session=None,
             allowed=False,
         )
-        request = model.get_request_params(messages=messages)
-        replay = model._format_messages(messages)
+        sent = _sent(model, messages, native)
         if budget is None:
-            assert request["previous_response_id"] == "resp_previous"
-            assert replay == [{"role": "user", "content": "Continue"}]
+            assert _continues(sent) == "resp_previous"
+            assert sent["input"] == [{"role": "user", "content": "Continue"}]
         else:
-            assert "previous_response_id" not in request
-            assert replay[0] == {"role": "assistant", "content": "Previous answer"}
+            assert _continues(sent) is None
+            assert sent["input"][0] == {"role": "assistant", "content": "Previous answer"}
 
 
 @pytest.mark.parametrize("change", ["none", "model", "endpoint", "summary", "disabled", "missing", "invalid_threshold"])
-def test_restore_native_policy_requires_latest_compatible_response(change: str) -> None:
+def test_restore_native_policy_requires_latest_compatible_response(tmp_path: Path, change: str) -> None:
     """A rebuild must not recover stale policy from an older checkpoint or foreign route."""
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    model.configure_native_compaction(threshold=1024)
-    checkpoint = ModelResponse(content="Ready")
-    record_native_checkpoint(
-        checkpoint,
-        [{"type": "compaction", "id": "cmp", "encrypted_content": "small-checkpoint"}],
-        model.native_compaction,
-    )
-    latest = ModelResponse(content="Waiting for approval")
-    record_native_checkpoint(latest, [], None if change == "disabled" else model.native_compaction)
+    paused = responses_adapter(tmp_path, store=False)
+    native = paused.native_compaction_settings(threshold=1024)
+    assert native is not None
+    checkpoint = Message(role="assistant", content="Ready")
+    record_native_checkpoint(checkpoint, _CHECKPOINT, native)
+    latest = Message(role="assistant", content="Waiting for approval")
+    record_native_checkpoint(latest, [], None if change == "disabled" else native)
     if change == "missing":
         latest.provider_data = None
     elif change == "invalid_threshold":
+        assert latest.provider_data is not None
         latest.provider_data["mindroom_native_compaction"]["threshold"] = True
     messages = [
         Message(role="user", content="Canonical facts"),
-        Message(role="assistant", content=checkpoint.content, provider_data=checkpoint.provider_data),
+        checkpoint,
         Message(role="user", content="Continue"),
-        Message(role="assistant", content=latest.content, provider_data=latest.provider_data),
+        latest,
     ]
     run = _completed_run("paused", messages=messages)
     session = _session("session", runs=[run])
-    rebuilt = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    rebuilt.configure_native_compaction(threshold=2048)
-    if change == "model":
-        rebuilt.id = "unsupported-route"
-    elif change == "endpoint":
-        rebuilt.base_url = "https://other.example/v1"
-    elif change == "summary":
-        session.summary = SessionSummary(summary="New portable summary")
-    restore_native_history(rebuilt, persisted_run=run, session=session)
-    replay = rebuilt._format_messages(messages)
+    rebuilt_kwargs: dict[str, Any] = {"store": False}
+    if change == "endpoint":
+        rebuilt_kwargs["base_url"] = "https://other.example/v1"
+    rebuilt = responses_adapter(tmp_path, "unsupported-route" if change == "model" else "gpt-6-astra", **rebuilt_kwargs)
+    if change == "summary":
+        session.summary = ScopeSummary(text="New portable summary", updated_at=datetime.now(UTC))
+
+    restored = restore_native_history(rebuilt, persisted_run=run, session=session)
+
+    assert restored is not None
+    replay = _sent(rebuilt, messages, restored)["input"]
     if change == "none":
-        assert rebuilt.native_compaction is not None
-        assert rebuilt.native_compaction.threshold == 1024
+        assert restored.native_compaction is not None
+        assert restored.native_compaction.threshold == 1024
         assert replay[0]["type"] == "compaction"
     else:
-        assert rebuilt.native_compaction is None
+        assert restored.native_compaction is None
         assert replay[0] == {"role": "user", "content": "Canonical facts"}
 
 
@@ -626,50 +255,29 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    model.configure_native_compaction(threshold=120000)
-    response = ModelResponse(content="Ready")
-    record_native_checkpoint(
-        response,
-        [{"type": "compaction", "id": "cmp", "encrypted_content": "small-checkpoint"}],
-        model.native_compaction,
+    model = responses_adapter(tmp_path, store=False)
+    answer = Message(
+        role="assistant",
+        content="Ready",
+        # Billed for the transcript the checkpoint replaced, over the 183,516-token hard budget.
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=190000)),
     )
-    run = _completed_run(
-        "old",
-        messages=[
-            Message(role="user", content="large old transcript " * 50000),
-            # Billed for the transcript the checkpoint replaced, over the 183,516-token hard budget.
-            Message(
-                role="assistant",
-                content="Ready",
-                provider_data=response.provider_data,
-                metrics=MessageMetrics(input_tokens=190000),
-            ),
-        ],
-    )
-    run.model = model.id
-    run.model_provider = model.provider
+    record_native_checkpoint(answer, _CHECKPOINT, model.native_compaction_settings(threshold=120000))
+    run = _completed_run("old", messages=[Message(role="user", content="large old transcript " * 50000), answer])
+    run.model = model.identity.id
+    run.model_provider = model.identity.provider
     session = _session("session", runs=[run])
-    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(db, session)
-    agent = _agent(model=model, db=db)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     text_compact = AsyncMock(side_effect=AssertionError("Canonical history must remain intact"))
     monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
     prepared = await prepare_scope_history(
-        agent=agent,
-        agent_name="test_agent",
-        resolved_inputs=resolved,
+        model=model,
+        resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -682,9 +290,8 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     assert final.replay_plan.num_history_messages is None
     assert final.replay_plan.estimated_tokens < 1000
     assert final.replays_persisted_history
-    assert len(session.runs or []) == 1
-    assert len(session.runs[0].messages[0].content) > 900000
-    db.close()
+    assert len(session.runs) == 1
+    assert len(str(session.runs[0].messages[0].content)) > 900000
 
 
 @pytest.mark.asyncio
@@ -702,21 +309,21 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=30000)},
     )
     monkeypatch.setattr(
-        "mindroom.providers.model_loading.get_model_instance",
-        lambda *_args, **_kwargs: FakeModel(id="summary"),
+        "mindroom.history.compaction.build_model_provider",
+        lambda *_args: summary_model(model_id="summary"),
     )
     monkeypatch.setattr(
         "mindroom.history.compaction.generate_compaction_summary",
-        AsyncMock(return_value=SessionSummary(summary="Keep the recent instruction")),
+        AsyncMock(return_value="Keep the recent instruction"),
     )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", base_url="https://proxy.example/v1", store=True)
+    model = responses_adapter(tmp_path, base_url="https://proxy.example/v1", store=True)
     latest = [
         Message(role="user", content="Keep the recent instruction"),
         Message(
             role="assistant",
             content="Ready",
             provider_data={"response_id": "resp_large_context"},
-            metrics=MessageMetrics(input_tokens=9000, output_tokens=10),
+            metrics=MessageMetrics(tokens=TokenCounts(input_tokens=9000, output_tokens=10)),
         ),
     ]
     session = _session(
@@ -726,24 +333,15 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
             _completed_run("recent", messages=latest),
         ],
     )
-    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(db, session)
-    agent = _agent(model=model, db=db)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
     prepared = await prepare_scope_history(
-        agent=agent,
-        agent_name="test_agent",
-        resolved_inputs=resolved,
+        model=model,
+        resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -754,19 +352,19 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     if auto_compact:
         assert prepared.compaction_reply_outcome == "success"
         assert session.summary is not None
-        assert session.summary.summary == "Keep the recent instruction"
-        assert len(session.runs or []) == 0
+        assert session.summary.text == "Keep the recent instruction"
+        assert session.runs == []
     else:
         assert final.replay_plan.mode == "limited"
         assert final.replay_plan.num_history_runs == 1
         assert final.replay_plan.estimated_tokens < 100
-        assert len(session.runs or []) == 2
-    assert model.native_compaction is None
-    messages = [*latest, Message(role="user", content="Continue")]
-    assert "previous_response_id" not in model.get_request_params(messages=messages)
-    assert model._format_messages(messages)[0] == {"role": "user", "content": "Keep the recent instruction"}
+        assert len(session.runs) == 2
+    assert final.native_history is not None
+    assert final.native_history.native_compaction is None
+    sent = _sent(model, [*latest, Message(role="user", content="Continue")], final.native_history)
+    assert _continues(sent) is None
+    assert sent["input"][0] == {"role": "user", "content": "Keep the recent instruction"}
     assert latest[-1].provider_data == {"response_id": "resp_large_context"}
-    db.close()
 
 
 @pytest.mark.asyncio
@@ -793,48 +391,47 @@ async def test_native_activation_respects_history_policy(
         },
     )
     model = (
-        MindRoomAnthropicClaude(id="claude-sonnet-5", context_management={"edits": [{"type": "compact_20260112"}]})
+        provider_for(
+            {
+                "provider": "anthropic",
+                "id": "claude-sonnet-5",
+                "extra_kwargs": {
+                    "api_key": "test-key",
+                    "context_management": {"edits": [{"type": "compact_20260112"}]},
+                },
+            },
+            tmp_path / "claude",
+            httpx.AsyncClient(),
+        )
         if authored_claude
-        else MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+        else responses_adapter(tmp_path, store=False)
     )
     session = _session("session", runs=[_completed_run("old")])
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     if case == "manual":
-        set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
-    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
+        session.metadata = _with_scope_state(
+            session.metadata,
+            _SCOPE,
+            HistoryScopeState(force_compact_before_next_run=True),
+        )
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(db, session)
-    agent = _agent(model=model, db=db)
-    if case == "manual":
-        # The policy must reach the existing text owner, with native replay disabled.
-        async def text_compact(**_kwargs: object) -> None:
-            assert model.native_compaction is None
-            message = "Reached portable compaction"
-            raise RuntimeError(message)
+    # A manual request must reach the portable text owner, which returns no outcome here.
+    text_compact = AsyncMock(return_value=_ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed"))
+    monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
 
-        monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
-    kwargs = dict(  # noqa: C408
-        agent=agent,
-        agent_name="test_agent",
-        resolved_inputs=resolved,
+    prepared = await prepare_scope_history(
+        model=model,
+        resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
         allow_native_compaction=case != "scheduled",
     )
-    if case == "manual":
-        with pytest.raises(RuntimeError, match="Reached portable compaction"):
-            await prepare_scope_history(**kwargs)
-    else:
-        await prepare_scope_history(**kwargs)
-        assert (model.native_compaction is not None) is (case == "normal")
-    db.close()
+
+    native = prepared.native_history
+    assert (native is not None and native.native_compaction is not None) is (case == "normal")
+    assert text_compact.await_count == (1 if case == "manual" else 0)
 
 
 @pytest.mark.asyncio
@@ -845,31 +442,23 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    model.configure_native_compaction(threshold=120000)
-    old_route = model.native_compaction.route
-    session = _session("session", summary=SessionSummary(summary="New portable summary."))
-    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
+    model = responses_adapter(tmp_path, store=False)
+    old = model.native_compaction_settings(threshold=120000)
+    assert old is not None
+    session = _session("session", summary=ScopeSummary(text="New portable summary.", updated_at=datetime.now(UTC)))
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(db, session)
-    agent = _agent(model=model, db=db)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
-    await prepare_scope_history(
-        agent=agent,
-        agent_name="test_agent",
-        resolved_inputs=resolved,
+    prepared = await prepare_scope_history(
+        model=model,
+        resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
     )
-    assert model.native_compaction is not None
-    assert model.native_compaction.route != old_route
-    db.close()
+    assert prepared.native_history is not None
+    assert prepared.native_history.native_compaction is not None
+    assert prepared.native_history.native_compaction.route != old.route
 
 
 def test_native_requests_record_the_history_they_replay(tmp_path: Path) -> None:
@@ -882,16 +471,11 @@ def test_native_requests_record_the_history_they_replay(tmp_path: Path) -> None:
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    resolved = resolve_agent_preparation_inputs(
-        agent=_agent(model=model),
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
+    model = responses_adapter(tmp_path, store=False)
+    resolved = _inputs(config)
 
-    def configured_basis(runs: list[RunOutput]) -> str:
-        configure_native_history(
+    def configured(runs: list[RunRecord]) -> NativeCompactionReplay:
+        native = configure_native_history(
             model,
             plan=resolved.execution_plan,
             history_settings=resolved.history_settings,
@@ -899,42 +483,39 @@ def test_native_requests_record_the_history_they_replay(tmp_path: Path) -> None:
             allowed=True,
             runs=runs,
         )
-        assert model.native_compaction is not None
-        return model.native_compaction.basis
+        assert native is not None
+        assert native.native_compaction is not None
+        return native.native_compaction
 
     first, waited = _completed_run("first"), _completed_run("waited")
-    configured_basis([])
-    settings = model.native_compaction
-    assert settings is not None
+    settings = configured([])
 
-    def resumed(basis: str | None, *, route: str = settings.route, run_id: str = "resumed") -> RunOutput:
-        response = ModelResponse(content="Done")
+    def resumed(basis: str | None, *, route: str = settings.route, run_id: str = "resumed") -> RunRecord:
+        answer = Message(role="assistant", content="Done")
         items = [{"type": "compaction", "encrypted_content": "checkpoint"}]
-        record_native_checkpoint(response, items, replace(settings, route=route, basis=basis))
-        answer = Message(role="assistant", content="Done", provider_data=response.provider_data)
+        record_native_checkpoint(answer, items, replace(settings, route=route, basis=basis))
         return _completed_run(run_id, messages=[Message(role="user", content="Go"), answer])
 
     covering = resumed(replay_basis(None, [first, waited]))
-    assert configured_basis([first, waited, covering]) == replay_basis(None, [first, waited, covering])
+    assert configured([first, waited, covering]).basis == replay_basis(None, [first, waited, covering])
     skipping = resumed(replay_basis(None, [first]))
-    assert configured_basis([first, waited, skipping]) == ""
+    assert configured([first, waited, skipping]).basis == ""
     # A checkpoint recorded before bases existed counts as covering, as native replay assumes.
     unknown = resumed(None)
-    assert configured_basis([first, waited, unknown]) == replay_basis(None, [first, waited, unknown])
+    assert configured([first, waited, unknown]).basis == replay_basis(None, [first, waited, unknown])
     # Replay starts from the latest checkpoint on its own route, so one on another route does not vouch for it.
     elsewhere = resumed(replay_basis(None, [first, waited, skipping]), route="other-route", run_id="elsewhere")
-    assert configured_basis([first, waited, skipping, elsewhere]) == ""
+    assert configured([first, waited, skipping, elsewhere]).basis == ""
 
     # An approval continuation records what the paused request replayed, so its checkpoints stay reusable.
-    paused_basis = configured_basis([first])
-    waiting = ModelResponse(content="Waiting for approval")
-    record_native_checkpoint(waiting, [], model.native_compaction)
-    answer = Message(role="assistant", content=waiting.content, provider_data=waiting.provider_data)
-    paused = _completed_run("paused", messages=[Message(role="user", content="Go"), answer])
-    rebuilt = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    restore_native_history(rebuilt, persisted_run=paused, session=None)
-    assert rebuilt.native_compaction is not None
-    assert rebuilt.native_compaction.basis == paused_basis
+    paused_settings = configured([first])
+    waiting = Message(role="assistant", content="Waiting for approval")
+    record_native_checkpoint(waiting, [], paused_settings)
+    paused = _completed_run("paused", messages=[Message(role="user", content="Go"), waiting])
+    restored = restore_native_history(responses_adapter(tmp_path, store=False), persisted_run=paused, session=None)
+    assert restored is not None
+    assert restored.native_compaction is not None
+    assert restored.native_compaction.basis == paused_settings.basis
 
 
 @pytest.mark.asyncio
@@ -945,41 +526,32 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    model = responses_adapter(tmp_path, store=False)
     later = _completed_run("later", messages=[Message(role="user", content="Later")])
     seeded = _session(
         "session",
         runs=[_completed_run("folded", messages=[Message(role="user", content="Earlier")]), later],
-        summary=SessionSummary(summary="Stale summary."),
+        summary=ScopeSummary(text="Stale summary.", updated_at=datetime.now(UTC)),
     )
-    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
-    assert isinstance(db, SqliteDb)
+    db = create_state_storage("test_agent", tmp_path)
     seed_session(db, seeded)
-    compact_runs(db, seeded, scope, ["folded"], "Archived summary.")
-    session = get_agent_session(db, "session")
+    compact_runs(db, seeded, _SCOPE, ["folded"], "Archived summary.")
+    session = db.load_session("session", "agent")
     assert session is not None
-    agent = _agent(model=model, db=db)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
-    await prepare_scope_history(
-        agent=agent,
-        agent_name="test_agent",
+    resolved = _inputs(config)
+    prepared = await prepare_scope_history(
+        model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session, "session"),
     )
 
     assert session.summary is not None
-    assert session.summary.summary == "Archived summary."
+    assert session.summary.text == "Archived summary."
     expected = configure_native_history(
-        MindRoomOpenAIResponses(id="gpt-6-astra", store=False),
+        responses_adapter(tmp_path, store=False),
         plan=resolved.execution_plan,
         history_settings=resolved.history_settings,
         session=session,
@@ -987,46 +559,61 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     )
     assert expected is not None
     assert expected.native_compaction is not None
-    assert model.native_compaction is not None
-    assert model.native_compaction.route == expected.native_compaction.route
+    assert prepared.native_history is not None
+    assert prepared.native_history.native_compaction is not None
+    assert prepared.native_history.native_compaction.route == expected.native_compaction.route
     # A checkpoint records the history its request replayed, so text compaction can tell where it still stands in.
-    response = ModelResponse(content="Done")
-    record_native_checkpoint(response, [{"type": "compaction", "content": "Checkpoint."}], model.native_compaction)
-    answer = Message(role="assistant", content="Done", provider_data=response.provider_data)
+    answer = Message(role="assistant", content="Done")
+    record_native_checkpoint(
+        answer,
+        [{"type": "compaction", "content": "Checkpoint."}],
+        prepared.native_history.native_compaction,
+    )
     assert checkpoint_summary(answer, replay_basis("Archived summary.", [later])) == "Checkpoint."
-    db.close()
 
 
 @pytest.mark.asyncio
 async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
-    """A team's native policy belongs to its leader model, not its first member."""
+    """A team's native policy belongs to its leader model and the team's settings, not to its member's."""
     config, paths = _make_config(
         tmp_path,
+        compaction=CompactionOverrideConfig(threshold_tokens=30000),
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
-        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000),
+            "member": ModelConfig(provider="openai", id="gpt-6-luna", context_window=200000),
+        },
     )
+    # The member compacts on its own model at its own threshold; neither may reach the team's requests.
+    config.agents["test_agent"].model = "member"
     config.teams["team"] = TeamConfig(agents=["test_agent"], display_name="Team", role="Coordinate work.")
-    member = _agent()
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    team = Team(id="team", model=model, members=[member])
-    db = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
+    leader = responses_adapter(tmp_path, store=False)
+    db = create_state_storage("test_agent", tmp_path)
     session = _team_session("session", team_id="team", runs=[_completed_team_run("run", team_id="team")])
     seed_session(db, session)
-    await prepare_bound_scope_history(
-        agents=[member],
-        team=team,
+
+    prepared = await prepare_bound_scope_history(
+        member_names=["test_agent"],
+        model=leader,
         team_name="team",
         config=config,
         runtime_paths=paths,
-        scope_context=ScopeSessionContext(HistoryScope(kind="team", scope_id="team"), db, session),
+        scope_context=ScopeSessionContext(HistoryScope(kind="team", scope_id="team"), db, session, "session"),
         active_model_name="default",
         active_context_window=200000,
         static_prompt_tokens=100,
         non_prompt_tokens=0,
     )
-    assert model.native_compaction is not None
-    assert model.native_compaction.threshold == 120000
-    db.close()
+
+    assert prepared.native_history is not None
+    native = prepared.native_history.native_compaction
+    assert native is not None
+    expected = leader.native_compaction_settings(threshold=120000)
+    assert expected is not None
+    assert native == replace(expected, basis=replay_basis(None, session.runs))
+    member = responses_adapter(tmp_path, "gpt-6-luna", store=False).native_compaction_settings(threshold=30000)
+    assert member is not None
+    assert (native.route, native.threshold) != (member.route, member.threshold)
 
 
 @pytest.mark.parametrize(
@@ -1081,7 +668,12 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         ),
     ],
 )
-def test_restore_portable_policy_requires_latest_provenance(provider_data: dict[str, Any], *, portable: bool) -> None:
+def test_restore_portable_policy_requires_latest_provenance(
+    tmp_path: Path,
+    provider_data: dict[str, Any],
+    *,
+    portable: bool,
+) -> None:
     """Without legacy provenance the original budget is unknown; retain stored continuation."""
     messages = [
         Message(
@@ -1096,15 +688,14 @@ def test_restore_portable_policy_requires_latest_provenance(provider_data: dict[
         ),
         Message(role="user", content="Continue"),
     ]
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
-    model.configure_portable_replay(enabled=not portable)
-    restore_native_history(model, persisted_run=_completed_run("paused", messages=messages), session=None)
-    request = model.get_request_params(messages=messages)
+    model = responses_adapter(tmp_path, store=True)
+    restored = restore_native_history(model, persisted_run=_completed_run("paused", messages=messages), session=None)
+    sent = _sent(model, messages, restored)
     if portable:
-        assert "previous_response_id" not in request
+        assert _continues(sent) is None
     else:
-        assert request["previous_response_id"] == "resp_latest"
-        assert model._format_messages(messages) == [{"role": "user", "content": "Continue"}]
+        assert _continues(sent) == "resp_latest"
+        assert sent["input"] == [{"role": "user", "content": "Continue"}]
 
 
 @pytest.mark.parametrize("summary", ["S1", ""])
@@ -1115,15 +706,11 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
-    resolved = resolve_agent_preparation_inputs(
-        agent=_agent(),
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
-    session = _session("session", summary=SessionSummary(summary=summary) if summary else None)
+    resolved = _inputs(config)
+    session = _session("session", summary=ScopeSummary(text=summary, updated_at=datetime.now(UTC)) if summary else None)
+    model = responses_adapter(tmp_path, store=False)
     configured = configure_native_history(
-        MindRoomOpenAIResponses(id="gpt-6-astra", store=False),
+        model,
         plan=resolved.execution_plan,
         history_settings=resolved.history_settings,
         session=session,
@@ -1131,10 +718,9 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
     )
 
     def route_for(history_generation: str) -> str:
-        model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-        model.configure_native_compaction(threshold=120000, history_generation=history_generation)
-        assert model.native_compaction is not None
-        return model.native_compaction.route
+        native = model.native_compaction_settings(threshold=120000, history_generation=history_generation)
+        assert native is not None
+        return native.route
 
     assert configured is not None
     assert configured.native_compaction is not None
@@ -1144,87 +730,63 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
         assert configured.native_compaction.route != route_for(summary)
 
 
-def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> None:
-    """A checkpoint already covers the summary message before it, which the projection drops."""
-    route = "route-1"
-    checkpoint = Message(
-        role="assistant",
-        content="",
-        provider_data={
-            "mindroom_native_compaction": {
-                "route": route,
-                "threshold": 100,
-                "checkpoint_prefix": True,
-                "items": [{"type": "compaction", "content": "provider checkpoint"}],
-            },
-        },
-    )
-    runs = [_completed_run("run-1", messages=[Message(role="user", content="question"), checkpoint])]
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    _config_settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
-
-    without_summary = estimate_prompt_visible_history_tokens(
-        session=_session("session", runs=runs),
-        scope=scope,
-        history_settings=_config_settings,
-        native_route=route,
-    )
-    with_summary = estimate_prompt_visible_history_tokens(
-        session=_session("session", runs=runs, summary=SessionSummary(summary="S" * 400)),
-        scope=scope,
-        history_settings=_config_settings,
-        native_route=route,
-    )
-
-    assert with_summary == without_summary
-
-
-@pytest.mark.parametrize(
-    ("items", "logged"),
-    [
-        ([{"type": "compaction", "content": "provider checkpoint"}, {"type": "text", "text": "Done"}], True),
-        ([{"type": "compaction", "content": None}, {"type": "text", "text": "Done"}], False),
-        ([{"type": "text", "text": "Done"}], False),
-    ],
-)
-def test_provider_compaction_logs_once_per_checkpoint(items: list[dict[str, Any]], *, logged: bool) -> None:
-    """Only a response that carries a real checkpoint reports that the provider compacted."""
-    model = MindRoomAnthropicClaude(id="claude-sonnet-4-6")
-    model.configure_native_compaction(threshold=60_000)
-    assert model.native_compaction is not None
-
-    with capture_logs() as logs:
-        record_native_checkpoint(ModelResponse(content="Done"), items, model.native_compaction)
-
-    events = [log for log in logs if log["event"] == "Native compaction checkpoint"]
-    expected = {
-        "event": "Native compaction checkpoint",
-        "log_level": "info",
-        "threshold_tokens": 60_000,
-        "checkpoint_tokens": checkpoint_estimated_tokens(items[:1]),
-    }
-    assert events == ([expected] if logged else [])
-
-
-def test_compaction_marker_names_the_newest_summary_and_native_checkpoint() -> None:
+def test_compaction_marker_names_the_newest_summary_and_native_checkpoint(tmp_path: Path) -> None:
     """A provider compaction changes the marker as a text compaction does, so inlined memory reloads after either."""
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    model.configure_native_compaction(threshold=1024)
+    native = responses_adapter(tmp_path, store=False).native_compaction_settings(threshold=1024)
+    assert native is not None
 
     def answer(items: list[dict[str, Any]]) -> Message:
-        response = ModelResponse(content="Answer")
-        record_native_checkpoint(response, items, model.native_compaction)
-        return Message(role="assistant", content=response.content, provider_data=response.provider_data)
+        reply = Message(role="assistant", content="Answer")
+        record_native_checkpoint(reply, items, native)
+        return reply
 
-    def run(run_id: str, reply: Message) -> RunOutput:
+    def run(run_id: str, reply: Message) -> RunRecord:
         return _completed_run(run_id, messages=[Message(role="user", content="question"), reply])
 
     first, second = (answer([{"type": "compaction", "encrypted_content": name}]) for name in ("first", "second"))
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     session = _session("session", runs=[run("plain", answer([]))])
-    assert compaction_marker(session, scope) == (None, None)
+    assert compaction_marker(session, _SCOPE) == (None, None)
 
     # Every completed response records its route; only a compaction adds checkpoint items.
     session.runs = [run("first", first), run("second", second), run("later", answer([]))]
-    session.summary = SessionSummary(summary=" Text summary. ")
-    assert compaction_marker(session, scope) == ("Text summary.", second.id)
+    session.summary = ScopeSummary(text=" Text summary. ", updated_at=datetime.now(UTC))
+    assert compaction_marker(session, _SCOPE) == ("Text summary.", second.id)
+
+
+def test_history_reads_the_routes_native_settings_through_the_request_pipeline(tmp_path: Path) -> None:
+    """The provider the registry builds hands history planning its route's native history and replay estimator."""
+    config, paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(threshold_tokens=120000),
+        models={
+            "default": ModelConfig(
+                provider="openai",
+                id="gpt-6-astra",
+                api="responses",
+                context_window=200000,
+                extra_kwargs={"store": False},
+            ),
+            "chat": ModelConfig(provider="openai", id="gpt-6-astra", api="chat_completions", context_window=200000),
+        },
+    )
+    resolved = _inputs(config)
+
+    def configured(model: ModelProvider) -> NativeHistory | None:
+        return configure_native_history(
+            model,
+            plan=resolved.execution_plan,
+            history_settings=resolved.history_settings,
+            session=None,
+            allowed=True,
+        )
+
+    provider = build_model_provider(config, paths, "default")
+    adapter = bare_adapter(provider)
+
+    native = configured(provider)
+    assert native is not None
+    assert native.native_compaction is not None
+    assert native == configured(adapter)
+    assert provider.replay_estimator is adapter
+    chat = build_model_provider(config, paths, "chat")
+    assert (configured(chat), chat.replay_estimator) == (None, None)

@@ -204,7 +204,7 @@ The runtime chart rejects a file-sourced config inside `agents`, `private_instan
 
 > [!WARNING]
 > The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
-> All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
+> All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, and memory.
 > The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication.
 > Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY`.
 > Use dedicated Kubernetes workers through the runtime chart when per-agent filesystem and credential isolation are required.
@@ -310,7 +310,7 @@ A `user`-scope tool call whose `base_dir` points at an agent on another scope fa
 
 ### Filesystem isolation and agent data
 
-Each non-private agent's data (context files, workspace, memory, sessions, learning) lives in `agents/<name>/` whatever its `worker_scope`, and every runtime for that agent reads and writes the same directory.
+Each non-private agent's data (context files, workspace, memory, sessions) lives in `agents/<name>/` whatever its `worker_scope`, and every runtime for that agent reads and writes the same directory.
 Private agents keep one state root per requester under `private_instances/<scope-key>/<agent>/`.
 Worker runtimes also keep their own virtualenvs, caches, and scratch files, which are not agent data.
 
@@ -318,7 +318,7 @@ What a worker can see depends on the backend:
 
 - **Local execution** shares the primary process filesystem.
 - **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory, and every shared directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
-- **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions, memory, or learning data beside the workspaces.
+- **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
 When an agent has a workspace (the `file` memory backend or `private`), `shell`, `file`, `python`, and `coding` use it as their default working directory (`base_dir`); this is a convenience, not a boundary.

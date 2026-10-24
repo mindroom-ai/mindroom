@@ -16,6 +16,8 @@ from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_r
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Sequence
+
     from agno.tools.function import ToolResult
 
     from mindroom.constants import RuntimePaths
@@ -50,38 +52,30 @@ def _normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | No
     return normalized or None
 
 
-def hide_mcp_function_collisions(toolkits: list[Toolkit]) -> dict[str, tuple[str, ...]]:
-    """Hide MCP functions colliding in this exact runtime projection."""
+def mcp_function_collisions(projection: Sequence[tuple[Toolkit, Collection[str]]]) -> dict[str, tuple[str, ...]]:
+    """Return, by server, the MCP functions that collide in one runtime projection and must not be offered.
+
+    ``projection`` pairs each toolkit with the names of the functions the projection offers of it. An MCP function
+    collides with a local function of the same name and with a same-named function of another MCP toolkit.
+    """
     local_function_names = {
-        function_name
-        for toolkit in toolkits
-        if not isinstance(toolkit, MindRoomMCPToolkit)
-        for function_name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+        name for toolkit, names in projection if not isinstance(toolkit, MindRoomMCPToolkit) for name in names
     }
     mcp_toolkit_function_names = [
-        (toolkit, {*toolkit.get_functions(), *toolkit.get_async_functions()})
-        for toolkit in toolkits
-        if isinstance(toolkit, MindRoomMCPToolkit)
+        (toolkit, frozenset(names)) for toolkit, names in projection if isinstance(toolkit, MindRoomMCPToolkit)
     ]
     mcp_function_name_counts = Counter(
         function_name for _, function_names in mcp_toolkit_function_names for function_name in function_names
     )
     hidden_by_server: dict[str, tuple[str, ...]] = {}
     for toolkit, function_names in mcp_toolkit_function_names:
-        hidden = tuple(
-            sorted(
-                local_mcp_function_name_collisions(local_function_names, function_names)
-                | {name for name in function_names if mcp_function_name_counts[name] > 1},
-            ),
-        )
-        if not hidden:
-            continue
-        for function_name in hidden:
-            toolkit.functions.pop(function_name, None)
-            toolkit.async_functions.pop(function_name, None)
-        hidden_by_server[toolkit.server_id] = tuple(
-            sorted(set(hidden_by_server.get(toolkit.server_id, ())) | set(hidden)),
-        )
+        hidden = local_mcp_function_name_collisions(local_function_names, function_names) | {
+            name for name in function_names if mcp_function_name_counts[name] > 1
+        }
+        if hidden:
+            hidden_by_server[toolkit.server_id] = tuple(
+                sorted(set(hidden_by_server.get(toolkit.server_id, ())) | hidden),
+            )
     return hidden_by_server
 
 

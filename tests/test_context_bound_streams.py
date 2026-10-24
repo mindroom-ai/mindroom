@@ -8,11 +8,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.llm_request_logging import (
-    bind_llm_request_log_context,
-    current_llm_request_log_context,
-    stream_with_llm_request_log_context,
-)
+from mindroom.llm.request_context import bind_llm_request_log_context, current_llm_request_log_context
+from mindroom.response_turn import stream_with_llm_request_log_context
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,

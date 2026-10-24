@@ -1,118 +1,136 @@
-"""Tests for team-scope history preparation and team instance history wiring."""
+"""Tests for team-scope history preparation and the team build's history and call-limit settings."""
 # ruff: noqa: D103, TC003
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager
+from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.agent import Agent
-from agno.run import RunContext
-from agno.run.team import TeamRunOutput
-from agno.session.team import TeamSession
-from agno.team import Team
-from agno.team._tools import _determine_tools_for_model
-from agno.tools import Toolkit
 
+from mindroom import agents, execution_preparation
+from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.history.prompt_tokens import team_static_token_estimator
+from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_bound_scope_history,
 )
 from mindroom.history.session_context import (
     ScopeSessionContext,
-    open_bound_scope_session_context,
-    open_resolved_scope_session_context,
-    resolve_bound_team_scope_context,
+    load_bound_scope_session,
+    resolve_bound_team_scope,
 )
 from mindroom.history.types import (
     HistoryScope,
     PreparedHistoryState,
 )
-from mindroom.teams import TeamMode, _create_team_instance
+from mindroom.llm.messages import Message
+from mindroom.teams.envelope import prepare_materialized_team_execution
+from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact_team_members
+from mindroom.teams.runtime import leader_tool_specs, run_team
+from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
-from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import (
-    FakeModel,
-    bind_runtime_paths,
+from tests.conftest import bind_runtime_paths, make_turn_context
+from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.history_helpers import _runtime_paths
+
+_PAIR = TeamConfig(
+    display_name="Pair",
+    role="Test team",
+    agents=["alpha", "zeta"],
+    num_history_messages=2,
+    max_tool_calls_per_turn=3,
 )
-from tests.history_helpers import (  # noqa: F401
-    _agent,
-    _close_test_storages,
-    _make_config,
-    _runtime_paths,
-)
+
+
+def _pair_config(tmp_path: Path, *, teams: dict[str, TeamConfig] | None = None) -> tuple[Config, object]:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "alpha": AgentConfig(display_name="Alpha", num_history_messages=100),
+                "zeta": AgentConfig(display_name="Zeta", num_history_messages=1),
+            },
+            teams=teams or {},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=2_000)},
+        ),
+        runtime_paths,
+    )
+    return config, runtime_paths
+
+
+def _build_pair(
+    config: Config,
+    runtime_paths: object,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    configured_team_name: str | None,
+    scope_context: ScopeSessionContext | None = None,
+    leader: ScriptedModel | None = None,
+) -> BuiltTeam:
+    """Build the alpha+zeta team on scripted providers, as a reply builds it; ``leader`` scripts the leader's turns."""
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    monkeypatch.setattr(
+        "mindroom.teams.members.build_model_provider",
+        lambda *_args, **_kwargs: leader or ScriptedModel([]),
+    )
+    members = materialize_exact_team_members(
+        ["zeta", "alpha"],
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+    )
+    assert members.failed_agent_names == []
+    return build_team_spec(
+        members=members,
+        mode=TeamMode.COORDINATE,
+        config=config,
+        runtime_paths=runtime_paths,
+        team_display_name="Team-zeta-alpha",
+        scope_context=scope_context,
+        execution_identity=None,
+        model_name="default",
+        configured_team_name=configured_team_name,
+    )
+
+
+def _expected_static_tokens(built: BuiltTeam, prompt: str) -> int:
+    """Return the estimate a request of ``prompt`` costs before its history: the prompt, the leader's prompt, its tools."""
+    payloads = [
+        {key: value for key, value in asdict(tool).items() if value is not None}
+        for tool in leader_tool_specs(built.spec)
+    ]
+    system_content = built.spec.system_message.content
+    assert isinstance(system_content, str)
+    return estimate_text_tokens(prompt) + estimate_text_tokens(system_content) + len(stable_serialize(payloads)) // 4
 
 
 @pytest.mark.asyncio
-async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-    owner_agent = _agent(agent_id="alpha", name="Alpha")
-    peer_agent = _agent(agent_id="beta", name="Beta")
+async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ad hoc team's scope is prepared once, sized by the leader's prompt."""
+    config, runtime_paths = _pair_config(tmp_path)
+    built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
+    estimator = build_static_token_estimator(built.spec.system_message, leader_tool_specs(built.spec), frozenset())
+    expected_static_prompt_tokens = _expected_static_tokens(built, "Current prompt")
 
-    def team_lookup(topic: str, include_links: bool = False) -> str:
-        """Look up team context for a topic before delegating work."""
-        return f"{topic}:{include_links}"
-
-    toolkit = Toolkit(
-        name="team_docs",
-        tools=[team_lookup],
-        instructions="Use the team docs tool before delegating factual questions.",
-        add_instructions=True,
+    scope_context = load_bound_scope_session(
+        member_names=["zeta", "alpha"],
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
     )
-    team = Team(
-        members=[owner_agent, peer_agent],
-        model=FakeModel(id="fake-model", provider="fake"),
-        id="team_alpha+beta",
-        name="Pair",
-        role="Verbose team role",
-        tools=[toolkit],
-        get_member_information_tool=True,
-    )
-
-    prepared_tools = _determine_tools_for_model(
-        team,
-        model=team.model,
-        run_response=TeamRunOutput(
-            run_id="history-budget",
-            team_id=team.id,
-            session_id="history-budget",
-            session_state={},
-        ),
-        run_context=RunContext(run_id="history-budget", session_id="history-budget", session_state={}),
-        team_run_context={},
-        session=TeamSession(session_id="history-budget", team_id=team.id),
-        check_mcp_tools=False,
-    )
-    expected_payloads = [
-        {
-            "name": tool.name,
-            "description": tool.description or "",
-            "parameters": tool.parameters,
-        }
-        for tool in prepared_tools
-    ]
-    previous_tool_instructions = team._tool_instructions
-    try:
-        team._tool_instructions = [toolkit.instructions]
-        system_message = team.get_system_message(
-            session=TeamSession(session_id="history-budget", team_id=team.id),
-            tools=prepared_tools,
-            add_session_state_to_context=False,
-        )
-    finally:
-        team._tool_instructions = previous_tool_instructions
-    expected_static_prompt_tokens = estimate_text_tokens("Current prompt")
-    if system_message is not None and system_message.content is not None:
-        expected_static_prompt_tokens += estimate_text_tokens(str(system_message.content))
-    expected_static_prompt_tokens += len(stable_serialize(expected_payloads)) // 4
-
     with (
         patch(
             "mindroom.history.runtime.prepare_scope_history",
@@ -122,21 +140,14 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
             "tests.test_history_team_scope.finalize_history_preparation",
             return_value=PreparedHistoryState(replays_persisted_history=True),
         ) as mock_finalize,
-        open_bound_scope_session_context(
-            agents=[peer_agent, owner_agent],
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        ) as scope_context,
     ):
         prepared_scope_history = await prepare_bound_scope_history(
-            agents=[peer_agent, owner_agent],
-            team=team,
+            member_names=["zeta", "alpha"],
+            model=built.spec.model,
             runtime_paths=runtime_paths,
             config=config,
-            static_prompt_tokens=team_static_token_estimator(team).estimate("Current prompt"),
-            non_prompt_tokens=team_static_token_estimator(team).non_prompt_tokens(),
+            static_prompt_tokens=estimator.estimate("Current prompt"),
+            non_prompt_tokens=estimator.non_prompt_tokens(),
             scope_context=scope_context,
         )
         prepared = finalize_history_preparation(
@@ -148,55 +159,103 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
     assert prepared.replays_persisted_history is True
     assert mock_finalize.call_count == 1
     assert mock_prepare.await_count == 1
-    assert mock_prepare.await_args.kwargs["agent"] is owner_agent
-    assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
-    assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+beta")
-    assert team_static_token_estimator(team).estimate("Current prompt") == expected_static_prompt_tokens
+    assert mock_prepare.await_args.kwargs["scope_context"].scope == HistoryScope("team", "team_alpha+zeta")
+    assert mock_prepare.await_args.kwargs["model"] is built.spec.model
+    assert estimator.estimate("Current prompt") == expected_static_prompt_tokens
     assert (
         mock_prepare.await_args.kwargs["resolved_inputs"].execution_plan.static_prompt_tokens
         == expected_static_prompt_tokens
     )
 
 
-def test_scope_session_context_closes_its_storage_on_exit_and_on_error(
+@pytest.mark.asyncio
+async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_every_tool_it_offers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-    closed: list[object] = []
-    monkeypatch.setattr("mindroom.history.session_context.close_execution_storage", closed.append)
+    """The static estimate counts the leader's rendered prompt and the tools its requests offer, the delegation tool among them."""
+    config, runtime_paths = _pair_config(tmp_path, teams={"pair": _PAIR})
+    leader = ScriptedModel([answer("ok")])
+    built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name="pair", leader=leader)
+    sized: dict[str, Any] = {}
+    real_estimator = execution_preparation.build_static_token_estimator
 
-    def open_context() -> AbstractContextManager[ScopeSessionContext | None]:
-        return open_resolved_scope_session_context(
-            agent_name="test_agent",
-            scope=HistoryScope(kind="team", scope_id="team-1"),
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        )
+    def capture_estimator(system_message: Message, tools: Any, deferred_tool_names: frozenset[str]) -> Any:  # noqa: ANN401
+        sized["system_message"], sized["tools"] = system_message, list(tools)
+        return real_estimator(system_message, tools, deferred_tool_names)
 
-    with open_context() as scope_context:
-        assert scope_context is not None
-        assert closed == []
-    assert closed == [scope_context.storage]
-    opened: list[ScopeSessionContext] = []
+    monkeypatch.setattr(execution_preparation, "build_static_token_estimator", capture_estimator)
 
-    def fail_inside() -> None:
-        with open_context() as failed_context:
-            assert failed_context is not None
-            opened.append(failed_context)
-            message = "reply failed"
-            raise RuntimeError(message)
+    scope_context = load_bound_scope_session(
+        member_names=["zeta", "alpha"],
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        team_name="pair",
+    )
+    await prepare_materialized_team_execution(
+        make_turn_context("pair", session_id="session-1"),
+        scope_context=scope_context,
+        spec=built.spec,
+        message="Current prompt",
+        thread_history=None,
+        config=config,
+        runtime_paths=runtime_paths,
+        runtime_model=config.resolve_runtime_model(entity_name="pair", active_model_name="default"),
+        response_sender_id=None,
+        current_sender_id=None,
+        configured_team_name="pair",
+    )
+    events = run_team(
+        built.spec,
+        [Message(role="user", content="Current prompt")],
+        ctx=RunContext(run_id="run-1", session_id="session-1"),
+    )
+    async with closing_async_stream(events):
+        async for _event in events:
+            pass
 
-    with pytest.raises(RuntimeError, match="reply failed"):
-        fail_inside()
-    assert closed == [scope_context.storage, opened[0].storage]
-    for storage in (scope_context.storage, opened[0].storage):
-        storage.close()
+    assert sized["system_message"] is built.spec.system_message
+    offered = [tool.name for tool in leader.requests[0].tools]
+    assert [tool.name for tool in sized["tools"]] == offered
+    assert "delegate_task_to_member" in offered
+    assert set(offered) > {function.name for kit in built.spec.toolkits for function in kit.functions}
 
 
-def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path) -> None:
+def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, runtime_paths = _pair_config(tmp_path, teams={"pair": _PAIR})
+
+    scope_context = load_bound_scope_session(
+        member_names=["zeta", "alpha"],
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        team_name="pair",
+    )
+    assert scope_context is not None
+    configured = _build_pair(
+        config,
+        runtime_paths,
+        monkeypatch,
+        configured_team_name="pair",
+        scope_context=scope_context,
+    )
+    ad_hoc = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
+
+    assert (configured.spec.id, configured.spec.max_tool_calls_per_turn) == ("pair", 3)
+    assert [(member.spec.id, member.spec.name) for member in configured.spec.members] == [
+        ("zeta", "Zeta"),
+        ("alpha", "Alpha"),
+    ]
+    assert ad_hoc.spec.max_tool_calls_per_turn == config.defaults.max_tool_calls_per_turn
+
+
+def _private_pair_config(tmp_path: Path) -> tuple[Config, object]:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -211,10 +270,12 @@ def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path
         ),
         runtime_paths,
     )
-    agents = [
-        Agent(id="private_worker", name="Private Worker"),
-        Agent(id="shared", name="Shared"),
-    ]
+    return config, runtime_paths
+
+
+def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path) -> None:
+    config, runtime_paths = _private_pair_config(tmp_path)
+    member_names = ["private_worker", "shared"]
 
     def identity_for(requester_id: str) -> ToolExecutionIdentity:
         return ToolExecutionIdentity(
@@ -227,51 +288,33 @@ def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path
             session_id="session-1",
         )
 
-    with (
-        open_bound_scope_session_context(
-            agents=agents,
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=identity_for("@alice:localhost"),
-        ) as alice_scope,
-        open_bound_scope_session_context(
-            agents=agents,
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=identity_for("@bob:localhost"),
-        ) as bob_scope,
-    ):
-        assert alice_scope is not None
-        assert bob_scope is not None
-        assert alice_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
-        assert bob_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
-        assert alice_scope.scope != bob_scope.scope
+    alice_scope = load_bound_scope_session(
+        member_names=member_names,
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=identity_for("@alice:localhost"),
+    )
+    bob_scope = load_bound_scope_session(
+        member_names=member_names,
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=identity_for("@bob:localhost"),
+    )
+    assert alice_scope is not None
+    assert bob_scope is not None
+    assert alice_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
+    assert bob_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
+    assert alice_scope.scope != bob_scope.scope
 
 
 def test_private_ad_hoc_bound_team_scope_requires_requester_identity(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "private_worker": AgentConfig(
-                    display_name="Private Worker",
-                    private=AgentPrivateConfig(per="user", root="private_worker_data"),
-                ),
-                "shared": AgentConfig(display_name="Shared"),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-        runtime_paths,
-    )
+    config, _runtime_paths = _private_pair_config(tmp_path)
 
     with pytest.raises(ValueError, match="Private ad hoc team history scope requires requester identity"):
-        resolve_bound_team_scope_context(
-            agents=[
-                Agent(id="private_worker", name="Private Worker"),
-                Agent(id="shared", name="Shared"),
-            ],
+        resolve_bound_team_scope(
+            member_names=["private_worker", "shared"],
             config=config,
             execution_identity=None,
         )
@@ -279,22 +322,7 @@ def test_private_ad_hoc_bound_team_scope_requires_requester_identity(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "private_worker": AgentConfig(
-                    display_name="Private Worker",
-                    private=AgentPrivateConfig(per="user", root="private_worker_data"),
-                ),
-                "shared": AgentConfig(display_name="Shared"),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-        runtime_paths,
-    )
-    owner_agent = Agent(id="private_worker", name="Private Worker")
-    peer_agent = Agent(id="shared", name="Shared")
+    config, runtime_paths = _private_pair_config(tmp_path)
     opened_scope = HistoryScope(kind="team", scope_id="team_private_worker+shared_requester_alice")
     scope_context = ScopeSessionContext(
         scope=opened_scope,
@@ -302,15 +330,14 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
         session=None,
         session_id="session-1",
     )
-    team = Team(name="Ad hoc team", members=[owner_agent, peer_agent])
 
     with patch(
         "mindroom.history.runtime.prepare_scope_history",
         new=AsyncMock(return_value=MagicMock()),
     ) as mock_prepare:
         await prepare_bound_scope_history(
-            agents=[owner_agent, peer_agent],
-            team=team,
+            member_names=["private_worker", "shared"],
+            model=None,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,
@@ -319,212 +346,5 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
         )
 
     assert mock_prepare.await_count == 1
-    assert mock_prepare.await_args.kwargs["scope"] == opened_scope
+    assert mock_prepare.await_args.kwargs["scope_context"].scope == opened_scope
     assert mock_prepare.await_args.kwargs["non_prompt_tokens"] == 2
-
-
-def test_team_static_token_estimator_includes_agentic_state_tool() -> None:
-    owner_agent = _agent(agent_id="alpha", name="Alpha")
-    peer_agent = _agent(agent_id="beta", name="Beta")
-    team = Team(
-        members=[owner_agent, peer_agent],
-        model=FakeModel(id="fake-model", provider="fake"),
-        id="team_alpha+beta",
-        name="Pair",
-        role="Stateful team role",
-        enable_agentic_state=True,
-    )
-    budget_session_id = "history-budget"
-    session = TeamSession(session_id=budget_session_id, team_id=team.id)
-    prepared_tools = _determine_tools_for_model(
-        team,
-        model=team.model,
-        run_response=TeamRunOutput(
-            run_id=budget_session_id,
-            team_id=team.id,
-            session_id=budget_session_id,
-            session_state={},
-        ),
-        run_context=RunContext(
-            run_id=budget_session_id,
-            session_id=budget_session_id,
-            session_state={},
-        ),
-        team_run_context={},
-        session=session,
-        check_mcp_tools=False,
-    )
-    expected_payloads = [
-        {
-            "name": tool.name,
-            "description": tool.description or "",
-            "parameters": tool.parameters,
-        }
-        for tool in prepared_tools
-    ]
-    assert any(tool["name"] == "update_session_state" for tool in expected_payloads)
-
-    previous_tool_instructions = team._tool_instructions
-    try:
-        team._tool_instructions = []
-        system_message = team.get_system_message(
-            session=session,
-            tools=prepared_tools,
-            add_session_state_to_context=False,
-        )
-    finally:
-        team._tool_instructions = previous_tool_instructions
-
-    expected_static_prompt_tokens = estimate_text_tokens("Current prompt")
-    if system_message is not None and system_message.content is not None:
-        expected_static_prompt_tokens += estimate_text_tokens(str(system_message.content))
-    expected_static_prompt_tokens += len(stable_serialize(expected_payloads)) // 4
-
-    assert team_static_token_estimator(team).estimate("Current prompt") == expected_static_prompt_tokens
-
-
-def test_team_static_token_estimator_preserves_tool_instructions() -> None:
-    owner_agent = _agent(agent_id="alpha", name="Alpha")
-    peer_agent = _agent(agent_id="beta", name="Beta")
-    team = Team(
-        members=[owner_agent, peer_agent],
-        model=FakeModel(id="fake-model", provider="fake"),
-        id="team_alpha+beta",
-        name="Pair",
-        role="Stateful team role",
-        enable_agentic_state=True,
-    )
-    team._tool_instructions = ["keep me"]
-
-    team_static_token_estimator(team).estimate("Current prompt")
-
-    assert team._tool_instructions == ["keep me"]
-
-
-def test_create_team_instance_enables_native_team_history_and_disables_members(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "alpha": AgentConfig(display_name="Alpha", num_history_messages=100),
-                "zeta": AgentConfig(display_name="Zeta", num_history_messages=1),
-            },
-            teams={
-                "pair": TeamConfig(
-                    display_name="Pair",
-                    role="Test team",
-                    agents=["alpha", "zeta"],
-                    num_history_messages=2,
-                    max_tool_calls_per_turn=3,
-                ),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            models={
-                "default": ModelConfig(
-                    provider="openai",
-                    id="test-model",
-                    context_window=2_000,
-                ),
-            },
-        ),
-        runtime_paths,
-    )
-    alpha = _agent(agent_id="alpha", name="Alpha")
-    zeta = _agent(agent_id="zeta", name="Zeta")
-
-    with (
-        open_bound_scope_session_context(
-            agents=[alpha, zeta],
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-            team_name="pair",
-        ) as scope_context,
-        patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="fake-model", provider="fake"),
-        ),
-        patch("mindroom.teams.install_model_call_cap", wraps=install_model_call_cap) as install_cap,
-    ):
-        assert scope_context is not None
-        team = _create_team_instance(
-            agents=[alpha, zeta],
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime_paths,
-            team_display_name="Team-alpha-zeta",
-            scope_context=scope_context,
-            execution_identity=None,
-            model_name="default",
-            configured_team_name="pair",
-        )
-
-    install_cap.assert_called_once_with(team.model, entity_name="pair")
-    assert alpha.add_history_to_context is False
-    assert zeta.add_history_to_context is False
-    assert team.add_history_to_context is True
-    assert team.num_history_messages == 2
-    assert team.store_history_messages is False
-    assert team.store_member_responses is False
-    assert team.tool_call_limit == 3
-
-
-def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "alpha": AgentConfig(display_name="Alpha"),
-                "zeta": AgentConfig(display_name="Zeta"),
-            },
-            teams={
-                "pair": TeamConfig(
-                    display_name="Pair",
-                    role="Test team",
-                    agents=["alpha", "zeta"],
-                ),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            models={
-                "default": ModelConfig(
-                    provider="openai",
-                    id="test-model",
-                    context_window=2_000,
-                ),
-            },
-        ),
-        runtime_paths,
-    )
-    alpha = _agent(agent_id="alpha", name="Alpha")
-    zeta = _agent(agent_id="zeta", name="Zeta")
-
-    with (
-        open_bound_scope_session_context(
-            agents=[alpha, zeta],
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-            team_name="pair",
-        ) as scope_context,
-        patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="fake-model", provider="fake"),
-        ),
-    ):
-        assert scope_context is not None
-        team = _create_team_instance(
-            agents=[alpha, zeta],
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime_paths,
-            team_display_name="Team-alpha-zeta",
-            scope_context=scope_context,
-            execution_identity=None,
-            model_name="default",
-            configured_team_name="pair",
-        )
-
-    assert team.num_history_runs is None
-    assert team.num_history_messages is None

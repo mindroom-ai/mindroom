@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.models.message import Message
-from agno.models.response import ModelResponse
 from graphiti_core.prompts.models import Message as GraphitiMessage
 from pydantic import BaseModel
 
@@ -19,12 +16,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.knowledge_graph import clients
 from mindroom.knowledge_graph.clients import MindRoomEmbedder, MindRoomLLMClient, UnusedCrossEncoder
 from mindroom.knowledge_graph.store import UnusableExtractionError
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
-from tests.conftest import FakeModel
+from mindroom.llm.errors import ProviderError
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,17 +32,15 @@ class _Entities(BaseModel):
     names: list[str]
 
 
-@dataclass
-class _JsonModel(FakeModel):
-    """Answers every request with one fixed JSON document and records what it was sent."""
+def _json_model(answer_text: str) -> ScriptedModel:
+    """Return a model that answers one extraction request with ``answer_text``."""
+    return ScriptedModel([answer(answer_text)])
 
-    answer: str = "{}"
-    requests: list[str] = field(default_factory=list)
 
-    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
-        messages = cast("list[Message]", kwargs.get("messages") or args[0])
-        self.requests.append("\n".join(str(message.content) for message in messages))
-        return ModelResponse(content=self.answer)
+def _sent_text(model: ScriptedModel) -> str:
+    """Return every message of the model's only request as one text."""
+    [request] = model.requests
+    return "\n".join(message.get_content_string() for message in request.messages)
 
 
 def _config() -> Config:
@@ -60,7 +56,7 @@ async def test_llm_client_returns_structured_output_and_records_usage(tmp_path: 
     """An extraction call runs on the configured model and is charged to the conversation it came from."""
     config = _config()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    model = _JsonModel(id="luna", provider="test", answer=json.dumps({"names": ["Alice", "Project Atlas"]}))
+    model = _json_model(json.dumps({"names": ["Alice", "Project Atlas"]}))
     client = MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())
     record = AsyncMock()
     messages = [
@@ -69,15 +65,18 @@ async def test_llm_client_returns_structured_output_and_records_usage(tmp_path: 
     ]
 
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model) as get_model,
+        patch.object(clients, "build_model_provider", return_value=model) as build,
         patch.object(clients, "record_helper_usage", record),
         usage_target(UsageTarget(agent_name="mind", session_id="!room:x:$thread", execution_identity=None)),
     ):
         result = await client._generate_response(messages, _Entities)
 
     assert result == {"names": ["Alice", "Project Atlas"]}
-    assert get_model.call_args.args[2] == "luna"
-    assert "Alice runs Atlas." in model.requests[0]
+    assert build.call_args.args[2] == "luna"
+    [request] = model.requests
+    assert request.messages[0].role == "system"
+    assert request.messages[0].get_content_string().startswith("Extract entities.")
+    assert request.messages[1].get_content_string() == "Alice runs Atlas."
     assert record.await_args.kwargs["kind"] == "knowledge_graph"
     assert record.await_args.kwargs["owner"].session_id == "!room:x:$thread"
 
@@ -87,29 +86,24 @@ async def test_llm_client_without_usage_target_records_nothing(tmp_path: Path) -
     """A call outside ingestion, such as a search, has no conversation to charge."""
     config = _config()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    model = _JsonModel(id="luna", provider="test", answer=json.dumps({"names": []}))
+    model = _json_model(json.dumps({"names": []}))
     record = AsyncMock()
 
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch.object(clients, "build_model_provider", return_value=model),
         patch.object(clients, "record_helper_usage", record),
     ):
         await MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())._generate_response(
-            [Message(role="user", content="x")],
+            [GraphitiMessage(role="user", content="x")],
             _Entities,
         )
 
     record.assert_not_awaited()
 
 
-@dataclass
-class _FailingModel(FakeModel):
-    """Fails like a provider that rejects the key."""
-
-    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
-        del args, kwargs
-        msg = "401 invalid api key"
-        raise RuntimeError(msg)
+async def _reject_key() -> None:
+    msg = "401 invalid api key"
+    raise ProviderError(msg, provider="OpenAI", status_code=401)
 
 
 @pytest.mark.asyncio
@@ -119,8 +113,8 @@ async def test_llm_client_reports_the_providers_error(tmp_path: Path) -> None:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=_FailingModel(id="luna")),
-        pytest.raises(RuntimeError, match="invalid api key"),
+        patch.object(clients, "build_model_provider", return_value=ScriptedModel([[Await(_reject_key)]])),
+        pytest.raises(ProviderError, match="invalid api key"),
     ):
         await MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())._generate_response(
             [GraphitiMessage(role="user", content="x")],
@@ -129,14 +123,14 @@ async def test_llm_client_reports_the_providers_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer", ["[1, 2]", "null", json.dumps({"other": 1})])
-async def test_llm_client_rejects_output_of_the_wrong_shape(tmp_path: Path, answer: str) -> None:
+@pytest.mark.parametrize("answer_text", ["[1, 2]", "null", json.dumps({"other": 1})])
+async def test_llm_client_rejects_output_of_the_wrong_shape(tmp_path: Path, answer_text: str) -> None:
     """Output that is not the requested object counts as unusable, so ingestion can drop it after a few tries."""
     config = _config()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=_JsonModel(id="luna", answer=answer)),
+        patch.object(clients, "build_model_provider", return_value=_json_model(answer_text)),
         pytest.raises(ValueError, match="knowledge graph extraction"),
     ):
         await MindRoomLLMClient(lambda: config, paths, asyncio.get_running_loop())._generate_response(
@@ -145,24 +139,18 @@ async def test_llm_client_rejects_output_of_the_wrong_shape(tmp_path: Path, answ
         )
 
 
-@dataclass
-class _LoopRecordingModel(_JsonModel):
-    """Records the event loop each request runs on."""
-
-    loops: list[asyncio.AbstractEventLoop] = field(default_factory=list)
-
-    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
-        self.loops.append(asyncio.get_running_loop())
-        return await super().ainvoke(*args, **kwargs)
-
-
 @pytest.mark.asyncio
 async def test_extraction_runs_on_the_runtime_loop(tmp_path: Path) -> None:
     """Graphiti calls from its own loop, but the model runs on the runtime loop that owns the providers' HTTP clients."""
     config = _config()
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     runtime_loop = asyncio.get_running_loop()
-    model = _LoopRecordingModel(id="luna", provider="test", answer=json.dumps({"names": ["Alice"]}))
+    loops: list[asyncio.AbstractEventLoop] = []
+
+    async def record_loop() -> None:
+        loops.append(asyncio.get_running_loop())
+
+    model = ScriptedModel([[Await(record_loop), *answer(json.dumps({"names": ["Alice"]}))]])
     record = AsyncMock()
     target = UsageTarget(agent_name="mind", session_id="!room:x:$thread", execution_identity=None)
     client = MindRoomLLMClient(lambda: config, paths, runtime_loop)
@@ -172,13 +160,13 @@ async def test_extraction_runs_on_the_runtime_loop(tmp_path: Path) -> None:
             return await client._generate_response([GraphitiMessage(role="user", content="x")], _Entities)
 
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch.object(clients, "build_model_provider", return_value=model),
         patch.object(clients, "record_helper_usage", record),
     ):
         result = await asyncio.to_thread(asyncio.run, from_graph_loop())
 
     assert result == {"names": ["Alice"]}
-    assert model.loops == [runtime_loop]
+    assert loops == [runtime_loop]
     assert record.await_args.kwargs["owner"].session_id == "!room:x:$thread"
 
 
@@ -191,15 +179,18 @@ async def test_unusable_extraction_crosses_back_to_the_caller(tmp_path: Path) ->
     call = client._generate_response([GraphitiMessage(role="user", content="x")], _Entities)
 
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=_JsonModel(id="luna", answer="no")),
+        patch.object(clients, "build_model_provider", return_value=_json_model("no")),
         pytest.raises(UnusableExtractionError),
     ):
         await asyncio.to_thread(asyncio.run, call)
 
 
 class _Embedder:
-    async def async_get_embedding(self, text: str) -> list[float]:
-        return [float(len(text)), 1.0]
+    sends_batches = False
+
+    async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        assert purpose == "query"
+        return [[float(len(text)), 1.0] for text in texts]
 
 
 @pytest.mark.asyncio
@@ -221,7 +212,7 @@ async def test_embedder_sends_an_openai_batch_as_batch_requests() -> None:
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(side_effect=create)
     embedder = MindRoomEmbedder(
-        MindRoomOpenAIEmbedder(id="text-embedding-3-small", api_key="sk-test", async_client=async_client),
+        OpenAIEmbedder(model="text-embedding-3-small", api_key="sk-test", async_client=async_client),
     )
 
     texts = ["x" * (index % 7 + 1) for index in range(150)]
@@ -241,8 +232,8 @@ async def test_embedder_embeds_every_graph_text_as_a_query() -> None:
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(side_effect=create)
     embedder = MindRoomEmbedder(
-        MindRoomOpenAIEmbedder(
-            id="embeddinggemma-2",
+        OpenAIEmbedder(
+            model="embeddinggemma-2",
             api_key="sk-test",
             base_url="http://local/v1",
             async_client=async_client,
@@ -270,8 +261,8 @@ async def test_embedder_embeds_one_text_per_request_when_a_server_answers_a_batc
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(side_effect=create)
     embedder = MindRoomEmbedder(
-        MindRoomOpenAIEmbedder(
-            id="local-embed",
+        OpenAIEmbedder(
+            model="local-embed",
             api_key="sk-test",
             base_url="http://local/v1",
             async_client=async_client,
@@ -290,13 +281,16 @@ async def test_embedder_bounds_concurrent_requests_without_batch_support() -> No
     active = peak = 0
 
     class _Counting:
-        async def async_get_embedding(self, text: str) -> list[float]:
+        sends_batches = False
+
+        async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
             nonlocal active, peak
+            del purpose
             active += 1
             peak = max(peak, active)
             await asyncio.sleep(0)
             active -= 1
-            return [float(len(text))]
+            return [[float(len(text))] for text in texts]
 
     texts = ["x" * (index % 5 + 1) for index in range(60)]
     assert await MindRoomEmbedder(_Counting()).create_batch(texts) == [[float(len(text))] for text in texts]

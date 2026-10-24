@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import suppress
 from dataclasses import replace
 from types import SimpleNamespace
@@ -11,22 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.db.base import SessionType
-from agno.models.message import Message
-from agno.models.response import ToolExecution
-from agno.run.agent import (
-    RunContentEvent,
-    RunErrorEvent,
-    RunOutput,
-    ToolCallCompletedEvent,
-    ToolCallStartedEvent,
-)
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
 
-from mindroom.ai import (
-    _PreparedAgentRun,
-)
 from mindroom.bot import AgentBot
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
@@ -35,8 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_CANCELLED,
@@ -48,6 +33,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
+from mindroom.llm.errors import ProviderError
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import (
     ResponseRequest,
@@ -55,6 +41,8 @@ from mindroom.response_runner import (
     _NonStreamingGeneration,
 )
 from mindroom.response_sources import ResponseSources
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry, strip_visible_tool_markers
 from mindroom.tool_system.runtime_context import (
@@ -70,15 +58,13 @@ from tests.ai_user_id_helpers import (
     _claimed_reply_span,
     _config,
     _config_with_matrix_message,
+    _install_inert_post_response_effects,
     _knowledge_access_support,
     _make_bot,
     _mark_requester_online,
-    _open_agent_scope_context,
     _plugin,
-    _prepared_prompt_result,
     _response_request,
     _runtime_paths,
-    _SessionStorage,
     _set_gateway_method,
     bind_runtime_paths,
 )
@@ -89,17 +75,48 @@ from tests.conftest import (
     message_origin,
     request_envelope,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.reply_span_helpers import response_span
+from tests.scripted_agent_helpers import (
+    PROBE_TOOL,
+    install_agent_model,
+    raising,
+    registered_probe_tools,
+    stored_runs,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
-    from agno.session.team import TeamSession
+    from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store import ConversationStore
+
+
+THREAD_SESSION_ID = "!test:localhost:$thread-root"
+
+
+def _history_store(tmp_path: Path) -> ConversationStore:
+    """Return the agent scope's store the runner opens for its session probe and its interrupted-turn records."""
+    return create_state_storage("general", tmp_path / "scope_history")
+
+
+def _start_session(storage: ConversationStore, session_id: str) -> None:
+    """Store the session row a reply's first run creates."""
+    storage.ensure_session_row(ConversationSession(session_id=session_id, kind="agent", owner_id="general"))
+
+
+def _persisted_run(storage: ConversationStore, session_id: str = THREAD_SESSION_ID) -> AnyRunRecord:
+    """Return the first run the reply stored in its session."""
+    session = storage.load_session(session_id, "agent")
+    assert session is not None
+    assert session.runs
+    return session.runs[0]
 
 
 def _assert_interrupted_messages(
-    run: RunOutput,
+    run: AnyRunRecord,
     *,
     response_event_id: str,
     assistant_body: str,
@@ -111,73 +128,6 @@ def _assert_interrupted_messages(
     assert run.metadata is not None
     assert run.metadata["matrix_response_event_id"] == response_event_id
     assert run.messages[1].content == assistant_body
-
-
-def test_persist_interrupted_turn_closes_storage_after_write(tmp_path: Path) -> None:
-    """Runner-owned interrupted replay should always close the opened storage handle."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    coordinator = _build_response_runner(
-        bot,
-        config=config,
-        runtime_paths=runtime_paths,
-        storage_path=tmp_path,
-        requester_id="@alice:localhost",
-    )
-    storage = MagicMock()
-    coordinator.deps.state_writer.create_storage = MagicMock(return_value=storage)
-    recorder = TurnRecorder(user_message="Hello")
-    recorder.mark_interrupted()
-
-    with patch("mindroom.response_runner.persist_interrupted_replay_snapshot") as mock_persist:
-        coordinator._persist_interrupted_turn(
-            recorder=recorder,
-            session_scope=HistoryScope(kind="agent", scope_id="general"),
-            session_id="session1",
-            execution_identity=None,
-            run_id="run-1",
-            is_team=False,
-        )
-
-    mock_persist.assert_called_once()
-    storage.close.assert_called_once_with()
-
-
-def test_persist_interrupted_turn_closes_storage_when_write_fails(tmp_path: Path) -> None:
-    """Runner-owned interrupted replay should close storage even if persistence raises."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    coordinator = _build_response_runner(
-        bot,
-        config=config,
-        runtime_paths=runtime_paths,
-        storage_path=tmp_path,
-        requester_id="@alice:localhost",
-    )
-    storage = MagicMock()
-    coordinator.deps.state_writer.create_storage = MagicMock(return_value=storage)
-    recorder = TurnRecorder(user_message="Hello")
-    recorder.mark_interrupted()
-
-    with (
-        patch(
-            "mindroom.response_runner.persist_interrupted_replay_snapshot",
-            side_effect=RuntimeError("boom"),
-        ),
-        pytest.raises(RuntimeError, match="boom"),
-    ):
-        coordinator._persist_interrupted_turn(
-            recorder=recorder,
-            session_scope=HistoryScope(kind="agent", scope_id="general"),
-            session_id="session1",
-            execution_identity=None,
-            run_id="run-1",
-            is_team=False,
-        )
-
-    storage.close.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -360,7 +310,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     sequence: list[tuple[str, str | None, str | None, str | None]] = []
     saw_matrix_admin: list[bool] = []
     active_states: list[bool] = []
@@ -407,12 +357,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
         async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
-            storage.session = AgentSession(
-                session_id=context.session_id or "",
-                agent_id="general",
-                created_at=1,
-                updated_at=1,
-            )
+            _start_session(storage, context.session_id or "")
             sequence.append(("ai", context.session_id, None, None))
             return "Hello!"
 
@@ -465,7 +410,7 @@ async def test_process_and_respond_applies_session_started_agent_and_room_scopes
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED, agents=["general"], rooms=["!test:localhost"])
@@ -500,12 +445,7 @@ async def test_process_and_respond_applies_session_started_agent_and_room_scopes
         async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
-            storage.session = AgentSession(
-                session_id=context.session_id or "",
-                agent_id="general",
-                created_at=1,
-                updated_at=1,
-            )
+            _start_session(storage, context.session_id or "")
             sequence.append("ai")
             return "Hello!"
 
@@ -532,7 +472,7 @@ async def test_process_and_respond_does_not_emit_session_started_without_persist
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED)
@@ -569,11 +509,8 @@ async def test_process_and_respond_does_not_emit_session_started_without_persist
     assert sequence == ["ai"]
 
 
-@pytest.mark.asyncio
-async def test_should_watch_session_started_returns_false_when_storage_probe_fails(
-    tmp_path: Path,
-) -> None:
-    """session:started eligibility should degrade to False when the session probe fails."""
+async def _session_started_probe(tmp_path: Path, create_storage: Callable[[], object]) -> tuple[ResponseRunner, bool]:
+    """Set up one reply's session:started watch with a registered hook; return the runner and whether it watches."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -581,14 +518,6 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
     @hook(EVENT_SESSION_STARTED)
     async def started(_ctx: SessionHookContext) -> None:
         return None
-
-    class BrokenStorage:
-        def get_session(self, _session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
-            msg = "probe boom"
-            raise RuntimeError(msg)
-
-        def close(self) -> None:
-            return None
 
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
     coordinator = _build_response_runner(
@@ -611,20 +540,53 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
         identity=coordinator._response_identity(watch_request, response_kind="ai"),
         request=watch_request,
     )
-    watch = lifecycle.setup_session_watch(
+    watch = await lifecycle.setup_session_watch(
         tool_context=tool_context,
         session_id=target.session_id,
-        session_type=SessionType.AGENT,
+        session_type="agent",
         scope=HistoryScope(kind="agent", scope_id="general"),
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
-        create_storage=BrokenStorage,
+        create_storage=create_storage,
     )
+    return coordinator, watch.should_watch
 
-    assert watch.should_watch is False
+
+@pytest.mark.asyncio
+async def test_should_watch_session_started_returns_false_when_storage_probe_fails(
+    tmp_path: Path,
+) -> None:
+    """session:started eligibility should degrade to False when the session probe fails."""
+
+    class BrokenStorage:
+        def has_session(self, _session_id: str, _kind: object) -> bool:
+            msg = "probe boom"
+            raise RuntimeError(msg)
+
+    coordinator, should_watch = await _session_started_probe(tmp_path, BrokenStorage)
+
+    assert should_watch is False
+    target = MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg")
     coordinator.deps.logger.exception.assert_called_once()
     assert coordinator.deps.logger.exception.call_args.kwargs["session_id"] == target.session_id
     assert coordinator.deps.logger.exception.call_args.kwargs["failure_reason"] == "probe boom"
+
+
+@pytest.mark.asyncio
+async def test_session_started_probe_reads_storage_off_the_event_loop(tmp_path: Path) -> None:
+    """A slow session store must not stall the event loop while a reply decides whether to watch for session:started."""
+    probe_threads: list[int] = []
+
+    class MissingSessionStorage:
+        def has_session(self, _session_id: str, _kind: object) -> bool:
+            probe_threads.append(threading.get_ident())
+            return False
+
+    _, should_watch = await _session_started_probe(tmp_path, MissingSessionStorage)
+
+    assert should_watch is True
+    assert len(probe_threads) == 1
+    assert probe_threads[0] != threading.get_ident()
 
 
 @pytest.mark.asyncio
@@ -641,7 +603,7 @@ async def test_session_started_hooks_continue_after_timeout(tmp_path: Path) -> N
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED, priority=10, timeout_ms=10)
@@ -673,12 +635,7 @@ async def test_session_started_hooks_continue_after_timeout(tmp_path: Path) -> N
         async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
-            storage.session = AgentSession(
-                session_id=context.session_id or "",
-                agent_id="general",
-                created_at=1,
-                updated_at=1,
-            )
+            _start_session(storage, context.session_id or "")
             sequence.append("ai")
             return "Hello!"
 
@@ -698,7 +655,7 @@ async def test_session_started_hooks_continue_after_runtime_error(tmp_path: Path
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
 
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED, priority=10)
@@ -745,12 +702,7 @@ async def test_session_started_hooks_continue_after_runtime_error(tmp_path: Path
         async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
-            storage.session = AgentSession(
-                session_id=context.session_id or "",
-                agent_id="general",
-                created_at=1,
-                updated_at=1,
-            )
+            _start_session(storage, context.session_id or "")
             sequence.append("ai")
             return "Hello!"
 
@@ -779,7 +731,7 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED)
@@ -823,12 +775,7 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
             async def fake_stream() -> AsyncIterator[str]:
                 context = get_tool_runtime_context()
                 assert context is not None
-                storage.session = AgentSession(
-                    session_id=context.session_id or "",
-                    agent_id="general",
-                    created_at=1,
-                    updated_at=1,
-                )
+                _start_session(storage, context.session_id or "")
                 sequence.append("stream")
                 yield "Hello!"
 
@@ -857,7 +804,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
 
     with patch("mindroom.response_runner.stream_agent_response") as mock_stream:
         coordinator = _build_response_runner(
@@ -903,10 +850,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
 
     assert generation.delivery.event_id == "$terminal"
     assert generation.delivery.failure_reason == "boom"
-    persisted_session = cast("AgentSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    persisted_run = _persisted_run(storage)
     _assert_interrupted_messages(
         persisted_run,
         response_event_id="$terminal",
@@ -917,36 +861,25 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
 @pytest.mark.asyncio
 async def test_process_and_respond_streaming_persists_interrupted_history_when_model_stream_errors(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Model stream errors returned as text should still persist interrupted replay."""
+    """A provider error after a finished tool still persists the interrupted turn with that tool."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    storage = _SessionStorage()
-    mock_agent = MagicMock()
-    mock_agent.model = MagicMock()
-    mock_agent.model.__class__.__name__ = "OpenAIChat"
-    mock_agent.model.id = "test-model"
-    mock_agent.name = "GeneralAgent"
-    mock_agent.add_history_to_context = False
-
-    completed_tool = ToolExecution(
-        tool_call_id="call-1",
-        tool_name="run_shell_command",
-        tool_args={"cmd": "pwd"},
-        result="/app",
+    storage = _history_store(tmp_path)
+    config.agents["general"].tools = [PROBE_TOOL]
+    install_agent_model(
+        monkeypatch,
+        ScriptedModel(
+            [
+                calls(tool_call("run_shell_command", "call-1", cmd="pwd"), content="Partial answer"),
+                [raising(ProviderError("Error code: 500 - provider exploded", provider="Synthetic", status_code=500))],
+            ],
+        ),
     )
 
-    async def errored_agent_stream() -> AsyncIterator[object]:
-        yield RunContentEvent(content="Partial answer")
-        yield ToolCallStartedEvent(tool=completed_tool)
-        yield ToolCallCompletedEvent(tool=completed_tool)
-        yield RunErrorEvent(content="Error code: 500 - provider exploded")
-
-    mock_agent.arun = MagicMock(return_value=errored_agent_stream())
-
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-        mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+    with registered_probe_tools():
         coordinator = _build_response_runner(
             bot,
             config=config,
@@ -971,10 +904,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
             generation = await coordinator._process_and_respond_streaming(request, run_id="run-1")
 
     assert generation.delivery.event_id == "$streamed"
-    persisted_session = cast("AgentSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    persisted_run = _persisted_run(storage)
     assert persisted_run.run_id == "run-1"
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_response_event_id"] == "$streamed"
@@ -1010,7 +940,7 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
 
     with (
         patch("mindroom.response_runner.stream_agent_response") as mock_stream,
@@ -1062,10 +992,7 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
         )
 
     assert generation.delivery.event_id == "$terminal"
-    persisted_session = cast("AgentSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    persisted_run = _persisted_run(storage)
     _assert_interrupted_messages(
         persisted_run,
         response_event_id="$terminal",
@@ -1097,7 +1024,7 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED)
@@ -1126,12 +1053,7 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
             cancel_message = "cancel"
             context = get_tool_runtime_context()
             assert context is not None
-            storage.session = AgentSession(
-                session_id=context.session_id or "",
-                agent_id="general",
-                created_at=1,
-                updated_at=1,
-            )
+            _start_session(storage, context.session_id or "")
             sequence.append("ai")
             raise asyncio.CancelledError(cancel_message)
 
@@ -1167,7 +1089,7 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED)
@@ -1202,12 +1124,7 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
                 cancel_message = "cancel"
                 context = get_tool_runtime_context()
                 assert context is not None
-                storage.session = AgentSession(
-                    session_id=context.session_id or "",
-                    agent_id="general",
-                    created_at=1,
-                    updated_at=1,
-                )
+                _start_session(storage, context.session_id or "")
                 sequence.append("stream")
                 yield "Hello!"
                 raise asyncio.CancelledError(cancel_message)
@@ -1239,7 +1156,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     started = asyncio.Event()
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
@@ -1273,8 +1190,8 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-            run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-            run_id_callback("run-retry")
+            on_attempt_start = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+            on_attempt_start("run-retry", "default")
             started.set()
             await asyncio.sleep(60)
             return "unreachable"
@@ -1289,10 +1206,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
 
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
-    persisted_session = cast("AgentSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    persisted_run = _persisted_run(storage)
     assert persisted_run.run_id == "run-retry"
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_response_event_id"] == "$thinking"
@@ -1401,7 +1315,7 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     started = asyncio.Event()
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
@@ -1436,8 +1350,8 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-            run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-            run_id_callback("run-retry")
+            on_attempt_start = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+            on_attempt_start("run-retry", "default")
             started.set()
             await asyncio.sleep(60)
             return "unreachable"
@@ -1452,10 +1366,7 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
 
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
-    persisted_session = cast("AgentSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    persisted_run = _persisted_run(storage)
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_seen_event_ids"] == ["$user_msg"]
     assert "$other-response" not in persisted_run.metadata["matrix_seen_event_ids"]
@@ -1521,7 +1432,7 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -1580,47 +1491,30 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
                 )
 
     assert resolution is None
-    assert storage.session is None
+    assert storage.load_session(THREAD_SESSION_ID, "agent") is None
 
 
 @pytest.mark.asyncio
 async def test_generate_response_locked_unhandled_delivery_outcome_does_not_persist_tool_replay(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unhandled delivery outcome should not synthesize interrupted replay from visible tools."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
+    config.agents["general"].tools = [PROBE_TOOL]
+    config.agents["general"].show_tool_calls = True
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    history_storage = _SessionStorage()
-    ai_scope_storage = _SessionStorage()
-    completed_run = RunOutput(
-        run_id="run-visible-tools",
-        agent_id="general",
-        session_id="session1",
-        content="Half done",
-        messages=[Message(role="assistant", content="Half done")],
-        tools=[
-            ToolExecution(
-                tool_name="run_shell_command",
-                tool_args={"cmd": "pwd"},
-                result="/app",
-            ),
-        ],
-        status=RunStatus.completed,
+    history_storage = _history_store(tmp_path)
+    install_agent_model(
+        monkeypatch,
+        ScriptedModel([calls(tool_call("run_shell_command", "call-1", cmd="pwd")), answer("Half done")]),
     )
 
     with (
+        registered_probe_tools(),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
-        patch.object(ResponseRunner, "_show_tool_calls", return_value=True),
-        patch(
-            "mindroom.ai.open_resolved_scope_session_context",
-            new=lambda **_: _open_agent_scope_context(ai_scope_storage),
-        ),
-        patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-        patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=completed_run),
     ):
-        mock_prepare.return_value = _prepared_prompt_result(MagicMock(), prompt="Hello")
         coordinator = _build_response_runner(
             bot,
             config=config,
@@ -1630,6 +1524,7 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             history_storage=history_storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
+        _install_inert_post_response_effects(coordinator)
         # The homeserver refuses the reply's placeholder, so nothing of the reply is visible.
         bot.client.room_send = AsyncMock(return_value=nio.RoomSendError("refused"))
         _set_gateway_method(
@@ -1651,7 +1546,7 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             )
 
     assert resolution is None
-    assert history_storage.session is None
+    assert history_storage.load_session(THREAD_SESSION_ID, "agent") is None
 
 
 @pytest.mark.asyncio
@@ -1662,7 +1557,7 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     request = replace(
         _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         response_envelope=MessageEnvelope(
@@ -1740,7 +1635,7 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
 
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
-    assert storage.session is None
+    assert storage.load_session(THREAD_SESSION_ID, "agent") is None
 
 
 @pytest.mark.asyncio
@@ -1751,7 +1646,7 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    storage = _SessionStorage()
+    storage = _history_store(tmp_path)
     request = replace(
         _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         response_envelope=MessageEnvelope(
@@ -2032,67 +1927,25 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
 @pytest.mark.asyncio
 async def test_generate_response_preserves_model_prompt_in_persisted_session(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Persisted model prompts should stay intact so later turns can reuse provider cache prefixes."""
+    """The stored prompt is the model-facing prompt byte for byte, so later turns reuse provider cache prefixes."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     config.agents["general"].show_tool_calls = False
+    config.memory.backend = "none"
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    storage = _SessionStorage()
+    model = ScriptedModel([answer("Hello")])
+    install_agent_model(monkeypatch, model)
 
-    async def fake_prepare_agent_and_prompt(
-        _ctx: object,
-        *_args: object,
-        prompt: str,
-        model_prompt: str | None = None,
-        **_kwargs: object,
-    ) -> _PreparedAgentRun:
-        model_facing_prompt = model_prompt if model_prompt is not None else prompt
-        return _PreparedAgentRun(
-            agent=MagicMock(),
-            messages=(
-                Message(role="user", content="Earlier context"),
-                Message(role="assistant", content="Earlier answer"),
-                Message(role="user", content=model_facing_prompt),
-            ),
-            unseen_event_ids=[],
-            prepared_history=PreparedHistoryState(),
-            runtime_model_name="default",
-        )
-
-    async def fake_cached_agent_run(
-        _agent: object,
-        run_input: tuple[Message, ...],
-        session_id: str,
-        **kwargs: object,
-    ) -> RunOutput:
-        run = RunOutput(
-            run_id=cast("str | None", kwargs.get("run_id")),
-            content="Hello",
-            status=RunStatus.completed,
-            messages=[*run_input, Message(role="assistant", content="Hello")],
-        )
-        storage.session = AgentSession(
-            session_id=session_id,
-            agent_id="general",
-            created_at=1,
-            updated_at=1,
-            runs=[run],
-        )
-        return run
-
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(side_effect=fake_prepare_agent_and_prompt)),
-        patch("mindroom.ai_runtime.cached_agent_run", new=AsyncMock(side_effect=fake_cached_agent_run)),
-    ):
+    with patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)):
         coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            history_storage=storage,
+            history_storage=_history_store(tmp_path),
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
@@ -2105,13 +1958,12 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
             ),
         )
 
-    persisted_session = cast("AgentSession", storage.session)
-    assert persisted_session.runs is not None
-    persisted_run = cast("RunOutput", persisted_session.runs[0])
-    assert persisted_run.messages is not None
-    assert persisted_run.messages[0].content == "Earlier context"
-    assert "Describe this image" in cast("str", persisted_run.messages[2].content)
-    assert "Available attachment IDs: att_1" in cast("str", persisted_run.messages[2].content)
+    sent_prompt = model.requests[0].messages[-1]
+    assert "Describe this image" in str(sent_prompt.content)
+    assert "Available attachment IDs: att_1" in str(sent_prompt.content)
+    [stored] = stored_runs(config, runtime_paths, THREAD_SESSION_ID)
+    [stored_prompt] = [message for message in stored.messages if message.role == "user"]
+    assert stored_prompt.content == sent_prompt.content
 
 
 @pytest.mark.asyncio

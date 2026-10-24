@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import google.auth
 import httpx
 import pytest
 import typer
-from anthropic import APIStatusError
-from google.auth.exceptions import DefaultCredentialsError
+from google.auth.exceptions import DefaultCredentialsError, RefreshError
+from google.oauth2.credentials import Credentials
 
 from mindroom.cli.doctor import (
     _check_matrix_homeserver,
@@ -17,6 +18,8 @@ from mindroom.cli.doctor import (
     _check_pairing,
     _check_single_provider,
     _classify_vertexai_claude_error,
+    _validate_provider_key,
+    _validate_vertexai_claude_connection,
     doctor,
 )
 from mindroom.config.main import Config
@@ -24,6 +27,8 @@ from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.credentials.sync import get_embedder_api_key
+from mindroom.llm.errors import ProviderError, ProviderUnavailable
+from mindroom.providers.anthropic import messages as claude_messages
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,10 +36,30 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _api_status_error(status_code: int, message: str) -> APIStatusError:
-    request = httpx.Request("POST", "https://example.test/v1/messages")
-    response = httpx.Response(status_code, request=request)
-    return APIStatusError(message, response=response, body=None)
+def _api_status_error(status_code: int, message: str) -> ProviderError:
+    return ProviderError(message, provider="VertexAI", status_code=status_code)
+
+
+def test_the_vertex_claude_probe_asks_for_one_output_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The probe caps its reply through the model's own ``max_tokens``, over any value the model authored."""
+    built: list[ModelConfig] = []
+
+    def build_provider(model_config: ModelConfig, _runtime_paths: RuntimePaths) -> None:
+        built.append(model_config)
+        msg = "probe stopped here"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(claude_messages, "build_provider", build_provider)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    authored = {"project_id": "test-project", "region": "us-east5", "max_tokens": 4096}
+    model = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5", extra_kwargs=authored)
+
+    assert _validate_vertexai_claude_connection(model, runtime_paths) == (None, "probe stopped here")
+    assert [config.extra_kwargs for config in built] == [{"timeout": 10, **authored, "max_tokens": 1}]
 
 
 def test_publisher_model_not_found_explains_model_garden() -> None:
@@ -74,12 +99,52 @@ def test_other_status_codes_stay_compact() -> None:
     assert detail == "HTTP 500"
 
 
-def test_missing_credentials_stay_inconclusive() -> None:
-    """Missing ADC credentials remain a warning, not a failure."""
-    valid, detail = _classify_vertexai_claude_error(DefaultCredentialsError("no ADC"))
+@pytest.mark.parametrize(
+    "error",
+    [
+        DefaultCredentialsError("no ADC"),
+        ProviderUnavailable("token service unreachable", provider="VertexAI", code="connection_error"),
+        ProviderError("connection refused", provider="VertexAI"),
+    ],
+    ids=["missing-credentials", "token-service-unreachable", "endpoint-unreachable"],
+)
+def test_unverifiable_checks_stay_inconclusive(error: Exception) -> None:
+    """Missing credentials and unreachable services remain a warning, not a failure."""
+    valid, detail = _classify_vertexai_claude_error(error)
 
     assert valid is None
-    assert detail == "no ADC"
+    assert detail == str(error)
+
+
+class _RejectedCredentials(Credentials):
+    """Google credentials whose token endpoint rejects every refresh, as for a deleted service-account key."""
+
+    def __init__(self) -> None:
+        super().__init__(token=None)
+
+    def refresh(self, request: object) -> None:  # noqa: ARG002 - google-auth passes its transport
+        msg = "invalid_grant: Invalid JWT Signature."
+        raise RefreshError(msg)
+
+
+def test_rejected_vertex_credentials_fail_with_the_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credentials the token endpoint rejects fail the check with the token endpoint's reason, not a bare status."""
+    monkeypatch.setattr(google.auth, "default", lambda scopes: (_RejectedCredentials(), "adc-project"))  # noqa: ARG005
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    model = ModelConfig(
+        provider="vertexai_claude",
+        id="claude-sonnet-5-5",
+        extra_kwargs={"project_id": "test-project", "region": "us-east5"},
+    )
+
+    valid, detail = _validate_vertexai_claude_connection(model, runtime_paths)
+
+    assert valid is False
+    assert detail == "Google credentials were rejected: invalid_grant: Invalid JWT Signature."
 
 
 def _openai_embedder_config(host: str | None = None) -> Config:
@@ -117,6 +182,66 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
     assert result == (0, 0, 1)
     assert validated == []
     assert "openai: OPENAI_API_KEY not set" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("provider", "base_url", "url", "headers"),
+    [
+        # The request the dashboard's provider setup sends for the same key.
+        ("openrouter", None, "https://openrouter.ai/api/v1/key", {"Authorization": "Bearer k"}),
+        (
+            "anthropic",
+            None,
+            "https://api.anthropic.com/v1/models",
+            {"x-api-key": "k", "anthropic-version": "2023-06-01"},
+        ),
+        ("openai", None, "https://api.openai.com/v1/models", {"Authorization": "Bearer k"}),
+        ("gemini", None, "https://generativelanguage.googleapis.com/v1beta/models?key=k", {}),
+        ("groq", None, "https://api.groq.com/openai/v1/models", {"Authorization": "Bearer k"}),
+        ("openai", "https://proxy.example/v1/", "https://proxy.example/v1/models", {"Authorization": "Bearer k"}),
+    ],
+)
+def test_a_provider_key_is_checked_with_the_request_that_proves_it_valid(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    base_url: str | None,
+    url: str,
+    headers: dict[str, str],
+) -> None:
+    """Doctor sends the dashboard's key check, so an OpenRouter key is read back from its key endpoint."""
+    sent: list[tuple[str, dict[str, str]]] = []
+
+    def get(url: str, *, headers: dict[str, str], **_kwargs: object) -> httpx.Response:
+        sent.append((url, headers))
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+
+    assert _validate_provider_key(provider, "k", base_url) == (True, "")
+    assert sent == [(url, headers)]
+
+
+@pytest.mark.parametrize(
+    ("provider", "base_url"),
+    [
+        ("zai", "https://zai-proxy.example/v4"),
+        ("huggingface", "http://embeddings.local:8080"),
+        ("zai", None),
+    ],
+)
+def test_a_provider_without_a_key_check_is_not_probed_even_at_a_custom_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    base_url: str | None,
+) -> None:
+    """Only a route with a known key check is probed, so a custom endpoint cannot misreport a valid key as invalid."""
+
+    def get(url: str, **_kwargs: object) -> httpx.Response:
+        raise AssertionError(url)
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+
+    assert _validate_provider_key(provider, "k", base_url) == (None, "no key check for this provider")
 
 
 def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

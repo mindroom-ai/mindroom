@@ -2691,6 +2691,8 @@ def test_managed_graceful_stop_delivers_one_interrupt(monkeypatch: pytest.Monkey
         stack._log_handle = stack.log_path.open("a", encoding="utf-8")
         stack._env = stack._mindroom_environment()
         monkeypatch.setattr(live_fuzz, "__file__", str(probe))
+        # The probe runs under this interpreter; a real `uv run` would first sync the project environment.
+        monkeypatch.setattr(live_fuzz, "_run_command", lambda *_args, **_kwargs: sys.executable)
         monkeypatch.setattr(subprocess, "Popen", partial(popen, stdin=subprocess.DEVNULL))
         monkeypatch.setattr(stack, "_wait_for_runtime_attestation", wait_for_probe)
         monkeypatch.setattr(stack, "_wait_for_url", lambda *_args, **_kwargs: None)

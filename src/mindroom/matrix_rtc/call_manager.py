@@ -86,7 +86,7 @@ from mindroom.matrix_rtc.voice_agent import (
     matrix_calls_dependencies_available,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_BASE_URL_DEFAULT
 from mindroom.response_admission import (
     ResponseAdmissionGate,
     ResponseAdmissionRefusedError,
@@ -139,7 +139,6 @@ _RECONCILE_MIN_INTERVAL_S = 1.0
 # Origin context is optional enrichment; never let a slow homeserver delay call pick-up beyond this.
 _ORIGIN_RESOLUTION_TIMEOUT_S = 5.0
 _CALL_WRITEBACK_TIMEOUT_S = 30.0
-_OPENAI_SPEECH_BASE_URL = "https://api.openai.com/v1"
 _MATRIX_NETWORK_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError)
 _CALL_NETWORK_ERRORS = (httpx.HTTPError, *_MATRIX_NETWORK_ERRORS)
 
@@ -1544,6 +1543,7 @@ class CallManager:
                 voice=realtime_config.voice,
                 greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 tools=tooling.tools,
+                close_tools=tooling.close,
                 on_conversation_turn=transcript.record,
                 on_tools_executed=transcript.record_tool_use,
                 on_session_terminated=on_session_terminated,
@@ -1615,7 +1615,7 @@ class CallManager:
         """Resolve one independently credentialed cloud or local speech service."""
         base_url = normalize_speech_base_url(service.host)
         if base_url is None and service.provider == "openai":
-            base_url = _OPENAI_SPEECH_BASE_URL
+            base_url = OPENAI_BASE_URL_DEFAULT
         api_key = service.api_key
         if api_key is None:
             if service.credentials_service is not None:

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 
-from agno.models.response import ToolExecution
-
+from mindroom.llm.runs import ToolExecution
 from mindroom.turn_continuation import (
     TURN_CONTINUATION_LIMIT,
     continuation_decision_from_tools,
@@ -26,14 +25,14 @@ def _model_switch_execution(when: str, *, model_name: str = "large") -> ToolExec
                 "when": when,
             },
         ),
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
 
 def test_continuation_decision_switches_model_after_tool_call() -> None:
     """Ignoring an immediate model-switch result would end the turn before the new model can continue."""
     decision = continuation_decision_from_tools(
-        [_model_switch_execution("after-toolcall")],
+        [_model_switch_execution("after-toolcall").call],
         original_prompt="Solve the problem",
         continuation_count=0,
     )
@@ -49,7 +48,7 @@ def test_continuation_decision_switches_model_after_tool_call() -> None:
 def test_continuation_decision_defers_model_switch_until_next_turn() -> None:
     """A next-turn switch still needs the original model to finish the stopped provider run."""
     decision = continuation_decision_from_tools(
-        [_model_switch_execution("next-turn")],
+        [_model_switch_execution("next-turn").call],
         original_prompt="Solve the problem",
         continuation_count=0,
     )
@@ -75,11 +74,11 @@ def test_failed_model_switch_resumes_with_current_model() -> None:
                 "tool": "thread_model",
             },
         ),
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
     decision = continuation_decision_from_tools(
-        [execution],
+        [execution.call],
         original_prompt="Solve the problem",
         continuation_count=0,
     )
@@ -98,11 +97,11 @@ def test_malformed_model_switch_result_resumes_with_current_model() -> None:
         tool_name="switch_thread_model",
         tool_args={"model_name": "large", "when": "after-toolcall"},
         result="not-json",
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
     decision = continuation_decision_from_tools(
-        [execution],
+        [execution.call],
         original_prompt="Solve the problem",
         continuation_count=0,
     )
@@ -128,11 +127,11 @@ def test_latest_successful_model_switch_wins_over_later_rejection() -> None:
                 "tool": "thread_model",
             },
         ),
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
     decision = continuation_decision_from_tools(
-        [_model_switch_execution("after-toolcall"), rejected],
+        [_model_switch_execution("after-toolcall").call, rejected.call],
         original_prompt="Solve the problem",
         continuation_count=0,
     )
@@ -145,8 +144,8 @@ def test_latest_successful_model_switch_wins_among_multiple_valid_calls() -> Non
     """Provider call order determines the active alias when several switches succeed."""
     decision = continuation_decision_from_tools(
         [
-            _model_switch_execution("after-toolcall"),
-            _model_switch_execution("after-toolcall", model_name="default"),
+            _model_switch_execution("after-toolcall").call,
+            _model_switch_execution("after-toolcall", model_name="default").call,
         ],
         original_prompt="Solve the problem",
         continuation_count=0,
@@ -165,7 +164,7 @@ def test_tool_search_and_call_tool_results_never_continue() -> None:
         result=json.dumps({"status": "ok", "tool": "dynamic_tools", "matches": []}),
     )
 
-    decision = continuation_decision_from_tools([search], original_prompt="Nap", continuation_count=0)
+    decision = continuation_decision_from_tools([search.call], original_prompt="Nap", continuation_count=0)
 
     assert decision.should_continue is False
     assert decision.limit_message is None
@@ -174,7 +173,7 @@ def test_tool_search_and_call_tool_results_never_continue() -> None:
 def test_model_switch_at_the_limit_returns_limit_message() -> None:
     """A model switch past the continuation limit answers with visible fallback text instead of continuing."""
     decision = continuation_decision_from_tools(
-        [_model_switch_execution("after-toolcall")],
+        [_model_switch_execution("after-toolcall").call],
         original_prompt="Book the campsite",
         continuation_count=TURN_CONTINUATION_LIMIT,
     )

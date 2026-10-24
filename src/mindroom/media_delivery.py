@@ -13,20 +13,18 @@ import warnings
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from agno.media import Image
-
 from mindroom.file_access import resolve_agent_file
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.tools.function import ToolResult
     from PIL.Image import Image as PillowImage
 
     from mindroom.config.models import FileAccess
     from mindroom.file_access import AuthorizedFile
+    from mindroom.tool_system.agno_toolkits import ToolResult
 
-VIEWED_IMAGE_ID_PREFIX = "mindroom_viewed_"
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_PIXELS = 40_000_000
@@ -36,7 +34,8 @@ _SUPPORTED_FORMATS = {"PNG", "JPEG", "GIF", "WEBP"}
 
 def media_error(message: str, *, metadata: dict[str, object]) -> ToolResult:
     """Keep the artifact receipt while explicitly reporting unsuccessful viewing."""
-    from agno.tools.function import ToolResult  # noqa: PLC0415
+    # The Agno tool types load on first use, so importing this module stays free of them.
+    from mindroom.tool_system.agno_toolkits import ToolResult  # noqa: PLC0415
 
     return ToolResult(content=json.dumps({**metadata, "view_status": "error", "message": message}, sort_keys=True))
 
@@ -56,7 +55,7 @@ def _encode_image(image: PillowImage) -> tuple[bytes, str]:
 
 def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # noqa: PLR0911
     """Deliver supported image bytes as model media with disclosed transformations."""
-    from agno.tools.function import ToolResult  # noqa: PLC0415
+    from mindroom.tool_system.agno_toolkits import AgnoImage, ToolResult  # noqa: PLC0415
 
     if not data:
         return media_error("Image file is empty.", metadata=metadata)
@@ -120,7 +119,7 @@ def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # 
     }
     return ToolResult(
         content=json.dumps(receipt, sort_keys=True),
-        images=[Image(id=f"{VIEWED_IMAGE_ID_PREFIX}{uuid4().hex}", content=data, mime_type=mime_type)],
+        images=[AgnoImage(id=f"{VIEWED_IMAGE_ID_PREFIX}{uuid4().hex}", content=data, mime_type=mime_type)],
     )
 
 

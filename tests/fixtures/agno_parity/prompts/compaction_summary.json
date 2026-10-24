@@ -1,0 +1,301 @@
+{
+  "description": "History compaction: a turn calls compact_context, so the next reply first sends the non-streaming summary request, then replies with the summary in place of the compacted run.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "role": "Answer questions about the team handbook.",
+          "tools": [
+            "compact_context"
+          ]
+        }
+      },
+      "defaults": {
+        "tools": []
+      },
+      "memory": {
+        "backend": "none"
+      },
+      "models": {
+        "default": {
+          "context_window": 200000,
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "anthropic"
+        }
+      },
+      "timezone": "UTC"
+    },
+    "turns": [
+      {
+        "api_server": "127.0.0.1:8765",
+        "entry_point": "mindroom.ai.stream_agent_response",
+        "prompt": "Please compact our conversation before we continue.",
+        "requester_id": "@user:localhost",
+        "room_id": "!room:localhost",
+        "thread_history": [
+          "Our handbook moved to the new wiki last week."
+        ],
+        "thread_id": "$thread:localhost"
+      },
+      {
+        "api_server": "127.0.0.1:8765",
+        "entry_point": "mindroom.ai.stream_agent_response",
+        "prompt": "What is the travel policy?",
+        "requester_id": "@user:localhost",
+        "room_id": "!room:localhost",
+        "thread_history": [
+          "Our handbook moved to the new wiki last week."
+        ],
+        "thread_id": "$thread:localhost"
+      }
+    ]
+  },
+  "requests": [
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "stream": true,
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `compact_context`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (this agent has no workspace, so path tools in the primary runtime reach only attachments).Answer questions about the team handbook.\n</your_role>\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>\nDo not reflect on the quality of the returned search results in your response",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system"
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Please compact our conversation before we continue.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "compact_context",
+            "description": "Request compaction before the next reply.",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            },
+            "requires_confirmation": false,
+            "external_execution": false
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "invite_router",
+            "description": "Invite router to current Matrix room.",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            },
+            "requires_confirmation": false,
+            "external_execution": false,
+            "approval_type": "mindroom_matrix_room_runtime"
+          }
+        }
+      ],
+      "tool_choice": null,
+      "response_format": null,
+      "deferred_tool_names": []
+    },
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "stream": true,
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `compact_context`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (this agent has no workspace, so path tools in the primary runtime reach only attachments).Answer questions about the team handbook.\n</your_role>\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>\nDo not reflect on the quality of the returned search results in your response",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system"
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Please compact our conversation before we continue.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        },
+        {
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call_compact",
+              "type": "function",
+              "function": {
+                "name": "compact_context",
+                "arguments": "{}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "claude-sonnet-5-5",
+              "provider": "Anthropic"
+            }
+          }
+        },
+        {
+          "content": "Compaction will run before the next reply in this conversation scope.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call_compact",
+          "tool_name": "compact_context",
+          "tool_call_error": false
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "compact_context",
+            "description": "Request compaction before the next reply.",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            },
+            "requires_confirmation": false,
+            "external_execution": false
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "invite_router",
+            "description": "Invite router to current Matrix room.",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            },
+            "requires_confirmation": false,
+            "external_execution": false,
+            "approval_type": "mindroom_matrix_room_runtime"
+          }
+        }
+      ],
+      "tool_choice": null,
+      "response_format": null,
+      "deferred_tool_names": []
+    },
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "stream": true,
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `compact_context`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (this agent has no workspace, so path tools in the primary runtime reach only attachments).Answer questions about the team handbook.\n</your_role>\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>\nDo not reflect on the quality of the returned search results in your response",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system"
+        },
+        {
+          "content": "The earlier part of this conversation was compacted into this summary:\n\n<compacted_history>\nAlice asked the assistant to compact the conversation; it scheduled compaction.\n</compacted_history>\n\nThe conversation continues after this summary. If it records progress on the current request, continue that work from its next steps instead of starting over.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "provider_data": {
+            "mindroom_compaction_summary": "scope"
+          }
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[What is the travel policy?]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "compact_context",
+            "description": "Request compaction before the next reply.",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            },
+            "requires_confirmation": false,
+            "external_execution": false
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "invite_router",
+            "description": "Invite router to current Matrix room.",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            },
+            "requires_confirmation": false,
+            "external_execution": false,
+            "approval_type": "mindroom_matrix_room_runtime"
+          }
+        }
+      ],
+      "tool_choice": null,
+      "response_format": null,
+      "deferred_tool_names": []
+    },
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "stream": false,
+      "messages": [
+        {
+          "content": "You are updating a durable conversation handoff summary for a future model call.\n\nYou will receive:\n1. An optional <previous_summary> block that already contains everything summarized before this compaction.\n2. A <new_conversation> block containing only the runs that became old enough to compact in this pass.\n\nYour job is to produce one merged handoff summary as plain text.\nReturn only the summary text.\n\nRules:\n- Retain the information from <previous_summary> needed to continue the current work.\n- Omit resolved, superseded, stale, or exploratory detail when it no longer affects current state or future work.\n- Incorporate relevant new information from <new_conversation>.\n- Keep retained wording stable when practical, but condense it when needed.\n- Preserve exact technical details only while they remain load-bearing, including file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, and error text.\n- Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.\n- In Next Steps, put the work the user is still waiting for, such as an unanswered question or an unsent result or report, before the agent's own bookkeeping (notes, logs, snapshots), keeping any steps that work depends on ahead of it.\n- Do not invent facts.\n- If a section has no content, write `None.`\n\nWrite a plain-text summary in exactly this markdown structure:\n## Goal\n## Constraints\n## Progress\n## Decisions\n## Next Steps\n## Critical Context\n",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "system"
+        },
+        {
+          "content": "<new_conversation>\n<run index=\"0\" run_id=\"run-compact\" status=\"COMPLETED\">\n<run_metadata>\n{\"correlation_id\":\"correlation-1\",\"matrix_event_id\":\"$current:localhost\",\"matrix_seen_event_ids\":[\"$current:localhost\",\"$earlier:localhost\"],\"reply_to_event_id\":\"$current:localhost\",\"requester_id\":\"@user:localhost\",\"room_id\":\"!room:localhost\",\"thread_id\":\"$thread:localhost\"}\n</run_metadata>\n<message role=\"user\">\n&lt;msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"&gt;&lt;![CDATA[Our handbook moved to the new wiki last week.]]&gt;&lt;/msg&gt;\n</message>\n<message role=\"user\">\nCurrent message:\n&lt;msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"&gt;&lt;![CDATA[Please compact our conversation before we continue.]]&gt;&lt;/msg&gt;\n</message>\n<message role=\"assistant\">\n\n</message>\n<tool_calls>\n[{\"function\":{\"arguments\":\"{}\",\"name\":\"compact_context\"},\"id\":\"call_compact\",\"type\":\"function\"}]\n</tool_calls>\n<message role=\"tool\" tool_call_id=\"call_compact\" tool_name=\"compact_context\">\nCompaction will run before the next reply in this conversation scope.\n</message>\n<message role=\"assistant\">\nok\n</message>\n</run>\n</new_conversation>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "response_format": null,
+      "deferred_tool_names": []
+    }
+  ],
+  "scenario": "compaction_summary"
+}

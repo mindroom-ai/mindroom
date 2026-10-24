@@ -7,67 +7,80 @@ import os
 import signal
 import sys
 from contextlib import closing
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING
 
-from agno.knowledge.embedder.base import Embedder
-
-from mindroom.knowledge.chroma_client import ChromaDb
+from mindroom.knowledge.chroma_client import KnowledgeCollection
 from mindroom.knowledge.collection_lifetime import read_collection
 from mindroom.knowledge.read_protocol import (
     MAX_FRAME_BYTES,
-    ReadDocument,
     ReadRequest,
     ReadResult,
+    SearchHit,
     request_adapter,
     result_adapter,
 )
 from mindroom.logging_config import get_logger, setup_subprocess_logging
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from chromadb.api.models.Collection import Collection
 
 # The parent runs this module with `python -m`, so `__name__` is `__main__`.
 logger = get_logger("mindroom.knowledge.read_worker")
 
 
-class _PublishedChromaDb(ChromaDb):
-    """Keep Agno's search semantics while forbidding implicit collection creation."""
+def _query_collection(collection: Collection, embedding: Sequence[float], *, limit: int) -> list[SearchHit]:
+    """Return the ``limit`` nearest chunks, the way knowledge search has always ranked and shown them.
 
-    @override
-    def _collections_to_query(self, user_id: str | None) -> list[Collection]:
-        del user_id
-        return [self.client.get_collection(name=self.collection_name)]
-
-
-@dataclass
-class _QueryEmbedder(Embedder):
-    vector: list[float] = field(default_factory=list)
-
-    def get_embedding(self, text: str) -> list[float]:
-        del text
-        return self.vector
+    A chunk stored twice under one name appears once, and ``distances`` and
+    ``similarity_score`` both carry the cosine distance.
+    """
+    result = collection.query(
+        query_embeddings=[list(embedding)],
+        n_results=limit,
+        include=["metadatas", "documents", "distances"],
+    )
+    hits: list[SearchHit] = []
+    seen: set[tuple[str | None, str]] = set()
+    for document, metadata, distance in zip(
+        (result["documents"] or [[]])[0],
+        (result["metadatas"] or [[]])[0],
+        (result["distances"] or [[]])[0],
+        strict=True,
+    ):
+        meta_data = dict(metadata or {})
+        name = meta_data.pop("name", None)
+        meta_data.pop("content_id", None)
+        # TODO(simplify): Hits show the model the stored source signature, Agno's empty `linked_to`, `content_hash`, and
+        # the cosine distance twice, once as a `similarity_score` that falls as matches improve. Show the source, the
+        # chunk, and one distance. Models would read shorter hits; the knowledge goldens pin these keys.
+        meta_data["distances"] = distance
+        meta_data["similarity_score"] = distance
+        hit = SearchHit(
+            content=document or "",
+            name=None if name is None else str(name),
+            meta_data=meta_data,
+        )
+        if (hit.name, hit.content) not in seen:
+            seen.add((hit.name, hit.content))
+            hits.append(hit)
+    hits.sort(key=lambda hit: hit.meta_data["similarity_score"])
+    return hits[:limit]
 
 
 def _read(request: ReadRequest) -> ReadResult:
     with (
         read_collection(request) as collection_name,
-        closing(
-            _PublishedChromaDb(
-                collection=collection_name,
-                path=request.path,
-                persistent_client=True,
-                embedder=_QueryEmbedder(vector=request.embedding or []),
-            ),
-        ) as vector_db,
+        closing(KnowledgeCollection(path=request.path, name=collection_name)) as collection,
     ):
-        if request.query is None:
-            return ReadResult(exists=vector_db.exists())
+        # TODO(simplify): production reads always send an embedding, so this probe and ``ReadResult.exists`` serve
+        # only tests. Require the embedding and drop both. Only the reader tests that send bare requests would notice.
         if request.embedding is None:
-            message = "A search requires a query embedding"
-            raise ValueError(message)
-        documents = vector_db.search(query=request.query, limit=request.limit, filters=request.filters)
-        return ReadResult(exists=True, documents=[ReadDocument.from_document(document) for document in documents])
+            return ReadResult(exists=collection.exists())
+        # ``get_collection`` raises for a vanished collection instead of recreating it.
+        hits = _query_collection(collection.collection(), request.embedding, limit=request.limit)
+        return ReadResult(exists=True, hits=hits)
 
 
 def _main() -> None:

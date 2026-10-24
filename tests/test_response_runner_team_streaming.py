@@ -11,13 +11,8 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.models.message import Message
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.team import TeamSession
-from agno.team import Team
-from agno.team import _run as team_run
 
+from mindroom import agents
 from mindroom.bot import AgentBot
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -28,20 +23,24 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_SESSION_STARTED,
     HookRegistry,
     SessionHookContext,
     hook,
 )
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.response_runner import (
     ResponseRunner,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.session_storage import agno_compat_session_persistence
+from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError, UnfinishedStreamedReply
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.access_schema_support import with_current_room_member_access
@@ -53,30 +52,68 @@ from tests.ai_user_id_helpers import (
     _install_inert_post_response_effects,
     _knowledge_access_support,
     _make_bot,
-    _open_team_scope_context,
     _plugin,
     _response_request,
     _runtime_paths,
-    _SessionStorage,
     _set_gateway_method,
-    _team_orchestrator,
     bind_runtime_paths,
+    team_orchestrator,
 )
 from tests.bot_helpers import (
     _handled_response_event_id,
     _stream_outcome,
 )
+from tests.conftest import seed_session
+from tests.fakes.scripted_model import Await, ScriptedModel
 from tests.identity_helpers import fixture_entity_matrix_id
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
-    from agno.session.agent import AgentSession
+    from mindroom.constants import RuntimePaths
+    from mindroom.session_storage.store import ConversationStore
+
+TEAM_SESSION_ID = "!test:localhost:$thread-root"
+
+
+def _team_store(config: Config, runtime_paths: RuntimePaths, *, scope_id: str = "ultimate") -> ConversationStore:
+    """Open the team scope's conversation store, where a team reply of ``config`` stores its runs."""
+    return create_scope_session_storage(
+        agent_name="general",
+        scope=HistoryScope(kind="team", scope_id=scope_id),
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+    )
+
+
+def _team_session(
+    session_id: str = TEAM_SESSION_ID,
+    *,
+    team_id: str = "ultimate",
+    runs: list[TeamRunRecord] | None = None,
+) -> ConversationSession:
+    return ConversationSession(
+        session_id=session_id,
+        kind="team",
+        owner_id=team_id,
+        metadata={},
+        runs=list(runs or []),
+        created_at=1,
+        updated_at=1,
+    )
+
+
+def _persisted_runs(store: ConversationStore) -> list[TeamRunRecord]:
+    """Return the team runs the reply's session holds, in the order they were stored."""
+    session = store.load_session(TEAM_SESSION_ID, "team")
+    assert session is not None
+    return [run for run in session.runs if isinstance(run, TeamRunRecord)]
 
 
 def _assert_interrupted_messages(
-    run: TeamRunOutput,
+    run: TeamRunRecord,
     *,
     response_event_id: str,
     assistant_body: str,
@@ -113,7 +150,7 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         await coordinator.generate_team_response_helper(
@@ -163,7 +200,7 @@ async def test_process_shutdown_blocks_team_terminal_delivery_after_generation_c
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         deliver_final = AsyncMock(
             return_value=FinalDeliveryOutcome(
@@ -211,7 +248,7 @@ async def test_team_delivery_exposes_fixed_shutdown_phase(
         storage_path=tmp_path,
         requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        orchestrator=_team_orchestrator(config, runtime_paths),
+        orchestrator=team_orchestrator(config, runtime_paths),
     )
     _install_inert_post_response_effects(coordinator)
     boundary_started = asyncio.Event()
@@ -307,7 +344,7 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
 
@@ -353,7 +390,7 @@ async def test_team_turn_checks_its_own_room_for_redacted_history(tmp_path: Path
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         coordinator.deps = replace(coordinator.deps, redacted_history_events=redacted_history_events)
         _install_inert_post_response_effects(coordinator)
@@ -404,7 +441,7 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
 
@@ -454,7 +491,7 @@ async def test_generate_team_response_passes_resolved_correlation_id_to_team_res
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$original"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
 
@@ -487,28 +524,29 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
 
     async def fake_team_response(*_args: object, **kwargs: object) -> str:
         model_message = cast("str", kwargs["message"])
-        run_id = cast("str | None", kwargs.get("run_id"))
-        storage.session = TeamSession(
-            session_id="!test:localhost:$thread-root",
-            team_id="ultimate",
-            created_at=1,
-            updated_at=1,
-            runs=[
-                TeamRunOutput(
-                    run_id=run_id,
-                    content="Team answer",
-                    messages=[
-                        Message(role="user", content="Earlier context"),
-                        Message(role="assistant", content="Earlier answer"),
-                        Message(role="user", content=model_message),
-                        Message(role="assistant", content="Team answer"),
-                    ],
-                ),
-            ],
+        cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
+        run_id = cast("str | None", kwargs["ctx"].run_id)
+        assert run_id is not None
+        seed_session(
+            store,
+            _team_session(
+                runs=[
+                    TeamRunRecord(
+                        run_id=run_id,
+                        content="Team answer",
+                        messages=[
+                            Message(role="user", content="Earlier context"),
+                            Message(role="assistant", content="Earlier answer"),
+                            Message(role="user", content=model_message),
+                            Message(role="assistant", content="Team answer"),
+                        ],
+                    ),
+                ],
+            ),
         )
         return "Team answer"
 
@@ -522,9 +560,9 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         await coordinator.generate_team_response_helper(
@@ -536,9 +574,7 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
             team_mode="coordinate",
         )
 
-    persisted_session = cast("TeamSession", storage.session)
-    assert persisted_session.runs is not None
-    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    [persisted_run] = _persisted_runs(store)
     assert persisted_run.messages is not None
     assert persisted_run.messages[0].content == "Earlier context"
     assert "Describe this image" in cast("str", persisted_run.messages[2].content)
@@ -551,7 +587,7 @@ async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> 
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
     seen_run_ids: list[str | None] = []
 
     async def fake_team_response(*_args: object, **kwargs: object) -> str:
@@ -562,31 +598,27 @@ async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> 
         run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
         if run_id is not None:
             run_id_callback(run_id)
-        storage.session = TeamSession(
-            session_id="!test:localhost:$thread-root",
-            team_id="ultimate",
-            created_at=1,
-            updated_at=1,
-            runs=[
-                TeamRunOutput(
-                    run_id=run_id,
-                    content="Team answer",
-                    messages=[
-                        Message(role="user", content=model_message),
-                        Message(role="assistant", content="Team answer"),
-                    ],
-                ),
-            ],
+        assert run_id is not None
+        seed_session(
+            store,
+            _team_session(
+                runs=[
+                    TeamRunRecord(
+                        run_id=run_id,
+                        content="Team answer",
+                        messages=[
+                            Message(role="user", content=model_message),
+                            Message(role="assistant", content="Team answer"),
+                        ],
+                    ),
+                ],
+            ),
         )
         return "Team answer"
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
-        patch(
-            "mindroom.teams.open_bound_scope_session_context",
-            side_effect=lambda **_kwargs: _open_team_scope_context(storage),
-        ),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -594,9 +626,9 @@ async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> 
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         coordinator.deps.delivery_gateway.send_text.return_value = "$msg"
@@ -610,11 +642,8 @@ async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> 
             team_mode="coordinate",
         )
 
-    persisted_session = cast("TeamSession", storage.session)
-    assert persisted_session.runs is not None
-    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    [persisted_run] = _persisted_runs(store)
     assert seen_run_ids == [persisted_run.run_id]
-    assert persisted_run.run_id is not None
     assert persisted_run.messages is not None
     assert "Describe this image" in cast("str", persisted_run.messages[0].content)
     assert "Available attachment IDs: att_1" in cast("str", persisted_run.messages[0].content)
@@ -636,7 +665,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED)
@@ -656,9 +685,9 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             hook_registry=registry,
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         async def consume_delivery_and_fail(request: object) -> StreamTransportOutcome:
@@ -684,12 +713,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             async def fake_stream() -> AsyncIterator[str]:
                 session_id = kwargs["ctx"].session_id
                 assert isinstance(session_id, str)
-                storage.session = TeamSession(
-                    session_id=session_id,
-                    team_id="ultimate",
-                    created_at=1,
-                    updated_at=1,
-                )
+                seed_session(store, _team_session(session_id, team_id="ultimate"))
                 sequence.append("stream")
                 yield "Team hello"
 
@@ -751,7 +775,7 @@ async def test_generate_team_response_helper_streaming_delivery_carries_live_met
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         async def consume_delivery(request: object) -> StreamTransportOutcome:
@@ -791,7 +815,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
@@ -804,9 +828,9 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             hook_registry=HookRegistry.empty(),
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
 
@@ -845,10 +869,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == "$thinking"
-    persisted_session = cast("TeamSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    [persisted_run] = _persisted_runs(store)
     _assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
@@ -864,7 +885,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
@@ -879,9 +900,9 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             hook_registry=HookRegistry.empty(),
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         async def consume_delivery_and_fail(_request: object) -> StreamTransportOutcome:
@@ -931,10 +952,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == "$thinking"
-    persisted_session = cast("TeamSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    [persisted_run] = _persisted_runs(store)
     _assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
@@ -967,7 +985,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
     started = asyncio.Event()
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
@@ -995,9 +1013,9 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
@@ -1016,119 +1034,12 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
 
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
-    persisted_session = cast("TeamSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    [persisted_run] = _persisted_runs(store)
     _assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
         assistant_body="(turn stopped before completion)",
     )
-
-
-class _OrderedSessionStorage(_SessionStorage):
-    """Record when MindRoom writes the session, relative to other events."""
-
-    def __init__(self, order: list[str]) -> None:
-        super().__init__()
-        self._order = order
-
-    @property
-    def session(self) -> AgentSession | TeamSession | None:
-        return _SessionStorage.session.fget(self)
-
-    @session.setter
-    def session(self, session: AgentSession | TeamSession | None) -> None:
-        self._order.append("mindroom")
-        _SessionStorage.session.fset(self, session)
-
-
-@pytest.mark.asyncio
-async def test_interrupted_team_turn_is_written_after_agno_saves_the_stopped_run(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A stopped team turn's record lands after Agno's detached save of the same run, so history keeps it."""
-    agno_compat_session_persistence.install_patch()
-    order: list[str] = []
-    released = asyncio.Event()
-
-    def schedule_slow_save(*_args: object) -> None:
-        async def save() -> None:
-            await released.wait()
-            order.append("agno")
-
-        asyncio.get_running_loop().call_later(0.1, released.set)
-        team_run._background_tasks.add(asyncio.create_task(save()))
-
-    monkeypatch.setattr(agno_compat_session_persistence, "_ORIGINAL_CANCELLED_TEAM_RUN_PERSIST", schedule_slow_save)
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config_with_team(), runtime_paths)
-    bot = MagicMock(spec=AgentBot)
-    bot.logger = MagicMock()
-    bot.client = AsyncMock()
-    bot.agent_name = "ultimate"
-    bot.storage_path = tmp_path
-    bot.config = config
-    bot.runtime_paths = runtime_paths
-    bot._knowledge_access_support = _knowledge_access_support()
-    storage = _OrderedSessionStorage(order)
-    started = asyncio.Event()
-
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        task = asyncio.create_task(response_function("$thinking"))
-        await started.wait()
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        return "$thinking"
-
-    async def fake_team_response(*_args: object, **kwargs: object) -> str:
-        cast("Callable[[str], None]", kwargs["run_id_callback"])("team-attempt")
-        started.set()
-        try:
-            await asyncio.sleep(60)
-        except asyncio.CancelledError:
-            # Agno schedules the stopped team run's save in the background, then re-raises.
-            team_run._persist_cancelled_team_run_in_background(
-                Team(id="ultimate", members=[], telemetry=False),
-                TeamRunOutput(run_id="team-attempt", team_id="ultimate", session_id="session"),
-                TeamSession(session_id="session", team_id="ultimate"),
-            )
-            raise
-        return "unreachable"
-
-    with (
-        patch.object(
-            ResponseRunner,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
-        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-            team_history_storage=storage,
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
-        )
-        _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
-        await coordinator.generate_team_response_helper(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
-            team_mode="coordinate",
-        )
-
-    assert order[0] == "agno"
-    assert "mindroom" in order
 
 
 @pytest.mark.asyncio
@@ -1139,7 +1050,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -1152,9 +1063,9 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1183,7 +1094,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
     # The reply's own event: the placeholder its stream and notes write into.
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
-    assert storage.session is None
+    assert store.load_session(TEAM_SESSION_ID, "team") is None
 
 
 @pytest.mark.asyncio
@@ -1194,7 +1105,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
@@ -1207,9 +1118,9 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1256,7 +1167,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
     # The reply's own event: the placeholder its stream and notes write into.
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
-    assert storage.session is None
+    assert store.load_session(TEAM_SESSION_ID, "team") is None
 
 
 @pytest.mark.asyncio
@@ -1267,7 +1178,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
     structured_prompt = "\n".join(
         (
             "<messages>",
@@ -1298,9 +1209,9 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1329,10 +1240,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == "$thinking"
-    persisted_session = cast("TeamSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    [persisted_run] = _persisted_runs(store)
     assert persisted_run.messages is not None
     assert [message.role for message in persisted_run.messages] == ["user", "assistant"]
     assert persisted_run.messages[0].content == persisted_prompt
@@ -1349,7 +1257,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
@@ -1362,9 +1270,9 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1437,7 +1345,7 @@ async def test_generate_team_response_helper_settles_late_failure_without_finali
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1484,26 +1392,22 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
     )
     recorder = TurnRecorder(user_message="Hello")
     recorder.set_run_metadata({"matrix_seen_event_ids": ["$user_msg"]})
-    recorder.set_assistant_text("Partial answer")
-    recorder.set_completed_tools(
-        [
-            ToolTraceEntry(
-                type="tool_call_completed",
-                tool_name="run_shell_command",
-                args_preview="cmd=pwd",
-                result_preview="/app",
-            ),
-        ],
-    )
-    recorder.set_interrupted_tools(
-        [
-            ToolTraceEntry(
-                type="tool_call_started",
-                tool_name="save_file",
-                args_preview="file_name=main.py",
-            ),
-        ],
-    )
+    recorder.assistant_text = "Partial answer"
+    recorder.completed_tools = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="run_shell_command",
+            args_preview="cmd=pwd",
+            result_preview="/app",
+        ),
+    ]
+    recorder.interrupted_tools = [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="save_file",
+            args_preview="file_name=main.py",
+        ),
+    ]
 
     assert coordinator._record_stream_delivery_error(
         recorder=recorder,
@@ -1574,13 +1478,22 @@ def test_record_stream_delivery_error_leaves_out_the_resumed_attempt(tmp_path: P
 @pytest.mark.asyncio
 async def test_generate_team_response_helper_persists_original_user_message_for_cancelled_team_run(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancelled team replay should store the raw user turn, not the shaped model prompt."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
-    model_prompts: list[list[Message]] = []
+    store = _team_store(config, runtime_paths)
+
+    async def stopped() -> None:
+        reason = "user_stop"
+        raise asyncio.CancelledError(reason)
+
+    # The leader is stopped while its first request streams; the member never runs.
+    leader = ScriptedModel([[Await(stopped)]])
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: leader)
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
@@ -1599,13 +1512,8 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
         ),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
-        patch("mindroom.teams.Team.arun", new_callable=AsyncMock) as mock_team_arun,
-        patch(
-            "mindroom.teams.open_bound_scope_session_context",
-            side_effect=lambda **_kwargs: _open_team_scope_context(storage),
-        ),
     ):
-        orchestrator = _team_orchestrator(config, runtime_paths)
+        orchestrator = team_orchestrator(config, runtime_paths)
         orchestrator.agent_bots = {"general": SimpleNamespace(running=True)}
         coordinator = _build_response_runner(
             bot,
@@ -1613,23 +1521,10 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=orchestrator,
         )
-
-        async def fake_team_arun(prompt: list[Message], **kwargs: object) -> TeamRunOutput:
-            model_prompts.append(prompt)
-            return TeamRunOutput(
-                run_id=cast("str | None", kwargs.get("run_id")),
-                team_id="ultimate",
-                session_id=cast("str | None", kwargs.get("session_id")),
-                content="Run cancelled",
-                messages=[Message(role="assistant", content="Run cancelled")],
-                status=RunStatus.cancelled,
-            )
-
-        mock_team_arun.side_effect = fake_team_arun
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
@@ -1637,16 +1532,15 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
             team_mode="coordinate",
         )
 
-    # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
-    assert model_prompts
-    assert model_prompts[0][-1].content != "Hello"
-    assert 'Current message:\n<msg event_id="$user_msg" from="@alice:localhost">' in model_prompts[0][-1].content
-    assert "Hello" in model_prompts[0][-1].content
-    persisted_session = cast("TeamSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    # The reply's own event: the placeholder its stream and notes write into.
+    assert resolution == "$thinking"
+    [request] = leader.requests
+    model_prompt = request.messages[-1].content
+    assert isinstance(model_prompt, str)
+    assert model_prompt != "Hello"
+    assert 'Current message:\n<msg event_id="$user_msg" from="@alice:localhost">' in model_prompt
+    assert "Hello" in model_prompt
+    [persisted_run] = _persisted_runs(store)
     _assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
@@ -1670,7 +1564,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED)
@@ -1705,9 +1599,9 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             hook_registry=registry,
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
@@ -1715,12 +1609,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
             cancel_message = "cancel"
             session_id = kwargs["ctx"].session_id
             assert isinstance(session_id, str)
-            storage.session = TeamSession(
-                session_id=session_id,
-                team_id="ultimate",
-                created_at=1,
-                updated_at=1,
-            )
+            seed_session(store, _team_session(session_id, team_id="ultimate"))
             sequence.append("team")
             raise asyncio.CancelledError(cancel_message)
 
@@ -1756,7 +1645,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
     bot.runtime_paths = runtime_paths
     bot._knowledge_access_support = _knowledge_access_support()
 
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED)
@@ -1790,9 +1679,9 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             hook_registry=registry,
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         async def consume_delivery_and_cancel(request: object) -> StreamTransportOutcome:
@@ -1809,12 +1698,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
                 cancel_message = "cancel"
                 session_id = kwargs["ctx"].session_id
                 assert isinstance(session_id, str)
-                storage.session = TeamSession(
-                    session_id=session_id,
-                    team_id="ultimate",
-                    created_at=1,
-                    updated_at=1,
-                )
+                seed_session(store, _team_session(session_id, team_id="ultimate"))
                 sequence.append("stream")
                 yield "Team hello"
                 raise asyncio.CancelledError(cancel_message)
@@ -1847,7 +1731,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name=ROUTER_AGENT_NAME)
 
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths, scope_id="team_general")
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED, agents=["team_general"], rooms=["!test:localhost"])
@@ -1868,21 +1752,16 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             hook_registry=registry,
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         async def fake_team_response(*_args: object, **kwargs: object) -> str:
             session_id = kwargs["ctx"].session_id
             assert isinstance(session_id, str)
             cast("TurnRecorder", kwargs["turn_recorder"]).mark_interrupted(RunStatus.error)
-            storage.session = TeamSession(
-                session_id=session_id,
-                team_id="team_general",
-                created_at=1,
-                updated_at=1,
-            )
+            seed_session(store, _team_session(session_id, team_id="team_general"))
             return "Team hello"
 
         mock_team_response.side_effect = fake_team_response
@@ -1894,7 +1773,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
         )
 
     assert sequence == ["started:team:team_general:team_general"]
-    assert len(cast("TeamSession", storage.session).runs or []) == 1
+    assert len(_persisted_runs(store)) == 1
 
 
 @pytest.mark.asyncio
@@ -1919,7 +1798,7 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         resolution = await coordinator.generate_team_response_helper(
@@ -1949,7 +1828,7 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
 
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
@@ -1963,9 +1842,9 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             hook_registry=HookRegistry.empty(),
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1995,12 +1874,7 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
             async def fake_stream() -> AsyncIterator[str]:
                 session_id = kwargs["session_id"]
                 assert isinstance(session_id, str)
-                storage.session = TeamSession(
-                    session_id=session_id,
-                    team_id="ultimate",
-                    created_at=1,
-                    updated_at=1,
-                )
+                seed_session(store, _team_session(session_id, team_id="ultimate"))
                 yield "Team hello"
 
             return fake_stream()
@@ -2030,7 +1904,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    storage = _SessionStorage()
+    store = _team_store(config, runtime_paths)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
@@ -2043,9 +1917,9 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             hook_registry=HookRegistry.empty(),
-            team_history_storage=storage,
+            team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
 
@@ -2079,10 +1953,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
             team_mode="coordinate",
         )
 
-    persisted_session = cast("TeamSession", storage.session)
-    assert persisted_session is not None
-    assert persisted_session.runs is not None
-    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    [persisted_run] = _persisted_runs(store)
     _assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
@@ -2108,7 +1979,7 @@ async def test_persist_interrupted_recorder_off_loop_swallows_persist_failure(tm
         storage_path=tmp_path,
         requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        orchestrator=_team_orchestrator(config, runtime_paths),
+        orchestrator=team_orchestrator(config, runtime_paths),
     )
     recorder = TurnRecorder(user_message="Hello")
     recorder.record_interrupted(
@@ -2146,7 +2017,7 @@ async def test_persist_interrupted_recorder_off_loop_propagates_cancellation(tmp
         storage_path=tmp_path,
         requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        orchestrator=_team_orchestrator(config, runtime_paths),
+        orchestrator=team_orchestrator(config, runtime_paths),
     )
     recorder = TurnRecorder(user_message="Hello")
     recorder.record_interrupted(

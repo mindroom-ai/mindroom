@@ -6,7 +6,6 @@ and saves a pasted provider key only after the provider accepts it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import httpx
@@ -16,7 +15,7 @@ from pydantic import BaseModel
 from mindroom.api import config_lifecycle
 from mindroom.api.credentials import save_dashboard_api_key
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import OPENROUTER_BASE_URL_DEFAULT
+from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
 from mindroom.providers.model_loading import missing_model_api_key_provider
 
 if TYPE_CHECKING:
@@ -29,40 +28,9 @@ router = APIRouter(prefix="/api/provider-setup", tags=["provider-setup"])
 
 _ConnectableProvider = Literal["openrouter", "anthropic", "openai"]
 
+_LABELS: dict[_ConnectableProvider, str] = {"openrouter": "OpenRouter", "anthropic": "Anthropic", "openai": "OpenAI"}
+
 _KEY_CHECK_TIMEOUT_SECONDS = 10.0
-
-
-@dataclass(frozen=True)
-class _ProviderKeyCheck:
-    """One cheap, non-billable authenticated request that proves a key is valid."""
-
-    label: str
-    url: str
-    header_name: str
-    header_prefix: str = ""
-    extra_headers: tuple[tuple[str, str], ...] = ()
-
-
-_PROVIDER_KEY_CHECKS: dict[_ConnectableProvider, _ProviderKeyCheck] = {
-    "openrouter": _ProviderKeyCheck(
-        label="OpenRouter",
-        url=f"{OPENROUTER_BASE_URL_DEFAULT}/key",
-        header_name="Authorization",
-        header_prefix="Bearer ",
-    ),
-    "anthropic": _ProviderKeyCheck(
-        label="Anthropic",
-        url="https://api.anthropic.com/v1/models",
-        header_name="x-api-key",
-        extra_headers=(("anthropic-version", "2023-06-01"),),
-    ),
-    "openai": _ProviderKeyCheck(
-        label="OpenAI",
-        url="https://api.openai.com/v1/models",
-        header_name="Authorization",
-        header_prefix="Bearer ",
-    ),
-}
 
 
 class MissingProviderKey(BaseModel):
@@ -111,28 +79,28 @@ def _missing_provider_keys(config: Config, runtime_paths: RuntimePaths) -> list[
 
 async def _verify_provider_key(provider: _ConnectableProvider, api_key: str) -> None:
     """Raise an HTTP error unless the provider accepts the key. Never logs or echoes the key."""
-    check = _PROVIDER_KEY_CHECKS[provider]
-    headers = {check.header_name: f"{check.header_prefix}{api_key}", **dict(check.extra_headers)}
+    label = _LABELS[provider]
+    url, headers = PROVIDER_KEY_CHECKS[provider].request(api_key)
     try:
         async with httpx.AsyncClient(timeout=_KEY_CHECK_TIMEOUT_SECONDS) as client:
-            response = await client.get(check.url, headers=headers)
+            response = await client.get(url, headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("provider_key_check_unreachable", provider=provider, error_type=type(exc).__name__)
         raise HTTPException(
             status_code=502,
-            detail=f"Could not reach {check.label} to verify the key. Try again in a moment.",
+            detail=f"Could not reach {label} to verify the key. Try again in a moment.",
         ) from None
     if response.status_code in {401, 403}:
         logger.info("provider_key_check_rejected", provider=provider, status_code=response.status_code)
         raise HTTPException(
             status_code=400,
-            detail=f"{check.label} rejected this API key. Check that you copied the whole key and that it is active.",
+            detail=f"{label} rejected this API key. Check that you copied the whole key and that it is active.",
         )
     if response.is_error:
         logger.warning("provider_key_check_failed", provider=provider, status_code=response.status_code)
         raise HTTPException(
             status_code=502,
-            detail=f"{check.label} could not verify the key right now (HTTP {response.status_code}). Try again shortly.",
+            detail=f"{label} could not verify the key right now (HTTP {response.status_code}). Try again shortly.",
         )
 
 

@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.ai import ai_response, collect_streamed_response_content
 from mindroom.config.main import Config
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.runs import ToolExecution
 from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
 from tests.conftest import make_turn_context, test_runtime_paths
 
@@ -23,17 +23,17 @@ async def test_collect_streamed_response_preserves_tool_marker_order() -> None:
     """Silent collection should keep the same relative tool placement as streaming delivery."""
 
     async def stream() -> AsyncGenerator[object, None]:
-        yield RunContentEvent(content="Before tool.\n")
-        yield ToolCallStartedEvent(
-            tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "git status"}),
+        yield TextDelta("Before tool.\n")
+        yield ToolStarted(
+            call=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "git status"}).call,
         )
-        yield RunContentEvent(content="\nAfter tool.")
-        yield ToolCallCompletedEvent(
-            tool=ToolExecution(
+        yield TextDelta("\nAfter tool.")
+        yield ToolCompleted(
+            call=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "git status"},
                 result="clean",
-            ),
+            ).call,
         )
 
     body, trace = await collect_streamed_response_content(
@@ -57,12 +57,12 @@ async def test_collect_streamed_response_can_hide_tool_markers() -> None:
     """The collector still supports hidden-tool-call responses."""
 
     async def stream() -> AsyncGenerator[object, None]:
-        yield RunContentEvent(content="Before.")
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}))
-        yield ToolCallCompletedEvent(
-            tool=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}, result="content"),
+        yield TextDelta("Before.")
+        yield ToolStarted(call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}).call)
+        yield ToolCompleted(
+            call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}, result="content").call,
         )
-        yield RunContentEvent(content=" After.")
+        yield TextDelta(" After.")
 
     body, trace = await collect_streamed_response_content(
         stream(),
@@ -86,21 +86,21 @@ async def test_collect_streamed_response_resumes_pending_tool_by_exact_id() -> N
     ]
 
     async def stream() -> AsyncGenerator[object, None]:
-        yield ToolCallCompletedEvent(
-            tool=ToolExecution(
+        yield ToolCompleted(
+            call=ToolExecution(
                 tool_call_id="call-1",
                 tool_name="inspect",
                 tool_args={"path": "report.txt"},
                 result="details",
-            ),
+            ).call,
         )
-        yield RunContentEvent(content="\nAfter approval.")
-        yield ToolCallStartedEvent(
-            tool=ToolExecution(
+        yield TextDelta("\nAfter approval.")
+        yield ToolStarted(
+            call=ToolExecution(
                 tool_call_id="call-2",
                 tool_name="inspect",
                 tool_args={"path": "report.txt"},
-            ),
+            ).call,
         )
 
     body, trace = await collect_streamed_response_content(
@@ -124,12 +124,12 @@ async def test_collect_streamed_response_does_not_merge_equal_calls_with_distinc
 
     async def stream() -> AsyncGenerator[object, None]:
         for call_id in ("call-1", "call-2"):
-            yield ToolCallStartedEvent(
-                tool=ToolExecution(
+            yield ToolStarted(
+                call=ToolExecution(
                     tool_call_id=call_id,
                     tool_name="inspect",
                     tool_args={},
-                ),
+                ).call,
             )
 
     body, trace = await collect_streamed_response_content(
@@ -150,9 +150,9 @@ async def test_collect_streamed_response_ignores_repeated_start_for_restored_cal
 
     async def stream() -> AsyncGenerator[object, None]:
         tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
-        yield ToolCallStartedEvent(tool=tool)
-        yield ToolCallCompletedEvent(
-            tool=ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}, result="done"),
+        yield ToolStarted(call=tool.call)
+        yield ToolCompleted(
+            call=ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}, result="done").call,
         )
 
     body, trace = await collect_streamed_response_content(
@@ -179,12 +179,12 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
 
     async def fake_stream_agent_response(_ctx: object, **kwargs: object) -> AsyncGenerator[object, None]:
         seen_kwargs.update(kwargs)
-        yield RunContentEvent(content="Before.")
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}))
-        yield ToolCallCompletedEvent(
-            tool=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}, result="content"),
+        yield TextDelta("Before.")
+        yield ToolStarted(call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}).call)
+        yield ToolCompleted(
+            call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}, result="content").call,
         )
-        yield RunContentEvent(content=" After.")
+        yield TextDelta(" After.")
 
     monkeypatch.setattr("mindroom.ai.stream_agent_response", fake_stream_agent_response)
 
@@ -202,3 +202,28 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
     assert body == "Before. After."
     assert trace == []
     assert seen_kwargs["show_tool_calls"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_collector_whose_update_fails_closes_the_stream_before_the_failure_propagates() -> None:
+    """The stream's producer stops when its collector fails, not whenever the abandoned stream is collected."""
+    closed: list[bool] = []
+
+    async def stream() -> AsyncGenerator[object, None]:
+        try:
+            yield TextDelta("Working.")
+            yield TextDelta(" More.")
+        finally:
+            closed.append(True)
+
+    async def fail() -> None:
+        msg = "delivery failed"
+        raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await collect_streamed_response_content(
+            stream(),
+            presentation=CollectedStreamPresentation(show_tool_calls=True),
+            on_update=fail,
+        )
+    assert closed == [True]

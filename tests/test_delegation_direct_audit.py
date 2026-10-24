@@ -4,58 +4,49 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse, ToolExecution
-from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput, ToolCallStartedEvent
-from agno.run.base import RunStatus
-from agno.tools.function import Function
 
+from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.lifecycle import child_execution_identity, observe_child_event, prepare_child_turn
+from mindroom.delegation.lifecycle import (
+    child_execution_identity,
+    observe_child_event,
+    observe_child_record,
+    prepare_child_turn,
+)
+from mindroom.llm.errors import ProviderError
+from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.invocation import ToolCall, ToolCallContext, ToolNext, execute_tool_call, run_tool_call
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     get_tool_execution_identity,
     tool_execution_identity,
 )
 from tests.access_schema_support import with_responder_access
+from tests.agent_loop.helpers import collect, toolkit
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
-from tests.history_helpers import RecordingModel
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls
+from tests.fakes.scripted_model import tool_call as scripted_call
 from tests.test_delegate_tools import _make_config
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.response_turn import ResponseTurnContext
-
-
-@dataclass
-class _ToolThenErrorModel(RecordingModel):
-    """Run one real tool request, then surface a provider failure through Agno."""
-
-    responses: list[ModelResponse] = field(default_factory=list)
-
-    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
-        messages = kwargs.get("messages")
-        if isinstance(messages, list):
-            self.seen_messages = list(messages)
-        if self.responses:
-            return self.responses.pop(0)
-        msg = "provider failed after tool"
-        raise RuntimeError(msg)
-
-    async def ainvoke_stream(self, *_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        yield await self.ainvoke(*_args, **kwargs)
 
 
 def _identity() -> ToolExecutionIdentity:
@@ -100,14 +91,6 @@ def _only_run(tmp_path: Path) -> dict[str, object]:
     return value
 
 
-def _tool_call(name: str, call_id: str, **arguments: object) -> dict[str, object]:
-    return {
-        "id": call_id,
-        "type": "function",
-        "function": {"name": name, "arguments": json.dumps(arguments)},
-    }
-
-
 @pytest.mark.asyncio
 async def test_direct_delegation_does_not_infer_success_from_unretained_text(tmp_path: Path) -> None:
     """A text return without a retained terminal run must not be labeled successful."""
@@ -139,40 +122,47 @@ async def test_direct_delegation_does_not_infer_success_from_unretained_text(tmp
 
 @pytest.mark.asyncio
 async def test_direct_delegation_records_real_tool_before_provider_error(tmp_path: Path) -> None:
-    """A real Agno tool result must survive a later provider failure in the same run."""
+    """A real tool result the loop ran must survive a later provider failure in the same run."""
     tools, config, runtime_paths = _tools(tmp_path)
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
 
-    async def lookup(query: str) -> str:
+    def lookup(query: str) -> str:
+        """Look something up.
+
+        Args:
+            query: What to look up.
+
+        """
         return f"found: {query}"
 
-    async def run_real_envelope(ctx: object, **kwargs: object) -> str:
-        callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-        callback("real-child-run")
-        agent = Agent(
-            name="child",
-            model=_ToolThenErrorModel(
-                id="test",
-                responses=[
-                    ModelResponse(
-                        tool_calls=[_tool_call("lookup", "actual-call", query="full query")],
-                    ),
-                ],
-            ),
-            tools=[Function.from_callable(lookup)],
+    async def fail() -> None:
+        msg = "provider failed after tool"
+        raise ProviderError(msg, provider="Synthetic")
+
+    async def run_real_envelope(ctx: ResponseTurnContext, **kwargs: object) -> str:
+        callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+        callback("real-child-run", ctx.active_model_name)
+        model = ScriptedModel([calls(scripted_call("lookup", "actual-call", query="full query")), [Await(fail)]])
+        spec = AgentSpec(id="child", name="child", model=model, system_message=None, toolkits=(toolkit(lookup),))
+        stored: list[RunRecord] = []
+
+        async def persist(record: RunRecord) -> None:
+            stored.append(record)
+
+        events = run_agent(
+            spec,
+            [Message(role="user", content="run the tool")],
+            ctx=RunContext(run_id="real-child-run", session_id=ctx.session_id or ""),
+            persist=persist,
         )
-        async for event in agent.arun(
-            "run the tool",
-            session_id=ctx.session_id,
-            run_id="real-child-run",
-            stream=True,
-            stream_events=True,
-            yield_run_output=True,
-        ):
-            await observe_child_event(event)
-            if isinstance(event, RunErrorEvent):
-                return f"Error generating response: {event.content}"
-        pytest.fail("Agno did not surface the provider failure")
+        try:
+            async for event in events:
+                await observe_child_event(event)
+        except ProviderError as error:
+            # The reply hands the failed run's stored record to the observer, as ``ai_response`` does.
+            observe_child_record(stored[-1])
+            return f"Error generating response: {error}"
+        pytest.fail("The loop did not surface the provider failure")
 
     with (
         tool_runtime_context(context),
@@ -198,104 +188,117 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
 
 @pytest.mark.asyncio
 async def test_real_parent_tool_call_records_direct_provenance_without_schema_fields(tmp_path: Path) -> None:
-    """A real Agno parent call must bind its run and call IDs without exposing them in the tool schema."""
+    """A parent's call binds its run and call IDs to the child without exposing them in the tool schema."""
     tools, config, runtime_paths = _tools(tmp_path)
     config = with_responder_access(config, "child", users=[_identity().requester_id])
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
-    function = tools.async_functions["run_subagent"]
-    schema = cached_processed_schema(function, strict=False)
-    assert schema is not None
+    function = adapt_function(tools.async_functions["run_subagent"])
     # Minimal mode is hidden here because no allowed subagent can run it.
-    assert set(schema.parameters["properties"]) == {"agent_name", "task", "model"}
+    assert set(function.parameters["properties"]) == {"agent_name", "task", "model"}
 
-    async def complete_child(ctx: object, **kwargs: object) -> str:
-        callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-        callback("direct-child-run")
+    async def complete_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
+        callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+        callback("direct-child-run", ctx.active_model_name)
         await observe_child_event(
-            RunOutput(
-                run_id="direct-child-run",
-                session_id=ctx.session_id,
-                status=RunStatus.completed,
-                content="child result",
+            RunFinished(
+                RunRecord(
+                    run_id="direct-child-run",
+                    session_id=ctx.session_id,
+                    status=RunStatus.completed,
+                    content="child result",
+                ),
             ),
         )
         return "child result"
 
-    parent = Agent(
-        name="leader",
-        model=_ToolThenErrorModel(
-            id="parent-model",
-            responses=[
-                ModelResponse(
-                    tool_calls=[
-                        _tool_call("run_subagent", "parent-delegate-call", agent_name="child", task="Do the work"),
-                    ],
-                ),
-                ModelResponse(content="parent complete"),
-            ],
-        ),
-        tools=[tools],
-    )
     with (
         tool_runtime_context(context),
         patch("mindroom.ai.ai_response", side_effect=complete_child),
     ):
-        response = await parent.arun(
-            "delegate",
-            session_id="parent-session",
-            run_id="parent-run",
-            user_id=_identity().requester_id,
+        outcome = await execute_tool_call(
+            function,
+            {"agent_name": "child", "task": "Do the work"},
+            ToolCallContext(
+                run_id="parent-run",
+                session_id="parent-session",
+                user_id=_identity().requester_id,
+                call_id="parent-delegate-call",
+            ),
         )
 
-    assert response.status == RunStatus.completed
+    assert not outcome.is_error
     run = _only_run(tmp_path)
     assert run["parent_run_id"] == "parent-run"
     assert run["parent_tool_call_id"] == "parent-delegate-call"
 
 
+async def _deny_call(_call: ToolCall, _call_next: ToolNext) -> str:
+    return "denied before delegation"
+
+
+async def _deny_through_the_loop(tools: DelegateTools) -> None:
+    """Deny the leader's delegation inside the loop, which runs each tool call in a task of its own."""
+    parent = ScriptedModel(
+        [
+            calls(scripted_call("run_subagent", "denied-call", agent_name="child", task="Skip")),
+            answer("parent complete"),
+        ],
+    )
+    spec = AgentSpec(id="leader", name="leader", model=parent, system_message=None, toolkits=(adapt_toolkit(tools),))
+    _events, record = await collect(
+        run_agent(
+            spec,
+            [Message(role="user", content="delegate")],
+            ctx=RunContext(
+                run_id="denied-parent-run",
+                session_id="denied-parent-session",
+                user_id=_identity().requester_id,
+            ),
+            hooks=LoopHooks(tool_middleware=(_deny_call,)),
+        ),
+    )
+    assert record.status is RunStatus.completed
+    assert parent.requests[-1].messages[-1].content == "denied before delegation"
+
+
+async def _deny_in_the_callers_task(tools: DelegateTools) -> None:
+    """Deny the delegation through a runner outside the loop, which runs the call in the caller's task."""
+    [delegate] = [function for function in adapt_toolkit(tools).functions if function.name == "run_subagent"]
+    result = await run_tool_call(
+        delegate,
+        {"agent_name": "child", "task": "Skip"},
+        ToolCallContext(run_id="denied-parent-run", session_id="denied-parent-session", call_id="denied-call"),
+        middleware=(_deny_call,),
+    )
+    assert result == "denied before delegation"
+
+
 @pytest.mark.asyncio
-async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> None:
-    """A hook that skips the tool body must not leak its parent IDs into a later direct call."""
+@pytest.mark.parametrize("deny", [_deny_through_the_loop, _deny_in_the_callers_task], ids=["loop", "same-task"])
+async def test_denied_tool_middleware_clears_direct_provenance(
+    tmp_path: Path,
+    deny: Callable[[DelegateTools], Awaitable[None]],
+) -> None:
+    """A tool middleware that skips the tool body must not leak its parent IDs into a later direct call."""
     tools, config, runtime_paths = _tools(tmp_path)
     config = with_responder_access(config, "child", users=[_identity().requester_id])
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
 
-    async def deny_call() -> str:
-        return "denied before delegation"
-
-    tools.async_functions["run_subagent"].tool_hooks = [deny_call]
-    parent = Agent(
-        name="leader",
-        model=_ToolThenErrorModel(
-            id="parent-model",
-            responses=[
-                ModelResponse(
-                    tool_calls=[_tool_call("run_subagent", "denied-call", agent_name="child", task="Skip")],
-                ),
-                ModelResponse(content="parent complete"),
-            ],
-        ),
-        tools=[tools],
-    )
     with tool_runtime_context(context):
-        response = await parent.arun(
-            "delegate",
-            session_id="denied-parent-session",
-            run_id="denied-parent-run",
-            user_id=_identity().requester_id,
-        )
-    assert response.status == RunStatus.completed
+        await deny(tools)
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
 
-    async def complete_child(ctx: object, **kwargs: object) -> str:
-        callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-        callback("later-child-run")
+    async def complete_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
+        callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+        callback("later-child-run", ctx.active_model_name)
         await observe_child_event(
-            RunOutput(
-                run_id="later-child-run",
-                session_id=ctx.session_id,
-                status=RunStatus.completed,
-                content="later result",
+            RunFinished(
+                RunRecord(
+                    run_id="later-child-run",
+                    session_id=ctx.session_id,
+                    status=RunStatus.completed,
+                    content="later result",
+                ),
             ),
         )
         return "later result"
@@ -313,22 +316,17 @@ async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: Path) -> None:
-    """A subagent's latest words and tool calls are its caller's progress; other runs' events are not."""
+    """A subagent's latest words and tool calls are its caller's progress."""
     tools, config, runtime_paths = _tools(tmp_path)
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     reports: list[str] = []
 
-    async def talking_child(ctx: object, **kwargs: object) -> str:
-        cast("Callable[[str], None]", kwargs["run_id_callback"])("child-run")
-        await observe_child_event(RunContentEvent(run_id="child-run", session_id=ctx.session_id, content="Reading "))
-        await observe_child_event(RunContentEvent(run_id="other-run", session_id=ctx.session_id, content="noise"))
-        await observe_child_event(RunContentEvent(run_id="child-run", session_id=ctx.session_id, content="the logs."))
+    async def talking_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
+        cast("Callable[[str, str], None]", kwargs["on_attempt_start"])("child-run", ctx.active_model_name)
+        await observe_child_event(TextDelta("Reading "))
+        await observe_child_event(TextDelta("the logs."))
         await observe_child_event(
-            ToolCallStartedEvent(
-                run_id="child-run",
-                session_id=ctx.session_id,
-                tool=ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={}),
-            ),
+            ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={}).call),
         )
         return "done"
 
@@ -348,19 +346,28 @@ async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: P
     tools, config, runtime_paths = _tools(tmp_path)
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
 
-    async def retry_child(ctx: object, **kwargs: object) -> str:
-        callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-        callback("first-run")
+    async def retry_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
+        callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+        callback("first-run", ctx.active_model_name)
         await observe_child_event(
-            RunErrorEvent(run_id="first-run", session_id=ctx.session_id, content="earlier provider failure"),
+            RunFinished(
+                RunRecord(
+                    run_id="first-run",
+                    session_id=ctx.session_id,
+                    status=RunStatus.error,
+                    content="earlier provider failure",
+                ),
+            ),
         )
-        callback("replacement-run")
+        callback("replacement-run", ctx.active_model_name)
         await observe_child_event(
-            RunOutput(
-                run_id="replacement-run",
-                session_id=ctx.session_id,
-                status=RunStatus.error,
-                content="replacement provider failure",
+            RunFinished(
+                RunRecord(
+                    run_id="replacement-run",
+                    session_id=ctx.session_id,
+                    status=RunStatus.error,
+                    content="replacement provider failure",
+                ),
             ),
         )
         return "replacement provider failure"
@@ -369,6 +376,25 @@ async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: P
         await tools.run_subagent(agent_name="child", task="Run with a replacement attempt")
 
     assert _only_run(tmp_path)["error"] == "replacement provider failure"
+
+
+@pytest.mark.asyncio
+async def test_a_direct_delegation_that_fails_hands_over_and_records_its_redacted_reason(tmp_path: Path) -> None:
+    """A child failure whose text names a credential reaches the caller and the audit record redacted."""
+    tools, config, runtime_paths = _tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+    failure = "child exploded: api_key=example-secret"
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock, side_effect=RuntimeError(failure)),
+    ):
+        result = await tools.run_subagent(agent_name="child", task="Do the work")
+
+    run = _only_run(tmp_path)
+    assert run["error"] == redact_sensitive_text(failure)
+    assert f"Delegation to 'child' failed: {redact_sensitive_text(failure)}" in result
+    assert "example-secret" not in result
 
 
 @pytest.mark.asyncio
@@ -428,14 +454,16 @@ async def test_direct_delegation_preserves_completed_outcome_after_envelope_erro
     error = error_type("Envelope interrupted after child completion")
 
     async def complete_then_interrupt(ctx: ResponseTurnContext, **kwargs: object) -> str:
-        callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-        callback("completed-child-run")
+        callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+        callback("completed-child-run", ctx.active_model_name)
         await observe_child_event(
-            RunOutput(
-                run_id="completed-child-run",
-                session_id=ctx.session_id,
-                status=RunStatus.completed,
-                content="Child completed.",
+            RunFinished(
+                RunRecord(
+                    run_id="completed-child-run",
+                    session_id=ctx.session_id,
+                    status=RunStatus.completed,
+                    content="Child completed.",
+                ),
             ),
         )
         raise error

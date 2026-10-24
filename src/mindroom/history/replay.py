@@ -3,22 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
-from agno.models.message import Message
-from agno.utils.message import filter_tool_calls
-
-from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.history.message_content import (
     HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS,
     image_content_for_token_estimation,
     media_payload_snapshot,
     message_media_entries,
-    project_history_media_for_replay,
     render_message_content,
 )
-from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
+from mindroom.history.request_messages import scope_history_messages
+from mindroom.history.run_visibility import replays_in_scope
+from mindroom.history.summary_message import compaction_summary_fields
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
+from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import (
     checkpoint_estimated_tokens,
@@ -31,14 +29,9 @@ from mindroom.token_budget import estimate_text_tokens, stable_serialize
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.agent import Agent
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
-    from agno.team import Team
-
-    from mindroom.native_compaction import NativeCompactionModel
+    from mindroom.llm.provider import PortableReplayEstimator
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.types import ConversationSession
 
 
 logger = get_logger(__name__)
@@ -57,28 +50,34 @@ class HistorySummaryBudgetError(RuntimeError):
 
 def estimate_prompt_visible_history_tokens(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     native_route: str | None = None,
-    replay_model: NativeCompactionModel | None = None,
+    replay_model: PortableReplayEstimator | None = None,
 ) -> int:
-    """Estimate the durable summary plus visible persisted history for one run."""
-    summary_tokens = estimate_summary_tokens(session)
-    history_messages = _history_messages_for_estimation(
-        session=session,
+    """Estimate the durable summary plus visible persisted history for one run.
+
+    The history is the selection a request under ``history_settings`` sends, so the estimate counts exactly what the
+    model will read. Stale Anthropic replay fields are left in place because the char estimate never counts them.
+    """
+    policy = history_settings.policy
+    history_messages = scope_history_messages(
+        session.runs,
         scope=scope,
-        history_settings=history_settings,
+        num_history_runs=policy.num_history_runs,
+        num_history_messages=policy.num_history_messages,
+        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
     )
     tokens, has_checkpoint = _route_tokens(history_messages, replay_model=replay_model, native_route=native_route)
     # A checkpoint covers the summary message before it, which native projection drops.
-    return tokens if has_checkpoint else summary_tokens + tokens
+    return tokens if has_checkpoint else estimate_summary_tokens(session) + tokens
 
 
 def _route_tokens(
     messages: list[Message],
     *,
-    replay_model: NativeCompactionModel | None,
+    replay_model: PortableReplayEstimator | None,
     native_route: str | None,
 ) -> tuple[int, bool]:
     """Estimate messages as a route replays them, and report whether a native checkpoint replaced their prefix."""
@@ -98,7 +97,7 @@ def _route_tokens(
 def estimate_request_messages_tokens(
     messages: Sequence[Message],
     *,
-    replay_model: NativeCompactionModel | None,
+    replay_model: PortableReplayEstimator | None,
     native_route: str | None = None,
 ) -> int:
     """Estimate one provider request's messages the way replay planning estimates history."""
@@ -108,7 +107,7 @@ def estimate_request_messages_tokens(
 def _estimate_messages_tokens(
     history_messages: list[Message],
     *,
-    replay_model: NativeCompactionModel | None,
+    replay_model: PortableReplayEstimator | None,
     native_route: str | None,
 ) -> int:
     uses_visual_tokens = replay_model is not None and replay_model.portable_replay_uses_visual_tokens()
@@ -129,8 +128,11 @@ def _estimate_messages_tokens(
         _without_image_transport(message, strip_content_blocks=provider_accounts_for_images)
         for message in history_messages
     ]
+    # TODO(simplify): Canonical text counts as total characters // 4 without a native route but as a per-message
+    # ceiling with one, so one history gets two estimates. Use one rounding rule. Operators would see compaction and
+    # replay trimming trigger a few tokens earlier or later.
     canonical_tokens = (
-        _estimate_history_messages_tokens(canonical_messages)
+        sum(_estimated_message_chars(message) for message in canonical_messages) // 4
         if native_route is None
         else sum((_estimated_message_chars(message) + 3) // 4 for message in canonical_messages)
     )
@@ -145,7 +147,7 @@ def _without_attachments(message: Message) -> Message:
         for field, value in (("files", message.files), ("audio", message.audio), ("videos", message.videos))
         if value
     }
-    return message.model_copy(update=updates) if updates else message
+    return replace(message, **updates) if updates else message
 
 
 def _attachment_fallback_tokens(messages: list[Message]) -> int:
@@ -161,68 +163,15 @@ def _without_image_transport(message: Message, *, strip_content_blocks: bool) ->
         updates["content"] = [image_content_for_token_estimation(block) for block in message.content]
     if message.images:
         updates["images"] = None
-    return message.model_copy(update=updates) if updates else message
-
-
-_COMPACTION_SUMMARY_MARKER = "mindroom_compaction_summary"
-_SCOPE_SUMMARY = "scope"
-_RUN_LOCAL_SUMMARY = "run"
+    return replace(message, **updates) if updates else message
 
 
 def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
-    """Render one compaction summary as the user message that replaces the history it covers.
-
-    The scope's summary is rebuilt from its latest summary row for every request, so it is history; a run-local summary is
-    stored with its run. The marker keeps that kind when Agno later replays the run and marks its messages history.
-    """
-    return Message(
-        role="user",
-        content=(
-            "The earlier part of this conversation was compacted into this summary:\n\n"
-            f"<compacted_history>\n{summary}\n</compacted_history>\n\n"
-            "The conversation continues after this summary. If it records progress on the current request, "
-            "continue that work from its next steps instead of starting over."
-        ),
-        provider_data={_COMPACTION_SUMMARY_MARKER: _RUN_LOCAL_SUMMARY if run_local else _SCOPE_SUMMARY},
-        from_history=not run_local,
-    )
+    """Render one compaction summary as the user message that replaces the history it covers."""
+    return Message(**compaction_summary_fields(summary, run_local=run_local))
 
 
-def compaction_summary_text(message: Message) -> str:
-    """Return the summary a rendered compaction summary message carries."""
-    content = str(message.content)
-    start = content.index("<compacted_history>\n") + len("<compacted_history>\n")
-    return content[start : content.rindex("\n</compacted_history>")]
-
-
-def is_compaction_summary(message: Message) -> bool:
-    """Return whether one message is a rendered compaction summary."""
-    return _summary_kind(message) in {_SCOPE_SUMMARY, _RUN_LOCAL_SUMMARY}
-
-
-def is_scope_summary(message: Message) -> bool:
-    """Return whether one message is the scope's summary, as opposed to one run's own."""
-    return _summary_kind(message) == _SCOPE_SUMMARY
-
-
-_SUMMARY_FOLLOWS_KEY = "mindroom_compaction_summary_follows"
-
-
-def mark_summary_follows(prompt: Message) -> None:
-    """Record that the scope's summary replays right after this prompt, where a mid-turn compaction placed it."""
-    prompt.provider_data = {**(prompt.provider_data or {}), _SUMMARY_FOLLOWS_KEY: True}
-
-
-def summary_follows(message: Message) -> bool:
-    """Return whether the scope's summary replays right after this message."""
-    return isinstance(message.provider_data, dict) and message.provider_data.get(_SUMMARY_FOLLOWS_KEY) is True
-
-
-def _summary_kind(message: Message) -> object:
-    return message.provider_data.get(_COMPACTION_SUMMARY_MARKER) if isinstance(message.provider_data, dict) else None
-
-
-def estimate_summary_tokens(session: AgentSession | TeamSession) -> int:
+def estimate_summary_tokens(session: ConversationSession) -> int:
     """Estimate the tokens the scope's summary message adds to a request."""
     summary = current_summary_text(session)
     if summary is None:
@@ -230,79 +179,19 @@ def estimate_summary_tokens(session: AgentSession | TeamSession) -> int:
     return estimate_text_tokens(str(compaction_summary_message(summary, run_local=False).content))
 
 
-def _estimate_history_messages_tokens(messages: list[Message]) -> int:
-    """Estimate the token count of materialized history messages."""
-    return sum(_estimated_message_chars(message) for message in messages) // 4
-
-
-def _history_messages_for_estimation(
-    *,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    """Return the prompt-visible history messages for token estimation only.
-
-    No deepcopy: filter_tool_calls copies any message it modifies and only the
-    list itself is mutated. Stale Anthropic replay fields are left in place
-    because the char estimate never counts them.
-    """
-    history_messages = list(
-        _session_history_messages(
-            session=session,
-            scope=scope,
-            history_settings=history_settings,
-        ),
-    )
-    if history_settings.max_tool_calls_from_history is not None and history_messages:
-        filter_tool_calls(history_messages, history_settings.max_tool_calls_from_history)
-    return project_history_media_for_replay(history_messages)
-
-
-def _session_history_messages(
-    *,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    policy = history_settings.policy
-    skip_roles = history_skip_roles(history_settings)
-    if scope.kind == "team":
-        return cast("TeamSession", session).get_messages(
-            team_id=scope.scope_id,
-            last_n_runs=policy.num_history_runs,
-            limit=policy.num_history_messages,
-            skip_roles=skip_roles,
-        )
-    return cast("AgentSession", session).get_messages(
-        agent_id=scope.scope_id,
-        last_n_runs=policy.num_history_runs,
-        limit=policy.num_history_messages,
-        skip_roles=skip_roles,
-    )
-
-
-def history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str]:
-    """Return prompt roles that should never be materialized as persisted history."""
-    return sorted(prompt_roles_for_history_storage(history_settings.system_message_role))
-
-
-def scope_visible_runs(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-) -> list[RunOutput | TeamRunOutput]:
+def scope_visible_runs(session: ConversationSession, scope: HistoryScope) -> list[AnyRunRecord]:
     """Return this scope's model-history-visible runs in stored order."""
-    return [run for run in session.runs or [] if is_model_history_visible_run(run) and run_in_scope(run, scope)]
+    return [run for run in session.runs if replays_in_scope(run, scope)]
 
 
-def current_summary_text(session: AgentSession | TeamSession) -> str | None:
+def current_summary_text(session: ConversationSession) -> str | None:
     """Return a nonempty durable summary, normalized for replay."""
     if session.summary is None:
         return None
-    return session.summary.summary.strip() or None
+    return session.summary.text.strip() or None
 
 
-def compaction_marker(session: AgentSession | TeamSession, scope: HistoryScope) -> tuple[str | None, str | None]:
+def compaction_marker(session: ConversationSession, scope: HistoryScope) -> tuple[str | None, str | None]:
     """Identify what the scope's replayed history was last compacted into: its summary and newest native checkpoint.
 
     A changed marker means a compaction rewrote the history that requests replay.
@@ -311,7 +200,7 @@ def compaction_marker(session: AgentSession | TeamSession, scope: HistoryScope) 
         (
             checkpoint_id
             for run in reversed(scope_visible_runs(session, scope))
-            for message in reversed(run.messages or [])
+            for message in reversed(run.messages)
             if (checkpoint_id := native_checkpoint_id(message)) is not None
         ),
         None,
@@ -327,12 +216,13 @@ def _estimated_message_chars(message: Message) -> int:
 
 def _estimate_message_media_chars(message: Message) -> int:
     """Estimate serialized character cost for a message's media payloads."""
-    media_chars = 0
-    for _tag, media_value in message_media_entries(message):
-        if media_value is None:
-            continue
-        media_chars += len(stable_serialize(media_payload_snapshot(media_value)))
-    return media_chars
+    # TODO(simplify): Estimation strips every non-empty media field before counting characters, so this adds only two
+    # characters per empty media list. Drop the media count. Operators would see estimates move by a few tokens at most.
+    return sum(
+        len(stable_serialize(media_payload_snapshot(media_value)))
+        for _tag, media_value in message_media_entries(message)
+        if media_value is not None
+    )
 
 
 def _image_fallback_tokens(messages: list[Message]) -> int:
@@ -342,12 +232,12 @@ def _image_fallback_tokens(messages: list[Message]) -> int:
 
 def plan_replay_that_fits(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     current_history_tokens: int,
-    replay_model: NativeCompactionModel | None = None,
+    replay_model: PortableReplayEstimator | None = None,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
     summary_tokens = estimate_summary_tokens(session)
@@ -392,42 +282,28 @@ def plan_replay_that_fits(
     )
 
 
-def apply_replay_plan(
-    *,
-    target: Agent | Team,
-    replay_plan: ResolvedReplayPlan,
-) -> None:
-    """Apply one resolved persisted-replay plan to a live Agent or Team."""
-    target.add_history_to_context = replay_plan.add_history_to_context
-    target.num_history_runs = replay_plan.num_history_runs
-    target.num_history_messages = replay_plan.num_history_messages
-
-
 def _context_window_guard_limit_bounds(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> tuple[Literal["runs", "messages"], int]:
-    configured_limit = history_settings.policy.limit or 0
-    if history_settings.policy.mode == "messages":
-        return "messages", configured_limit
-
+    policy = history_settings.policy
+    if policy.mode == "messages":
+        return "messages", policy.limit or 0
     visible_run_count = len(scope_visible_runs(session, scope))
-    if history_settings.policy.mode == "all":
-        return "runs", visible_run_count
-    return "runs", min(configured_limit, visible_run_count)
+    return "runs", visible_run_count if policy.mode == "all" else min(policy.limit or 0, visible_run_count)
 
 
 def _find_fitting_history_limit_for_budget(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
-    replay_model: NativeCompactionModel | None = None,
+    replay_model: PortableReplayEstimator | None = None,
 ) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0
@@ -502,7 +378,7 @@ def configured_replay_plan(
 
 def has_effective_persisted_replay(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     replay_plan: ResolvedReplayPlan,
 ) -> bool:

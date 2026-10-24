@@ -8,32 +8,37 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import MessageMetrics, RunMetrics
-from agno.models.message import Message
-from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
     _build_interrupted_replay_run,
     build_interrupted_replay_snapshot,
+    persist_interrupted_replay,
     persist_interrupted_replay_snapshot,
     split_interrupted_tool_trace,
 )
+from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session, save_runs
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import seed_session
 from tests.history_helpers import store_fold
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.session_storage.types import SessionKind
+
+
+def _session() -> ConversationSession:
+    return new_scope_session(session_id="session-1", scope_id="test_agent", is_team=False)
 
 
 def _assistant_text(run: object) -> str:
@@ -46,8 +51,8 @@ def _assistant_text(run: object) -> str:
     return ""
 
 
-def _completed_run(run_id: str, content: str) -> RunOutput:
-    return RunOutput(
+def _completed_run(run_id: str, content: str) -> RunRecord:
+    return RunRecord(
         run_id=run_id,
         agent_id="test_agent",
         session_id="session-1",
@@ -65,7 +70,7 @@ def test_split_interrupted_tool_trace_treats_explicit_success_without_result_as_
                 tool_name="noop",
                 tool_args={"x": 1},
                 result=None,
-                tool_call_error=False,
+                is_error=False,
             ),
         ],
     )
@@ -82,7 +87,7 @@ def test_split_interrupted_tool_trace_keeps_missing_terminal_state_as_interrupte
                 tool_name="noop",
                 tool_args={"x": 1},
                 result=None,
-                tool_call_error=None,
+                is_error=None,
             ),
         ],
     )
@@ -99,7 +104,7 @@ def test_interrupted_replay_describes_terminal_tool_errors_without_implying_succ
                 tool_name="request",
                 tool_args={"url": "https://example.com"},
                 result="HTTP 500",
-                tool_call_error=True,
+                is_error=True,
             ),
         ],
     )
@@ -111,13 +116,7 @@ def test_interrupted_replay_describes_terminal_tool_errors_without_implying_succ
         run_metadata={},
     )
 
-    run = _build_interrupted_replay_run(
-        snapshot=snapshot,
-        run_id="run-123",
-        scope_id="test_agent",
-        session_id="session-1",
-        is_team=False,
-    )
+    run = _build_interrupted_replay_run(snapshot=snapshot, run_id="run-123", session=_session())
 
     content = _assistant_text(run)
     assert (
@@ -154,13 +153,7 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_summary_a
         },
     )
 
-    run = _build_interrupted_replay_run(
-        snapshot=snapshot,
-        run_id="run-123",
-        scope_id="test_agent",
-        session_id="session-1",
-        is_team=False,
-    )
+    run = _build_interrupted_replay_run(snapshot=snapshot, run_id="run-123", session=_session())
 
     assert run.status is RunStatus.completed
     assert run.messages is not None
@@ -195,13 +188,7 @@ def test_build_interrupted_replay_run_tags_user_message_and_keeps_assistant_plai
         },
     )
 
-    run = _build_interrupted_replay_run(
-        snapshot=snapshot,
-        run_id="run-123",
-        scope_id="test_agent",
-        session_id="session-1",
-        is_team=False,
-    )
+    run = _build_interrupted_replay_run(snapshot=snapshot, run_id="run-123", session=_session())
 
     assert run.messages is not None
     assert run.messages[0].content == render_msg_tag(
@@ -231,13 +218,7 @@ def test_interrupted_replay_content_retains_safe_matrix_tool_previews_without_ra
         run_metadata={},
     )
 
-    run = _build_interrupted_replay_run(
-        snapshot=snapshot,
-        run_id="run-123",
-        scope_id="test_agent",
-        session_id="session-1",
-        is_team=False,
-    )
+    run = _build_interrupted_replay_run(snapshot=snapshot, run_id="run-123", session=_session())
 
     content = _assistant_text(run)
     assert "[tool:" not in content
@@ -267,13 +248,7 @@ def test_interrupted_replay_context_redacts_secrets_and_marks_truncated_previews
         run_metadata={},
     )
 
-    run = _build_interrupted_replay_run(
-        snapshot=snapshot,
-        run_id="run-123",
-        scope_id="test_agent",
-        session_id="session-1",
-        is_team=False,
-    )
+    run = _build_interrupted_replay_run(snapshot=snapshot, run_id="run-123", session=_session())
 
     content = _assistant_text(run)
     assert "secret-value" not in content
@@ -307,13 +282,7 @@ def test_interrupted_replay_context_is_bounded_and_reports_omitted_tools(
         run_metadata={},
     )
 
-    run = _build_interrupted_replay_run(
-        snapshot=snapshot,
-        run_id="run-123",
-        scope_id="test_agent",
-        session_id="session-1",
-        is_team=False,
-    )
+    run = _build_interrupted_replay_run(snapshot=snapshot, run_id="run-123", session=_session())
 
     content = _assistant_text(run)
     retained_context = content.split("Retained tool context", maxsplit=1)[1]
@@ -337,13 +306,7 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata(orig
         original_status=original_status,
     )
 
-    run = _build_interrupted_replay_run(
-        snapshot=snapshot,
-        run_id="run-123",
-        scope_id="test_agent",
-        session_id="session-1",
-        is_team=False,
-    )
+    run = _build_interrupted_replay_run(snapshot=snapshot, run_id="run-123", session=_session())
 
     assert run.metadata == {
         "matrix_event_id": "e1",
@@ -373,13 +336,7 @@ def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> N
         response_event_id="$reply",
     )
 
-    run = _build_interrupted_replay_run(
-        snapshot=snapshot,
-        run_id="run-123",
-        scope_id="test_agent",
-        session_id="session-1",
-        is_team=False,
-    )
+    run = _build_interrupted_replay_run(snapshot=snapshot, run_id="run-123", session=_session())
 
     assert run.metadata == {
         "matrix_event_id": "$anchor",
@@ -394,147 +351,296 @@ def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> N
 
 def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_path: Path) -> None:
     """Interrupted replay persistence must merge against the latest stored session state."""
-    storage = create_state_storage(
-        "test_agent",
-        tmp_path,
-        subdir="sessions",
-        session_table="test_agent_sessions",
+    storage = create_state_storage("test_agent", tmp_path)
+    seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id="session-1",
+            owner_id="test_agent",
+            runs=[
+                _completed_run("old1", "First response"),
+                _completed_run("old2", "Second response"),
+            ],
+            metadata={},
+            created_at=1,
+            updated_at=1,
+        ),
     )
-    try:
+    stale_session = ConversationSession(
+        kind="agent",
+        session_id="session-1",
+        owner_id="test_agent",
+        runs=[_completed_run("old1", "First response")],
+        metadata={},
+        created_at=1,
+        updated_at=1,
+    )
+
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        user_message_is_structured=False,
+        partial_text="Text emitted before interruption",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=None,
+    )
+    persist_interrupted_replay_snapshot(
+        storage=storage,
+        session=stale_session,
+        run_id="cancelled-run",
+        snapshot=snapshot,
+    )
+
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    assert persisted.runs is not None
+    assert [run.run_id for run in persisted.runs] == ["old1", "old2", "cancelled-run"]
+
+
+@pytest.mark.parametrize("stored", [True, False], ids=["stored-session", "first-session"])
+def test_an_interrupted_replay_is_saved_as_the_session_its_scope_context_names(tmp_path: Path, *, stored: bool) -> None:
+    """The scope context's stored session, else a first one under its session id, receives the replay run."""
+    storage = create_state_storage("test_agent", tmp_path)
+    if stored:
         seed_session(
             storage,
-            AgentSession(
+            ConversationSession(
+                kind="agent",
                 session_id="session-1",
-                agent_id="test_agent",
-                runs=[
-                    _completed_run("old1", "First response"),
-                    _completed_run("old2", "Second response"),
-                ],
-                metadata={},
+                owner_id="test_agent",
                 created_at=1,
-                updated_at=1,
+                runs=[_completed_run("earlier-run", "Earlier answer")],
             ),
         )
-        stale_session = AgentSession(
+    context = ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        storage=storage,
+        session=storage.load_session("session-1", "agent"),
+        session_id="session-1",
+    )
+
+    persist_interrupted_replay(
+        scope_context=context,
+        run_id="cancelled-run",
+        user_message="Please continue",
+        user_message_is_structured=False,
+        partial_text="Text emitted before interruption",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=None,
+    )
+
+    expected_run_ids = ["earlier-run", "cancelled-run"] if stored else ["cancelled-run"]
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs] == expected_run_ids
+    replay = persisted.runs[-1]
+    assert isinstance(replay, RunRecord)
+    assert (replay.session_id, replay.agent_id) == ("session-1", "test_agent")
+    if stored:
+        # The stored session itself receives the run, so a later attempt of the turn replays it.
+        assert context.session is not None
+        assert [run.run_id for run in context.session.runs] == expected_run_ids
+
+
+def test_a_team_scopes_first_interrupted_replay_is_a_team_run(tmp_path: Path) -> None:
+    """The scope context's kind decides whether a scope's first session, and so its replay run, is a team's."""
+    storage = create_state_storage("test_scope", tmp_path)
+    context = ScopeSessionContext(
+        scope=HistoryScope(kind="team", scope_id="squad"),
+        storage=storage,
+        session=None,
+        session_id="session-1",
+    )
+
+    persist_interrupted_replay(
+        scope_context=context,
+        run_id="cancelled-run",
+        user_message="Please continue",
+        user_message_is_structured=False,
+        partial_text="Text emitted before interruption",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=None,
+    )
+
+    persisted = storage.load_session("session-1", "team")
+    assert persisted is not None
+    [replay] = persisted.runs
+    assert isinstance(replay, TeamRunRecord)
+    assert replay.team_id == "squad"
+
+
+def test_a_team_sessions_interrupted_replay_is_a_team_run(tmp_path: Path) -> None:
+    """The session's kind, not a flag beside it, decides whether the replay run is a team's."""
+    storage = create_state_storage("test_scope", tmp_path)
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        user_message_is_structured=False,
+        partial_text="Text emitted before interruption",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=None,
+    )
+
+    persist_interrupted_replay_snapshot(
+        storage=storage,
+        session=new_scope_session(session_id="session-1", scope_id="squad", is_team=True),
+        run_id="cancelled-run",
+        snapshot=snapshot,
+    )
+
+    persisted = storage.load_session("session-1", "team")
+    assert persisted is not None
+    [replay] = persisted.runs
+    assert isinstance(replay, TeamRunRecord)
+    assert replay.team_id == "squad"
+
+
+def test_an_interrupted_replay_and_the_session_state_it_carries_commit_together_or_neither(tmp_path: Path) -> None:
+    """A recovered call's state and the replay run that records it land in one transaction, as the session recorded it."""
+    storage = create_state_storage("test_agent", tmp_path)
+    seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
             session_id="session-1",
-            agent_id="test_agent",
+            owner_id="test_agent",
             runs=[_completed_run("old1", "First response")],
             metadata={},
             created_at=1,
             updated_at=1,
+        ),
+    )
+    session = storage.load_session("session-1", "agent")
+    assert session is not None
+    session.session_state["recovered"] = "value"
+    state = session_state_snapshot(session.session_state)
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        user_message_is_structured=False,
+        partial_text="Text emitted before interruption",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=None,
+    )
+    replay = {
+        "storage": storage,
+        "session": session,
+        "run_id": "cancelled-run",
+        "snapshot": snapshot,
+        "state": state,
+    }
+    database = tmp_path / "sessions" / "test_agent.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TRIGGER refuse_replay BEFORE INSERT ON test_agent_sessions_runs "
+            "WHEN NEW.run_id = 'cancelled-run' BEGIN SELECT RAISE(ABORT, 'replay refused'); END",
         )
 
-        snapshot = build_interrupted_replay_snapshot(
-            user_message="Please continue",
-            user_message_is_structured=False,
-            partial_text="Text emitted before interruption",
-            completed_tools=(),
-            interrupted_tools=(),
-            run_metadata=None,
-        )
-        persist_interrupted_replay_snapshot(
-            storage=storage,
-            session=stale_session,
-            session_id="session-1",
-            scope_id="test_agent",
-            run_id="cancelled-run",
-            snapshot=snapshot,
-            is_team=False,
-        )
+    with pytest.raises(sqlite3.IntegrityError, match="replay refused"):
+        persist_interrupted_replay_snapshot(**replay)
 
-        persisted = get_agent_session(storage, "session-1")
-        assert persisted is not None
-        assert persisted.runs is not None
-        assert [run.run_id for run in persisted.runs] == ["old1", "old2", "cancelled-run"]
-    finally:
-        storage.close()
+    fields = storage.read_session_fields("session-1")
+    assert fields is not None
+    assert fields.session_state == {}
+    assert session.stored_session_state == {}
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER refuse_replay")
+    persist_interrupted_replay_snapshot(**replay)
+
+    fields = storage.read_session_fields("session-1")
+    assert fields is not None
+    assert fields.session_state == {"recovered": "value"}
+    # The replay run is saved through the session the state came from, which learns both.
+    assert session.stored_session_state == {"recovered": "value"}
+    assert [run.run_id for run in session.runs] == ["old1", "cancelled-run"]
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs] == ["old1", "cancelled-run"]
 
 
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
 def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_team: bool) -> None:
     """Replay and later metadata edits must retain the provider's durable usage snapshot."""
-    storage = create_state_storage("test_scope", tmp_path, subdir="sessions", session_table="test_sessions")
+    storage = create_state_storage("test_scope", tmp_path)
     db_path = tmp_path / "sessions" / "test_scope.db"
-    load_session = get_team_session if is_team else get_agent_session
+    kind: SessionKind = "team" if is_team else "agent"
     session = (
-        TeamSession(session_id="session-1", team_id="test_scope")
+        ConversationSession(kind="team", session_id="session-1", owner_id="test_scope")
         if is_team
-        else AgentSession(session_id="session-1", agent_id="test_scope")
+        else ConversationSession(kind="agent", session_id="session-1", owner_id="test_scope")
     )
-    run_type = TeamRunOutput if is_team else RunOutput
+    run_type = TeamRunRecord if is_team else RunRecord
     metered_run = run_type(
         run_id="interrupted-run",
         session_id="session-1",
         model="test-model",
         model_provider="test-provider",
         status=RunStatus.error,
-        metrics=RunMetrics(input_tokens=20, output_tokens=2, total_tokens=22, cache_read_tokens=5),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22, cache_read_tokens=5)),
         messages=[
             Message(
                 role="assistant",
                 content="Text emitted before interruption",
-                metrics=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22, cache_read_tokens=5),
+                metrics=MessageMetrics(
+                    tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22, cache_read_tokens=5),
+                ),
             ),
         ],
         metadata={"requester_id": "@alice:example.test"},
     )
-    try:
-        storage.upsert_session(session)
-        storage.upsert_run(metered_run, session_id="session-1")
-        with sqlite3.connect(db_path) as connection:
-            original_usage = connection.execute("SELECT run_id, usage_data FROM test_sessions_usage").fetchall()
-        assert len(original_usage) == 1
-        payload = json.loads(original_usage[0][1])
-        assert payload["metrics"]["total_tokens"] == 22
-        assert len(payload["requests"]) == 1
+    storage.save_run(session, metered_run, record_usage=True)
+    with sqlite3.connect(db_path) as connection:
+        original_usage = connection.execute("SELECT run_id, usage_data FROM test_scope_sessions_usage").fetchall()
+    assert len(original_usage) == 1
+    payload = json.loads(original_usage[0][1])
+    assert payload["metrics"]["total_tokens"] == 22
+    assert len(payload["requests"]) == 1
 
-        snapshot = build_interrupted_replay_snapshot(
-            user_message="Please continue",
-            user_message_is_structured=False,
-            partial_text="Text emitted before interruption",
-            completed_tools=(),
-            interrupted_tools=(),
-            run_metadata=metered_run.metadata,
-            original_status=RunStatus.error,
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        user_message_is_structured=False,
+        partial_text="Text emitted before interruption",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=metered_run.metadata,
+        original_status=RunStatus.error,
+    )
+    for _ in range(2):
+        persist_interrupted_replay_snapshot(
+            storage=storage,
+            session=session,
+            run_id="interrupted-run",
+            snapshot=snapshot,
         )
-        for _ in range(2):
-            persist_interrupted_replay_snapshot(
-                storage=storage,
-                session=session,
-                session_id="session-1",
-                scope_id="test_scope",
-                run_id="interrupted-run",
-                snapshot=snapshot,
-                is_team=is_team,
-            )
-            with sqlite3.connect(db_path) as connection:
-                assert (
-                    connection.execute("SELECT run_id, usage_data FROM test_sessions_usage").fetchall()
-                    == original_usage
-                )
-
-        persisted = load_session(storage, "session-1")
-        assert persisted is not None
-        assert persisted.runs
-        linked_run = deepcopy(persisted.runs[0])
-        linked_run.metadata = {**(linked_run.metadata or {}), "matrix_response_event_id": "$reply"}
-        save_runs(storage, persisted, [linked_run])
-    finally:
-        storage.close()
-
-    storage = create_state_storage("test_scope", tmp_path, subdir="sessions", session_table="test_sessions")
-    try:
-        persisted = load_session(storage, "session-1")
-        assert persisted is not None
-        assert persisted.runs
-        replay = persisted.runs[0]
-        assert replay.metadata["mindroom_replay_state"] == "interrupted"
-        assert replay.metadata["matrix_response_event_id"] == "$reply"
-        assert "Text emitted before interruption" in _assistant_text(replay)
         with sqlite3.connect(db_path) as connection:
-            assert connection.execute("SELECT run_id, usage_data FROM test_sessions_usage").fetchall() == original_usage
-    finally:
-        storage.close()
+            assert (
+                connection.execute("SELECT run_id, usage_data FROM test_scope_sessions_usage").fetchall()
+                == original_usage
+            )
+
+    persisted = storage.load_session("session-1", kind)
+    assert persisted is not None
+    assert persisted.runs
+    linked_run = deepcopy(persisted.runs[0])
+    linked_run.metadata = {**(linked_run.metadata or {}), "matrix_response_event_id": "$reply"}
+    storage.save_runs(persisted, [linked_run])
+
+    storage = create_state_storage("test_scope", tmp_path)
+    persisted = storage.load_session("session-1", kind)
+    assert persisted is not None
+    assert persisted.runs
+    replay = persisted.runs[0]
+    assert replay.metadata["mindroom_replay_state"] == "interrupted"
+    assert replay.metadata["matrix_response_event_id"] == "$reply"
+    assert "Text emitted before interruption" in _assistant_text(replay)
+    with sqlite3.connect(db_path) as connection:
+        assert (
+            connection.execute("SELECT run_id, usage_data FROM test_scope_sessions_usage").fetchall() == original_usage
+        )
 
 
 def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
@@ -544,26 +650,22 @@ def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
         run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
     )
 
-    recorder.set_assistant_text("Text emitted before interruption")
-    recorder.set_completed_tools(
-        [
-            ToolTraceEntry(
-                type="tool_call_completed",
-                tool_name="run_shell_command",
-                args_preview="cmd=pwd",
-                result_preview="/app",
-            ),
-        ],
-    )
-    recorder.set_interrupted_tools(
-        [
-            ToolTraceEntry(
-                type="tool_call_started",
-                tool_name="save_file",
-                args_preview="file_name=main.py",
-            ),
-        ],
-    )
+    recorder.assistant_text = "Text emitted before interruption"
+    recorder.completed_tools = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="run_shell_command",
+            args_preview="cmd=pwd",
+            result_preview="/app",
+        ),
+    ]
+    recorder.interrupted_tools = [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="save_file",
+            args_preview="file_name=main.py",
+        ),
+    ]
     recorder.mark_interrupted()
 
     snapshot = recorder.interrupted_snapshot()
@@ -637,41 +739,30 @@ def test_turn_recorder_keeps_seed_metadata_when_runtime_metadata_is_missing() ->
 
 def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_path: Path) -> None:
     """Even hard-cancelled turns with no observed assistant state should persist one interrupted record."""
-    storage = create_state_storage(
-        "test_agent",
-        tmp_path,
-        subdir="sessions",
-        session_table="test_agent_sessions",
+    storage = create_state_storage("test_agent", tmp_path)
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        user_message_is_structured=False,
+        partial_text="",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
     )
-    try:
-        snapshot = build_interrupted_replay_snapshot(
-            user_message="Please continue",
-            user_message_is_structured=False,
-            partial_text="",
-            completed_tools=(),
-            interrupted_tools=(),
-            run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
-        )
 
-        persist_interrupted_replay_snapshot(
-            storage=storage,
-            session=None,
-            session_id="session-1",
-            scope_id="test_agent",
-            run_id="cancelled-run",
-            snapshot=snapshot,
-            is_team=False,
-        )
+    persist_interrupted_replay_snapshot(
+        storage=storage,
+        session=new_scope_session(session_id="session-1", scope_id="test_agent", is_team=False),
+        run_id="cancelled-run",
+        snapshot=snapshot,
+    )
 
-        persisted = get_agent_session(storage, "session-1")
-        assert persisted is not None
-        assert persisted.runs is not None
-        assert len(persisted.runs) == 1
-        assert _assistant_text(persisted.runs[0]) == "(turn stopped before completion)"
-        with sqlite3.connect(tmp_path / "sessions" / "test_agent.db") as connection:
-            assert connection.execute("SELECT run_id, usage_data FROM test_agent_sessions_usage").fetchall() == []
-    finally:
-        storage.close()
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    assert persisted.runs is not None
+    assert len(persisted.runs) == 1
+    assert _assistant_text(persisted.runs[0]) == "(turn stopped before completion)"
+    with sqlite3.connect(tmp_path / "sessions" / "test_agent.db") as connection:
+        assert connection.execute("SELECT run_id, usage_data FROM test_agent_sessions_usage").fetchall() == []
 
 
 def _traced(call_id: str, *, parent: str | None = None, completed: bool = True) -> ToolTraceEntry:
@@ -705,42 +796,36 @@ def test_a_stopped_reply_keeps_only_tool_calls_its_fold_did_not_summarize() -> N
 
 def test_an_interrupted_record_without_a_turn_recorder_leaves_out_what_its_folds_summarized(tmp_path: Path) -> None:
     """Paths with no turn recorder, such as the OpenAI-compatible API, still drop the calls a mid-turn fold holds."""
-    storage = create_state_storage("test_agent", tmp_path, subdir="sessions", session_table="test_agent_sessions")
-    try:
-        store_fold(
-            storage,
-            "session-1",
-            HistoryScope(kind="agent", scope_id="test_agent"),
-            "stopped-run",
-            tools=[{"tool_call_id": "folded-call"}],
-        )
-        snapshot = build_interrupted_replay_snapshot(
-            user_message="Please continue",
-            user_message_is_structured=False,
-            partial_text="",
-            completed_tools=(
-                ToolTraceEntry(type="tool_call_completed", tool_name="folded_lookup", tool_call_id="folded-call"),
-                ToolTraceEntry(type="tool_call_completed", tool_name="later_lookup", tool_call_id="later-call"),
-            ),
-            interrupted_tools=(),
-            run_metadata=None,
-        )
+    storage = create_state_storage("test_agent", tmp_path)
+    store_fold(
+        storage,
+        "session-1",
+        HistoryScope(kind="agent", scope_id="test_agent"),
+        "stopped-run",
+        tools=[{"tool_call_id": "folded-call"}],
+    )
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        user_message_is_structured=False,
+        partial_text="",
+        completed_tools=(
+            ToolTraceEntry(type="tool_call_completed", tool_name="folded_lookup", tool_call_id="folded-call"),
+            ToolTraceEntry(type="tool_call_completed", tool_name="later_lookup", tool_call_id="later-call"),
+        ),
+        interrupted_tools=(),
+        run_metadata=None,
+    )
 
-        persist_interrupted_replay_snapshot(
-            storage=storage,
-            session=None,
-            session_id="session-1",
-            scope_id="test_agent",
-            run_id="stopped-run",
-            snapshot=snapshot,
-            is_team=False,
-        )
+    persist_interrupted_replay_snapshot(
+        storage=storage,
+        session=new_scope_session(session_id="session-1", scope_id="test_agent", is_team=False),
+        run_id="stopped-run",
+        snapshot=snapshot,
+    )
 
-        persisted = get_agent_session(storage, "session-1")
-        assert persisted is not None
-        [record] = persisted.runs or []
-        text = _assistant_text(record)
-        assert "later_lookup" in text
-        assert "folded_lookup" not in text
-    finally:
-        storage.close()
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    [record] = persisted.runs or []
+    text = _assistant_text(record)
+    assert "later_lookup" in text
+    assert "folded_lookup" not in text

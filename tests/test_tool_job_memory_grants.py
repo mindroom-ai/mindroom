@@ -8,8 +8,6 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import build_agent_toolkit
@@ -19,20 +17,15 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.memory import list_all_agent_memories
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import (
-    authority_snapshot,
-    bind_actor_authority,
-    bind_toolkit_authority,
-    function_authority,
-)
+from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.tool_job_helpers import tool_job_journal
+from tests.tool_job_helpers import job_actor, run_job_turn, tool_job_journal, toolkit_job_tools
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,11 +43,10 @@ def memory_context(tmp_path: Path) -> ToolRuntimeContext:
             "leader": AgentConfig(
                 display_name="Leader",
                 tools=["memory"],
-                learning=False,
                 access=ResponderAccessConfig(users=["@alice:example.org"], current_room_members=False),
             ),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "file"},
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
     )
@@ -71,7 +63,7 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
     agent_setting: bool,
     revoked: bool,
 ) -> None:
-    """A real SDK memory call uses current grants even though its toolkit retains old config."""
+    """A real memory call uses current grants even though its toolkit retains old config."""
     config, paths = memory_context.config, memory_context.runtime_paths
     if agent_setting:
         config.agents["leader"].memory_backend = "file"
@@ -94,26 +86,20 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
         execution_identity=owner,
     )
     assert toolkit is not None
-    bind_toolkit_authority(toolkit, authored_name="memory")
-    function = toolkit.get_async_functions()["add_memory"]
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("add_memory", "write-memory", content="accepted memory marker")]),
-            ModelResponse(content="done"),
-        ],
+    tools = toolkit_job_tools(toolkit, authored_name="memory", snapshot=authority_snapshot(config, "leader"))
+    tool = tools["add_memory"]
+    model = ScriptedModel(
+        [calls(tool_call("add_memory", "write-memory", content="accepted memory marker")), answer("done")],
     )
-    install_tool_job_execution(model)
-    actor = bind_actor_authority(Agent(id="leader", model=model, tools=[toolkit]), authority_snapshot(config, "leader"))
-    function._agent = actor
+    actor = job_actor(*tools.values())
     started, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
         try:
             started.set()
             await release.wait()
-            response = await actor.arun("Store the marker", session_id=owner.session_id)
-            return BackgroundOutcome("completed", str(response.content))
+            record = await run_job_turn(actor, model, "Store the marker", session_id=owner.session_id or "session")
+            return BackgroundOutcome("completed", str(record.content))
         finally:
             finished.set()
 
@@ -126,7 +112,7 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
                     tool_name="add_memory",
                     depth=0,
                     toolkit_name="memory",
-                    adapter={"origin": function_provenance(function), "authority": function_authority(function)},
+                    adapter={"origin": function_provenance(tool), "authority": dict(tool.authority)},
                     owner=owner,
                     operation=operation,
                 )

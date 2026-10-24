@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import RunMetrics
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom.api import config_lifecycle
-from mindroom.session_storage.agent_storage import create_state_storage, save_independent_usage
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import RunMetrics, TokenCounts
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from tests.api.test_private_usage_api import _client as _private_client
 from tests.api.test_usage_service_auth import (
     _initialize_usage_runtime,
@@ -42,26 +42,17 @@ def test_live_voice_duration_exports_separately_from_delegate_tokens(
         env = {"MINDROOM_API_KEY": "test-usage-key"}
         headers = {"Authorization": "Bearer test-usage-key"}
     client, storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
-    storage = create_state_storage(
-        "test_agent",
-        storage_root / "agents/test_agent",
-        subdir="sessions",
-        session_table="test_agent_sessions",
-    )
+    storage = create_state_storage("test_agent", storage_root / "agents/test_agent")
     run = _run()
     run.agent_id = "test_agent"
     assert run.metrics is not None
-    storage.upsert_session(
-        AgentSession(
-            session_id="session",
-            agent_id="test_agent",
-            session_data={"session_metrics": run.metrics.to_dict()},
-        ),
+    storage.save_run(
+        ConversationSession(kind="agent", session_id="session", owner_id="test_agent"),
+        run,
+        record_usage=True,
     )
-    storage.upsert_run(run, session_id="session")
     for seconds, finalized in [(12.0, False), (15.5, False), (15.5, True)]:
-        save_independent_usage(
-            storage,
+        storage.save_independent_usage(
             session_id="session",
             usage_id="live_voice:provider-session",
             kind="live_voice",
@@ -74,8 +65,7 @@ def test_live_voice_duration_exports_separately_from_delegate_tokens(
                 "voice_finalized": finalized,
             },
         )
-    storage.delete_runs(["run-1"])
-    storage.close()
+    storage.delete_run_subtrees(["run-1"])
     runner, workers = _install_manual_export_runner(client)
     try:
         assert client.get(route).status_code == 401
@@ -129,24 +119,15 @@ def test_request_export_flag_authentication_and_cache_variants(
     else:
         headers = {"Cf-Access-Jwt-Assertion": _service_assertion(key)}
     client, storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
-    storage = create_state_storage(
-        "test_agent",
-        storage_root / "agents/test_agent",
-        subdir="sessions",
-        session_table="test_agent_sessions",
-    )
+    storage = create_state_storage("test_agent", storage_root / "agents/test_agent")
     run = _run()
     run.agent_id = "test_agent"
     assert run.metrics is not None
-    storage.upsert_session(
-        AgentSession(
-            session_id="session",
-            agent_id="test_agent",
-            session_data={"session_metrics": run.metrics.to_dict()},
-        ),
+    storage.save_run(
+        ConversationSession(kind="agent", session_id="session", owner_id="test_agent"),
+        run,
+        record_usage=True,
     )
-    storage.upsert_run(run, session_id="session")
-    storage.close()
     runner, workers = _install_manual_export_runner(client)
     variants = [
         {"include_daily": "false", "include_requests": "false"},
@@ -190,27 +171,19 @@ def test_helper_usage_exports_once_without_counting_another_reply(
 ) -> None:
     """The authenticated API must include independent helper usage from the real SQLite store."""
     client, storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, {"MINDROOM_API_KEY": "test-usage-key"})
-    storage = create_state_storage(
-        "test_agent",
-        storage_root / "agents/test_agent",
-        subdir="sessions",
-        session_table="test_agent_sessions",
-    )
-    run = RunOutput(
+    storage = create_state_storage("test_agent", storage_root / "agents/test_agent")
+    run = RunRecord(
         run_id="ordinary",
         model="test-model",
         model_provider="test-provider",
-        metrics=RunMetrics(input_tokens=10, output_tokens=1, total_tokens=11),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=10, output_tokens=1, total_tokens=11)),
     )
     assert run.metrics is not None
-    storage.upsert_session(
-        AgentSession(
-            session_id="session",
-            agent_id="test_agent",
-            session_data={"session_metrics": run.metrics.to_dict()},
-        ),
+    storage.save_run(
+        ConversationSession(kind="agent", session_id="session", owner_id="test_agent"),
+        run,
+        record_usage=True,
     )
-    storage.upsert_run(run, session_id="session")
     helper = {
         "model": "helper-model",
         "model_provider": "test-provider",
@@ -225,18 +198,14 @@ def test_helper_usage_exports_once_without_counting_another_reply(
             },
         ],
     }
-    try:
-        for _ in range(2):
-            save_independent_usage(
-                storage,
-                session_id="session",
-                usage_id="helper",
-                kind=kind,
-                requester_id=None,
-                run=helper,
-            )
-    finally:
-        storage.close()
+    for _ in range(2):
+        storage.save_independent_usage(
+            session_id="session",
+            usage_id="helper",
+            kind=kind,
+            requester_id=None,
+            run=helper,
+        )
     runner, workers = _install_manual_export_runner(client)
     headers = {"Authorization": "Bearer test-usage-key"}
     try:

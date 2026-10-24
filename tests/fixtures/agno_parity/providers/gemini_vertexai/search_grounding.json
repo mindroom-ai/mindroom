@@ -1,0 +1,339 @@
+{
+  "family": "gemini_vertexai",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "location": "global",
+        "project_id": "parity-project",
+        "search": true,
+        "vertexai": true
+      },
+      "id": "gemini-3.1-pro-preview",
+      "provider": "google"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Search the user's travel notes.",
+        "external_execution": false,
+        "name": "search_notes",
+        "parameters": {
+          "properties": {
+            "limit": {
+              "description": "Maximum results.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "citations": {
+        "raw": {
+          "grounding_metadata": {
+            "google_maps_widget_context_token": null,
+            "grounding_chunks": [
+              {
+                "image": null,
+                "maps": null,
+                "retrieved_context": null,
+                "web": {
+                  "domain": null,
+                  "title": "weather.example",
+                  "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/parity-forecast"
+                }
+              },
+              {
+                "image": null,
+                "maps": null,
+                "retrieved_context": null,
+                "web": {
+                  "domain": null,
+                  "title": "travel.example",
+                  "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/parity-packing"
+                }
+              }
+            ],
+            "grounding_supports": [
+              {
+                "confidence_scores": [
+                  0.93
+                ],
+                "grounding_chunk_indices": [
+                  0
+                ],
+                "rendered_parts": null,
+                "segment": {
+                  "end_index": 41,
+                  "part_index": null,
+                  "start_index": null,
+                  "text": "Light rain is forecast for Paris tomorrow"
+                }
+              },
+              {
+                "confidence_scores": [
+                  0.81
+                ],
+                "grounding_chunk_indices": [
+                  1
+                ],
+                "rendered_parts": null,
+                "segment": {
+                  "end_index": 93,
+                  "part_index": null,
+                  "start_index": 46,
+                  "text": "pack a light rain jacket and comfortable shoes."
+                }
+              }
+            ],
+            "image_search_queries": null,
+            "retrieval_metadata": null,
+            "retrieval_queries": null,
+            "search_entry_point": {
+              "rendered_content": "<div class=\"parity-search\">Paris weather tomorrow</div>",
+              "sdk_blob": null
+            },
+            "source_flagging_uris": null,
+            "web_search_queries": [
+              "Paris weather tomorrow",
+              "what to pack for rain in Paris"
+            ]
+          }
+        },
+        "search_queries": [
+          "Paris weather tomorrow",
+          "what to pack for rain in Paris"
+        ],
+        "urls": [
+          {
+            "title": "weather.example",
+            "url": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/parity-forecast"
+          },
+          {
+            "title": "travel.example",
+            "url": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/parity-packing"
+          }
+        ]
+      },
+      "content": "Light rain is forecast for Paris tomorrow, so pack a light rain jacket and comfortable shoes.",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gemini-3.1-pro-preview",
+          "provider": "Google"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 21,
+      "provider_metrics": {
+        "traffic_type": "ON_DEMAND"
+      },
+      "reasoning_tokens": 9,
+      "total_tokens": 63
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What should I pack for Paris tomorrow?"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+          }
+        ],
+        "role": "user"
+      },
+      "tools": [
+        {
+          "googleSearch": {}
+        }
+      ],
+      "generationConfig": {}
+    },
+    "headers": {
+      "accept": "*/*",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://aiplatform.googleapis.com/v1beta1/projects/parity-project/locations/global/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "text": "Light rain is forecast for Paris tomorrow, so pack"
+                  }
+                ],
+                "role": "model"
+              },
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.1-pro-preview",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 1,
+            "promptTokenCount": 42,
+            "thoughtsTokenCount": 9,
+            "toolUsePromptTokenCount": 96,
+            "totalTokenCount": 148,
+            "trafficType": "ON_DEMAND"
+          }
+        }
+      },
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "text": " a light rain jacket and comfortable shoes."
+                  }
+                ],
+                "role": "model"
+              },
+              "finishReason": "STOP",
+              "groundingMetadata": {
+                "groundingChunks": [
+                  {
+                    "web": {
+                      "title": "weather.example",
+                      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/parity-forecast"
+                    }
+                  },
+                  {
+                    "web": {
+                      "title": "travel.example",
+                      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/parity-packing"
+                    }
+                  }
+                ],
+                "groundingSupports": [
+                  {
+                    "confidenceScores": [
+                      0.93
+                    ],
+                    "groundingChunkIndices": [
+                      0
+                    ],
+                    "segment": {
+                      "endIndex": 41,
+                      "text": "Light rain is forecast for Paris tomorrow"
+                    }
+                  },
+                  {
+                    "confidenceScores": [
+                      0.81
+                    ],
+                    "groundingChunkIndices": [
+                      1
+                    ],
+                    "segment": {
+                      "endIndex": 93,
+                      "startIndex": 46,
+                      "text": "pack a light rain jacket and comfortable shoes."
+                    }
+                  }
+                ],
+                "searchEntryPoint": {
+                  "renderedContent": "<div class=\"parity-search\">Paris weather tomorrow</div>"
+                },
+                "webSearchQueries": [
+                  "Paris weather tomorrow",
+                  "what to pack for rain in Paris"
+                ]
+              },
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.1-pro-preview",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 12,
+            "promptTokenCount": 42,
+            "thoughtsTokenCount": 9,
+            "toolUsePromptTokenCount": 96,
+            "totalTokenCount": 159,
+            "trafficType": "ON_DEMAND"
+          }
+        }
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "search_grounding"
+}

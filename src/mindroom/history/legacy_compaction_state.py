@@ -4,26 +4,28 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
-from mindroom.history.summary_rows_schema import owner_scope_key, summary_rows_schema_sql, summary_rows_table_names
-from mindroom.session_storage import agno_compat_sqlite
-from mindroom.session_storage.legacy_session_storage import (
-    decode_persisted_session_json,
+from mindroom.history.summary_rows_schema import owner_scope_key, summary_rows_schema_sql
+from mindroom.session_storage.legacy_agno2_runs import (
+    has_blob_column,
     insert_run_entry,
-    materialize_legacy_run_blobs,
+    move_blob_runs_to_rows,
     number_unindexed_runs,
     ordered_run_ids,
     renumber_runs,
 )
+from mindroom.session_storage.schema import run_log_sql, table_names
+from mindroom.session_storage.store import decoded_mapping, delete_run_subtrees_in_transaction, migrate_database
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
+    import sqlite3
     from collections.abc import Collection
+    from pathlib import Path
 
-    from agno.db.sqlite import SqliteDb
-    from sqlalchemy import Connection, Table
+    from mindroom.session_storage.schema import TableNames
 
 # LEGACY_COMPAT: Destructive compaction state without an archive.
 # Legacy format: A v2 ``mindroom_compaction`` scope state holding ``compacted_run_ids``
@@ -46,71 +48,63 @@ _SEEN_STATE_VERSION = 1
 _SEEN_STATE_KEYS = frozenset({"seen_event_ids"})
 
 
-def migrate_to_summary_rows(db: SqliteDb) -> None:
+def migrate_to_summary_rows(path: Path, names: TableNames) -> None:
     """Create the summary-row tables once, first giving every stored run a position and adopting older state."""
-    session_table = db.session_table_name
-    with db.db_engine.connect() as connection:
-        if not _needs_summary_rows(connection, session_table):
-            return
-        # Created before the write lock: Agno creates it on its own connection.
-        runs = agno_compat_sqlite.owned_table(db, "runs")
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
-        # Another startup may have finished while this connection waited for its write lock.
-        if _needs_summary_rows(connection, session_table):
-            materialize_legacy_run_blobs(connection, runs, session_table)
-            number_unindexed_runs(connection, runs)
-            for statement in summary_rows_schema_sql(session_table):
-                connection.exec_driver_sql(statement)
-            if f"{session_table}_compactions" in _tables(connection):
-                _convert_archive(connection, session_table, runs)
-            else:
-                _adopt_legacy_sessions(connection, session_table, runs.name)
-        connection.commit()
+    migrate_database(
+        path,
+        needed=lambda connection: _needs_summary_rows(connection, names),
+        apply=lambda connection: _create_summary_rows(connection, names),
+    )
 
 
-def _needs_summary_rows(connection: Connection, session_table: str) -> bool:
-    tables = _tables(connection)
-    return session_table in tables and summary_rows_table_names(session_table)[0] not in tables
+def _create_summary_rows(connection: sqlite3.Connection, names: TableNames) -> None:
+    for statement in run_log_sql(names):
+        connection.execute(statement)
+    if has_blob_column(connection, names):
+        move_blob_runs_to_rows(connection, names)
+    number_unindexed_runs(connection, names)
+    for statement in summary_rows_schema_sql(names.sessions):
+        connection.execute(statement)
+    if f"{names.sessions}_compactions" in table_names(connection):
+        _convert_archive(connection, names)
+    else:
+        _adopt_legacy_sessions(connection, names)
 
 
-def _tables(connection: Connection) -> set[str]:
-    return {name for (name,) in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type = 'table'")}
+def _needs_summary_rows(connection: sqlite3.Connection, names: TableNames) -> bool:
+    tables = table_names(connection)
+    return names.sessions in tables and names.summaries not in tables
 
 
-def _adopt_legacy_sessions(connection: Connection, session_table: str, runs_table: str) -> None:
-    sessions = quote_identifier(session_table)
-    summaries = quote_identifier(summary_rows_table_names(session_table)[0])
-    rows = connection.exec_driver_sql(
+def _adopt_legacy_sessions(connection: sqlite3.Connection, names: TableNames) -> None:
+    sessions = quote_identifier(names.sessions)
+    summaries = quote_identifier(names.summaries)
+    rows = connection.execute(
         f"SELECT session_id, session_type, agent_id, team_id, metadata, summary FROM {sessions}",  # noqa: S608
     ).fetchall()
     for session_id, session_type, agent_id, team_id, raw_metadata, raw_summary in rows:
-        metadata = _decoded_mapping(raw_metadata)
+        metadata = decoded_mapping(raw_metadata) or {}
         scopes = {
             scope_key: tombstones
             for scope_key, state in _scope_states(metadata, MINDROOM_COMPACTION_METADATA_KEY).items()
             if isinstance(state, dict) and (tombstones := _legacy_tombstones(state)) is not None
         }
         seen_states = _scope_states(metadata, MINDROOM_MATRIX_HISTORY_METADATA_KEY)
-        summary = _summary_text(_decoded_mapping(raw_summary))
+        summary = _summary_text(decoded_mapping(raw_summary) or {})
         summary_scope = owner_scope_key(session_type, agent_id, team_id) if summary is not None else None
         if summary_scope is not None:
             scope_seen = json.dumps(_seen_event_ids(seen_states.get(summary_scope)))
-            connection.exec_driver_sql(
+            connection.execute(
                 f"INSERT INTO {summaries} (session_id, scope_key, after_run_index, summary, legacy, event_ids, "  # noqa: S608
                 "seen_event_ids, created_at) VALUES (?, ?, -1, ?, 1, ?, ?, ?)",
                 (session_id, summary_scope, summary, scope_seen, scope_seen, int(time.time())),
             )
             scopes.setdefault(summary_scope, ())
         tombstoned = {run_id for ids in scopes.values() for run_id in ids}
-        agno_compat_sqlite.delete_run_subtrees(
-            connection,
-            quote_identifier(runs_table),
-            tombstoned,
-            session_id=session_id,
-        )
+        delete_run_subtrees_in_transaction(connection, names, tombstoned, session_id=session_id)
         adopted_metadata = _without_adopted_state(metadata, scopes, summary_scope)
         if adopted_metadata != metadata:
-            connection.exec_driver_sql(
+            connection.execute(
                 f"UPDATE {sessions} SET metadata = ? WHERE session_id = ?",  # noqa: S608
                 (json.dumps(adopted_metadata), session_id),
             )
@@ -135,51 +129,46 @@ def _adopt_legacy_sessions(connection: Connection, session_table: str, runs_tabl
 # ::test_a_legacy_generation_stays_in_force_before_every_run, ::test_retired_generations_keep_their_runs_behind_the_barrier,
 # ::test_stale_copies_of_archived_and_tombstoned_runs_are_dropped, ::test_archived_member_runs_return_with_their_team_run,
 # and ::test_redaction_candidates_keep_what_the_archive_matched.
-def _convert_archive(connection: Connection, session_table: str, runs: Table) -> None:
-    compactions = quote_identifier(f"{session_table}_compactions")
-    compacted_runs = quote_identifier(f"{session_table}_compacted_runs")
+def _convert_archive(connection: sqlite3.Connection, names: TableNames) -> None:
+    compactions = quote_identifier(f"{names.sessions}_compactions")
+    compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
     archived: dict[str, list[tuple[str, str | None]]] = {}
-    for session_id, run_id, run_data in connection.exec_driver_sql(
+    for session_id, run_id, run_data in connection.execute(
         f"SELECT session_id, run_id, run_data FROM {compacted_runs} ORDER BY id",  # noqa: S608
     ):
         archived.setdefault(session_id, []).append((run_id, run_data))
     for session_id, entries in archived.items():
         # A stale save or blob residue can hold a copy that reconcile had not pruned yet.
-        agno_compat_sqlite.delete_run_subtrees(
-            connection,
-            quote_identifier(runs.name),
-            {run_id for run_id, _ in entries},
-            session_id=session_id,
-        )
+        delete_run_subtrees_in_transaction(connection, names, {run_id for run_id, _ in entries}, session_id=session_id)
         restored: list[str] = []
         for run_id, run_data in entries:
             if run_data is not None:
-                insert_run_entry(connection, runs, json.loads(run_data), session_id=session_id)
+                insert_run_entry(connection, names, json.loads(run_data), session_id=session_id)
                 restored.append(run_id)
         restored_ids = set(restored)
-        live = [run_id for run_id in ordered_run_ids(connection, runs, session_id) if run_id not in restored_ids]
-        renumber_runs(connection, runs, session_id, [*restored, *live])
-    _insert_generation_rows(connection, session_table, runs)
-    connection.exec_driver_sql(f"DROP TABLE {compacted_runs}")
-    connection.exec_driver_sql(f"DROP TABLE {compactions}")
+        live = [run_id for run_id in ordered_run_ids(connection, names, session_id) if run_id not in restored_ids]
+        renumber_runs(connection, names, session_id, [*restored, *live])
+    _insert_generation_rows(connection, names)
+    connection.execute(f"DROP TABLE {compacted_runs}")
+    connection.execute(f"DROP TABLE {compactions}")
 
 
-def _insert_generation_rows(connection: Connection, session_table: str, runs: Table) -> None:
-    compactions = quote_identifier(f"{session_table}_compactions")
-    compacted_runs = quote_identifier(f"{session_table}_compacted_runs")
-    summaries = quote_identifier(summary_rows_table_names(session_table)[0])
+def _insert_generation_rows(connection: sqlite3.Connection, names: TableNames) -> None:
+    compactions = quote_identifier(f"{names.sessions}_compactions")
+    compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
+    summaries = quote_identifier(names.summaries)
     positions: dict[tuple[str, str], int] = {}
-    generations = connection.exec_driver_sql(
+    generations = connection.execute(
         f"SELECT id, session_id, scope_key, summary, summary_model, legacy, created_at FROM {compactions} ORDER BY id",  # noqa: S608
     ).fetchall()
     for generation_id, session_id, scope_key, summary, summary_model, legacy, created_at in generations:
-        newest_run = connection.exec_driver_sql(
+        (newest_run,) = connection.execute(
             f"SELECT MAX(run.run_index) FROM {compacted_runs} AS archived "  # noqa: S608
-            f"JOIN {quote_identifier(runs.name)} AS run "
+            f"JOIN {quote_identifier(names.runs)} AS run "
             "ON run.session_id = archived.session_id AND run.run_id = archived.run_id "
             "WHERE archived.compaction_id = ? AND archived.run_data IS NOT NULL AND run.parent_run_id IS NULL",
             (generation_id,),
-        ).scalar()
+        ).fetchone()
         if legacy:
             position = -1
         elif newest_run is not None:
@@ -187,7 +176,7 @@ def _insert_generation_rows(connection: Connection, session_table: str, runs: Ta
         else:
             position = positions.get((session_id, scope_key), -1)
         positions[session_id, scope_key] = position
-        connection.exec_driver_sql(
+        connection.execute(
             f"INSERT INTO {summaries} (session_id, scope_key, after_run_index, summary, summary_model, legacy, "  # noqa: S608
             "event_ids, seen_event_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -197,20 +186,25 @@ def _insert_generation_rows(connection: Connection, session_table: str, runs: Ta
                 summary,
                 summary_model,
                 legacy,
-                json.dumps(_generation_event_ids(connection, session_table, generation_id, "event_ids")),
-                json.dumps(_generation_event_ids(connection, session_table, generation_id, "seen_event_ids")),
+                json.dumps(_generation_event_ids(connection, names, generation_id, "event_ids")),
+                json.dumps(_generation_event_ids(connection, names, generation_id, "seen_event_ids")),
                 created_at,
             ),
         )
 
 
-def _generation_event_ids(connection: Connection, session_table: str, generation_id: int, column: str) -> list[str]:
+def _generation_event_ids(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    generation_id: int,
+    column: str,
+) -> list[str]:
     """Return the event ids a generation's archived runs carry in ``column``, plus a legacy generation's own."""
-    compactions = quote_identifier(f"{session_table}_compactions")
-    compacted_runs = quote_identifier(f"{session_table}_compacted_runs")
+    compactions = quote_identifier(f"{names.sessions}_compactions")
+    compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
     return sorted(
         value
-        for (value,) in connection.exec_driver_sql(
+        for (value,) in connection.execute(
             f"SELECT value FROM {compacted_runs} AS archived, json_each(archived.{column}) "  # noqa: S608
             "WHERE archived.compaction_id = ? "
             f"UNION SELECT value FROM {compactions} AS generation, json_each(generation.legacy_event_ids) "
@@ -280,12 +274,3 @@ def _seen_event_ids(raw_state: dict[str, Any] | None) -> list[str]:
 def _summary_text(summary: dict[str, Any]) -> str | None:
     text = summary.get("summary")
     return text if isinstance(text, str) and text.strip() else None
-
-
-def _decoded_mapping(raw_value: object) -> dict[str, Any]:
-    """Decode one JSON object column; unreadable or non-object values read as empty."""
-    try:
-        value = decode_persisted_session_json(raw_value)
-    except (TypeError, ValueError):
-        return {}
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}

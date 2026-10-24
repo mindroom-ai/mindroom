@@ -11,8 +11,6 @@ from dataclasses import dataclass, field, replace
 from threading import Event
 from typing import TYPE_CHECKING, Protocol
 
-from agno.tools.function import Function, FunctionCall, FunctionExecutionResult
-
 from mindroom.approval.tool_approval import (
     BackgroundScriptToolOrigin,
     ToolApprovalDecision,
@@ -35,7 +33,9 @@ from mindroom.script_runs.store import (
     ScriptRunNotFoundError,
     ScriptRunStore,
 )
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeContext,
@@ -46,10 +46,10 @@ from mindroom.tool_system.tool_calls import sanitize_failure_text
 from mindroom.tool_system.tool_hooks import (
     BackgroundToolApprovalDenied,
     SyncToolCompletionTracker,
-    build_tool_hook_bridge,
-    prepend_tool_hook_bridge,
+    build_tool_hook_middleware,
     track_sync_tool_completion,
 )
+from mindroom.tool_system.toolkit_connections import run_toolkit_lifecycle, shielded_lifecycle
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -62,9 +62,9 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from agno.tools import Toolkit
-
     from mindroom.config.main import Config
+    from mindroom.tool_system.agno_toolkits import Function, Toolkit
+    from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
     "ScriptBrokerAuthenticationError",
@@ -187,8 +187,15 @@ class _PreparedExecution:
     source_config: Config
     execution_identity: ToolExecutionIdentity
     toolkit: Toolkit
-    function: Function
+    function: ToolFunction
     approval_config: Config
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolFailure:
+    """A tool call that raised; ``message`` is the exception's text."""
+
+    message: str
 
 
 class _CurrentGrantRevokedError(ValueError):
@@ -515,7 +522,7 @@ class ScriptToolBroker:
             toolkit = prepared.toolkit
             await self._connect_toolkit_owned(toolkit)
             execution_started = True
-            execution = await self._run_prepared_execution(
+            result = await self._run_prepared_execution(
                 prepared,
                 run=run,
                 call=call,
@@ -523,17 +530,17 @@ class ScriptToolBroker:
                 arguments=arguments,
             )
 
-            if execution.status != "success" or isinstance(execution.result, BackgroundToolApprovalDenied):
+            if isinstance(result, BackgroundToolApprovalDenied | _ToolFailure):
                 error = (
                     {
                         "kind": "approval_denied",
-                        "message": sanitize_failure_text(execution.result.reason),
+                        "message": sanitize_failure_text(result.reason),
                         "retryable": False,
                     }
-                    if isinstance(execution.result, BackgroundToolApprovalDenied)
+                    if isinstance(result, BackgroundToolApprovalDenied)
                     else {
                         "kind": "tool_failure",
-                        "message": sanitize_failure_text(execution.error or "Tool execution failed."),
+                        "message": sanitize_failure_text(result.message or "Tool execution failed."),
                         "retryable": False,
                     }
                 )
@@ -542,8 +549,7 @@ class ScriptToolBroker:
                     state=ScriptCallState.FAILED,
                     error=error,
                 )
-            result = _strict_json_result(execution.result)
-            return await self._publish_async(call, state=ScriptCallState.COMPLETED, result=result)
+            return await self._publish_async(call, state=ScriptCallState.COMPLETED, result=_strict_json_result(result))
         except asyncio.CancelledError:
             raise
         except _CurrentGrantRevokedError:
@@ -569,15 +575,10 @@ class ScriptToolBroker:
     async def _connect_toolkit(self, toolkit: Toolkit) -> None:
         if not toolkit.requires_connect:
             return
-        completion_task = asyncio.create_task(
-            _run_toolkit_lifecycle(toolkit.connect),
-            name="script-toolkit-connect",
+        await shielded_lifecycle(
+            run_toolkit_lifecycle(toolkit.connect),
+            retain=lambda connecting: self._retain_toolkit_cleanup(connecting, toolkit),
         )
-        try:
-            await asyncio.shield(completion_task)
-        except asyncio.CancelledError:
-            self._retain_toolkit_cleanup(completion_task, toolkit)
-            raise
 
     async def _connect_toolkit_owned(self, toolkit: Toolkit) -> None:
         """Connect one toolkit and close it if normal connection fails."""
@@ -602,14 +603,15 @@ class ScriptToolBroker:
         call: ScriptCallRecord,
         origin: BackgroundScriptToolOrigin,
         arguments: dict[str, object],
-    ) -> FunctionExecutionResult:
+    ) -> object:
+        """Run the call through the tool-call policy; return the tool's value, its denial, or why it failed."""
         context = prepared.context
         toolkit = prepared.toolkit
         function = prepared.function
         completion_tracker = SyncToolCompletionTracker()
         cleanup_transferred = False
 
-        async def execute_function() -> FunctionExecutionResult:
+        async def execute_function() -> object:
             with tool_runtime_context(context), track_sync_tool_completion(completion_tracker):
                 authored_decision = await _request_authored_confirmation(
                     runtime_resolver=self.runtime_resolver,
@@ -630,7 +632,7 @@ class ScriptToolBroker:
                     authored_decision=authored_decision,
                     execution_gate=lambda: self._current_execution_decision(prepared, run=run, call=call),
                 )
-                bridge = build_tool_hook_bridge(
+                policy = build_tool_hook_middleware(
                     context.hook_registry,
                     agent_name=run.agent_name,
                     dispatch_context=LiveToolDispatchContext(
@@ -642,15 +644,17 @@ class ScriptToolBroker:
                     origin=origin,
                     approval_gate=approval_gate,
                 )
-                prepend_tool_hook_bridge(toolkit, bridge)
-                # Durable receipts are the idempotency boundary for background calls.
-                # Agno's result cache returns before hooks, approval, and live authority checks.
-                function.cache_results = False
-                return await FunctionCall(
-                    function=function,
-                    arguments=arguments,
+                # A script run is its own run: its calls share no conversation or session state.
+                call_context = ToolCallContext(
+                    run_id=run.run_id,
+                    session_id=DETACHED_SESSION_ID,
+                    user_id=run.owner_user_id,
                     call_id=call.call_id,
-                ).aexecute()
+                )
+                try:
+                    return await run_tool_call(function, arguments, call_context, middleware=(policy,))
+                except Exception as error:
+                    return _ToolFailure(str(error))
 
         try:
             return await run_with_tool_execution_identity(
@@ -737,13 +741,12 @@ class ScriptToolBroker:
 
     async def _close_toolkit_owned(self, toolkit: Toolkit) -> None:
         """Close one toolkit or transfer its exact close task on cancellation."""
-        close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
-        try:
-            await asyncio.shield(close_task)
-        except asyncio.CancelledError:
+
+        def retain(close_task: asyncio.Task[None]) -> None:
             if not close_task.done():
                 self._retain_cleanup_task(close_task)
-            raise
+
+        await shielded_lifecycle(_close_toolkit(toolkit), retain=retain)
 
     def _retain_toolkit_close(self, toolkit: Toolkit) -> None:
         close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
@@ -822,7 +825,7 @@ class ScriptToolBroker:
             source_config=source_config,
             execution_identity=execution_identity,
             toolkit=toolkit,
-            function=function,
+            function=adapt_function(function),
             approval_config=_background_approval_config(context, run),
         )
 
@@ -1012,7 +1015,7 @@ async def _request_authored_confirmation(
     approval_config: Config,
     required: bool,
 ) -> ToolApprovalDecision | None:
-    """Resolve function-authored confirmation before Agno can return a cached value."""
+    """Ask for a function-authored confirmation before the call's hooks and policy approval run."""
     if not required:
         return None
     _, timeout_seconds = await evaluate_tool_approval(
@@ -1053,34 +1056,16 @@ def _launch_function_owners(run: ScriptRunRecord) -> dict[str, frozenset[str]]:
 
 
 def _toolkit_function(toolkit: Toolkit, function_name: str) -> Function:
-    function = toolkit.async_functions.get(function_name) or toolkit.functions.get(function_name)
+    function = toolkit.get_async_functions().get(function_name)
     if function is None:
         msg = "The requested tool is no longer available to this script run."
         raise ScriptCapabilityError(msg)
     return function
 
 
-async def _maybe_await(value: object) -> object:
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
 async def _close_toolkit(toolkit: Toolkit) -> None:
     if toolkit.requires_connect:
-        await _run_toolkit_lifecycle(toolkit.close)
-
-
-async def _run_toolkit_lifecycle(operation: Callable[[], object]) -> None:
-    if inspect.iscoroutinefunction(operation):
-        await operation()
-        return
-    await _run_sync_toolkit_lifecycle(operation)
-
-
-async def _run_sync_toolkit_lifecycle(operation: Callable[[], object]) -> None:
-    result = await asyncio.to_thread(operation)
-    await _maybe_await(result)
+        await run_toolkit_lifecycle(toolkit.close)
 
 
 def _strict_json_result(result: object) -> object:

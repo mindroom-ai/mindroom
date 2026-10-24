@@ -13,7 +13,6 @@ import shutil
 import subprocess
 import textwrap
 import tomllib
-from contextlib import closing
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -38,7 +37,7 @@ from mindroom.session_storage.agent_storage import create_state_storage
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from agno.db.base import BaseDb
+    from mindroom.session_storage.store import ConversationStore
 
 
 def _render_chart(
@@ -1232,8 +1231,7 @@ def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
         paths.storage_root / "private_instances" / "s" / "helper",
     ):
         set_agent_mode(paths, state_root, "helper", "session", "minimal")
-        with closing(_open_sessions(state_root)):
-            pass
+        _open_sessions(state_root)
     ensure_private_instance_identity(
         paths.storage_root,
         worker_key="v1:default:user:~@alice:example.org",
@@ -1253,7 +1251,7 @@ def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
     assert len(trusted) == 8
     assert not [path for path in trusted if path.relative_to(paths.storage_root).parts[0] in runner_subpaths]
     assert len(recovery_locks) == 2
-    monkeypatch.setattr(agent_storage, "_BUSY_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(agent_storage, "BUSY_TIMEOUT_SECONDS", 0.2)
     for lock in recovery_locks:
         with lock.open("a") as holder:
             fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
@@ -1261,8 +1259,8 @@ def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
                 _open_sessions(lock.parent)
 
 
-def _open_sessions(state_root: Path) -> BaseDb:
-    return create_state_storage("helper", state_root, subdir="sessions", session_table="helper_sessions")
+def _open_sessions(state_root: Path) -> ConversationStore:
+    return create_state_storage("helper", state_root)
 
 
 def test_instance_chart_static_runner_generates_primary_api_key_without_other_auth() -> None:

@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from html.parser import HTMLParser
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
@@ -27,12 +28,15 @@ from mindroom.api import config_lifecycle, main
 from mindroom.api.connections_session_cookie import connections_session_cookie, issue_connections_session
 from mindroom.api.mcp_gateway import GatewayRuntime, gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.config.main import Config
+from mindroom.config.plugin import PluginEntryConfig
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook
 from mindroom.mcp_gateway import admission
+from mindroom.mcp_gateway import tools as gateway_tools
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     import httpx
@@ -340,6 +344,7 @@ def test_agent_selection_diagnostics(
 
 
 def _native_dispatch_builder(
+    monkeypatch: pytest.MonkeyPatch,
     phase: str,
     async_body: bool,
     paused: threading.Event,
@@ -347,11 +352,32 @@ def _native_dispatch_builder(
     events: list[str],
     agent: str = "personal",
 ) -> Callable[..., Toolkit]:
+    """Return a toolkit builder that pauses a gateway call in ``phase``: its build, its connect, or its tool hook."""
+
     def pause(at: str) -> None:
         if phase != at:
             return
         paused.set()
         assert release.wait(10), "Dispatch was never released"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def pause_in_hook(ctx: ToolBeforeCallContext) -> None:
+        assert ctx.tool_name in {"account", "async_account"}
+        await asyncio.to_thread(pause, "hook")
+
+    monkeypatch.setattr(
+        gateway_tools,
+        "load_plugins",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                name="pause",
+                entry_config=PluginEntryConfig(path="pause.py"),
+                plugin_order=0,
+                discovered_hooks=(pause_in_hook,),
+                discovered_automations=(),
+            ),
+        ],
+    )
 
     def account() -> str:
         identity = get_tool_execution_identity()
@@ -364,17 +390,10 @@ def _native_dispatch_builder(
     async def async_account() -> str:
         return account()
 
-    async def before(name: str, func: Callable[..., Awaitable[str]], args: dict[str, object]) -> str:
-        assert name in {"account", "async_account"}
-        await asyncio.to_thread(pause, "hook")
-        return await func(**args)
-
     class AccountToolkit(Toolkit):
         def __init__(self) -> None:
             super().__init__(name="calculator", tools=[async_account if async_body else account])
             self._requires_connect = True
-            function = next(iter({**self.functions, **self.async_functions}.values()))
-            function.tool_hooks = [before]
 
         def connect(self) -> None:
             pause("connect")
@@ -409,7 +428,7 @@ def test_native_dispatch_rejects_changed_publication(
     release = threading.Event()
     events: list[str] = []
 
-    build = _native_dispatch_builder(phase, async_body, paused, release, events)
+    build = _native_dispatch_builder(monkeypatch, phase, async_body, paused, release, events)
     monkeypatch.setattr(agents, "build_agent_toolkit", build)
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(

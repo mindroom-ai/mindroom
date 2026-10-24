@@ -13,25 +13,23 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
 
-from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
-from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
-from mindroom.tool_system.declarations import declare_tool_schema_source
+from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS, Function, Toolkit, ToolResult
+from mindroom.tool_system.declarations import declare_tool_schema_finisher, declare_tool_schema_source
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if sys.version_info >= (3, 14):
     from annotationlib import Format, type_repr
 
 if TYPE_CHECKING:
-    from agno.tools import Toolkit
-
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -46,7 +44,6 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 _AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
-_DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
 _AUTO_SAVE_ROOT = "mindroom_tool_outputs"
 _AUTO_SAVE_READ_HINT = (
     "Do not read this whole file: it is over threshold_bytes, so the result would be saved to a file again. "
@@ -131,36 +128,23 @@ class _ToolOutputWriteResult:
 
 
 def _output_redirect_max_bytes(runtime_paths: RuntimePaths) -> int:
-    return _positive_int_runtime_setting(
-        runtime_paths,
-        _MAX_BYTES_ENV,
-        default=DEFAULT_TOOL_OUTPUT_MAX_BYTES,
-        log_key="invalid_tool_output_redirect_max_bytes",
-    )
-
-
-def _positive_int_runtime_setting(
-    runtime_paths: RuntimePaths,
-    env_name: str,
-    *,
-    default: int,
-    log_key: str,
-) -> int:
+    # TODO(simplify): Unlike other runtime settings, an empty value falls through to the next source, ending at the
+    # live os.environ. Read it with runtime_paths.env_value alone. Operators who set it only outside the runtime's env,
+    # or blank it to restore the default, would notice.
     raw_value = (
-        runtime_paths.process_env.get(env_name)
-        or runtime_paths.env_file_values.get(env_name)
-        or os.environ.get(env_name)
+        runtime_paths.process_env.get(_MAX_BYTES_ENV)
+        or runtime_paths.env_file_values.get(_MAX_BYTES_ENV)
+        or os.environ.get(_MAX_BYTES_ENV)
     )
-    if raw_value is None or raw_value == "":
-        return default
+    if not raw_value:
+        return DEFAULT_TOOL_OUTPUT_MAX_BYTES
     try:
         configured_value = int(raw_value)
     except ValueError:
-        logger.warning(log_key, value=raw_value)
-        return default
+        configured_value = 0
     if configured_value <= 0:
-        logger.warning(log_key, value=raw_value)
-        return default
+        logger.warning("invalid_tool_output_redirect_max_bytes", value=raw_value)
+        return DEFAULT_TOOL_OUTPUT_MAX_BYTES
     return configured_value
 
 
@@ -195,10 +179,7 @@ def _auto_save_success_receipt(
         output_format=output_format,
         overwritten=False,
     )
-    receipt["auto_saved"] = True
-    receipt["threshold_bytes"] = threshold_bytes
-    receipt["preview"] = preview
-    receipt["hint"] = _AUTO_SAVE_READ_HINT
+    receipt.update(auto_saved=True, threshold_bytes=threshold_bytes, preview=preview, hint=_AUTO_SAVE_READ_HINT)
     return {"mindroom_tool_output": receipt}
 
 
@@ -248,37 +229,30 @@ def _has_output_path_argument(function: Function) -> bool:
     return isinstance(properties, dict) and OUTPUT_PATH_ARGUMENT in properties
 
 
+def _with_optional_output_path(parameters: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as an optional property."""
+    finished = dict(parameters or AGNO_EMPTY_PARAMETERS)
+    properties = dict(finished.get("properties") or {})
+    properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
+    finished["type"] = finished.get("type") or "object"
+    finished["properties"] = properties
+    required = finished.get("required")
+    finished["required"] = (
+        [name for name in required if name != OUTPUT_PATH_ARGUMENT] if isinstance(required, list) else []
+    )
+    return finished
+
+
 def ensure_output_path_schema_optional(function: Function) -> None:
     """Keep MindRoom's reserved output-path argument optional in one tool schema."""
-    parameters = dict(function.parameters or _DEFAULT_PARAMETERS)
-    properties = dict(parameters.get("properties") or {})
-    properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
-    parameters["type"] = parameters.get("type") or "object"
-    parameters["properties"] = properties
-    required = parameters.get("required")
-    if isinstance(required, list):
-        parameters["required"] = [name for name in required if name != OUTPUT_PATH_ARGUMENT]
-    else:
-        parameters["required"] = []
-    function.parameters = parameters
-
-
-def _normalize_output_path_argument(raw_path: object) -> object | None:
-    if raw_path is None:
-        return None
-    if isinstance(raw_path, str) and raw_path.strip() == "":
-        return None
-    return raw_path
+    function.parameters = _with_optional_output_path(function.parameters)
 
 
 def normalize_output_path_argument(raw_path: object) -> object | None:
     """Return the canonical runtime value for the reserved output-path argument."""
-    return _normalize_output_path_argument(raw_path)
-
-
-def uses_output_file_schema(function: Function) -> bool:
-    """Whether this Function uses our known output-path schema processor."""
-    return uses_schema_postprocessor(function, ensure_output_path_schema_optional)
+    if isinstance(raw_path, str) and raw_path.strip() == "":
+        return None
+    return raw_path
 
 
 def _path_has_environment_expansion(raw_path: str) -> bool:
@@ -298,29 +272,21 @@ def _relative_output_path_error(relative_path: Path) -> str | None:
 
 
 def _validate_raw_output_path(raw_path: object) -> tuple[str, Path] | str:
-    error: str | None = None
-    relative_path: Path | None = None
     if not isinstance(raw_path, str):
-        error = "mindroom_output_path must be a workspace-relative string path."
-    elif raw_path == "" or raw_path.strip() == "":
-        error = "mindroom_output_path must be a non-empty workspace-relative path."
-    elif "\x00" in raw_path:
-        error = "mindroom_output_path must not contain NUL bytes."
-    elif _path_has_environment_expansion(raw_path):
-        error = (
+        return "mindroom_output_path must be a workspace-relative string path."
+    if raw_path.strip() == "":
+        return "mindroom_output_path must be a non-empty workspace-relative path."
+    if "\x00" in raw_path:
+        return "mindroom_output_path must not contain NUL bytes."
+    if _path_has_environment_expansion(raw_path):
+        return (
             f"mindroom_output_path must be a plain path relative to the agent workspace, but got {raw_path!r}. "
             "Paths must not start with `~` or contain `$` or `%`; pass a workspace-relative path like 'output.json', "
             "then copy the file elsewhere with shell tools if needed."
         )
-    else:
-        relative_path = Path(raw_path)
-        error = _relative_output_path_error(relative_path)
-
-    if error is not None:
-        return error
-    if not isinstance(raw_path, str) or relative_path is None:
-        return "mindroom_output_path must be a workspace-relative string path."
-    return raw_path, relative_path
+    relative_path = Path(raw_path)
+    error = _relative_output_path_error(relative_path)
+    return error if error is not None else (raw_path, relative_path)
 
 
 def _validate_output_path(policy: ToolOutputFilePolicy, raw_path: object) -> _ValidatedOutputPath | str:
@@ -378,36 +344,35 @@ def _validate_parent_components(workspace_root: Path, relative_parent: Path) -> 
     return None if stat.S_ISDIR(mode) else message
 
 
-def _normalize_json_value(value: object) -> object:
+def _normalize_json_value(value: object) -> object:  # noqa: PLR0911 - One branch per supported value kind.
     if value is None or isinstance(value, str | int | float | bool):
-        normalized = value
-    elif isinstance(value, Path):
-        normalized = str(value)
-    elif isinstance(value, Enum):
-        normalized = _normalize_json_value(value.value)
-    elif isinstance(value, BaseModel):
-        normalized = _normalize_json_value(value.model_dump(mode="json"))
-    elif is_dataclass(value) and not isinstance(value, type):
-        normalized = _normalize_json_value(asdict(value))
-    elif isinstance(value, Mapping):
-        normalized = {str(key): _normalize_json_value(item) for key, item in value.items()}
-    elif isinstance(value, tuple | list):
-        normalized = [_normalize_json_value(item) for item in value]
-    elif isinstance(value, set | frozenset):
-        normalized_items = [_normalize_json_value(item) for item in value]
-        normalized = sorted(normalized_items, key=repr)
-    else:
-        msg = f"Value is not JSON-normalizable: {type(value).__name__}"
-        raise TypeError(msg)
-    return normalized
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Enum):
+        return _normalize_json_value(value.value)
+    if isinstance(value, BaseModel):
+        return _normalize_json_value(value.model_dump(mode="json"))
+    if is_dataclass(value) and not isinstance(value, type):
+        return _normalize_json_value(asdict(value))
+    if isinstance(value, Mapping):
+        return {str(key): _normalize_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_normalize_json_value(item) for item in value]
+    if isinstance(value, set | frozenset):
+        return sorted((_normalize_json_value(item) for item in value), key=repr)
+    msg = f"Value is not JSON-normalizable: {type(value).__name__}"
+    raise TypeError(msg)
 
 
-def _has_tool_result_media(result: ToolResult) -> bool:
+def _has_tool_result_media(result: ToolResult | ToolValue) -> bool:
     return bool(result.images or result.videos or result.audios or result.files)
 
 
 def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
-    if isinstance(result, ToolResult):
+    # TODO(simplify): The refusals below name an internal version ("in v1") the model cannot act on. Drop the suffix.
+    # Models would notice the changed error text.
+    if isinstance(result, ToolResult | ToolValue):
         if _has_tool_result_media(result):
             return "ToolResult media artifacts cannot be redirected to workspace files in v1."
         serialized = _SerializedToolOutput(payload=result.content.encode("utf-8"), format="text")
@@ -546,25 +511,23 @@ def _auto_save_large_result(
     policy: ToolOutputFilePolicy,
     tool_name: str,
 ) -> object:
-    auto_saved_result = result
     try:
         serialized = _serialize_tool_output(result)
     except Exception as exc:
         logger.warning("tool_output_auto_save_serialization_failed", error_type=type(exc).__name__)
-        return auto_saved_result
-    byte_count = len(serialized.payload) if isinstance(serialized, _SerializedToolOutput) else 0
-
-    if isinstance(serialized, _SerializedToolOutput) and byte_count > policy.auto_save_threshold_bytes:
-        try:
-            auto_saved_result = _write_auto_saved_result(
-                serialized,
-                policy=policy,
-                tool_name=tool_name,
-                byte_count=byte_count,
-            )
-        except Exception as exc:
-            logger.warning("tool_output_auto_save_write_failed", error_type=type(exc).__name__)
-    return auto_saved_result
+        return result
+    if isinstance(serialized, str) or len(serialized.payload) <= policy.auto_save_threshold_bytes:
+        return result
+    try:
+        return _write_auto_saved_result(
+            serialized,
+            policy=policy,
+            tool_name=tool_name,
+            byte_count=len(serialized.payload),
+        )
+    except Exception as exc:
+        logger.warning("tool_output_auto_save_write_failed", error_type=type(exc).__name__)
+        return result
 
 
 def _write_auto_saved_result(
@@ -654,7 +617,7 @@ def prepare_tool_output_file(
     output_path: object = None,
 ) -> ToolOutputFileRequest | dict[str, object]:
     """Validate before tool execution, without creating files or directories."""
-    normalized = _normalize_output_path_argument(output_path)
+    normalized = normalize_output_path_argument(output_path)
     validated = _validate_output_path(policy, normalized) if normalized is not None else None
     if isinstance(validated, str):
         return _error_receipt(validated)
@@ -712,6 +675,8 @@ def _wrap_entrypoint(
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
     _copy_annotations_with_output_path(wrapper, entrypoint)
     declare_tool_schema_source(wrapper, entrypoint)
+    # Agno derives the argument from the forged signature without the default the model is shown.
+    declare_tool_schema_finisher(wrapper, _with_optional_output_path)
     setattr(wrapper, _WRAPPED_ATTR, True)
     return wrapper
 
@@ -728,11 +693,12 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
         )
         return function
 
-    uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != _DEFAULT_PARAMETERS
+    uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != AGNO_EMPTY_PARAMETERS
     function.entrypoint = _wrap_entrypoint(function.entrypoint, policy, tool_name=function.name)
     function.strict = False
-    install_schema_postprocessor(function, ensure_output_path_schema_optional)
     if uses_custom_parameters:
+        # Agno keeps an authored schema as it is, so the argument joins it here; a derived one gets it from the
+        # wrapper's signature.
         ensure_output_path_schema_optional(function)
     return function
 

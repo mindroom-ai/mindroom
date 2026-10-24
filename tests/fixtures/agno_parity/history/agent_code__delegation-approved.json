@@ -1,0 +1,995 @@
+{
+  "store": "agent_code",
+  "session_id": "!room:example.org:$delegation-approved",
+  "get_messages": {
+    "all": {
+      "params": {},
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "last_run": {
+      "params": {
+        "last_n_runs": 1
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "last_two_runs": {
+      "params": {
+        "last_n_runs": 2
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "no_runs": {
+      "params": {
+        "last_n_runs": 0
+      },
+      "messages": []
+    },
+    "limit_1": {
+      "params": {
+        "limit": 1
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "limit_3": {
+      "params": {
+        "limit": 3
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "limit_4": {
+      "params": {
+        "limit": 4
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "last_three_runs_limit_5": {
+      "params": {
+        "last_n_runs": 3,
+        "limit": 5
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "skip_prompt_roles": {
+      "params": {
+        "skip_roles": [
+          "system",
+          "developer"
+        ]
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "every_status_limit_6": {
+      "params": {
+        "skip_statuses": [],
+        "limit": 6
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "every_status": {
+      "params": {
+        "skip_statuses": []
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    }
+  },
+  "filter_tool_calls": {
+    "all/max_tool_calls_0": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 0,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "all/max_tool_calls_1": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "all/max_tool_calls_2": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 2,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    },
+    "every_status/max_tool_calls_1": {
+      "selection": "every_status",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-00000000003c",
+          "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003d",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-delegate-approved",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 310,
+            "output_tokens": 11,
+            "total_tokens": 321
+          },
+          "created_at": 1800001560
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003e",
+          "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-delegate-approved",
+          "tool_name": "run_subagent",
+          "tool_args": {
+            "agent_name": "helper",
+            "task": "Multiply 6 by 7"
+          },
+          "created_at": 1800001620
+        },
+        {
+          "id": "00000000-0000-4000-8000-00000000003f",
+          "content": "The helper found 42.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "code-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 330,
+            "output_tokens": 6,
+            "total_tokens": 336,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001620
+        }
+      ]
+    }
+  }
+}

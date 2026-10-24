@@ -79,12 +79,12 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     restart_reason_category_for,
 )
-from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
+from mindroom.teams.formation import TeamOutcome, resolve_configured_team
+from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
 from . import constants
-from .agents import create_agent, show_tool_calls_for_agent
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing.batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
 from .coalescing.gate import CoalescingGate
@@ -169,7 +169,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import structlog
-    from agno.agent import Agent
     from nio.durable import DurableSync
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -1264,32 +1263,6 @@ class AgentBot:
             stop_reason=stop_reason,
         )
         await emit(self.hook_registry, event_name, context)
-
-    @property
-    def show_tool_calls(self) -> bool:
-        """Whether to show tool call details inline in responses."""
-        return show_tool_calls_for_agent(self.config, self.agent_name)
-
-    @property  # Not cached_property because Team mutates it!
-    def agent(self) -> Agent:
-        """Get the Agno Agent instance for this bot."""
-        if self.agent_name != ROUTER_AGENT_NAME and self.config.agents[self.agent_name].private is not None:
-            msg = (
-                f"AgentBot.agent is only available for shared agents. "
-                f"Private agent '{self.agent_name}' requires an explicit execution identity."
-            )
-            raise ValueError(msg)
-        assert self.orchestrator is not None
-        knowledge = self._knowledge_access_support.for_agent(self.agent_name)
-        return create_agent(
-            agent_name=self.agent_name,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            knowledge=knowledge,
-            execution_identity=None,
-            hook_registry=self.hook_registry,
-            refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
-        )
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -3001,11 +2974,6 @@ class AgentBot:
 
 class TeamBot(AgentBot):
     """A bot that represents a team of agents working together."""
-
-    @cached_property
-    def agent(self) -> Agent | None:
-        """Teams don't have individual agents, return None."""
-        return None
 
     def current_configured_team_agents(self) -> list[MatrixID]:
         """Return this configured team's current persisted member Matrix IDs."""

@@ -1,383 +1,228 @@
-"""A team member's usage is kept when the member is stopped or fails."""
+"""A team member's provider calls are counted once each, however its run ends: finished, failed, or stopped."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.agent import Agent
-from agno.agent import _run as agent_run
-from agno.db.base import BaseDb, SessionType
-from agno.exceptions import ModelProviderError
-from agno.metrics import MessageMetrics
-from agno.models.base import Model
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
-from agno.run.cancel import acancel_run
-from agno.run.team import TeamRunOutput
-from agno.session.team import TeamSession
-from agno.team import Team
-from agno.team import _run as team_run
-from agno.tools.function import Function
 
+from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.session_storage import agno_compat_session_persistence
-from mindroom.session_storage.agent_storage import create_state_storage, save_runs
-from mindroom.session_storage.agno_compat_session_persistence import drain_cancelled_team_save
+from mindroom.history.session_context import create_scope_session_storage
+from mindroom.history.storage import new_scope_session
+from mindroom.history.types import HistoryScope
+from mindroom.llm.errors import ProviderError
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.session_storage.store import persist_to
+from mindroom.teams.runtime import continue_team, run_team
+from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.usage.stats import collect_admin_usage
+from tests.agent_loop.helpers import gated, toolkit
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
+from tests.team_runtime.squad import approval, collect, scripted
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
-_HANG = "hang"
+    from mindroom.constants import RuntimePaths
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
+
+pytestmark = pytest.mark.asyncio
+
+_GO = [Message(role="user", content="Go")]
 
 
-@dataclass
-class _ScriptModel(Model):
-    """Return scripted provider responses; a hang marker blocks until the request is stopped."""
-
-    script: list[ModelResponse | Exception | str] = field(default_factory=list)
-    hanging: asyncio.Event = field(default_factory=asyncio.Event)
-
-    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        raise NotImplementedError
-
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        return await self._next()
-
-    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
-        raise NotImplementedError
-
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        yield await self._next()
-
-    def _parse_provider_response(self, response: ModelResponse, **_kwargs: object) -> ModelResponse:
-        return response
-
-    def _parse_provider_response_delta(self, response: ModelResponse, **_kwargs: object) -> ModelResponse:
-        return response
-
-    async def _next(self) -> ModelResponse:
-        item = self.script.pop(0)
-        if item == _HANG:
-            self.hanging.set()
-            await asyncio.Event().wait()
-        if isinstance(item, Exception):
-            raise item
-        assert isinstance(item, ModelResponse)
-        return item
-
-
-def _calling(name: str, arguments: str, input_tokens: int) -> ModelResponse:
-    return ModelResponse(
-        role="assistant",
-        tool_calls=[
-            {"id": f"call-{input_tokens}", "type": "function", "function": {"name": name, "arguments": arguments}},
-        ],
-        response_usage=MessageMetrics(input_tokens=input_tokens, output_tokens=0, total_tokens=input_tokens),
-    )
-
-
-def _answer(input_tokens: int) -> ModelResponse:
-    return ModelResponse(
-        role="assistant",
-        content="done",
-        response_usage=MessageMetrics(input_tokens=input_tokens, output_tokens=0, total_tokens=input_tokens),
-    )
-
-
-def _delegation(*, collaborate: bool = False) -> ModelResponse:
-    if collaborate:
-        return _calling("delegate_task_to_members", '{"task": "Do the work"}', 10)
-    return _calling("delegate_task_to_member", '{"member_id": "worker", "task": "Do the work"}', 10)
-
-
-def _lookup() -> str:
+def lookup() -> str:
+    """Look the answer up."""
     return "found"
+
+
+def publish() -> str:
+    """Publish the answer."""
+    return "published"
+
+
+def _calling(name: str, call_id: str, input_tokens: int) -> list[Any]:
+    return calls(tool_call(name, call_id), metrics=usage(input_tokens, 0))
+
+
+def _delegation(*, collaborate: bool) -> list[Any]:
+    if collaborate:
+        return calls(tool_call("delegate_task_to_members", "call-team", task="Go"), metrics=usage(10, 0))
+    return calls(tool_call("delegate_task_to_member", "call-team", member_id="worker", task="Go"), metrics=usage(10, 0))
 
 
 @dataclass
 class _Squad:
-    team: Team
-    leader: _ScriptModel
-    member: _ScriptModel
     config: Config
-    tmp_path: Path
+    runtime_paths: RuntimePaths
+    spec: TeamSpec
+    store: ConversationStore
+    session: ConversationSession
+    leader: ScriptedModel
+    member: ScriptedModel
+    hanging: asyncio.Event
 
     def model_tokens(self) -> dict[str, int]:
-        paths = resolve_runtime_paths(
-            config_path=self.tmp_path / "config.yaml",
-            storage_path=self.tmp_path,
-            process_env={},
-        )
-        report = collect_admin_usage(config=self.config, runtime_paths=paths)
+        """Return the tokens the usage export counts for each model, as the admin usage report reads them."""
+        report = collect_admin_usage(config=self.config, runtime_paths=self.runtime_paths)
         return {row.model: row.totals.total_tokens for row in report.model_breakdown}
 
+    def ctx(self) -> RunContext:
+        return RunContext(run_id="team-run", session_id="session", user_id="@alice:localhost")
 
-def _squad(
-    tmp_path: Path,
-    *,
-    leader: list[ModelResponse | Exception | str],
-    member: list[ModelResponse | Exception | str],
-    collaborate: bool = False,
-) -> _Squad:
+    async def run(self) -> TeamRunRecord:
+        """Run the team to its end and return the stored team record."""
+        _, record = await collect(
+            run_team(self.spec, _GO, ctx=self.ctx(), persist=persist_to(self.store, self.session)),
+        )
+        return record
+
+    async def run_until_stopped(self, events: Any) -> None:  # noqa: ANN401
+        """Drive ``events`` until the member hangs, then stop the reply as a Stop does, and wait for its saves."""
+
+        async def drain() -> None:
+            async for _ in events:
+                pass
+
+        reply = asyncio.create_task(drain())
+        await asyncio.wait_for(self.hanging.wait(), timeout=5)
+        reply.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reply
+
+
+def _squad(tmp_path: Path, *, leader: list[list[Any]], member: list[list[Any]], collaborate: bool = False) -> _Squad:
     config = Config(
         agents={"worker": AgentConfig(display_name="Worker")},
         teams={"squad": TeamConfig(display_name="Squad", role="Does work", agents=["worker"])},
     )
-    storage = create_state_storage(
-        "squad",
-        tmp_path / "teams" / "squad",
-        subdir="sessions",
-        session_table="squad_sessions",
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    store = create_scope_session_storage(
+        agent_name="worker",
+        scope=HistoryScope(kind="team", scope_id="squad"),
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
     )
-    storage.upsert_session(TeamSession(session_id="session", team_id="squad"))
-    leader_model = _ScriptModel(id="leader-model", provider="test-provider", script=leader)
-    member_model = _ScriptModel(id="member-model", provider="test-provider", script=member)
-    worker = Agent(
-        id="worker",
-        name="worker",
-        model=member_model,
-        telemetry=False,
-        tools=[
-            Function(name="lookup", entrypoint=_lookup),
-            Function(name="publish", entrypoint=_lookup, requires_confirmation=True),
-        ],
+    session = new_scope_session(session_id="session", scope_id="squad", is_team=True)
+    store.ensure_session_row(session)
+    hanging = asyncio.Event()
+
+    async def hang() -> None:
+        hanging.set()
+        await asyncio.Event().wait()
+
+    leader_model = scripted("leader-model", *leader)
+    member_model = scripted("member-model", *[[Await(hang)] if turn == _HANG else turn for turn in member])
+    worker = TeamMember(
+        spec=AgentSpec(
+            id="worker",
+            name="worker",
+            model=member_model,
+            system_message=Message(role="system", content="You work."),
+            toolkits=(toolkit(lookup, name="lookup"), gated(publish, name="publish")),
+        ),
+        role="Does the work.",
     )
-    team = Team(
+    spec = TeamSpec(
         id="squad",
         name="Squad",
-        members=[worker],
+        mode=TeamMode.COLLABORATE if collaborate else TeamMode.COORDINATE,
         model=leader_model,
-        db=storage,
-        telemetry=False,
-        delegate_to_all_members=collaborate,
+        system_message=Message(role="system", content="You lead."),
+        members=(worker,),
     )
-    return _Squad(team=team, leader=leader_model, member=member_model, config=config, tmp_path=tmp_path)
+    return _Squad(config, runtime_paths, spec, store, session, leader_model, member_model, hanging)
 
 
-async def _run(squad: _Squad, *, stream: bool) -> None:
-    if stream:
-        async for _ in squad.team.arun(
-            "Go",
-            session_id="session",
-            user_id="@alice:localhost",
-            run_id="team-run",
-            stream=True,
-            stream_events=True,
-            yield_run_output=True,
-        ):
-            pass
-    else:
-        await squad.team.arun("Go", session_id="session", user_id="@alice:localhost", run_id="team-run")
+_HANG: list[Any] = []
 
 
-async def _finish_detached_saves() -> None:
-    """Agno saves a stopped run on a detached task; wait for it like a later reader would."""
-    while pending := [task for task in (*team_run._background_tasks, *agent_run._background_tasks) if not task.done()]:
-        await asyncio.gather(*pending, return_exceptions=True)
+def _no_tasks_left() -> bool:
+    return not [task for task in asyncio.all_tasks() if task is not asyncio.current_task() and not task.done()]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [True, False], ids=["stream", "non-stream"])
-@pytest.mark.parametrize("asks_agno_to_cancel", [False, True], ids=["task-cancel", "task-and-agno-cancel"])
 @pytest.mark.parametrize("collaborate", [False, True], ids=["coordinate", "collaborate"])
-async def test_stopped_team_member_keeps_its_usage(
-    tmp_path: Path,
-    stream: bool,
-    asks_agno_to_cancel: bool,
-    collaborate: bool,
-) -> None:
+async def test_stopped_team_member_keeps_its_usage(tmp_path: Path, collaborate: bool) -> None:
     """A Stop while a member works keeps every request the member already made, and stops the member."""
     squad = _squad(
         tmp_path,
-        leader=[_delegation(collaborate=collaborate), _answer(1)],
-        member=[_calling("lookup", "{}", 100), _calling("lookup", "{}", 1000), _HANG],
+        leader=[_delegation(collaborate=collaborate), answer("Done", usage(1, 0))],
+        member=[_calling("lookup", "call-1", 100), _calling("lookup", "call-2", 1000), _HANG],
         collaborate=collaborate,
     )
-    reply = asyncio.create_task(_run(squad, stream=stream))
-    await squad.member.hanging.wait()
-    # MindRoom's Stop cancels the reply task and then asks Agno to cancel the run.
-    reply.cancel()
-    if asks_agno_to_cancel:
-        await acancel_run("team-run")
-    with pytest.raises(asyncio.CancelledError):
-        await reply
-    await _finish_detached_saves()
 
-    assert squad.model_tokens() == {"leader-model": 10, "member-model": 1100}
-    assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task() and not task.done()]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [True, False], ids=["stream", "non-stream"])
-async def test_failed_team_member_keeps_its_usage_once(tmp_path: Path, stream: bool) -> None:
-    """A member whose provider fails keeps the requests it made, and the team still answers."""
-    squad = _squad(
-        tmp_path,
-        leader=[_delegation(), _answer(1)],
-        member=[
-            _calling("lookup", "{}", 100),
-            ModelProviderError("overloaded", status_code=529, model_name="member-model", model_id="member-model"),
-        ],
+    await squad.run_until_stopped(
+        run_team(squad.spec, _GO, ctx=squad.ctx(), persist=persist_to(squad.store, squad.session)),
     )
 
-    await _run(squad, stream=stream)
+    assert squad.model_tokens() == {"leader-model": 10, "member-model": 1100}
+    assert _no_tasks_left()
 
+
+async def test_failed_team_member_keeps_its_usage_once(tmp_path: Path) -> None:
+    """A member whose provider fails keeps the requests it made, and the team still answers."""
+
+    async def overloaded() -> None:
+        msg = "overloaded"
+        raise ProviderError(msg, provider="Synthetic", status_code=529)
+
+    squad = _squad(
+        tmp_path,
+        leader=[_delegation(collaborate=False), answer("Done", usage(1, 0))],
+        member=[_calling("lookup", "call-1", 100), [Await(overloaded)]],
+    )
+
+    record = await squad.run()
+
+    assert record.status is RunStatus.completed
     assert squad.model_tokens() == {"leader-model": 11, "member-model": 100}
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [True, False], ids=["stream", "non-stream"])
-async def test_finished_team_member_counts_once(tmp_path: Path, stream: bool) -> None:
+async def test_finished_team_member_counts_once(tmp_path: Path) -> None:
     """A member that finishes is counted exactly once."""
     squad = _squad(
         tmp_path,
-        leader=[_delegation(), _answer(1)],
-        member=[_calling("lookup", "{}", 100), _answer(1000)],
+        leader=[_delegation(collaborate=False), answer("Done", usage(1, 0))],
+        member=[_calling("lookup", "call-1", 100), answer("found", usage(1000, 0))],
     )
 
-    await _run(squad, stream=stream)
+    record = await squad.run()
 
+    assert record.status is RunStatus.completed
     assert squad.model_tokens() == {"leader-model": 11, "member-model": 1100}
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [True, False], ids=["stream", "non-stream"])
-@pytest.mark.parametrize("stored_run", [False, True], ids=["by-run-id", "stored-run"])
-async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path, stream: bool, stored_run: bool) -> None:
-    """A member resumed after an approval keeps the requests it makes before a Stop, as well as those before it paused."""
+async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path) -> None:
+    """A member resumed after an approval keeps the requests it makes before a Stop, and those before it paused."""
     squad = _squad(
         tmp_path,
-        leader=[_delegation(), _answer(1)],
-        member=[_calling("publish", "{}", 100), _calling("lookup", "{}", 1000), _HANG],
+        leader=[_delegation(collaborate=False), answer("Done", usage(1, 0))],
+        member=[_calling("publish", "call-publish", 100), _calling("lookup", "call-2", 1000), _HANG],
     )
-    paused = await squad.team.arun("Go", session_id="session", user_id="@alice:localhost", run_id="team-run")
-    assert paused.is_paused
-    # MindRoom resumes the paused run it reads back from storage; Agno can also look it up by id.
-    database = cast("BaseDb", squad.team.db)
-    session = database.get_session("session", session_type=SessionType.TEAM)
-    assert isinstance(session, TeamSession)
-    stored = session.get_run("team-run")
-    assert isinstance(stored, TeamRunOutput)
-    requirements = (stored if stored_run else paused).requirements or []
-    for requirement in requirements:
-        requirement.confirm()
-    resume_from = {"run_response": stored} if stored_run else {"run_id": "team-run"}
+    paused = await squad.run()
+    assert paused.status is RunStatus.paused
+    # MindRoom resumes the paused run it reads back from storage.
+    stored = squad.store.get_run("team-run")
+    assert isinstance(stored, TeamRunRecord)
 
-    async def resume() -> None:
-        if stream:
-            async for _ in squad.team.acontinue_run(
-                **resume_from,
-                requirements=requirements,
-                session_id="session",
-                user_id="@alice:localhost",
-                stream=True,
-            ):
-                pass
-        else:
-            await squad.team.acontinue_run(
-                **resume_from,
-                requirements=requirements,
-                session_id="session",
-                user_id="@alice:localhost",
-            )
-
-    reply = asyncio.create_task(resume())
-    await squad.member.hanging.wait()
-    reply.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await reply
-    await _finish_detached_saves()
+    await squad.run_until_stopped(
+        continue_team(
+            squad.spec,
+            stored,
+            _GO,
+            approved={("worker", "call-publish"): approval("call-publish", "publish", {}, agent="worker")},
+            ctx=squad.ctx(),
+            persist=persist_to(squad.store, squad.session),
+        ),
+    )
 
     assert squad.model_tokens() == {"leader-model": 10, "member-model": 1100}
-
-
-@dataclass
-class _SlowToStopModel(_ScriptModel):
-    """Take a while to unwind when stopped, like closing a provider connection or a subprocess."""
-
-    async def _next(self) -> ModelResponse:
-        try:
-            return await super()._next()
-        except asyncio.CancelledError:
-            await asyncio.shield(asyncio.sleep(0.05))
-            raise
-
-
-@pytest.mark.asyncio
-async def test_interrupted_turn_written_after_a_stop_is_not_overwritten(tmp_path: Path) -> None:
-    """MindRoom's own record of a stopped turn lands after Agno's save of it, even while members take time to stop."""
-    squad = _squad(
-        tmp_path,
-        leader=[_delegation(), _answer(1)],
-        member=[_calling("lookup", "{}", 100), _calling("lookup", "{}", 1000), _HANG],
-    )
-    member = squad.team.members[0]
-    assert isinstance(member, Agent)
-    member.model = squad.member = _SlowToStopModel(
-        id="member-model",
-        provider="test-provider",
-        script=squad.member.script,
-    )
-    database = cast("BaseDb", squad.team.db)
-    session = database.get_session("session", session_type=SessionType.TEAM)
-    assert isinstance(session, TeamSession)
-    # Create the runs table up front, as an earlier turn would have.
-    save_runs(database, session, [TeamRunOutput(run_id="earlier", team_id="squad", session_id="session", content="Hi")])
-    reply = asyncio.create_task(_run(squad, stream=False))
-    await squad.member.hanging.wait()
-    reply.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await reply
-
-    await drain_cancelled_team_save("team-run")
-    interrupted = TeamRunOutput(
-        run_id="team-run",
-        team_id="squad",
-        session_id="session",
-        content="Partial answer",
-        status=RunStatus.completed,
-        messages=[Message(role="user", content="Go"), Message(role="assistant", content="Partial answer")],
-    )
-    await asyncio.to_thread(save_runs, database, session, [interrupted])
-    await _finish_detached_saves()
-
-    stored = database.get_session("session", session_type=SessionType.TEAM)
-    assert isinstance(stored, TeamSession)
-    run = stored.get_run("team-run")
-    assert run is not None
-    assert run.status == RunStatus.completed
-    assert squad.model_tokens()["member-model"] == 1100
-
-
-@pytest.mark.asyncio
-async def test_interrupted_turn_waits_only_for_its_own_team_save(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stopping one team reply never waits for another conversation's stopped team to finish saving."""
-    agno_compat_session_persistence.install_patch()
-    released = asyncio.Event()
-
-    def schedule_slow_save(*_args: object) -> None:
-        team_run._background_tasks.add(asyncio.create_task(released.wait()))
-
-    monkeypatch.setattr(agno_compat_session_persistence, "_ORIGINAL_CANCELLED_TEAM_RUN_PERSIST", schedule_slow_save)
-    team = Team(id="squad", members=[], telemetry=False)
-    team_run._persist_cancelled_team_run_in_background(
-        team,
-        TeamRunOutput(run_id="other-run", team_id="squad", session_id="other"),
-        TeamSession(session_id="other", team_id="squad"),
-    )
-    try:
-        async with asyncio.timeout(5):
-            await drain_cancelled_team_save("team-run")
-        assert "other-run" in agno_compat_session_persistence._CANCELLED_TEAM_SAVES
-    finally:
-        released.set()
-        await _finish_detached_saves()
-    assert "other-run" not in agno_compat_session_persistence._CANCELLED_TEAM_SAVES
+    assert _no_tasks_left()

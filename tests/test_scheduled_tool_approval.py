@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from dataclasses import replace
+from collections.abc import AsyncIterator, Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-from agno.agent import Agent
-from agno.agent._tools import parse_tools
-from agno.models.openai import OpenAIChat
-from agno.run import RunContext
+from agno.media import Image  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
-from mindroom.agents import apply_tool_approval_capability
+from mindroom import agents
+from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agents import create_agent
 from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
@@ -45,7 +45,7 @@ from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
-from mindroom.scheduling.scheduled_tool_calls import prepare_scheduled_call
+from mindroom.scheduling.scheduled_tool_calls import bind_live_tools, prepare_scheduled_call
 from mindroom.scheduling.tasks import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
@@ -56,6 +56,9 @@ from mindroom.scheduling.tasks import (
     save_edited_scheduled_task,
 )
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
+from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -64,23 +67,30 @@ from mindroom.tool_system.runtime_context import (
 )
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 from tests.scheduling_helpers import joined_member_state
+from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
+from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
     from contextlib import AbstractContextManager
 
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.approval.manager import ApprovalActionResult
     from mindroom.event_journal import ScheduledCallRefusal
+    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _ROOM = "!room:test"
 _THREAD = "$thread"
 _REQUESTER = "@human:test"
 _AGENT = "code"
 _TOOLKIT = "slack"
+_MIRRORED_TOOLKIT = "slack_mirror"
 _TASK = "task-1"
 _SCHEDULED_CARD = "$scheduled-approval:" + _TASK
 _RECEIPT = "scheduled-receipt:" + _TASK
@@ -1059,35 +1069,76 @@ class _SlackTools(Toolkit):
         return self.outcome
 
 
+@dataclass(frozen=True)
+class _LiveRun:
+    """One agent run's tools as its build offers them, beside the scheduler, under the run's tool-call policy."""
+
+    toolkits: tuple[Toolkit, ...]
+    middleware: tuple[ToolMiddleware, ...] = ()
+
+    async def call(self, function_name: str, /, **arguments: object) -> object:
+        """Run one of the run's functions as the loop does, with the live tools bound as an agent build binds them."""
+        functions: dict[str, ToolFunction] = {}
+        for toolkit in (*self.toolkits, SchedulerTools()):
+            for function in adapt_toolkit(toolkit).functions:
+                functions.setdefault(function.name, function)
+        owners = {"schedule_tool_call": "scheduler", "run_scheduled_call": "scheduler"}
+        for toolkit in self.toolkits:
+            for name, function in toolkit.get_async_functions().items():
+                if function.owning_toolkit is not None:
+                    owners.setdefault(name, function.owning_toolkit)
+        policy = bind_live_tools(functions, owners, self.middleware)
+        context = ToolCallContext(run_id="run", session_id="session", call_id="call-1")
+        return await run_tool_call(functions[function_name], arguments, context, middleware=policy)
+
+
+_DEFAULT_OUTCOME = object()
+
+
 def _live_agent(
     runs: list[dict[str, object]] | None = None,
     *,
-    outcome: object = "sent",
+    outcome: object = _DEFAULT_OUTCOME,
+    toolkit: Toolkit | None = None,
     toolkit_name: str = _TOOLKIT,
     authored_confirmation: bool = False,
-    extra_toolkits: tuple[Toolkit, ...] = (),
-) -> Agent:
-    """Build a live agent whose toolkit carries its configured identity, as agent assembly sets it."""
-    toolkit = _SlackTools([] if runs is None else runs, outcome=outcome)
+    external_execution: bool = False,
+    stop_after_tool_call: bool = False,
+    middleware: tuple[ToolMiddleware, ...] = (),
+) -> _LiveRun:
+    """Build a live agent run whose toolkit carries its configured identity and flags, as agent assembly sets them.
+
+    The toolkit is a recording ``_SlackTools`` of ``runs`` and ``outcome`` (``"sent"`` unless given) unless
+    ``toolkit`` is given, which they would not reach, so passing them with ``toolkit`` is refused.
+    """
+    if toolkit is None:
+        toolkit = _SlackTools([] if runs is None else runs, outcome="sent" if outcome is _DEFAULT_OUTCOME else outcome)
+    else:
+        assert runs is None, "runs records only the default toolkit's calls"
+        assert outcome is _DEFAULT_OUTCOME, "outcome configures only the default toolkit"
     for function in toolkit.get_async_functions().values():
         function.owning_toolkit = toolkit_name
         if authored_confirmation:
             function.requires_confirmation = True
-    return Agent(id="general", model=OpenAIChat(), tools=[toolkit, *extra_toolkits])
+        if external_execution:
+            function.external_execution = True
+        if stop_after_tool_call:
+            function.stop_after_tool_call = True
+    return _LiveRun((toolkit,), middleware)
 
 
 async def _schedule_from_tool(
     *,
     arguments_json: str = '{"text": "Good morning!", "channel": "U123"}',
     execute_at: str = "2030-01-02T09:00:00-05:00",
-    agent: Agent | None = None,
-) -> str:
-    return await SchedulerTools().schedule_tool_call(
+    agent: _LiveRun | None = None,
+) -> object:
+    return await (agent or _live_agent()).call(
+        "schedule_tool_call",
         tool_name="post_slack_message",
         arguments_json=arguments_json,
         execute_at=execute_at,
         description="Morning DM",
-        agent=agent or _live_agent(),
     )
 
 
@@ -1248,7 +1299,6 @@ async def test_schedule_tool_call_stores_arguments_exactly_as_given() -> None:
         ('{"channel": "U1", "text": 1e999}', "2030-01-02T09:00:00-05:00", "$thread", True, None, "non-finite"),
         ('{"text": "no channel"}', "2030-01-02T09:00:00-05:00", "$thread", True, None, "current parameters"),
         ('{"channel": "U1"}', "2030-01-02T09:00:00-05:00", "$thread", True, "elsewhere", "not one of this agent"),
-        ('{"channel": "U1"}', "2030-01-02T09:00:00-05:00", "$thread", True, "twice", "more than one"),
         ('{"channel": "U1"}', "tomorrow at nine", "$thread", True, None, "ISO 8601"),
         ('{"channel": "U1"}', "2030-01-02T09:00:00", "$thread", True, None, "UTC offset"),
         ('{"channel": "U1"}', "2020-01-02T09:00:00+00:00", "$thread", True, None, "future"),
@@ -1263,7 +1313,6 @@ async def test_schedule_tool_call_stores_arguments_exactly_as_given() -> None:
         "overflow",
         "schema",
         "unknown-tool",
-        "ambiguous-tool",
         "not-iso",
         "naive",
         "past",
@@ -1287,11 +1336,7 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
     )
     context = _tool_context(config, thread_id=thread_id)
     request = AsyncMock(return_value=True)
-    live_agent = {
-        None: _live_agent(),
-        "elsewhere": Agent(id="general", model=OpenAIChat(), tools=[]),
-        "twice": _live_agent(extra_toolkits=(_named_slack_tools("other_slack"),)),
-    }[agent]
+    live_agent = {None: _live_agent(), "elsewhere": _LiveRun(())}[agent]
 
     with (
         patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
@@ -1303,13 +1348,6 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
 
     context.client.room_put_state.assert_not_awaited()
     request.assert_not_awaited()
-
-
-def _named_slack_tools(owner: str) -> Toolkit:
-    toolkit = _SlackTools([])
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = owner
-    return toolkit
 
 
 @pytest.mark.asyncio
@@ -1893,45 +1931,37 @@ def _turn_context(config: Config, *, thread_id: str = _THREAD) -> ToolRuntimeCon
 
 async def _run(
     manager: ApprovalManager,
-    agent: Agent | None,
+    agent: _LiveRun | None,
     *,
     arguments_json: str | None = None,
     context: ToolRuntimeContext | None = None,
 ) -> object:
+    """Run the scheduler's runner inside ``agent``'s run, or, without one, outside any agent run."""
     with (
         patch("mindroom.approval.manager.get_approval_store", return_value=manager),
         tool_runtime_context(context or _turn_context(_code_config())),
     ):
-        return await SchedulerTools().run_scheduled_call(
-            task_id=_TASK,
-            arguments_json=arguments_json,
-            agent=agent,
-            run_context=RunContext(run_id="run", session_id="session", session_state={}),
-        )
+        if agent is None:
+            return await SchedulerTools().run_scheduled_call(task_id=_TASK, arguments_json=arguments_json)
+        return await agent.call("run_scheduled_call", task_id=_TASK, arguments_json=arguments_json)
 
 
 @pytest.mark.asyncio
-async def test_live_function_runs_with_its_hooks_and_keeps_tool_instructions(
+async def test_live_function_runs_once_under_the_runs_tool_call_policy(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """The stored call runs once through the live function and its hooks, off the event loop, in this turn."""
+    """The stored call runs once through the live function and the run's policy, off the event loop, in this turn."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
-    hooked: list[str] = []
-    agent = _live_agent(runs)
+    hooked: list[tuple[str, str | None]] = []
 
-    def hook(function_name: str, function_call: Callable[..., object], arguments: dict[str, object]) -> object:
-        hooked.append(function_name)
-        return function_call(**arguments)
+    async def policy(call: ToolCall, call_next: ToolNext) -> object:
+        hooked.append((call.function.name, call.context.call_id))
+        return await call_next(call.arguments)
 
-    for toolkit in agent.tools or ():
-        assert isinstance(toolkit, Toolkit)
-        for function in toolkit.get_async_functions().values():
-            function.tool_hooks = [hook]
-    instructions = ["keep me"]
-    agent._tool_instructions = instructions
+    agent = _live_agent(runs, middleware=(policy,))
     try:
         await _armed(manager)
 
@@ -1940,8 +1970,7 @@ async def test_live_function_runs_with_its_hooks_and_keeps_tool_instructions(
         assert result == "sent"
         assert [{key: run[key] for key in ("channel", "text")} for run in runs] == [_ARGUMENTS]
         assert runs[0]["thread"] != threading.get_ident()
-        assert hooked == ["post_slack_message"]
-        assert agent._tool_instructions is instructions
+        assert hooked == [("run_scheduled_call", "call-1"), ("post_slack_message", f"scheduled-{_TASK}")]
         assert await _binding_column(journal, "outcome") == "completed"
 
         repeat = await _run(manager, agent)
@@ -1949,6 +1978,228 @@ async def test_live_function_runs_with_its_hooks_and_keeps_tool_instructions(
         assert isinstance(repeat, str)
         assert "already used" in repeat
         assert len(runs) == 1
+    finally:
+        await manager.shutdown()
+
+
+class _ConfiguredSlackTools(Toolkit):
+    """The Slack toolkit as the tool registry builds it for an agent, recording each real run."""
+
+    runs: ClassVar[list[dict[str, object]]] = []
+
+    def __init__(self) -> None:
+        super().__init__(name="slack", tools=[self.post_slack_message])
+
+    def post_slack_message(self, channel: str, text: str = "") -> str:
+        """Post a Slack message.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+
+        """
+        type(self).runs.append({"channel": channel, "text": text})
+        return "sent"
+
+
+class _MirroredSlackTools(_ConfiguredSlackTools):
+    """A second configured toolkit offering a function of the same name, recording its own runs."""
+
+    runs: ClassVar[list[dict[str, object]]] = []
+
+
+@pytest.fixture
+def configured_slack() -> Iterator[list[dict[str, object]]]:
+    """Register the recording Slack toolkit under the stored call's toolkit name, then restore the registries.
+
+    The name is a built-in's, so the built-in registries it overwrites are restored too.
+    """
+    with registered_toolkit(_TOOLKIT, _ConfiguredSlackTools):
+        _ConfiguredSlackTools.runs.clear()
+        yield _ConfiguredSlackTools.runs
+
+
+@pytest.fixture
+def configured_slack_pair(configured_slack: list[dict[str, object]]) -> Iterator[dict[str, list[dict[str, object]]]]:
+    """Also register a second toolkit whose function has the stored call's name; return each toolkit's runs."""
+    with registered_toolkit(_MIRRORED_TOOLKIT, _MirroredSlackTools):
+        _MirroredSlackTools.runs.clear()
+        yield {_TOOLKIT: configured_slack, _MIRRORED_TOOLKIT: _MirroredSlackTools.runs}
+
+
+def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: str = _AGENT) -> AgentBuild:
+    """Build the configured agent as a turn does, on a model that is never called."""
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    return create_agent(agent_name, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
+
+
+async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Config) -> object:
+    """Run the scheduler's runner as the build's run calls it, in the scheduling agent's own turn."""
+    with (
+        patch("mindroom.approval.manager.get_approval_store", return_value=manager),
+        tool_runtime_context(_turn_context(config)),
+    ):
+        return await run_tool_call(
+            prepare_run_tools(build.spec).functions["run_scheduled_call"],
+            {"task_id": _TASK},
+            ToolCallContext(run_id="run", session_id="session", call_id="call-1"),
+            middleware=agent_tool_middleware(build),
+        )
+
+
+@pytest.mark.parametrize(
+    "offered",
+    ["schedule_tool_call", "run_scheduled_call", None],
+    ids=["scheduling-only", "running-only", "no-scheduler"],
+)
+def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
+    monkeypatch: pytest.MonkeyPatch,
+    offered: str | None,
+) -> None:
+    """Each scheduler function reading the run's live functions binds them; a build offering neither has no such step.
+
+    The build offers the scheduler with only the named function, so each name is checked against the scheduler's own.
+    """
+    config = _code_config()
+    config.defaults.tools = []
+    if offered is not None:
+        config.agents[_AGENT].tools = [{"scheduler": {"include_tools": [offered]}}]
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+
+    build = create_agent(_AGENT, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
+
+    functions = prepare_run_tools(build.spec).functions
+    assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())
+    names = [middleware.__name__ for middleware in build.tool_policy]
+    assert names.count("bind_live_functions") == int(offered is not None)
+    assert (names[0] == "bind_live_functions") is (offered is not None)
+
+
+@pytest.mark.asyncio
+async def test_an_agent_build_runs_a_stored_call_through_its_own_function_and_policy(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_slack: list[dict[str, object]],
+) -> None:
+    """The runner the agent's build offers finds the stored call among the build's functions and runs it once."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    config = _code_config()
+    config.agents[_AGENT].tools = [_TOOLKIT]
+    build = _agent_build(config, monkeypatch)
+    assert prepare_run_tools(build.spec).functions["post_slack_message"].requires_confirmation is True
+    try:
+        await _armed(manager)
+
+        result = await _run_in_build(manager, build, config)
+
+        assert result == "sent"
+        assert configured_slack == [_ARGUMENTS]
+        assert await _binding_column(journal, "outcome") == "completed"
+    finally:
+        await manager.shutdown()
+
+
+_SHARED_NAME_ORDERS = pytest.mark.parametrize(
+    "configured",
+    [(_TOOLKIT, _MIRRORED_TOOLKIT), (_MIRRORED_TOOLKIT, _TOOLKIT)],
+    ids=["stored-toolkit-first", "stored-toolkit-shadowed"],
+)
+
+
+@pytest.mark.asyncio
+@_SHARED_NAME_ORDERS
+async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_offers(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_slack_pair: dict[str, list[dict[str, object]]],
+    configured: tuple[str, str],
+) -> None:
+    """The build offers one function per name, the first configured toolkit's, and the stored call names that toolkit."""
+    config = _gated_config()
+    config.agents["general"].tools = list(configured)
+    build = _agent_build(config, monkeypatch, "general")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
+        tool_runtime_context(context),
+        _responders(config, "general"),
+    ):
+        await run_tool_call(
+            prepare_run_tools(build.spec).functions["schedule_tool_call"],
+            {
+                "tool_name": "post_slack_message",
+                "arguments_json": canonical_arguments(_ARGUMENTS),
+                "execute_at": "2030-01-02T09:00:00-05:00",
+                "description": "Morning DM",
+            },
+            ToolCallContext(run_id="run", session_id="session", call_id="call-1"),
+            middleware=agent_tool_middleware(build),
+        )
+
+    [binding] = request.await_args.args
+    assert binding.toolkit_name == configured[0]
+    assert configured_slack_pair == {_TOOLKIT: [], _MIRRORED_TOOLKIT: []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configured", "expected", "stored_toolkit_runs", "outcome"),
+    [
+        ((_TOOLKIT, _MIRRORED_TOOLKIT), "sent", [_ARGUMENTS], "completed"),
+        (
+            (_MIRRORED_TOOLKIT, _TOOLKIT),
+            f"❌ Scheduled call `{_TASK}` did not run: "
+            "`post_slack_message` now comes from another toolkit than the one the call was stored for.",
+            [],
+            None,
+        ),
+    ],
+    ids=["stored-toolkit-first", "stored-toolkit-shadowed"],
+)
+async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_name(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_slack_pair: dict[str, list[dict[str, object]]],
+    configured: tuple[str, str],
+    expected: str,
+    stored_toolkit_runs: list[dict[str, object]],
+    outcome: str | None,
+) -> None:
+    """A stored call runs the function the model's own call of its name runs, and only when its toolkit offers it.
+
+    When another toolkit configured earlier shadows the stored toolkit's function, the call is refused unspent.
+    """
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    config = _code_config()
+    config.agents[_AGENT].tools = list(configured)
+    build = _agent_build(config, monkeypatch)
+    try:
+        await _armed(manager)
+
+        result = await _run_in_build(manager, build, config)
+
+        assert result == expected
+        assert configured_slack_pair == {_TOOLKIT: stored_toolkit_runs, _MIRRORED_TOOLKIT: []}
+        assert await _binding_column(journal, "outcome") == outcome
+        assert (await _binding_column(journal, "consumed_at_ns") is None) == (outcome is None)
+
+        # The model's own call of the name runs the first configured toolkit's function.
+        with tool_runtime_context(_turn_context(config)):
+            await run_tool_call(
+                prepare_run_tools(build.spec).functions["post_slack_message"],
+                _OTHER_ARGUMENTS,
+                ToolCallContext(run_id="run", session_id="session", call_id="call-2"),
+                middleware=agent_tool_middleware(build),
+            )
+
+        assert configured_slack_pair[configured[0]][-1] == _OTHER_ARGUMENTS
+        assert _OTHER_ARGUMENTS not in configured_slack_pair[configured[1]]
     finally:
         await manager.shutdown()
 
@@ -2022,7 +2273,7 @@ async def test_unapproved_call_offers_the_ordinary_way_only_once_its_time_has_co
         ("none", _THREAD, "own conversation turn"),
         ("live", "$other-thread", "another agent, conversation, or requester"),
         ("without-tool", _THREAD, "not one of this agent's tools"),
-        ("other-toolkit", _THREAD, "not one of this agent's tools"),
+        ("other-toolkit", _THREAD, "now comes from another toolkit than the one the call was stored for"),
     ],
     ids=["no-live-agent", "other-thread", "tool-gone", "same-name-other-toolkit"],
 )
@@ -2039,7 +2290,7 @@ async def test_call_that_cannot_run_here_spends_nothing(
     agent = {
         "none": None,
         "live": _live_agent(),
-        "without-tool": Agent(id="general", model=OpenAIChat(), tools=[]),
+        "without-tool": _LiveRun(()),
         "other-toolkit": _live_agent(toolkit_name="other_slack"),
     }[agent_kind]
     try:
@@ -2054,17 +2305,64 @@ async def test_call_that_cannot_run_here_spends_nothing(
         await manager.shutdown()
 
 
+class _MediaSlackTools(_SlackTools):
+    """The recording Slack toolkit whose one function also takes the run's images."""
+
+    def post_slack_message(self, channel: str, text: str = "", images: Sequence[Image] | None = None) -> object:
+        """Post a Slack message with the run's images.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+            images: The run's images, which the model never supplies.
+
+        """
+        del images
+        return super().post_slack_message(channel, text)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("outcome", "message"),
-    [(RuntimeError("slack is down"), "slack is down"), (iter(["streamed"]), "streams its result")],
-    ids=["tool-error", "streaming-result"],
+    "needs",
+    ["external-execution", "stop-after-tool-call", "media", "media-behind-output-files"],
 )
+async def test_call_that_needs_live_input_is_refused_before_spending_its_approval(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    needs: str,
+) -> None:
+    """A stored call whose function runs elsewhere, ends the turn, or takes the run's media runs nothing, unspent.
+
+    The output-file wrapper forges the function's signature, and the media parameter still shows through it.
+    """
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    toolkit = _MediaSlackTools(runs) if needs.startswith("media") else _SlackTools(runs)
+    if needs == "media-behind-output-files":
+        wrap_toolkit_for_output_files(toolkit, ToolOutputFilePolicy(workspace_root=tmp_path))
+    agent = _live_agent(
+        toolkit=toolkit,
+        external_execution=needs == "external-execution",
+        stop_after_tool_call=needs == "stop-after-tool-call",
+    )
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, agent)
+
+        assert isinstance(result, str)
+        assert "needs live input or conversation control" in result
+        assert runs == []
+        assert await _binding_column(journal, "consumed_at_ns") is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_failed_call_spends_its_approval_and_records_the_failure(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
-    outcome: object,
-    message: str,
 ) -> None:
     """A claimed call that fails is never retried; its outcome and reason are reported."""
     journal = journal_database()
@@ -2072,10 +2370,10 @@ async def test_failed_call_spends_its_approval_and_records_the_failure(
     try:
         await _armed(manager)
 
-        result = await _run(manager, _live_agent(outcome=outcome))
+        result = await _run(manager, _live_agent(outcome=RuntimeError("slack is down")))
 
         assert isinstance(result, str)
-        assert message in result
+        assert "failed: slack is down" in result
         assert await _binding_column(journal, "outcome") == "failed"
         assert await _claim(manager) == "used"
     finally:
@@ -2090,33 +2388,17 @@ def test_only_the_built_in_scheduled_call_runner_skips_approval_gating() -> None
         """Plugin function that shares the runner's name."""
         return "plugin"
 
-    scheduler = apply_tool_approval_capability(
-        SchedulerTools(),
-        config,
-        supports_native_tool_approval=True,
-        registered_tool_name="scheduler",
-    )
-    plugin = apply_tool_approval_capability(
-        Toolkit(name="plugin", tools=[run_scheduled_call]),
-        config,
-        supports_native_tool_approval=True,
-        registered_tool_name="plugin",
-    )
+    scheduler = gated_functions(SchedulerTools(), config, registered_tool_name="scheduler")
+    plugin = gated_functions(Toolkit(name="plugin", tools=[run_scheduled_call]), config, registered_tool_name="plugin")
 
-    assert scheduler is not None
-    assert plugin is not None
-    assert scheduler.async_functions["run_scheduled_call"].requires_confirmation is not True
-    assert scheduler.async_functions["schedule_tool_call"].requires_confirmation is True
-    assert plugin.functions["run_scheduled_call"].requires_confirmation is True
+    assert scheduler["run_scheduled_call"].requires_confirmation is not True
+    assert scheduler["schedule_tool_call"].requires_confirmation is True
+    assert plugin["run_scheduled_call"].requires_confirmation is True
 
 
 def test_scheduler_tools_expose_their_arguments_to_the_model() -> None:
-    """The model sees each tool's real parameters, never the runtime-supplied agent or run context."""
-    agent = Agent(id="general", model=OpenAIChat(), tools=[SchedulerTools()])
-    prepared = {
-        function.name: function
-        for function in parse_tools(agent, tools=[SchedulerTools()], model=agent.model, async_mode=True)
-    }
+    """The model sees each tool's real parameters and nothing else."""
+    prepared = {function.name: function for function in adapt_toolkit(SchedulerTools()).functions}
 
     schedule = prepared["schedule_tool_call"].parameters
     run = prepared["run_scheduled_call"].parameters
@@ -2227,7 +2509,9 @@ async def test_editing_a_pre_approved_task_through_chat_is_refused_before_parsin
     context.client.room_put_state.assert_not_awaited()
 
 
-class _StreamingTools(Toolkit):
+class _StreamingSlackTools(Toolkit):
+    """A configured Slack toolkit whose function streams its result in two parts."""
+
     def __init__(self) -> None:
         super().__init__(name="slack", tools=[self.post_slack_message])
 
@@ -2239,60 +2523,88 @@ class _StreamingTools(Toolkit):
             text: Message text.
 
         """
-        yield f"{channel}: {text}"
+        yield f"{channel}: "
+        yield text
+
+
+class _AsyncStreamingSlackTools(Toolkit):
+    """The streaming Slack toolkit with an asynchronous generator for its function."""
+
+    def __init__(self) -> None:
+        super().__init__(name="slack", tools=[self.post_slack_message])
+
+    async def post_slack_message(self, channel: str, text: str = "") -> AsyncIterator[str]:
+        """Stream a Slack message.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+
+        """
+        yield f"{channel}: "
+        await asyncio.sleep(0)
+        yield text
 
 
 @pytest.mark.asyncio
-async def test_streaming_tool_is_refused_before_its_approval_is_spent(
+@pytest.mark.parametrize(
+    "toolkit_class",
+    [_StreamingSlackTools, _AsyncStreamingSlackTools],
+    ids=["generator", "async-generator"],
+)
+@pytest.mark.parametrize("workspace", [False, True], ids=["no-workspace", "workspace"])
+async def test_a_streaming_tool_runs_to_the_end_of_its_stream(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    toolkit_class: type[Toolkit],
+    workspace: bool,
 ) -> None:
-    """A tool whose body only runs when its stream is read cannot run as a scheduled call, and spends nothing."""
+    """A tool that streams its result runs as a scheduled call through the agent's build and returns the whole stream.
+
+    An agent with a workspace runs it behind the output-file wrapper, which hands the stream on undrained.
+    """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
-    toolkit = _StreamingTools()
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = _TOOLKIT
-    try:
-        await _armed(manager)
+    config = _code_config()
+    config.agents[_AGENT].tools = [_TOOLKIT]
+    if workspace:
+        config.agents[_AGENT].memory_backend = "file"
+    with registered_toolkit(_TOOLKIT, toolkit_class):
+        build = _agent_build(config, monkeypatch)
+        parameters = prepare_run_tools(build.spec).functions["post_slack_message"].parameters
+        assert ("mindroom_output_path" in parameters["properties"]) is workspace
+        try:
+            await _armed(manager)
 
-        result = await _run(manager, Agent(id="general", model=OpenAIChat(), tools=[toolkit]))
+            result = await _run_in_build(manager, build, config)
 
-        assert isinstance(result, str)
-        assert "streams its result" in result
-        assert await _binding_column(journal, "consumed_at_ns") is None
-    finally:
-        await manager.shutdown()
+            assert result == "U123: Good morning!"
+            assert await _binding_column(journal, "outcome") == "completed"
+        finally:
+            await manager.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_streaming_tool_behind_its_output_wrapper_is_refused_before_spending(
-    journal_database: Callable[[], EventJournalStore],
-    tmp_path: Path,
-) -> None:
-    """The output-file wrapper every workspace toolkit gets does not hide a streaming body."""
-    journal = journal_database()
-    manager = _manager(journal, tmp_path, [])
-    toolkit = wrap_toolkit_for_output_files(_StreamingTools(), ToolOutputFilePolicy(workspace_root=tmp_path))
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = _TOOLKIT
-    try:
-        await _armed(manager)
-
-        result = await _run(manager, Agent(id="general", model=OpenAIChat(), tools=[toolkit]))
-
-        assert isinstance(result, str)
-        assert "streams its result" in result
-        assert await _binding_column(journal, "consumed_at_ns") is None
-    finally:
-        await manager.shutdown()
-
-
-def test_scheduler_functions_are_never_scheduled_calls() -> None:
+async def test_scheduler_functions_are_never_scheduled_calls() -> None:
     """The runner and the scheduler cannot be stored as the call a schedule runs later."""
-    agent = Agent(id="general", model=OpenAIChat(), tools=[SchedulerTools(), _SlackTools([])])
+    context = _tool_context(_gated_config())
 
-    for tool_name in ("run_scheduled_call", "schedule_tool_call"):
-        result = prepare_scheduled_call(agent, tool_name, '{"task_id": "abc"}')
-        assert isinstance(result, str)
-        assert "not one of this agent's tools" in result
+    with tool_runtime_context(context), _responders(context.config, "general"):
+        for tool_name in ("run_scheduled_call", "schedule_tool_call"):
+            with pytest.raises(RuntimeError, match="not one of this agent's tools"):
+                await _live_agent().call(
+                    "schedule_tool_call",
+                    tool_name=tool_name,
+                    arguments_json='{"task_id": "abc"}',
+                    execute_at="2030-01-02T09:00:00-05:00",
+                    description="Run the runner",
+                )
+
+
+def test_outside_an_agent_run_no_call_can_be_stored() -> None:
+    """Without an agent run's functions bound, scheduling finds no tool to store."""
+    result = prepare_scheduled_call("post_slack_message", '{"channel": "U1"}')
+
+    assert isinstance(result, str)
+    assert "not one of this agent's tools" in result

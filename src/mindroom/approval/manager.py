@@ -45,7 +45,6 @@ from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_fail
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
-    from pathlib import Path
 
     from mindroom.approval.recovery import ApprovalRecovery
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
@@ -762,16 +761,10 @@ class ApprovalManager:
                 await before_consume()
             self._ensure_deadline_sweep()
             return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
-        transport_sender = None if self.transport_sender is None else self.transport_sender()
-        pending = (
-            None
-            if transport_sender is None
-            else self._trusted_pending_from_card_event(
-                stored.card,
-                room_id=room_id,
-                transport_sender=transport_sender,
-                expected_card_event_id=card_event_id,
-            )
+        pending = self._trusted_pending_from_card_event(
+            stored.card,
+            room_id=room_id,
+            expected_card_event_id=card_event_id,
         )
         if (
             pending is None
@@ -1073,16 +1066,10 @@ class ApprovalManager:
             if recorded.recorded and recorded.continuation_ready:
                 await self._wake_continuation(recorded)
             return False
-        transport_sender = None if self.transport_sender is None else self.transport_sender()
-        pending = (
-            None
-            if transport_sender is None
-            else self._trusted_pending_from_card_event(
-                stored.card,
-                room_id=room_id,
-                transport_sender=transport_sender,
-                expected_card_event_id=stored.card_event_id,
-            )
+        pending = self._trusted_pending_from_card_event(
+            stored.card,
+            room_id=room_id,
+            expected_card_event_id=stored.card_event_id,
         )
         if pending is None:
             return False
@@ -1210,10 +1197,6 @@ class ApprovalManager:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    def _uses_storage_root(self, storage_root: Path) -> bool:
-        """Check whether a runtime rebind belongs to this store."""
-        return self.runtime_paths.storage_root == storage_root
-
     def _has_live_work(self) -> bool:
         """Report decisions currently committing in this process."""
         with self._live_lock:
@@ -1234,14 +1217,17 @@ class ApprovalManager:
             with self._live_lock:
                 self._resolving_card_event_ids.discard(card_event_id)
 
-    @staticmethod
     def _trusted_pending_from_card_event(
+        self,
         card_event: dict[str, Any],
         *,
         room_id: str,
-        transport_sender: str,
         expected_card_event_id: str,
     ) -> PendingApproval | None:
+        """Return the still-pending card this process's transport account sent, or None without one."""
+        transport_sender = None if self.transport_sender is None else self.transport_sender()
+        if transport_sender is None:
+            return None
         event = dict(card_event)
         event.setdefault("sender", transport_sender)
         try:
@@ -1250,7 +1236,7 @@ class ApprovalManager:
             return None
         if pending.card_event_id != expected_card_event_id or pending.card_sender_id != transport_sender:
             return None
-        return pending if pending.latest_status(None) == "pending" else None
+        return pending if pending.initial_status == "pending" else None
 
     @staticmethod
     def _pending_event_content(
@@ -1327,7 +1313,7 @@ def initialize_approval_store(
 ) -> ApprovalManager:
     """Initialize the module-level approval domain for one runtime context."""
     global _MANAGER
-    if _MANAGER is not None and _MANAGER._uses_storage_root(runtime_paths.storage_root):
+    if _MANAGER is not None and _MANAGER.runtime_paths.storage_root == runtime_paths.storage_root:
         _MANAGER._configure_transport(
             prepare_event=prepare_event,
             send_delivery=send_delivery,

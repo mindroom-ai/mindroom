@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.tools import Toolkit
-from agno.tools.function import FunctionCall
 
 import mindroom.custom_tools.chat_ui as chat_ui_module
 import mindroom.tools  # noqa: F401
+from mindroom import agents
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -20,17 +21,23 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import computer_announcement
 from mindroom.custom_tools.browser import BrowserTools
-from mindroom.custom_tools.computer_announcement import attach_computer_announcement
+from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.chat_ui_contract_fixture import make_chat_ui_context
 from tests.conftest import bind_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.invocation import ToolMiddleware
 
 
 @pytest.fixture
@@ -53,6 +60,7 @@ def _agent(
     *,
     backend: str = "docker",
     computer: bool = True,
+    deferred: bool = False,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -64,7 +72,7 @@ def _agent(
         agents={
             "researcher": AgentConfig(
                 display_name="Researcher",
-                tools=tools,
+                tools=[{tool: {"defer": True}} if deferred and tool in browsers else tool for tool in tools],
                 worker_tools=browsers,
                 worker_scope="user_agent",
             ),
@@ -74,8 +82,8 @@ def _agent(
     return config, runtime_paths
 
 
-def _attach(toolkit: Toolkit, tool_name: str, config: Config, runtime_paths: RuntimePaths) -> Toolkit:
-    return attach_computer_announcement(
+def _middleware(toolkit: Toolkit, tool_name: str, config: Config, runtime_paths: RuntimePaths) -> ToolMiddleware | None:
+    return computer_announcement_middleware(
         toolkit,
         tool_name,
         agent_name="researcher",
@@ -111,22 +119,36 @@ def _real_browser(runtime_paths: RuntimePaths, events: list[str], *, default_tar
     return toolkit
 
 
-async def _call(toolkit: Toolkit, function_name: str, **arguments: object) -> object:
-    execution = await FunctionCall(
-        function=toolkit.get_async_functions()[function_name],
-        arguments=arguments,
-    ).aexecute()
-    assert execution.status == "success", execution.error
-    return execution.result
+async def _call(
+    toolkit: Toolkit,
+    function_name: str,
+    middleware: Sequence[ToolMiddleware | None],
+    **arguments: object,
+) -> object:
+    """Run one call of the toolkit through the loop's tool executor and the given middleware chain."""
+    function = next(function for function in adapt_toolkit(toolkit).functions if function.name == function_name)
+    outcome = await execute_tool_call(
+        function,
+        arguments,
+        ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
+        middleware=[item for item in middleware if item is not None],
+    )
+    assert not outcome.is_error, outcome.content
+    return outcome.content
 
 
 @pytest.mark.asyncio
 async def test_browser_call_announces_then_runs(tmp_path: Path, announce: AsyncMock, events: list[str]) -> None:
     """A worker browser call announces the computer first and returns the browser's own result."""
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
-    toolkit = _attach(_fake_browser(events), "browser", config, runtime_paths)
+    toolkit = _fake_browser(events)
 
-    result = await _call(toolkit, "browser_control", action="open")
+    result = await _call(
+        toolkit,
+        "browser_control",
+        [_middleware(toolkit, "browser", config, runtime_paths)],
+        action="open",
+    )
 
     assert result == "open done"
     announce.assert_awaited_once_with()
@@ -152,14 +174,10 @@ async def test_browser_call_announces_only_when_it_runs_on_the_worker(
 ) -> None:
     """Calls that drive the user's desktop browser, explicitly or by default, do not announce the computer."""
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
-    toolkit = _attach(
-        _real_browser(runtime_paths, events, default_target=default_target),
-        "browser",
-        config,
-        runtime_paths,
-    )
+    toolkit = _real_browser(runtime_paths, events, default_target=default_target)
+    middleware = _middleware(toolkit, "browser", config, runtime_paths)
 
-    assert await _call(toolkit, "browser_control", **arguments) == "browsed"
+    assert await _call(toolkit, "browser_control", [middleware], **arguments) == "browsed"
 
     assert announce.await_count == int(announced)
 
@@ -174,12 +192,13 @@ async def test_reference_actions_do_not_announce(
 ) -> None:
     """Help and actions only return reference data, so the first real browser call still announces."""
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
-    toolkit = _attach(_real_browser(runtime_paths, events, default_target="host"), "browser", config, runtime_paths)
+    toolkit = _real_browser(runtime_paths, events, default_target="host")
+    middleware = _middleware(toolkit, "browser", config, runtime_paths)
 
-    assert await _call(toolkit, "browser_control", action=action) == "browsed"
+    assert await _call(toolkit, "browser_control", [middleware], action=action) == "browsed"
     announce.assert_not_awaited()
 
-    assert await _call(toolkit, "browser_control", action="open") == "browsed"
+    assert await _call(toolkit, "browser_control", [middleware], action="open") == "browsed"
     announce.assert_awaited_once_with()
 
 
@@ -199,15 +218,11 @@ async def test_browser_mcp_functions_announce(tmp_path: Path, events: list[str])
         events.append("snapshot")
         return "snapshot"
 
-    toolkit = _attach(
-        Toolkit(name="browser_mcp", tools=[browser_navigate, browser_snapshot]),
-        "browser_mcp",
-        config,
-        runtime_paths,
-    )
+    toolkit = Toolkit(name="browser_mcp", tools=[browser_navigate, browser_snapshot])
+    middleware = _middleware(toolkit, "browser_mcp", config, runtime_paths)
 
-    assert await _call(toolkit, "browser_navigate", url="https://example.org") == "navigated"
-    assert await _call(toolkit, "browser_snapshot") == "snapshot"
+    assert await _call(toolkit, "browser_navigate", [middleware], url="https://example.org") == "navigated"
+    assert await _call(toolkit, "browser_snapshot", [middleware]) == "snapshot"
 
     assert events == ["announced", "navigate https://example.org", "announced", "snapshot"]
 
@@ -221,17 +236,18 @@ async def test_team_member_browser_call_does_not_announce_the_response_owners_co
     """A member's browser runs under the response owner's context, and a notice would name the owner."""
     monkeypatch.setattr(chat_ui_module, "_SHOWN_COMPUTERS", {})
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
-    toolkit = _attach(_fake_browser(events), "browser", config, runtime_paths)
+    toolkit = _fake_browser(events)
+    middleware = _middleware(toolkit, "browser", config, runtime_paths)
     owner = make_chat_ui_context(tmp_path / "owner", agent_name="general")
     member = make_chat_ui_context(tmp_path / "member", agent_name="researcher")
     assert owner.client.user_id != member.client.user_id
 
     with tool_runtime_context(owner):
-        assert await _call(toolkit, "browser_control", action="open") == "open done"
+        assert await _call(toolkit, "browser_control", [middleware], action="open") == "open done"
     owner.client.room_send.assert_not_awaited()
 
     with tool_runtime_context(member):
-        assert await _call(toolkit, "browser_control", action="open") == "open done"
+        assert await _call(toolkit, "browser_control", [middleware], action="open") == "open done"
     member.client.room_send.assert_awaited_once()
     assert events == ["open on default", "open on default"]
 
@@ -248,9 +264,12 @@ async def test_announcement_failure_still_runs_the_browser_call(
     logger = MagicMock()
     monkeypatch.setattr(computer_announcement, "logger", logger)
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
-    toolkit = _attach(_fake_browser(events), "browser", config, runtime_paths)
+    toolkit = _fake_browser(events)
 
-    assert await _call(toolkit, "browser_control", action="open") == "open done"
+    assert (
+        await _call(toolkit, "browser_control", [_middleware(toolkit, "browser", config, runtime_paths)], action="open")
+        == "open done"
+    )
 
     assert events == ["open on default"]
     logger.warning.assert_called_once()
@@ -267,7 +286,7 @@ async def test_announcement_failure_still_runs_the_browser_call(
     ],
     ids=["without-chat-ui", "without-computer", "computer-disabled", "not-the-computer-browser", "other-tool"],
 )
-def test_toolkit_unchanged_without_chat_ui_or_computer_or_for_other_tools(
+def test_no_middleware_without_chat_ui_or_computer_or_for_other_tools(
     tmp_path: Path,
     events: list[str],
     tools: list[str],
@@ -277,23 +296,17 @@ def test_toolkit_unchanged_without_chat_ui_or_computer_or_for_other_tools(
 ) -> None:
     """Only the browser tool that gives a chat_ui agent its worker computer announces it."""
     config, runtime_paths = _agent(tmp_path, tools, backend=backend, computer=computer)
-    toolkit = _fake_browser(events)
-    function = toolkit.async_functions["browser_control"]
-    existing_hook = MagicMock()
-    function.tool_hooks = [existing_hook]
 
-    assert _attach(toolkit, tool_name, config, runtime_paths) is toolkit
-
-    assert function.tool_hooks == [existing_hook]
+    assert _middleware(_fake_browser(events), tool_name, config, runtime_paths) is None
 
 
 @pytest.mark.asyncio
-async def test_announcement_hook_runs_inside_the_tool_hook_bridge(
+async def test_announcement_runs_inside_the_tool_hook_policy(
     tmp_path: Path,
     announce: AsyncMock,
     events: list[str],
 ) -> None:
-    """The announcement is the innermost hook, so a call a plugin declines announces nothing."""
+    """The announcement is the innermost policy, so a call a plugin declines announces nothing."""
 
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def decline(ctx: ToolBeforeCallContext) -> None:
@@ -306,18 +319,17 @@ async def test_announcement_hook_runs_inside_the_tool_hook_bridge(
         entry_config=PluginEntryConfig(path="./plugins/policy", settings={}),
         plugin_order=0,
     )
-    bridge = build_tool_hook_bridge(HookRegistry.from_plugins([plugin]), agent_name="researcher")
+    bridge = build_tool_hook_middleware(HookRegistry.from_plugins([plugin]), agent_name="researcher")
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
-    toolkit = prepend_tool_hook_bridge(_fake_browser(events), bridge)
-    function = toolkit.async_functions["browser_control"]
-    bridge_hooks = list(function.tool_hooks)
+    toolkit = _fake_browser(events)
 
-    _attach(toolkit, "browser", config, runtime_paths)
-
-    assert len(function.tool_hooks) == len(bridge_hooks) + 1
-    assert function.tool_hooks[:-1] == bridge_hooks
     with tool_runtime_context(make_chat_ui_context(tmp_path / "chat")):
-        result = await _call(toolkit, "browser_control", action="open")
+        result = await _call(
+            toolkit,
+            "browser_control",
+            [bridge, _middleware(toolkit, "browser", config, runtime_paths)],
+            action="open",
+        )
 
     assert "browsing is paused" in str(result)
     announce.assert_not_awaited()
@@ -327,16 +339,57 @@ async def test_announcement_hook_runs_inside_the_tool_hook_bridge(
 @pytest.mark.parametrize(("tools", "announces"), [(["browser", "chat_ui"], True), (["browser"], False)])
 def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     tools: list[str],
     announces: bool,
 ) -> None:
-    """create_agent gives a chat_ui agent's worker browser the announcement as its innermost hook, and no other agent."""
+    """create_agent gives a chat_ui agent's worker browser functions the announcement as their own policy, alone."""
     config, runtime_paths = _agent(tmp_path, tools)
     config = bind_runtime_paths(config, runtime_paths)
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
 
-    agent = create_agent("researcher", config, runtime_paths, execution_identity=None)
+    build = create_agent("researcher", config, runtime_paths, execution_identity=None)
 
-    browser = next(tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and tool.name == "browser")
-    hooks = browser.async_functions["browser_control"].tool_hooks or []
-    assert (hooks[-1].__name__ == "announce_computer") is announces
-    assert sum(hook.__name__ == "announce_computer" for hook in hooks) == int(announces)
+    assert [middleware.__name__ for middleware in build.tool_policy] == ["bind_live_functions", "middleware"]
+    carried = {
+        function.name: [middleware.__name__ for middleware in function.middleware]
+        for toolkit in build.spec.toolkits
+        for function in toolkit.functions
+    }
+    assert carried["browser_control"] == (["announce_computer"] if announces else [])
+    assert sum(names.count("announce_computer") for names in carried.values()) == int(announces)
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_browser_a_minimal_turn_builds_later_announces_the_computer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    announce: AsyncMock,
+    events: list[str],
+) -> None:
+    """A minimal turn builds a deferred browser when the agent first calls it, after the agent's policy was built.
+
+    Its calls still announce the computer, through the agent's policy as the CLI catalog runs them.
+    """
+    config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"], deferred=True)
+    config = bind_runtime_paths(config, runtime_paths)
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    build = create_agent("researcher", config, runtime_paths, execution_identity=None, agent_mode="minimal")
+    [deferred] = build.surface.deferred
+    assert deferred.name == "browser"
+
+    [function] = (await deferred.materialize()).functions
+
+    async def body(**arguments: object) -> str:
+        events.append(f"{arguments['action']} on {arguments.get('target') or 'default'}")
+        return "browsed"
+
+    outcome = await execute_tool_call(
+        replace(function, entrypoint=body),
+        {"action": "open", "target": "host"},
+        ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
+        middleware=agent_tool_middleware(build),
+    )
+    assert not outcome.is_error, outcome.content
+    announce.assert_awaited_once_with()
+    assert events == ["announced", "open on host"]

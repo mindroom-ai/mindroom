@@ -12,7 +12,7 @@ from weakref import WeakKeyDictionary
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from agno.tools import Toolkit
+    from mindroom.tool_system.agno_toolkits import Toolkit
 
 
 def tool_config_signature(overrides: Mapping[str, object] | None) -> str:

@@ -6,12 +6,6 @@ import time
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-from agno.models.message import Message
-from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
-
 from mindroom.automations import exploration
 from mindroom.automations.exploration import _collect_leads, check_exploration
 from mindroom.automations.steps import Ask, AutomationContext, Done
@@ -19,7 +13,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, resolve_runtime_paths
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
@@ -82,7 +79,7 @@ def _seed(
     metadata: dict[str, object] = {"room_id": "!room:x", "thread_id": session_id.rsplit(":", 1)[-1]}
     if hook_source is not None:
         metadata[HOOK_SOURCE_RUN_METADATA_KEY] = hook_source
-    run = RunOutput(
+    run = RunRecord(
         run_id=f"run-{session_id}",
         session_id=session_id,
         agent_id="mind",
@@ -93,16 +90,13 @@ def _seed(
         tools=tools,
     )
     storage = create_session_storage("mind", config, paths, execution_identity=None)
-    try:
-        seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=[run]))
-        # The conversation was last active when its turn was made, unless a later reply updated it.
-        with storage.db_engine.begin() as connection:
-            connection.exec_driver_sql(
-                f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-                (updated_at or created_at, session_id),
-            )
-    finally:
-        storage.close()
+    seed_session(storage, ConversationSession(kind="agent", session_id=session_id, owner_id="mind", runs=[run]))
+    # The conversation was last active when its turn was made, unless a later reply updated it.
+    with storage.transaction(write=True) as connection:
+        connection.execute(
+            f"UPDATE {storage.names.sessions} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+            (updated_at or created_at, session_id),
+        )
 
 
 def _finish(ask: Ask | None, config: Config) -> None:
@@ -286,7 +280,7 @@ def test_an_unreadable_conversation_does_not_stop_exploration(tmp_path: Path) ->
     _seed(config, paths, "!room:x:$good", [_tool("get_repository", repo="acme/atlas")], created_at=200)
     real = exploration.session_runs
 
-    def runs(storage: object, session_id: str) -> list[RunOutput]:
+    def runs(storage: object, session_id: str) -> list[RunRecord]:
         if session_id == "!room:x:$bad":
             msg = "corrupt session row"
             raise ValueError(msg)

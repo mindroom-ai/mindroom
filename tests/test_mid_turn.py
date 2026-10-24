@@ -8,38 +8,112 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 import pytest
-from agno.agent import Agent
-from agno.media import Image
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.tools.function import Function, ToolResult
+from agno.media import Image as AgnoImage
+from agno.tools.function import ToolResult
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
+from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.run import resume_agent, run_agent
+from mindroom.ai_runtime import (
+    queued_message_signal_context,
+    queued_notice_after_tool_batch,
+    queued_notice_on_resume_entry,
+)
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.history.request_messages import build_resume_request
+from mindroom.judgment import llm as judgment_llm
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
 from mindroom.judgment.typesafe import _PINNED_MODEL
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
-from mindroom.providers import model_loading
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from tests.agent_loop.helpers import collect, context, external, gated, spec, toolkit
 from tests.conftest import make_visible_message, request_envelope, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
-from tests.participation_helpers import ParticipationModel
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     from mindroom.judgment.state import JudgmentRequest
+    from mindroom.tool_system.tool_function import AdaptedToolkit
+
+_NOTICE = "WRAP UP NOW"
+_NOTICE_HOOKS = LoopHooks(
+    after_tool_batch=(queued_notice_after_tool_batch(_NOTICE),),
+    on_resume_entry=(queued_notice_on_resume_entry(_NOTICE),),
+)
+
+
+def _has_notice(messages: list[Message] | tuple[Message, ...]) -> bool:
+    return any(message.content == _NOTICE for message in messages)
+
+
+class _ResumedRequests:
+    """Resumed requests as the queued-notice resume hook leaves them for the provider."""
+
+    def __init__(self) -> None:
+        self.sent: list[list[Message]] = []
+        self._hook = queued_notice_on_resume_entry(_NOTICE)
+
+    async def send(self, messages: list[Message] | None = None) -> list[Message]:
+        request = messages if messages is not None else _resumed_messages()
+        await self._hook(request, ())
+        self.sent.append(request)
+        return request
+
+
+async def _run_turn(
+    model: ScriptedModel,
+    *toolkits: AdaptedToolkit,
+    stream: bool,
+    persist: Callable[[RunRecord], Awaitable[None]] | None = None,
+) -> RunRecord:
+    """Run one turn of "Do the task" on the owned loop with the queued-notice hooks a reply installs."""
+    _, record = await collect(
+        run_agent(
+            spec(model, *toolkits),
+            [Message(role="user", content="Do the task")],
+            ctx=context(),
+            hooks=_NOTICE_HOOKS,
+            persist=persist,
+            request_template=ModelRequest(messages=(), stream=stream),
+        ),
+    )
+    return record
+
+
+async def _resume_turn(
+    model: ScriptedModel,
+    paused: RunRecord,
+    *toolkits: AdaptedToolkit,
+    external_results: Mapping[str, str],
+) -> RunRecord:
+    """Resume a paused turn with the results of its externally executed calls."""
+    _, record = await collect(
+        resume_agent(
+            spec(model, *toolkits),
+            paused,
+            build_resume_request(paused=paused.messages, summary=None, history=[]),
+            external_results=external_results,
+            ctx=context(run_id=paused.run_id),
+            hooks=_NOTICE_HOOKS,
+        ),
+    )
+    return record
 
 
 def _resumed_messages() -> list[Message]:
@@ -185,23 +259,22 @@ async def test_defer_reaction_requires_accepted_current_decision(outcome: str) -
         return outcome != "wrap_up"
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=acknowledge)
-    model = ParticipationModel(ModelResponse(content="Done"))
-    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    resumed = _ResumedRequests()
     with queued_message_signal_context(state, mid_turn_gate=gate):
         if outcome == "cancel":
             with pytest.raises(asyncio.CancelledError):
-                await model.aresponse(_resumed_messages())
+                await resumed.send()
         else:
-            await model.aresponse(_resumed_messages())
-            await model.aresponse(_resumed_messages())
+            await resumed.send()
+            await resumed.send()
             if outcome == "finish":
                 state.add_waiting_human_message("$second", text="No rush")
-                await model.aresponse(_resumed_messages())
+                await resumed.send()
     assert acknowledgements == (
         ["$first", "$second"] if outcome == "finish" else ["$first"] if outcome == "reaction_error" else []
     )
     if outcome == "reaction_error":
-        assert all(not any(message.content == "WRAP UP NOW" for message in call["messages"]) for call in model.requests)
+        assert not any(_has_notice(request) for request in resumed.sent)
     assert state.has_pending_human_messages()
 
 
@@ -228,16 +301,15 @@ async def test_queue_change_during_reaction_still_requests_wrap_up(
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         return True
 
-    model = ParticipationModel(ModelResponse(content="Done"))
-    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    resumed = _ResumedRequests()
     with queued_message_signal_context(
         state,
         mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=acknowledge),
     ) as context:
-        await model.aresponse(_resumed_messages())
+        await resumed.send()
         assert context.notice_fired
     assert acknowledgements == ["$queued0"]
-    assert any(message.content == "WRAP UP NOW" for message in model.requests[0]["messages"])
+    assert _has_notice(resumed.sent[0])
 
 
 @pytest.mark.asyncio
@@ -473,6 +545,7 @@ async def test_real_tool_loop_judges_before_next_provider_request(
     evidence: list[dict] = []
 
     def queue_followup() -> str:
+        """Queue a follow-up while the turn works."""
         gate.record_visible_response(
             "Work started.\n🔧 `queue_followup` [1]",
             (ToolTraceEntry(type="tool_call_started", tool_name="queue_followup"),),
@@ -487,31 +560,16 @@ async def test_real_tool_loop_judges_before_next_provider_request(
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
     state.mid_turn_gate = gate
-    model = ParticipationModel(
-        ModelResponse(
-            tool_calls=[
-                {"id": "call_1", "type": "function", "function": {"name": "queue_followup", "arguments": "{}"}},
-            ],
-        ),
-    )
-    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
-    function = Function.from_callable(queue_followup)
-    function.stop_after_tool_call = terminal
-    agent = Agent(model=model, tools=[function], telemetry=False)
+    model = ScriptedModel([calls(tool_call("queue_followup", "call_1")), answer("Done")])
+    tools = toolkit(queue_followup, stop_after_call=True) if terminal else toolkit(queue_followup)
     with queued_message_signal_context(state, mid_turn_gate=gate) as context:
-        if stream:
-            async for _ in agent.arun("Do the task", stream=True):
-                pass
-        else:
-            await agent.arun("Do the task")
+        await _run_turn(model, tools, stream=stream)
         assert context.notice_fired is (not finish and not terminal)
     assert len(evidence) == (0 if terminal else 1)
     assert "Private tool result" not in json.dumps(evidence)
     assert ("queue_followup" in json.dumps(evidence)) is (not terminal)
     assert len(model.requests) == (1 if terminal else 2)
-    assert any(message.content == "WRAP UP NOW" for message in model.requests[-1]["messages"]) is (
-        not finish and not terminal
-    )
+    assert _has_notice(model.requests[-1].messages) is (not finish and not terminal)
     assert {message.event_id for message in state.pending_message_snapshot()} == {"$new"}
 
 
@@ -526,10 +584,12 @@ async def test_pending_approval_is_not_judged_as_completed_work(*, stream: bool,
     state.add_waiting_human_message("$queued", text="Thanks")
 
     def approved_action() -> str:
+        """Act once approved."""
         executed.append("approved_action")
         return "Done"
 
     def ordinary_action() -> str:
+        """Read something."""
         executed.append("ordinary_action")
         return "Read complete"
 
@@ -538,28 +598,10 @@ async def test_pending_approval_is_not_judged_as_completed_work(*, stream: bool,
         return True
 
     names = ["ordinary_action", "approved_action"] if mixed else ["approved_action"]
-    model = ParticipationModel(
-        ModelResponse(
-            tool_calls=[
-                {"id": name, "type": "function", "function": {"name": name, "arguments": "{}"}} for name in names
-            ],
-        ),
-    )
-    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
-    agent = Agent(
-        model=model,
-        tools=[
-            Function(name="approved_action", entrypoint=approved_action, requires_confirmation=True),
-            ordinary_action,
-        ],
-        telemetry=False,
-    )
+    model = ScriptedModel([calls(*(tool_call(name, name) for name in names))])
     with queued_message_signal_context(state, mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate)):
-        if stream:
-            async for _ in agent.arun("Do the task", stream=True):
-                pass
-        else:
-            await agent.arun("Do the task")
+        record = await _run_turn(model, gated(approved_action), toolkit(ordinary_action), stream=stream)
+    assert record.status == RunStatus.paused
     assert executed == (["ordinary_action"] if mixed else [])
     assert judgments == []
 
@@ -578,11 +620,10 @@ async def test_queue_change_during_judgment_cannot_approve_unseen_input(*, remov
             state.add_waiting_human_message("$correction", text="Use a different version")
         return True
 
-    model = ParticipationModel(ModelResponse(content="Done"))
-    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    resumed = _ResumedRequests()
     with queued_message_signal_context(state, mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate)):
-        await model.aresponse(_resumed_messages())
-    assert any(message.content == "WRAP UP NOW" for message in model.requests[0]["messages"]) is (not remove)
+        await resumed.send()
+    assert _has_notice(resumed.sent[0]) is (not remove)
 
 
 @pytest.mark.asyncio
@@ -596,14 +637,13 @@ async def test_wrap_up_remains_settled_after_later_queue_changes() -> None:
         judged.append(request)
         return len(judged) > 1
 
-    model = ParticipationModel(ModelResponse(content="Done"))
-    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    resumed = _ResumedRequests()
     with queued_message_signal_context(state, mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate)):
-        await model.aresponse(_resumed_messages())
+        await resumed.send()
         state.add_waiting_human_message("$second", text="Thanks")
-        await model.aresponse(_resumed_messages())
+        await resumed.send()
     assert len(judged) == 1
-    assert all(any(message.content == "WRAP UP NOW" for message in call["messages"]) for call in model.requests)
+    assert all(_has_notice(request) for request in resumed.sent)
 
 
 @pytest.mark.asyncio
@@ -621,12 +661,11 @@ async def test_resumed_tools_do_not_expose_invisible_execution_details() -> None
     messages = _resumed_messages()
     messages[-1].tool_call_error = True
     messages[-1].content = "Denied"
-    model = ParticipationModel(ModelResponse(content="Done"))
-    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    resumed = _ResumedRequests()
     with queued_message_signal_context(state, mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate)):
-        await model.aresponse(messages)
+        await resumed.send(messages)
     assert "completed_tools" not in evidence[0]
-    assert any(message.content == "WRAP UP NOW" for message in model.requests[0]["messages"])
+    assert _has_notice(resumed.sent[0])
 
 
 @pytest.mark.asyncio
@@ -657,14 +696,18 @@ async def test_configured_backends_control_resumed_turns(
         ).encode()
 
     monkeypatch.setattr(JudgmentClient, "_post", post)
-    judge = ParticipationModel(
-        TimeoutError()
-        if outcome == "timeout"
-        else ModelResponse(
-            content=("invalid" if outcome == "invalid" else json.dumps({"decision": outcome != "finish"})),
-        ),
+
+    async def time_out() -> None:
+        raise TimeoutError
+
+    judge = ScriptedModel(
+        [
+            [Await(time_out)]
+            if outcome == "timeout"
+            else answer("invalid" if outcome == "invalid" else json.dumps({"decision": outcome != "finish"})),
+        ],
     )
-    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
     settings = {"provider": backend, "timeout_seconds": 0.02}
     if backend == "llm":
         settings["model"] = "cheap"
@@ -685,24 +728,23 @@ async def test_configured_backends_control_resumed_turns(
     assert gate is not None
     state = _QueuedMessageState()
     state.add_waiting_human_message("$new", text="Thanks")
-    model = ParticipationModel(ModelResponse(content="Done"))
-    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    resumed = _ResumedRequests()
     with queued_message_signal_context(state, mid_turn_gate=gate):
-        await model.aresponse(_resumed_messages())
-    assert any(message.content == "WRAP UP NOW" for message in model.requests[0]["messages"]) is (outcome != "finish")
+        await resumed.send()
+    assert _has_notice(resumed.sent[0]) is (outcome != "finish")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, stream: bool, cancel: bool) -> None:
-    """Adding a judgment must not discard durable checkpoints of executed tools."""
+    """Adding a judgment must not discard the stored results of executed tools."""
     state = _QueuedMessageState()
     entered = asyncio.Event()
-    checkpoints: list[list[str]] = []
-    messages = [Message(role="user", content="Do the task")]
+    stored: list[RunRecord] = []
 
     def work() -> str:
+        """Do the work."""
         state.add_waiting_human_message("$new", text="Change the task")
         return "Completed action"
 
@@ -712,32 +754,17 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
             await asyncio.Event().wait()
         return False
 
-    async def checkpoint(_result: ModelResponse) -> None:
-        checkpoints.append([message.get_content_string() for message in messages if message.role in {"tool", "user"}])
+    async def persist(record: RunRecord) -> None:
+        stored.append(record)
 
-    model = ParticipationModel(
-        ModelResponse(
-            tool_calls=[
-                {"id": "call", "type": "function", "function": {"name": "work", "arguments": "{}"}},
-            ],
-        ),
-    )
-    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    model = ScriptedModel([calls(tool_call("work", "call")), answer("Done")])
 
     async def run() -> None:
         with queued_message_signal_context(
             state,
             mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate),
         ):
-            if stream:
-                async for _ in model.aresponse_stream(
-                    messages,
-                    tools=[Function.from_callable(work)],
-                    after_tool_results=checkpoint,
-                ):
-                    pass
-            else:
-                await model.aresponse(messages, tools=[Function.from_callable(work)], after_tool_results=checkpoint)
+            await _run_turn(model, toolkit(work), stream=stream, persist=persist)
 
     task = asyncio.create_task(run())
     await entered.wait()
@@ -747,10 +774,11 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
             await task
     else:
         await task
-    assert len(checkpoints) == 1
-    assert "Completed action" in checkpoints[0]
-    assert ("WRAP UP NOW" in checkpoints[0]) is (not cancel)
+    [record] = stored
+    assert record.status == (RunStatus.cancelled if cancel else RunStatus.completed)
+    assert "Completed action" in [message.get_content_string() for message in record.messages]
     assert len(model.requests) == (1 if cancel else 2)
+    assert _has_notice(model.requests[-1].messages) is (not cancel)
 
 
 @pytest.mark.asyncio
@@ -761,56 +789,90 @@ async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool
     """A delegation paused beside other calls must not request a wrap-up the judge did not ask for."""
     state = _QueuedMessageState()
     judgments: list[JudgmentRequest] = []
-    messages = [Message(role="user", content="Do the task")]
 
     def work() -> ToolResult:
+        """Do the work."""
         state.add_waiting_human_message("$new", text="Thanks")
-        images = [Image(content=b"image", mime_type="image/png")] if media else None
+        images = [AgnoImage(content=b"image", mime_type="image/png")] if media else None
         return ToolResult(content="Completed action", images=images)
 
     def delegate() -> str:
+        """Hand the subtask to a child."""
         return "Child result"
 
     async def evaluate(request: JudgmentRequest) -> bool | None:
         judgments.append(request)
         return not interrupt
 
-    delegation = Function.from_callable(delegate)
-    delegation.external_execution = True
-    tools = [Function.from_callable(work), delegation]
-    model = ParticipationModel(
-        ModelResponse(
-            tool_calls=[
-                {"id": "work", "type": "function", "function": {"name": "work", "arguments": "{}"}},
-                {"id": "child", "type": "function", "function": {"name": "delegate", "arguments": "{}"}},
-            ],
-        ),
-    )
-    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
-
-    async def respond() -> None:
-        if stream:
-            async for _ in model.aresponse_stream(messages, tools=tools):
-                pass
-        else:
-            await model.aresponse(messages, tools=tools)
-
+    tools = (toolkit(work), external(delegate))
+    model = ScriptedModel([calls(tool_call("work", "work"), tool_call("delegate", "child")), answer("Done")])
     with queued_message_signal_context(
         state,
         mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate),
     ):
-        # Agno runs the ordinary call and pauses the delegation for its external driver.
-        await respond()
+        # The loop runs the ordinary call and pauses the delegation for its external driver.
+        paused = await _run_turn(model, *tools, stream=stream)
+        assert paused.status == RunStatus.paused
         assert len(model.requests) == 1
         assert judgments == []
-        assert not any(message.content == "WRAP UP NOW" for message in messages)
-        # Agno moves generated media into a user-role message after the ordinary call's result.
-        assert (messages[-1].role == "user") is media
+        assert not any(_has_notice([message]) for message in paused.messages)
+        # Generated media follow the ordinary call's result as a user-role message.
+        assert (paused.messages[-1].role == "user") is media
         # The driver resumes the run with the child's result, completing the batch for the judge.
-        messages.append(Message(role="tool", content="Child result", tool_call_id="child", tool_name="delegate"))
-        await respond()
+        await _resume_turn(model, paused, *tools, external_results={"child": "Child result"})
     assert len(judgments) == 1
-    assert any(message.content == "WRAP UP NOW" for message in model.requests[-1]["messages"]) is interrupt
+    assert _has_notice(model.requests[-1].messages) is interrupt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["judge", "defer_reaction"])
+@pytest.mark.parametrize("resumed", [False, True])
+async def test_a_failing_judge_or_defer_reaction_costs_no_reply(*, failure: str, resumed: bool) -> None:
+    """A judge that errors wraps the turn up and a defer reaction Matrix refuses is skipped; the reply finishes.
+
+    The judgment runs after a completed tool batch, or, when the batch paused for a delegation, once the resume
+    completes it.
+    """
+    state = _QueuedMessageState()
+    reactions: list[str] = []
+    judgments: list[JudgmentRequest] = []
+
+    def work() -> str:
+        """Do the work."""
+        state.add_waiting_human_message("$new", text="Thanks")
+        return "Completed action"
+
+    def delegate() -> str:
+        """Hand the subtask to a child."""
+        return "Child result"
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judgments.append(request)
+        if failure == "judge":
+            msg = "judgment backend unavailable"
+            raise RuntimeError(msg)
+        return True
+
+    async def react(event_id: str) -> None:
+        reactions.append(event_id)
+        msg = "Matrix unavailable"
+        raise RuntimeError(msg)
+
+    tools = (toolkit(work), external(delegate))
+    batch = (tool_call("work", "work"), *((tool_call("delegate", "child"),) if resumed else ()))
+    model = ScriptedModel([calls(*batch), answer("Done")])
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=react)
+    with queued_message_signal_context(state, mid_turn_gate=gate):
+        record = await _run_turn(model, *tools, stream=False)
+        if resumed:
+            assert record.status == RunStatus.paused
+            record = await _resume_turn(model, record, *tools, external_results={"child": "Child result"})
+    assert record.status == RunStatus.completed
+    assert record.content == "Done"
+    assert len(judgments) == 1
+    assert reactions == ([] if failure == "judge" else ["$new"])
+    # A failed judgment wraps the turn up; a decision to finish stands when only its reaction failed.
+    assert _has_notice(model.requests[-1].messages) is (failure == "judge")
 
 
 @pytest.mark.asyncio

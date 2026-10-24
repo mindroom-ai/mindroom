@@ -1,7 +1,7 @@
 # Skills
 
 Skills are instruction packs: a `SKILL.md` file with optional scripts and reference documents that guide an agent through a task without adding new code capabilities.
-MindRoom uses Agno's skills system with OpenClaw-compatible metadata.
+Skills use OpenClaw-compatible metadata.
 This page covers writing, installing, and allowlisting skills, skills agents keep in their own workspace, and opt-in automatic skill learning.
 
 ## Skill directory structure

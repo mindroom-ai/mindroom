@@ -1,9 +1,10 @@
 """The one writer task a backend's writes queue for, from whichever loop issues them.
 
 Each backend owns one writer connection, so its writes are serialized by one
-task that drains a queue. Agno runs a synchronous tool's hooks on a loop of its
-own, so a write can arrive from a loop that is not the writer's, and its caller
-has to be admitted and woken across that boundary deliberately.
+task that drains a queue. A synchronous tool runs on a worker thread, where code
+that needs a coroutine gives itself a loop with ``asyncio.run``, so a write can
+arrive from a loop that is not the writer's, and its caller has to be admitted
+and woken across that boundary deliberately.
 
 Every commit waits for the disk, and under load the writes queued behind one
 commit outnumber what a commit apiece can keep up with. The task therefore

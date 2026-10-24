@@ -29,7 +29,6 @@ type HistoryContextFormValues = {
   num_history_runs?: number | null;
   num_history_messages?: number | null;
   max_tool_calls_from_history?: number | null;
-  compress_tool_results?: boolean;
   compaction?: CompactionConfig | null;
 };
 
@@ -39,10 +38,7 @@ interface HistoryContextSectionProps<T extends HistoryContextFormValues> {
   /** Where this entity's compaction lives in config.yaml, for validation errors. */
   compactionPath: Array<string | number>;
   defaults?: Config["defaults"];
-  onFieldChange: (
-    fieldName: HistoryFieldName,
-    value: number | boolean | null,
-  ) => void;
+  onFieldChange: (fieldName: HistoryFieldName, value: number | null) => void;
   updateCompaction: (
     nextCompaction: CompactionConfig | null | undefined,
   ) => void;
@@ -61,11 +57,6 @@ interface HistoryContextSectionProps<T extends HistoryContextFormValues> {
   numHistoryMessagesError?: string;
   maxToolCallsFromHistoryError?: string;
   compactionError?: string;
-  compressToolResults?: {
-    defaultValue: boolean;
-    helperText: string;
-    onChange: (value: boolean) => void;
-  };
 }
 
 function parseOptionalInt(raw: string, min: number): number | null {
@@ -113,7 +104,6 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
   numHistoryMessagesError,
   maxToolCallsFromHistoryError,
   compactionError,
-  compressToolResults,
 }: HistoryContextSectionProps<T>) {
   const numHistoryRuns = useWatch({
     name: "num_history_runs" as Path<T>,
@@ -260,41 +250,6 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
             }}
           />
         </FieldGroup>
-
-        {compressToolResults && (
-          <FieldGroup
-            label="Compress Tool Results"
-            helperText={compressToolResults.helperText}
-            htmlFor="compress_tool_results"
-          >
-            <Controller
-              name={"compress_tool_results" as Path<T>}
-              control={control}
-              render={({ field }) => {
-                const fieldValue = field.value as boolean | undefined;
-                return (
-                  <div className="flex items-center gap-2">
-                    <Checkbox
-                      id="compress_tool_results"
-                      checked={fieldValue ?? compressToolResults.defaultValue}
-                      onCheckedChange={(checked) => {
-                        const value = checked === true;
-                        field.onChange(value);
-                        compressToolResults.onChange(value);
-                      }}
-                    />
-                    <label
-                      htmlFor="compress_tool_results"
-                      className="text-sm font-medium cursor-pointer select-none"
-                    >
-                      Compress tool results
-                    </label>
-                  </div>
-                );
-              }}
-            />
-          </FieldGroup>
-        )}
 
         <FieldGroup
           label="Required Compaction"

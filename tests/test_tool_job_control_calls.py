@@ -8,16 +8,12 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.team import Team
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.thread_models import resolve_thread_model_override
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
+from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
@@ -25,20 +21,21 @@ from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.turn_continuation import continuation_decision_from_tools
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, tool_job_runtime
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, job_actor, run_job_turn, tool_job_runtime, toolkit_job_tools
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
+
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("team", [False, True])
 @pytest.mark.parametrize("when", ["next-turn", "after-toolcall"])
 @pytest.mark.parametrize("background_after", [None, 0, 0.001])
 async def test_model_control_preserves_timing_across_human_followup(  # noqa: PLR0915
     tmp_path: Path,
-    team: bool,
     when: str,
     background_after: float | None,
 ) -> None:
@@ -60,36 +57,32 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     toolkit = get_tool_by_name("thread_model", paths, worker_target=None, disable_sandbox_proxy=True)
-    bind_toolkit_authority(toolkit, authored_name="thread_model")
-    function = toolkit.async_functions["switch_thread_model"]
+    tools = toolkit_job_tools(toolkit, authored_name="thread_model", snapshot=authority_snapshot(config, "leader"))
     started, release = asyncio.Event(), asyncio.Event()
     signal = asyncio.Event()
 
-    async def before() -> None:
+    async def before(call: ToolCall, call_next: ToolNext) -> object:
         started.set()
         await release.wait()
+        return await call_next(call.arguments)
 
-    function.pre_hook = before
     arguments: dict[str, object] = {"model_name": "alternate", "when": when}
     if background_after is not None:
         arguments["background_after"] = background_after
-    model = DelegationModel(
-        id="test",
-        responses=[ModelResponse(tool_calls=[_call("switch_thread_model", "switch", **arguments)])],
-    )
-    install_tool_job_execution(model)
-    snapshot = authority_snapshot(config, "leader")
-    actor = (
-        Team(id="leader", model=model, members=[], tools=[toolkit], telemetry=False)
-        if team
-        else Agent(id="leader", model=model, tools=[toolkit], telemetry=False)
-    )
-    bind_actor_authority(actor, snapshot)
+    model = ScriptedModel([calls(tool_call("switch_thread_model", "switch", **arguments)), answer("switched")])
     pending = None
     try:
         async with execution_resources():
             with tool_runtime_context(context), pending_human_messages_context(signal):
-                pending = asyncio.create_task(actor.arun("Switch the model", session_id=context.session_id))
+                pending = asyncio.create_task(
+                    run_job_turn(
+                        job_actor(*tools.values()),
+                        model,
+                        "Switch the model",
+                        session_id=context.session_id,
+                        middleware=(before,),
+                    ),
+                )
                 if background_after is None:
                     await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
                     signal.set()
@@ -100,10 +93,10 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                 assert response.tools is not None
                 tool = response.tools[0]
                 if background_after is None:
-                    payload = json.loads(tool.result)
+                    payload = json.loads(str(tool.result))
                     assert payload["status"] == "ok"
                     decision = continuation_decision_from_tools(
-                        response.tools,
+                        [tool.call for tool in response.tools],
                         original_prompt="Switch",
                         continuation_count=0,
                     )
@@ -114,13 +107,13 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                         == "alternate"
                     )
                 else:
-                    assert tool.tool_call_error
-                    assert "background_after" in tool.result
+                    assert tool.is_error
+                    assert "background_after" in str(tool.result)
                     assert not started.is_set()
                     assert resolve_thread_model_override(paths, "$thread", config=config).active == {}
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
-                schema = model._format_tools([function])[0]["function"]["parameters"]
-                assert "background_after" not in schema["properties"]
+                [schema] = [item for item in model.requests[0].tools if item.name == "switch_thread_model"]
+                assert "background_after" not in schema.parameters["properties"]
     finally:
         release.set()
         if pending is not None:

@@ -1,4 +1,4 @@
-"""Live Agent catalog and ordinary execution without provider requests."""
+"""The live turn's CLI catalog and its calls, without provider requests."""
 
 from __future__ import annotations
 
@@ -8,55 +8,54 @@ from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno resolv
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
-from agno.agent import Agent  # noqa: TC002 - Agno resolves injected annotations at runtime
-from agno.learn import LearningMachine
 from agno.media import Image
-from agno.models.message import Message
-from agno.models.openai import OpenAIChat
-from agno.run import RunContext
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
-from agno.tools.function import Function, FunctionCall, ToolResult
+from agno.run import RunContext as AgnoRunContext  # noqa: TC002 - Agno resolves tool annotations
+from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
-from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
+from mindroom.agent_loop.spec import RunContext
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.invocation import ToolCall, ToolOutcome, current_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
+from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
-    from agno.learn.stores.protocol import LearningStore
+    from mindroom.tool_system.invocation import ToolMiddleware, ToolNext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-async def _catalog(
-    tmp_path: Path,
-    tools: list,
-    *,
-    include: Callable[[Function], bool] | None = None,
-    **kwargs: Any,  # noqa: ANN401
-) -> agent_tool_calls.PreparedAgentToolCatalog:
-    agent = KnowledgeToolDescribingAgent(id="helper", model=OpenAIChat(), tools=tools, **kwargs)
-    context = RunContext(run_id="run", session_id="session", session_state={})
-    output = RunOutput(run_id="run", session_id="session", messages=[])
-    session = AgentSession(session_id="session", agent_id="helper", session_data={})
-    runtime = make_test_tool_runtime_context(
+def _toolkit(name: str, *tools: Callable[..., object], instructions: str | None = None) -> AdaptedToolkit:
+    return adapt_toolkit(Toolkit(name=name, tools=list(tools), instructions=instructions))
+
+
+def _function(entrypoint: Callable[..., object], **flags: object) -> AdaptedToolkit:
+    function = Function.from_callable(entrypoint)
+    for name, value in flags.items():
+        setattr(function, name, value)
+    return AdaptedToolkit(name="actions", functions=(adapt_function(function),), instructions=None)
+
+
+def _runtime(tmp_path: Path) -> ToolRuntimeContext:
+    return make_test_tool_runtime_context(
         agent_name="helper",
         target=MessageTarget("!room:test", "$thread", "$thread", "$event", "session"),
         requester_id="@alice:test",
@@ -66,10 +65,49 @@ async def _catalog(
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
-    catalog = agent_tool_calls.PreparedAgentToolCatalog(agent, context, output, session, runtime)
-    processed = await agent.aget_tools(output, context, session)
-    await catalog.prepare(processed, include=include)
+
+
+async def _catalog(
+    tmp_path: Path,
+    toolkits: Sequence[AdaptedToolkit],
+    *,
+    owners: Mapping[str, str] | None = None,
+    include: Callable[[Any], bool] | None = None,
+    middleware: Sequence[ToolMiddleware] = (),
+    max_tool_calls_per_turn: int | None = None,
+) -> agent_tool_calls.PreparedAgentToolCatalog:
+    session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
+    catalog = agent_tool_calls.PreparedAgentToolCatalog(
+        agent_name="helper",
+        run=RunContext(run_id="run", session_id="session", user_id="@alice:test", session=session),
+        runtime_context=_runtime(tmp_path),
+        middleware=middleware,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
+    )
+    if owners is None:
+        owners = {function.name: toolkit.name for toolkit in toolkits for function in toolkit.functions}
+    await catalog.prepare(toolkits, owners, include=include)
     return catalog
+
+
+async def _events(
+    catalog: agent_tool_calls.PreparedAgentToolCatalog,
+    toolkit: str,
+    function: str,
+    arguments: dict | None = None,
+) -> list[agent_tool_calls.AgentToolCallEvent]:
+    binding = await catalog.bind(ToolKey(toolkit, function))
+    return [event async for event in agent_tool_calls.execute_agent_tool_call(binding, "inner-id", arguments or {})]
+
+
+def test_a_catalog_cannot_be_built_for_a_run_without_a_session(tmp_path: Path) -> None:
+    """A run no store keeps has no session for the catalog's checkpoints and delegations, so it fails at once."""
+    with pytest.raises(ValueError, match="belongs to a session"):
+        agent_tool_calls.PreparedAgentToolCatalog(
+            agent_name="helper",
+            run=RunContext(run_id="run", session_id="session", user_id="@alice:test"),
+            runtime_context=_runtime(tmp_path),
+        )
 
 
 @pytest.mark.asyncio
@@ -84,23 +122,13 @@ async def test_catalog_prepares_only_included_functions(tmp_path: Path) -> None:
 
     catalog = await _catalog(
         tmp_path,
-        [Toolkit(name="mixed", tools=[keep, drop])],
+        [_toolkit("mixed", keep, drop)],
         include=lambda function: function.name != "drop",
     )
 
     assert [(item["toolkit"], item["function"]) for item in catalog.metadata()] == [("mixed", "keep")]
     with pytest.raises(UnknownToolError, match="no function 'drop'; its functions: keep"):
         await catalog.bind(ToolKey("mixed", "drop"))
-
-
-async def _events(
-    catalog: agent_tool_calls.PreparedAgentToolCatalog,
-    toolkit: str,
-    function: str,
-    arguments: dict | None = None,
-) -> list[agent_tool_calls.AgentToolCallEvent]:
-    binding = await catalog.bind(ToolKey(toolkit, function))
-    return [event async for event in agent_tool_calls.execute_agent_tool_call(binding, "inner-id", arguments or {})]
 
 
 @pytest.mark.asyncio
@@ -117,11 +145,11 @@ async def test_a_cli_call_inside_a_job_blocks_on_its_own_thread(tmp_path: Path, 
     async def offloading() -> str:
         return await run_async_entrypoint_blocking_call(blocking, executor=shared)
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="threads", tools=[offloading])])
+    catalog = await _catalog(tmp_path, [_toolkit("threads", offloading)])
     try:
         with job_control_context(JobControl()) if in_job else nullcontext():
             events = await _events(catalog, "threads", "offloading")
-        assert events[-1].execution.result == "done"
+        assert events[-1].call.result == "done"
         [thread] = threads
         assert thread.startswith("mindroom-job-call" if in_job else "shared-pool")
     finally:
@@ -141,24 +169,24 @@ async def test_a_failed_offloaded_cli_call_ends_as_that_calls_failure(tmp_path: 
     async def offloading() -> str:
         return await run_async_entrypoint_blocking_call(blocking, executor=shared)
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="threads", tools=[offloading])])
+    catalog = await _catalog(tmp_path, [_toolkit("threads", offloading)])
     try:
         with job_control_context(JobControl()) if in_job else nullcontext():
             events = await _events(catalog, "threads", "offloading")
         assert events[-1].kind == "failed"
-        assert "runner refused the call" in str(events[-1].execution.result)
+        assert "runner refused the call" in str(events[-1].call.result)
     finally:
         shared.shutdown(wait=False)
 
 
 @pytest.mark.asyncio
-async def test_prepared_call_preserves_real_owner_context_and_hooks(tmp_path: Path) -> None:
-    """Execution retains owner identity and runs existing hooks once."""
+async def test_prepared_call_preserves_real_owner_context_and_middleware(tmp_path: Path) -> None:
+    """A call runs as its turn, through the build's tool policy once, and sees its own call id."""
     seen = []
-    hooks = []
+    policy = []
 
-    def inspect_binding(agent: Agent, run_context: RunContext, fc: FunctionCall) -> str:
-        seen.append((agent, run_context, get_tool_runtime_context(), fc))
+    def inspect_binding(run_context: AgnoRunContext) -> str:
+        seen.append((run_context.run_id, get_tool_runtime_context(), current_tool_call()))
         identity = get_tool_execution_identity()
         assert identity is not None
         assert identity.requester_id == "@alice:test"
@@ -166,25 +194,26 @@ async def test_prepared_call_preserves_real_owner_context_and_hooks(tmp_path: Pa
         run_context.session_state["changed"] = True
         return "bound"
 
-    async def hook(name: str, function_call: Callable[..., Awaitable[str]], arguments: dict) -> str:
-        hooks.append(name)
-        return await function_call(**arguments)
+    async def middleware(call: ToolCall, call_next: ToolNext) -> object:
+        policy.append(call.function.name)
+        return await call_next(call.arguments)
 
-    toolkit = Toolkit(name="inspect", tools=[inspect_binding], instructions="Keep identity.")
-    toolkit.get_async_functions()["inspect_binding"].tool_hooks = [hook]
-    catalog = await _catalog(tmp_path, [toolkit])
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("inspect", inspect_binding, instructions="Keep identity.")],
+        middleware=(middleware,),
+    )
     events = await _events(catalog, "inspect", "inspect_binding")
     assert [event.kind for event in events] == ["started", "completed"]
-    assert events[-1].execution.result == "bound"
-    assert seen[0][:3] == (catalog.agent, catalog.run_context, catalog.runtime_context)
-    assert seen[0][0] is catalog.agent
-    assert seen[0][1] is catalog.run_context
-    assert seen[0][2] is catalog.runtime_context
-    assert seen[0][3].call_id == "inner-id"
-    assert hooks == ["inspect_binding"]
-    assert catalog.run_context.session_state == {"changed": True}
-    assert catalog.run_response.messages == []
-    assert catalog.run_response.tools is None
+    assert events[-1].call.result == "bound"
+    [(run_id, runtime, call)] = seen
+    assert run_id == "run"
+    assert runtime is catalog.runtime_context
+    assert call is not None
+    assert call.context.call_id == "inner-id"
+    assert policy == ["inspect_binding"]
+    assert catalog.run.session_state == {"changed": True}
+    assert catalog.record is None
     assert get_tool_runtime_context() is None
     descriptor = await catalog.describe(ToolKey("inspect", "inspect_binding"))
     assert descriptor.instructions == ("Keep identity.",)
@@ -192,8 +221,8 @@ async def test_prepared_call_preserves_real_owner_context_and_hooks(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_sync_async_generators_media_and_generated_knowledge(tmp_path: Path) -> None:
-    """Bound calls retain generators, media and generated knowledge closures."""
+async def test_sync_async_generators_media_and_generated_functions(tmp_path: Path) -> None:
+    """Bound calls drain generators, return media, and reach the agent's generated functions as `agent`."""
 
     def sync(value: int) -> int:
         return value + 1
@@ -206,7 +235,7 @@ async def test_sync_async_generators_media_and_generated_knowledge(tmp_path: Pat
         yield "one"
         yield "two"
 
-    async def async_generator(run_context: RunContext) -> AsyncIterator[str]:
+    async def async_generator(run_context: AgnoRunContext) -> AsyncIterator[str]:
         yield "three"
         assert get_tool_runtime_context() is not None
         run_context.session_state["streamed"] = True
@@ -215,11 +244,16 @@ async def test_sync_async_generators_media_and_generated_knowledge(tmp_path: Pat
     def media() -> ToolResult:
         return ToolResult(content="picture", images=[Image(url="https://example.org/image.png")])
 
-    async def retriever(agent: Agent, query: str, **_kwargs: object) -> list[dict]:
-        return [{"content": f"Knowledge about {query} for {agent.id}"}]
+    async def search_knowledge_base(query: str) -> str:
+        return f"Knowledge about {query}"
 
-    toolkit = Toolkit(name="ordinary", tools=[sync, asynchronous, generator, async_generator, media])
-    catalog = await _catalog(tmp_path, [toolkit], knowledge_retriever=retriever, search_knowledge=True)
+    ordinary = _toolkit("ordinary", sync, asynchronous, generator, async_generator, media)
+    generated = _toolkit("search_knowledge_base", search_knowledge_base)
+    catalog = await _catalog(
+        tmp_path,
+        [ordinary, generated],
+        owners={function.name: "ordinary" for function in ordinary.functions},
+    )
     for name, args, expected in [
         ("sync", {"value": 2}, "3"),
         ("asynchronous", {"value": 2}, "4"),
@@ -228,13 +262,13 @@ async def test_sync_async_generators_media_and_generated_knowledge(tmp_path: Pat
     ]:
         events = await _events(catalog, "ordinary", name, args)
         assert events[-1].kind == "completed"
-        assert events[-1].execution.result == expected
+        assert events[-1].call.result == expected
     events = await _events(catalog, "ordinary", "media")
     assert [event.kind for event in events] == ["started", "media", "completed"]
     assert events[1].media.images[0].url == "https://example.org/image.png"
     events = await _events(catalog, "agent", "search_knowledge_base", {"query": "binding"})
-    assert "Knowledge about binding for helper" in events[-1].execution.result
-    assert catalog.run_context.session_state["streamed"] is True
+    assert events[-1].call.result == "Knowledge about binding"
+    assert catalog.run.session_state["streamed"] is True
 
 
 @pytest.mark.asyncio
@@ -246,9 +280,7 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
         seen.append(value)
         return value
 
-    function = Function.from_callable(action)
-    function.owning_toolkit = "actions"
-    catalog = await _catalog(tmp_path, [function], tool_call_limit=1)
+    catalog = await _catalog(tmp_path, [_function(action)], max_tool_calls_per_turn=1)
     events = await _events(catalog, "actions", "action", {"value": "wrong"})
     assert events[-1].kind == "failed"
     assert seen == []
@@ -258,38 +290,47 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
     assert events[-1].kind == "failed"
     assert seen == [1]
 
-    for flag in ("requires_confirmation", "requires_user_input", "external_execution"):
-        function = Function.from_callable(action)
-        function.owning_toolkit = "actions"
-        setattr(function, flag, True)
-        catalog = await _catalog(tmp_path, [function])
+    for flag in ("requires_confirmation", "external_execution"):
+        catalog = await _catalog(tmp_path, [_function(action, **{flag: True})])
         events = await _events(catalog, "actions", "action", {"value": 3})
         assert events[-1].kind == "waiting"
         assert events[-1].requirement.tool_execution.tool_args == {"value": 3}
     assert seen == [1]
-    function = Function.from_callable(action)
-    function.owning_toolkit = "actions"
-    function.stop_after_tool_call = True
-    catalog = await _catalog(tmp_path, [function])
+    catalog = await _catalog(tmp_path, [_function(action, stop_after_tool_call=True)])
     events = await _events(catalog, "actions", "action", {"value": 4})
     assert events[-1].kind == "continuation_required"
-    assert events[-1].execution.result == "4"
+    assert events[-1].call.result == "4"
 
 
 @pytest.mark.asyncio
 async def test_catalog_keeps_qualified_names_and_rejects_collisions(tmp_path: Path) -> None:
-    """Qualification prevents Agno name flattening from losing capabilities."""
+    """Each function is reached under its authored toolkit; the run's first function of a name is the one bound."""
 
     def action() -> str:
         return "ok"
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="one", tools=[action]), Toolkit(name="two", tools=[action])])
-    assert (await _events(catalog, "one", "action"))[-1].execution.result == "ok"
-    assert (await _events(catalog, "two", "action"))[-1].execution.result == "ok"
-    with pytest.raises(ValueError, match="Duplicate"):
-        await _catalog(tmp_path, [Toolkit(name="one", tools=[action]), Toolkit(name="one", tools=[action])])
+    def other() -> str:
+        return "other"
+
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("one", action), _toolkit("two", action, other)],
+        owners={"action": "one", "other": "two"},
+    )
+    assert (await _events(catalog, "one", "action"))[-1].call.result == "ok"
+    assert (await _events(catalog, "two", "other"))[-1].call.result == "other"
+    with pytest.raises(UnknownToolError):
+        await catalog.bind(ToolKey("two", "action"))
     with pytest.raises(ValueError, match="reserved"):
-        await _catalog(tmp_path, [Toolkit(name="agent", tools=[action])])
+        await _catalog(tmp_path, [_toolkit("agent", action)])
+    with pytest.raises(ValueError, match="reserved"):
+        catalog.add_deferred(agent_tool_calls.DeferredAgentToolkit("agent", "Reserved", _never_materialized))
+    with pytest.raises(ValueError, match="Duplicate toolkit"):
+        catalog.add_deferred(agent_tool_calls.DeferredAgentToolkit("one", "Taken", _never_materialized))
+
+
+async def _never_materialized() -> AdaptedToolkit:
+    pytest.fail("a refused deferred toolkit is never materialized")
 
 
 @pytest.mark.asyncio
@@ -300,10 +341,10 @@ async def test_lazy_metadata_and_single_materialization(tmp_path: Path) -> None:
     def action(value: int) -> int:
         return value
 
-    async def materialize() -> Toolkit:
+    async def materialize() -> AdaptedToolkit:
         builds.append(get_tool_runtime_context())
         await asyncio.sleep(0)
-        return Toolkit(name="lazy", tools=[action], instructions="Actual lazy instructions")
+        return _toolkit("implementation", action, instructions="Actual lazy instructions")
 
     catalog = await _catalog(tmp_path, [])
     catalog.add_deferred(agent_tool_calls.DeferredAgentToolkit("lazy", "Lazy operations", materialize))
@@ -314,40 +355,73 @@ async def test_lazy_metadata_and_single_materialization(tmp_path: Path) -> None:
     assert first == second
     assert first.instructions == ("Actual lazy instructions",)
     assert builds == [catalog.runtime_context]
-    assert (await _events(catalog, "lazy", "action", {"value": 9}))[-1].execution.result == "9"
+    assert (await _events(catalog, "lazy", "action", {"value": 9}))[-1].call.result == "9"
 
 
 @pytest.mark.asyncio
-async def test_closing_stream_stops_async_generator_before_catalog_release(tmp_path: Path) -> None:
-    """Agno's background generator consumer cannot outlive its call owner."""
-    closed = asyncio.Event()
-    resumed = []
-    blocker = asyncio.Event()
+async def test_toolkits_the_catalog_connects_stay_connected_until_it_closes(tmp_path: Path) -> None:
+    """A minimal turn's toolkits, eager and deferred, are connected through its catalog and closed with it."""
+    log: list[str] = []
+
+    def connecting(adapted: AdaptedToolkit) -> AdaptedToolkit:
+        async def close() -> None:
+            log.append(f"{adapted.name} close")
+
+        async def connect() -> Callable[[], Awaitable[None]]:
+            log.append(f"{adapted.name} connect")
+            return close
+
+        return replace(adapted, connect=connect)
+
+    def query(sql: str) -> str:
+        return sql
+
+    def lookup(term: str) -> str:
+        return term
+
+    async def materialize() -> AdaptedToolkit:
+        return connecting(_toolkit("server", lookup))
+
+    database = connecting(_toolkit("database", query))
+    catalog = await _catalog(tmp_path, [database])
+    await catalog.connect([database])
+    catalog.add_deferred(agent_tool_calls.DeferredAgentToolkit("server", "An MCP server", materialize))
+    assert (await _events(catalog, "server", "lookup", {"term": "x"}))[-1].call.result == "x"
+    assert log == ["database connect", "server connect"]
+
+    await catalog.close()
+    await catalog.close()
+
+    assert log == ["database connect", "server connect", "server close", "database close"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_streaming_call_closes_its_generator_before_the_catalog_releases(tmp_path: Path) -> None:
+    """A cancelled call's generator is closed inside the call, before anything else can take the catalog."""
+    started = asyncio.Event()
+    closed = []
 
     async def streaming() -> AsyncIterator[str]:
         try:
             yield "first"
-            await blocker.wait()
-            resumed.append(True)
+            started.set()
+            await asyncio.Event().wait()
             yield "second"
         finally:
             assert get_tool_runtime_context() is not None
-            closed.set()
+            closed.append(True)
 
-    function = Function.from_callable(streaming)
-    function.show_result = True
-    function.owning_toolkit = "stream"
-    catalog = await _catalog(tmp_path, [function])
-    binding = await catalog.bind(ToolKey("stream", "streaming"))
-    stream = agent_tool_calls.execute_agent_tool_call(binding, "stream-id", {})
-    assert (await anext(stream)).kind == "started"
-    assert (await anext(stream)).kind == "progress"
-    await stream.aclose()
-    was_closed = closed.is_set()
-    blocker.set()
+    catalog = await _catalog(tmp_path, [_toolkit("stream", streaming)])
+    call = asyncio.create_task(_events(catalog, "stream", "streaming"))
+    await started.wait()
+    close = asyncio.create_task(catalog.close())
     await asyncio.sleep(0)
-    assert was_closed
-    assert resumed == []
+    assert not close.done()
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert closed == [True]
+    await close
 
 
 @pytest.mark.asyncio
@@ -357,29 +431,11 @@ async def test_closed_catalog_rejects_later_bindings(tmp_path: Path) -> None:
     def action() -> str:
         return "ok"
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="existing", tools=[action])])
+    catalog = await _catalog(tmp_path, [_toolkit("existing", action)])
     await catalog.close()
     await catalog.close()
     with pytest.raises(RuntimeError, match="closed"):
         await catalog.bind(ToolKey("existing", "action"))
-
-
-@pytest.mark.asyncio
-async def test_generated_history_uses_exact_live_session(tmp_path: Path) -> None:
-    """Generated closure sees post-binding changes to the actual session."""
-    catalog = await _catalog(tmp_path, [], read_chat_history=True)
-    binding = await catalog.bind(ToolKey("agent", "get_chat_history"))
-    assert binding.catalog is catalog
-    catalog.session.runs = [RunOutput(run_id="earlier", messages=[Message(role="user", content="live session")])]
-    events = await _events(catalog, "agent", "get_chat_history")
-    assert "live session" in events[-1].execution.result
-
-
-@pytest.mark.asyncio
-async def test_provider_native_tools_fail_explicitly(tmp_path: Path) -> None:
-    """A provider-only capability must block activation instead of disappearing."""
-    with pytest.raises(TypeError, match="Provider-native"):
-        await _catalog(tmp_path, [{"type": "web_search"}])
 
 
 @pytest.mark.asyncio
@@ -391,14 +447,17 @@ async def test_arguments_are_frozen_before_started_event(tmp_path: Path) -> None
         seen.append(value)
         return value
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="actions", tools=[action])])
+    catalog = await _catalog(tmp_path, [_toolkit("actions", action)])
     binding = await catalog.bind(ToolKey("actions", "action"))
     arguments: dict[str, object] = {"value": 1}
     stream = agent_tool_calls.execute_agent_tool_call(binding, "id", arguments)
-    assert (await anext(stream)).kind == "started"
+    started = await anext(stream)
+    assert started.kind == "started"
     arguments["value"] = 2
+    started.call.tool_args["value"] = 3
     events = [event async for event in stream]
-    assert events[-1].execution.result == "1"
+    assert events[-1].call.result == "1"
+    assert events[-1].call.tool_args == {"value": 1}
     assert seen == [1]
 
 
@@ -411,7 +470,7 @@ async def test_close_before_dispatch_never_starts_generator(tmp_path: Path) -> N
         seen.append(True)
         yield "body"
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="stream", tools=[streaming])])
+    catalog = await _catalog(tmp_path, [_toolkit("stream", streaming)])
     binding = await catalog.bind(ToolKey("stream", "streaming"))
     stream = agent_tool_calls.execute_agent_tool_call(binding, "id", {})
     assert (await anext(stream)).kind == "started"
@@ -422,7 +481,7 @@ async def test_close_before_dispatch_never_starts_generator(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_cancelled_sync_leaf_keeps_resources_until_thread_finishes(tmp_path: Path) -> None:
-    """Cancellation cannot release toolkit lifetime while its thread is running."""
+    """Cancellation cannot release the catalog while its thread is running."""
     entered = threading.Event()
     finish = threading.Event()
     contexts = []
@@ -433,7 +492,7 @@ async def test_cancelled_sync_leaf_keeps_resources_until_thread_finishes(tmp_pat
         contexts.append(get_tool_runtime_context())
         return "done"
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="sync", tools=[action])])
+    catalog = await _catalog(tmp_path, [_toolkit("sync", action)])
     operation = asyncio.create_task(_events(catalog, "sync", "action"))
     assert await asyncio.to_thread(entered.wait, 5)
     try:
@@ -458,34 +517,34 @@ async def test_cancelled_sync_leaf_keeps_resources_until_thread_finishes(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_authored_alias_and_bare_source_instructions_survive_preparation(tmp_path: Path) -> None:
-    """Effective authored ownership and source instructions survive Agno copies."""
+async def test_authored_alias_and_toolkit_guidance_are_described(tmp_path: Path) -> None:
+    """A function is described under its authored toolkit, with its toolkit's guidance the prompt does not show."""
 
     def action() -> str:
         return "ok"
 
-    source = Toolkit(name="implementation", tools=[action], instructions="Source guidance")
-    function = source.get_async_functions()["action"]
-    function.owning_toolkit = "authored_alias"
-    function.source_toolkit = source
-    catalog = await _catalog(tmp_path, [function])
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("implementation", action, instructions="Source guidance")],
+        owners={"action": "authored_alias"},
+    )
     descriptor = await catalog.describe(ToolKey("authored_alias", "action"))
     assert descriptor.instructions == ("Source guidance",)
 
 
 @pytest.mark.asyncio
-async def test_call_local_control_flags_do_not_change_prepared_definition(tmp_path: Path) -> None:
-    """The injected FunctionCall controls only this invocation's stop boundary."""
+async def test_a_call_that_returns_a_stop_controls_only_its_own_invocation(tmp_path: Path) -> None:
+    """A call that asks to stop the run is a continuation; the prepared definition keeps running normally."""
 
-    def stop(fc: FunctionCall) -> str:
-        fc.function.stop_after_tool_call = True
-        return "stopped"
+    def stop() -> ToolOutcome:
+        return ToolOutcome(content="stopped", stop_after_call=True)
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="control", tools=[stop])])
+    catalog = await _catalog(tmp_path, [_toolkit("control", stop)])
     binding = await catalog.bind(ToolKey("control", "stop"))
     events = await _events(catalog, "control", "stop")
     assert events[-1].kind == "continuation_required"
-    assert binding.function.stop_after_tool_call is False
+    assert events[-1].call.result == "stopped"
+    assert binding.function.stop_after_call is False
 
 
 @pytest.mark.asyncio
@@ -497,95 +556,61 @@ async def test_generator_failure_is_terminal_and_does_not_leak_context(tmp_path:
         message = "generator failed"
         raise RuntimeError(message)
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="stream", tools=[broken])])
+    catalog = await _catalog(tmp_path, [_toolkit("stream", broken)])
     events = await _events(catalog, "stream", "broken")
     assert events[-1].kind == "failed"
-    assert events[-1].execution.tool_call_error
+    assert events[-1].call.is_error
     assert get_tool_runtime_context() is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("async_stream", [False, True])
-async def test_custom_iterator_closes_once(tmp_path: Path, *, async_stream: bool) -> None:
-    """Normal exhaustion and owner cleanup share one close of a custom iterator."""
-    closed = []
-
-    class SyncStream:
-        def __iter__(self) -> SyncStream:
-            return self
-
-        def __next__(self) -> str:
-            raise StopIteration
-
-        def close(self) -> None:
-            closed.append("sync")
-
-    class AsyncStream:
-        def __aiter__(self) -> AsyncStream:
-            return self
-
-        async def __anext__(self) -> str:
-            raise StopAsyncIteration
-
-        async def aclose(self) -> None:
-            closed.append("async")
-
-    async def stream() -> object:
-        return AsyncStream() if async_stream else SyncStream()
-
-    catalog = await _catalog(tmp_path, [Toolkit(name="stream", tools=[stream])])
-    events = await _events(catalog, "stream", "stream")
-    assert events[-1].kind == "completed"
-    assert closed == ["async" if async_stream else "sync"]
-
-
-@pytest.mark.asyncio
-async def test_failed_deferred_preparation_retains_agent_cleanup_owner(tmp_path: Path) -> None:
-    """Materialization transfers lifetime before schema processing can fail."""
+async def test_a_deferred_toolkit_whose_functions_collide_is_refused(tmp_path: Path) -> None:
+    """A materialized toolkit that names one function twice binds nothing."""
     catalog = await _catalog(tmp_path, [])
-    toolkit = Toolkit(name="deferred")
-    toolkit.functions["first"] = Function(name="duplicate", entrypoint=lambda: "first")
-    toolkit.functions["second"] = Function(name="duplicate", entrypoint=lambda: "second")
+    function = adapt_function(Function(name="duplicate", entrypoint=lambda: "first"))
 
-    async def materialize() -> Toolkit:
-        return toolkit
+    async def materialize() -> AdaptedToolkit:
+        return AdaptedToolkit(name="deferred", functions=(function, function), instructions=None)
 
     catalog.add_deferred(agent_tool_calls.DeferredAgentToolkit("deferred", "Deferred", materialize))
     with pytest.raises(ValueError, match="Duplicate"):
         await catalog.bind(ToolKey("deferred", "duplicate"))
-    assert catalog.agent.tools == [toolkit]
+    assert catalog.metadata() == [{"toolkit": "deferred", "description": "Deferred", "deferred": True}]
 
 
 @pytest.mark.asyncio
-async def test_canonical_shell_releases_only_shell_leaf_and_retains_hooks(tmp_path: Path) -> None:
-    """A nested CLI request progresses while canonical hooks stay serialized."""
+async def test_canonical_shell_releases_only_shell_leaf_and_retains_middleware(tmp_path: Path) -> None:
+    """A nested CLI request progresses while the shell call's tool policy stays around it."""
     seen: list[str] = []
 
     async def run_shell_command(args: str) -> str:
         del args
         pytest.fail("only the owner's shell leaf runs the command")
 
-    async def mutate(run_context: RunContext) -> str:
+    async def mutate(run_context: AgnoRunContext) -> str:
         seen.append("mutate")
         run_context.session_state["changed"] = True
         return "changed"
 
-    async def hook(name: str, function_call: Callable[..., Awaitable[str]], arguments: dict) -> str:
-        assert name == "run_shell_command"
+    async def middleware(call: ToolCall, call_next: ToolNext) -> object:
+        if call.function.name != "run_shell_command":
+            return await call_next(call.arguments)
         seen.append("before")
-        result = await function_call(**arguments)
+        result = await call_next(call.arguments)
         seen.append("after")
         return result
 
-    shell = Toolkit(name="shell", tools=[run_shell_command])
-    shell.get_async_functions()["run_shell_command"].tool_hooks = [hook]
-    catalog = await _catalog(tmp_path, [shell, Toolkit(name="state", tools=[mutate])])
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("shell", run_shell_command), _toolkit("state", mutate)],
+        middleware=(middleware,),
+    )
     binding = await catalog.bind(ToolKey("shell", "run_shell_command"))
 
     async def leaf(arguments: dict[str, object]) -> str:
         assert arguments == {"args": "nested"}
         events = await _events(catalog, "state", "mutate")
-        assert events[-1].execution.result == "changed"
+        assert events[-1].call.result == "changed"
         return "shell done"
 
     events = [
@@ -597,9 +622,9 @@ async def test_canonical_shell_releases_only_shell_leaf_and_retains_hooks(tmp_pa
             shell_leaf=leaf,
         )
     ]
-    assert events[-1].execution.result == "shell done"
+    assert events[-1].call.result == "shell done"
     assert seen == ["before", "mutate", "after"]
-    assert catalog.run_context.session_state["changed"] is True
+    assert catalog.run.session_state["changed"] is True
 
 
 @pytest.mark.asyncio
@@ -619,7 +644,7 @@ async def test_authorization_is_rechecked_under_dispatch_lock(tmp_path: Path) ->
         effects.append("ran")
         return "ran"
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="calls", tools=[blocker, effect])])
+    catalog = await _catalog(tmp_path, [_toolkit("calls", blocker, effect)])
     binding = await catalog.bind(ToolKey("calls", "effect"))
     first = asyncio.create_task(_events(catalog, "calls", "blocker"))
     await entered.wait()
@@ -646,19 +671,24 @@ async def test_authorization_is_rechecked_under_dispatch_lock(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("approved", [True, False])
-async def test_exact_native_confirmation_resumes_prepared_call(tmp_path: Path, approved: bool) -> None:
-    """Only the exact resolved native requirement releases a prepared call."""
+@pytest.mark.parametrize(
+    ("approved", "reason", "denial"),
+    [(True, None, None), (False, "Denied", "Denied"), (False, None, "Not approved by requester")],
+)
+async def test_exact_native_confirmation_resumes_prepared_call(
+    tmp_path: Path,
+    approved: bool,
+    reason: str | None,
+    denial: str | None,
+) -> None:
+    """Only the exact resolved native requirement releases a prepared call; a denial fails it with its note."""
     seen = []
 
     def action(value: int) -> int:
         seen.append(value)
         return value
 
-    function = Function.from_callable(action)
-    function.owning_toolkit = "actions"
-    function.requires_confirmation = True
-    catalog = await _catalog(tmp_path, [function])
+    catalog = await _catalog(tmp_path, [_function(action, requires_confirmation=True)])
     binding = await catalog.bind(ToolKey("actions", "action"))
     events = await _events(catalog, "actions", "action", {"value": 3})
     requirement = events[-1].requirement
@@ -666,7 +696,7 @@ async def test_exact_native_confirmation_resumes_prepared_call(tmp_path: Path, a
     if approved:
         requirement.confirm()
     else:
-        requirement.reject("Denied")
+        requirement.reject(reason)
     resumed = [
         event
         async for event in agent_tool_calls.execute_agent_tool_call(
@@ -678,6 +708,7 @@ async def test_exact_native_confirmation_resumes_prepared_call(tmp_path: Path, a
     ]
     assert seen == ([3] if approved else [])
     assert resumed[-1].kind == ("completed" if approved else "failed")
+    assert approved or resumed[-1].call.result == denial
     assert binding.function.requires_confirmation is True
     for changed in (4, 3.0):
         with pytest.raises(ValueError, match="exact"):
@@ -694,24 +725,25 @@ async def test_exact_native_confirmation_resumes_prepared_call(tmp_path: Path, a
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["requires_user_input", "external_execution", "approval_type"])
+@pytest.mark.parametrize("change", ["external_execution", "approval_type"])
 async def test_resolved_confirmation_cannot_bypass_changed_requirement(tmp_path: Path, change: str) -> None:
-    """Approval cannot authorize a new requirement added before prepared dispatch."""
+    """Approval cannot authorize a function whose pause changed before prepared dispatch."""
     effects = []
 
     def action() -> str:
         effects.append(True)
         return "executed"
 
-    function = Function.from_callable(action)
-    function.owning_toolkit = "actions"
-    function.requires_confirmation = True
-    function.approval_type = "mindroom_policy"
-    catalog = await _catalog(tmp_path, [function])
+    catalog = await _catalog(
+        tmp_path,
+        [_function(action, requires_confirmation=True, approval_type="mindroom_policy")],
+    )
     requirement = (await _events(catalog, "actions", "action"))[-1].requirement
     requirement.confirm()
-    binding = await catalog.bind(ToolKey("actions", "action"))
-    setattr(binding.function, change, "authored" if change == "approval_type" else True)
+    key = ToolKey("actions", "action")
+    binding = await catalog.bind(key)
+    changed = replace(binding.function, **{change: "authored" if change == "approval_type" else True})
+    catalog._bindings[key] = binding = replace(binding, function=changed)
     with pytest.raises(ValueError, match="exact"):
         _ = [
             event
@@ -739,9 +771,7 @@ async def test_shared_cli_authorizer_rejects_revoked_prepared_call(
         effects.append(True)
         return "executed"
 
-    function = Function.from_callable(action)
-    function.owning_toolkit = "actions"
-    catalog = await _catalog(tmp_path, [function])
+    catalog = await _catalog(tmp_path, [_function(action)])
     config = Config(agents={"helper": AgentConfig(display_name="Helper", tools=["shell"])})
     current = config.model_copy(deep=True) if revocation == "config" else config
     if revocation == "config":
@@ -768,19 +798,21 @@ async def test_shared_cli_authorizer_rejects_revoked_prepared_call(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("revocation", [None, "config", "membership", "forged"])
+@pytest.mark.parametrize("revocation", [None, "config", "membership", "forged", "stale"])
 async def test_generated_cli_authorization_keeps_exact_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     revocation: str | None,
 ) -> None:
-    """Generated functions need their effective owner and current reply permission."""
+    """Generated functions need their exact catalog binding and current reply permission."""
     config = Config(agents={"helper": AgentConfig(display_name="Helper")})
-    catalog = await _catalog(tmp_path, [], enable_agentic_state=True)
+
+    def update_session_state(value: str) -> str:
+        return value
+
+    catalog = await _catalog(tmp_path, [_toolkit("generated", update_session_state)], owners={})
     runtime = replace(catalog.runtime_context, config=config, config_provider=lambda: config)
     catalog.runtime_context = runtime
-    catalog._bindings.clear()
-    await catalog.prepare(await catalog.agent.aget_tools(catalog.run_response, catalog.run_context, catalog.session))
     binding = await catalog.bind(ToolKey("agent", "update_session_state"))
     target = runtime.resolve_worker_target()
     monkeypatch.setattr(
@@ -793,45 +825,11 @@ async def test_generated_cli_authorization_keeps_exact_owner(
         current.agents["helper"].display_name = "Changed"
         catalog.runtime_context = replace(runtime, config_provider=lambda: current)
     if revocation == "forged":
-        binding = replace(binding, function=Function(name="arbitrary", entrypoint=lambda: "bad"))
+        binding = replace(binding, function=adapt_function(Function(name="arbitrary", entrypoint=lambda: "bad")))
+    if revocation == "stale":
+        await catalog.close()
     if revocation:
         with pytest.raises(PermissionError):
             await approval_tools.authorize_prepared_tool_call(binding, expected_worker_target=target)
     else:
         await approval_tools.authorize_prepared_tool_call(binding, expected_worker_target=target)
-
-
-@pytest.mark.asyncio
-async def test_generated_learning_uses_live_requester_session_and_context(tmp_path: Path) -> None:
-    """Generated learning closures retain the same identities and mutable state."""
-    catalog = await _catalog(tmp_path, [])
-
-    async def learning_tools(
-        user_id: str,
-        session_id: str,
-        agent_id: str,
-        run_context: RunContext,
-        **kwargs: object,  # noqa: ARG001
-    ) -> list:
-        async def save_learning(value: str) -> str:
-            run_context.session_state["learning"] = value
-            return f"{agent_id}/{user_id}/{session_id}: {value}"
-
-        return [save_learning]
-
-    # Isolate persistence/provider work at the learning-store boundary; the real
-    # LearningMachine and Agent still construct the generated asynchronous tool.
-    store = cast("LearningStore", SimpleNamespace(aget_tools=learning_tools))
-    catalog.agent._learning = LearningMachine(custom_stores={"local": store})
-    await catalog.prepare(
-        await catalog.agent.aget_tools(
-            catalog.run_response,
-            catalog.run_context,
-            catalog.session,
-            user_id=catalog.runtime_context.requester_id,
-        ),
-    )
-    events = await _events(catalog, "agent", "save_learning", {"value": "shared lesson"})
-    assert events[-1].execution.result == "helper/@alice:test/session: shared lesson"
-    assert catalog.run_context.session_state["learning"] == "shared lesson"
-    await catalog.close()

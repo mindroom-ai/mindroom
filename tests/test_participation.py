@@ -1,244 +1,164 @@
-"""Same-model participation decisions must never execute tools or alter reply inputs."""
+"""The participation check decides once, before a reply's first request, and never executes tools or alters the reply."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, Mock
-
-import httpx
-from agno.agent import Agent
-from agno.compression.manager import CompressionManager
-from agno.metrics import MessageMetrics, RunMetrics
-from agno.run.agent import RunOutput
-from openai import AsyncOpenAI
-
-from mindroom.agno_participation import participation_model
-from mindroom.ai import ai_response, stream_agent_response
-from mindroom.participation import ParticipationGate
-from mindroom.providers.google_gemini import MindRoomGoogleGemini
-from mindroom.providers.openai_models import MindRoomOpenAIChat
-from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
-from tests.conftest import make_turn_context
-from tests.gemini_helpers import gemini_client, gemini_decision_response, gemini_response
-from tests.participation_helpers import ParticipationModel
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-    from pathlib import Path
-    from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.run.agent import RunContentEvent
-from agno.tools.function import Function
+
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
+from mindroom.agent_loop.run import run_agent
+from mindroom.judgment.state import JudgmentMessage
+from mindroom.llm.events import ToolStarted
+from mindroom.llm.media import Image
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import DeferredTools, ModelRequest, NativeCompactionReplay, RequestOverrides
+from mindroom.participation import ParticipationDecision, ParticipationGate
+from mindroom.participation_hook import parse_decision, participation_hook
+from mindroom.providers.tool_policy import provider_tools_disabled
+from tests.agent_loop.helpers import collect, context, spec, toolkit
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
+
+    from mindroom.llm.provider import StreamEvent
+    from mindroom.llm.runs import RunRecord
+    from tests.fakes.scripted_model import ScriptStep
+
+_RESPOND = '{"action":"respond","reason":"A factual question is unanswered."}'
+_SILENT = '{"action":"stay_silent","reason":"Humans are discussing plans."}'
+
+
+def operate() -> str:
+    """Run the operation."""
+    operate.calls.append("operated")  # type: ignore[attr-defined]
+    return "done"
+
+
+operate.calls = []  # type: ignore[attr-defined]
+
+
+class _PolicyAwareModel(ScriptedModel):
+    """Records whether provider-managed tools were disabled for each request."""
+
+    def __init__(self, turns: list[Sequence[ScriptStep]]) -> None:
+        super().__init__(turns)
+        self.tools_disabled: list[bool] = []
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Yield the scripted turn after noting the task's tool policy."""
+        self.tools_disabled.append(provider_tools_disabled())
+        async for event in super().stream(request):
+            yield event
+
+
+async def _reply(
+    model: ScriptedModel,
+    gate: ParticipationGate,
+    messages: Sequence[Message] | None = None,
+    *,
+    run_id: str = "run-1",
+    request_template: ModelRequest = EMPTY_REQUEST,
+) -> tuple[list[object], RunRecord]:
+    """Run one reply of the ``code`` agent, which offers ``operate``, under the participation gate."""
+    return await collect(
+        run_agent(
+            spec(model, toolkit(operate)),
+            list(messages or [Message(role="user", content="Can anyone explain this?")]),
+            ctx=context(run_id=run_id),
+            hooks=LoopHooks(before_request=(participation_hook(gate, model),)),
+            request_template=request_template,
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_operate() -> None:
+    operate.calls.clear()  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
-async def test_decision_cannot_execute_tools(stream: bool) -> None:
-    """Bypassing the provider-only decision boundary would execute the supplied tool."""
-    executed: list[str] = []
-
-    def operate() -> str:
-        executed.append("operated")
-        return "done"
-
-    model = ParticipationModel(
-        ModelResponse(
-            tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "operate", "arguments": "{}"}}],
-        ),
-    )
+async def test_decision_cannot_execute_tools() -> None:
+    """A decision answered with tool calls is invalid, so the reply stays silent and the tool never runs."""
+    model = ScriptedModel([calls(tool_call("operate", "call-1"))])
     gate = ParticipationGate()
-    messages = [Message(role="user", content="Thanks, everyone.")]
-    with participation_model(model, gate, run_id="primary"):
-        if stream:
-            result = [
-                chunk
-                async for chunk in model.aresponse_stream(
-                    messages,
-                    tools=[Function.from_callable(operate)],
-                    run_response=RunOutput(run_id="primary"),
-                )
-            ]
-            assert all(not chunk.content for chunk in result)
-        else:
-            result = await model.aresponse(
-                messages,
-                tools=[Function.from_callable(operate)],
-                run_response=RunOutput(run_id="primary"),
-            )
-            assert not result.content
-    assert executed == []
+
+    events, record = await _reply(model, gate)
+
+    assert operate.calls == []  # type: ignore[attr-defined]
+    assert not any(isinstance(event, ToolStarted) for event in events)
     assert len(model.requests) == 1
     assert gate.is_silent
+    assert gate.decision is not None
+    assert gate.decision.reason == "invalid_decision"
+    assert not record.content
+    assert not record.tools
 
 
 @pytest.mark.asyncio
 async def test_approval_reuses_exact_normal_prefix_and_only_checks_once() -> None:
-    """Rebuilding tools/system or checking every continuation breaks this invariant."""
-    model = ParticipationModel(
-        ModelResponse(content='{"action":"respond","reason":"A factual question is unanswered."}'),
-    )
+    """The decision is the reply's exact messages plus the prompt; later replies under the gate skip the check."""
+    model = ScriptedModel([answer(_RESPOND), answer("Useful answer"), answer("Continued")])
     gate = ParticipationGate(instructions="Offer concise technical help.")
-    messages = [
-        Message(role="system", content="You are a helpful agent."),
-        Message(role="user", content="Can anyone explain this?"),
-    ]
-    original = deepcopy(messages)
-    tools = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}}}]
-    original_response = model.ainvoke
-    with participation_model(model, gate, run_id="primary"):
-        response = await model.aresponse(
-            messages,
-            tools=tools,
-            tool_choice="auto",
-            run_response=RunOutput(run_id="primary"),
-        )
-        assert response.content == "Useful answer"
-        await model.aresponse(
-            [Message(role="user", content="Continue")],
-            tools=tools,
-            tool_choice="auto",
-            run_response=RunOutput(run_id="primary"),
-        )
-    decision, normal, _continuation = model.requests
-    assert decision["messages"][:-1] == original
-    assert normal["messages"] == original
-    assert decision["tools"] == normal["tools"] == tools
-    assert decision["tool_choice"] == "none"
-    assert normal["tool_choice"] == "auto"
-    assert decision["response_format"] == normal["response_format"]
-    assert "Offer concise technical help." in decision["messages"][-1].content
-    assert len(model.requests) == 3
+
+    _, first = await _reply(model, gate)
+    _, second = await _reply(model, gate, [Message(role="user", content="Continue")], run_id="run-2")
+
+    decision, reply, continuation = model.requests
+    assert [(m.role, m.content) for m in decision.messages[:-1]] == [(m.role, m.content) for m in reply.messages]
+    assert decision.messages[-1].role == "user"
+    assert "Offer concise technical help." in str(decision.messages[-1].content)
+    assert decision.tools == reply.tools == continuation.tools
+    assert (decision.tool_choice, decision.stream) == ("none", False)
+    assert (reply.tool_choice, reply.stream) == (None, True)
+    assert first.content == "Useful answer"
+    assert second.content == "Continued"
     assert gate.approved
     assert gate.decided.is_set()
-    assert model.ainvoke == original_response
+    # The decision prompt is transient: the stored run holds the reply's messages only.
+    assert [m.role for m in first.messages] == ["system", "user", "assistant"]
 
 
 @pytest.mark.asyncio
-async def test_openai_decision_disables_function_selection_before_answering() -> None:
-    """A decision containing a selected function would discard an otherwise useful answer."""
-    requests: list[dict[str, Any]] = []
-    executions: list[tuple[int, int]] = []
+async def test_the_decision_request_keeps_every_setting_of_the_reply_request() -> None:
+    """The decision is the reply's request with the prompt appended, tool selection off, and one non-streaming call.
 
-    def multiply(a: int, b: int) -> str:
-        """Multiply two integers."""
-        executions.append((a, b))
-        return str(a * b)
+    Deferred tool search, native compaction, portable replay, and request overrides reach the decision as they reach
+    the reply, so the decision shares the reply's prompt cache and replays the history the provider compacted.
+    """
+    model = ScriptedModel([answer(_RESPOND), answer("Useful answer")])
+    template = ModelRequest(
+        messages=(),
+        overrides=RequestOverrides(temperature=0.2, prompt_cache=True),
+        deferred_tools=DeferredTools(names=frozenset({"operate"}), portable=True),
+        portable_replay=True,
+        native_compaction=NativeCompactionReplay(route="route-1", threshold=1000),
+    )
 
-    def provider(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        requests.append(payload)
-        deciding = len(requests) == 1
-        message: dict[str, Any] = {
-            "role": "assistant",
-            "content": '{"action":"respond","reason":"An unanswered math question."}' if deciding else "437",
-        }
-        finish_reason = "stop"
-        if (deciding and payload.get("tool_choice") != "none") or len(requests) == 2:
-            message["tool_calls"] = [
-                {
-                    "id": "call-multiply",
-                    "type": "function",
-                    "function": {"name": "multiply", "arguments": '{"a":23,"b":19}'},
-                },
-            ]
-            finish_reason = "tool_calls"
-            if not deciding:
-                message["content"] = None
-        return httpx.Response(
-            200,
-            json={
-                "id": "completion",
-                "object": "chat.completion",
-                "created": 1,
-                "model": "test",
-                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-            },
-        )
+    await _reply(model, ParticipationGate(), request_template=template)
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http_client:
-        model = MindRoomOpenAIChat(
-            id="test",
-            api_key="test-key",
-            async_client=AsyncOpenAI(api_key="test-key", http_client=http_client),
-        )
-        gate = ParticipationGate()
-        with participation_model(model, gate, run_id="primary"):
-            response = await model.aresponse(
-                [Message(role="user", content="Use the calculator to multiply 23 by 19.")],
-                tools=[Function.from_callable(multiply)],
-                tool_choice="auto",
-                run_response=RunOutput(run_id="primary"),
-            )
-
-    assert response.content == "437"
-    assert gate.approved
-    assert executions == [(23, 19)]
-    assert len(requests) == 3
-    assert requests[0]["tool_choice"] == "none"
-    assert requests[1]["tool_choice"] == "auto"
-    assert requests[0]["tools"] == requests[1]["tools"]
-    assert requests[0]["messages"][:-1] == requests[1]["messages"]
+    decision, reply = model.requests
+    assert replace(reply, messages=template.messages, tools=template.tools) == template
+    assert tuple(decision.messages[:-1]) == tuple(reply.messages)
+    assert (decision.tool_choice, decision.stream) == ("none", False)
+    assert replace(decision, messages=reply.messages, tool_choice=reply.tool_choice, stream=reply.stream) == reply
 
 
 @pytest.mark.asyncio
-async def test_gemini_decision_requests_json_while_keeping_declarations() -> None:
-    """Gemini can call functions under mode NONE, which would silence an otherwise useful answer."""
-    requests: list[dict[str, Any]] = []
-    executions: list[tuple[int, int]] = []
-    multiply_call = {"name": "multiply", "args": {"a": 23, "b": 19}}
+async def test_the_decision_request_disables_provider_managed_tools() -> None:
+    """Only the decision request runs under the task policy that keeps providers from selecting tools."""
+    model = _PolicyAwareModel([answer(_RESPOND), answer("Useful answer")])
 
-    def multiply(a: int, b: int) -> str:
-        """Multiply two integers."""
-        executions.append((a, b))
-        return str(a * b)
+    await _reply(model, ParticipationGate())
 
-    def provider(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        requests.append(payload)
-        if len(requests) == 1:
-            return gemini_decision_response(
-                payload,
-                '{"action":"respond","reason":"An unanswered math question."}',
-                leaked_call=multiply_call,
-            )
-        if len(requests) == 2:
-            return gemini_response({"functionCall": multiply_call})
-        return gemini_response({"text": "437"})
-
-    gate = ParticipationGate()
-    async with gemini_client(provider, vertexai=False) as client:
-        model = MindRoomGoogleGemini(id="test", client=client)
-        with participation_model(model, gate, run_id="primary"):
-            response = await model.aresponse(
-                [Message(role="user", content="Use the calculator to multiply 23 by 19.")],
-                tools=[Function.from_callable(multiply)],
-                tool_choice="auto",
-                run_response=RunOutput(run_id="primary"),
-            )
-
-    assert gate.approved
-    assert response.content == "437"
-    assert executions == [(23, 19)]
-    decision, primary, _continuation = requests
-    assert decision["tools"] == primary["tools"]
-    assert decision["tools"][0]["functionDeclarations"][0]["name"] == "multiply"
-    assert decision["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
-    assert primary["toolConfig"] == {"functionCallingConfig": {"mode": "AUTO"}}
-    assert decision["generationConfig"] == {"responseMimeType": "application/json"}
-    assert "responseMimeType" not in primary.get("generationConfig", {})
-    # Gemini merges the appended decision prompt into the final user turn.
-    assert decision["contents"][0]["parts"][:-1] == primary["contents"][0]["parts"]
+    assert model.tools_disabled == [True, False]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["respond", "stay_silent"])
 @pytest.mark.parametrize(
     ("prefix", "suffix"),
@@ -254,25 +174,13 @@ async def test_gemini_decision_requests_json_while_keeping_declarations() -> Non
         ("Some {informal notation}. ", ""),
     ],
 )
-async def test_single_decision_allows_surrounding_text(action: str, prefix: str, suffix: str) -> None:
-    """Prose and fences must not hide a single valid verdict or leak into the answer."""
+def test_single_decision_allows_surrounding_text(action: str, prefix: str, suffix: str) -> None:
+    """Prose and fences must not hide a single valid verdict."""
     reason = 'An unanswered question about {"key": "value"} needs help.'
-    content = prefix + json.dumps({"action": action, "reason": reason}) + suffix
-    model = ParticipationModel(ModelResponse(content=content))
-    gate = ParticipationGate()
-    with participation_model(model, gate, run_id="primary"):
-        result = await model.aresponse(
-            [Message(role="user", content="Can anyone explain this?")],
-            run_response=RunOutput(run_id="primary"),
-        )
-    assert gate.decision is not None
-    assert gate.decision.action == action
-    assert gate.decision.reason == reason
-    assert (result.content or "") == ("Useful answer" if action == "respond" else "")
-    assert len(model.requests) == (2 if action == "respond" else 1)
+    decision = parse_decision(prefix + json.dumps({"action": action, "reason": reason}) + suffix)
+    assert (decision.action, decision.reason) == (action, reason)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "content",
     [
@@ -289,266 +197,134 @@ async def test_single_decision_allows_surrounding_text(action: str, prefix: str,
         'Before. {"action":"respond"} After.',
         'Before. {"action":"maybe","reason":"Help."} After.',
         'Before. {"action":"respond","reason":"Help." After.',
-    ],
-)
-async def test_ambiguous_or_invalid_embedded_decisions_stay_quiet(content: str) -> None:
-    """Extraction must not pick a verdict from multiple objects or bypass schema validation."""
-    model = ParticipationModel(ModelResponse(content=content))
-    gate = ParticipationGate()
-    with participation_model(model, gate, run_id="primary"):
-        result = await model.aresponse(
-            [Message(role="user", content="Can anyone explain this?")],
-            run_response=RunOutput(run_id="primary"),
-        )
-    assert not result.content
-    assert gate.is_silent
-    assert len(model.requests) == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "content",
-    [
+        '{"action":"error","reason":"Not a model verdict."}',
         '{"action":"stay_silent","action":"respond","reason":"Wait."}',
-        '{"action":"respond","action":"stay_silent","reason":"Wait."}',
-        '{"action":"respond","action":"respond","reason":"Help."}',
         '{"action":"respond","reason":"Wait.","reason":"Help."}',
         '{"action":"stay_silent","\\u0061ction":"respond","reason":"Wait."}',
     ],
 )
-async def test_duplicate_decision_keys_stay_quiet(content: str) -> None:
-    """Duplicate keys must fail validation regardless of order, value, or escaping."""
-    model = ParticipationModel(ModelResponse(content=f"Before.\n```json\n{content}\n```\nAfter."))
-    gate = ParticipationGate()
-    with participation_model(model, gate, run_id="primary"):
-        result = await model.aresponse(
-            [Message(role="user", content="Can anyone explain this?")],
-            run_response=RunOutput(run_id="primary"),
-        )
-    assert not result.content
-    assert gate.is_silent
-    assert gate.decision is not None
-    assert gate.decision.reason == "decision_failed"
-    assert not gate.is_declined
-    assert len(model.requests) == 1
+def test_ambiguous_invalid_or_duplicate_key_decisions_are_rejected(content: str) -> None:
+    """Extraction never picks a verdict from several objects, bypasses the schema, or accepts duplicate keys."""
+    with pytest.raises(ValueError):  # noqa: PT011 - JSON, schema, and duplicate-key failures each word it differently
+        parse_decision(content)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "decision",
+    ("turn", "declined", "reason"),
     [
-        ModelResponse(content='{"action":"stay_silent","reason":"Humans are discussing plans."}'),
-        ModelResponse(content="Sure!"),
-        ModelResponse(content='{"action":"respond"}'),
-        ModelResponse(content='{"action":"error","reason":"Not a model verdict."}'),
-        RuntimeError("provider unavailable"),
+        (answer(_SILENT), True, "Humans are discussing plans."),
+        (answer("Sure!"), False, "decision_failed"),
+        (answer('{"action":"respond"}'), False, "decision_failed"),
+        (answer('{"action":"error","reason":"Not a model verdict."}'), False, "decision_failed"),
+        (answer('{"action":"respond","action":"stay_silent","reason":"Wait."}'), False, "decision_failed"),
+        ([Await(AsyncMock(side_effect=RuntimeError("provider unavailable")))], False, "decision_failed"),
     ],
 )
-async def test_invalid_failed_or_declined_decision_stays_quiet(decision: ModelResponse | Exception) -> None:
-    """An untrusted or failed decision must not authorize an ambient reply."""
-    model = ParticipationModel(decision)
+async def test_invalid_failed_or_declined_decisions_stay_quiet(
+    turn: list[ScriptStep],
+    declined: bool,
+    reason: str,
+) -> None:
+    """An untrusted or failed decision never authorizes a reply; only an explicit verdict counts as declined."""
+    model = ScriptedModel([turn])
     gate = ParticipationGate()
-    with participation_model(model, gate, run_id="primary"):
-        result = await model.aresponse(
-            [Message(role="user", content="I agree.")],
-            run_response=RunOutput(run_id="primary"),
-        )
-    assert not result.content
+
+    _, record = await _reply(model, gate)
+
+    assert not record.content
     assert len(model.requests) == 1
     assert gate.is_silent
-    assert gate.is_declined == (isinstance(decision, ModelResponse) and '"stay_silent"' in (decision.content or ""))
+    assert gate.is_declined is declined
+    assert gate.decision is not None
+    assert gate.decision.reason == reason
 
 
 @pytest.mark.asyncio
 async def test_cancellation_is_not_converted_to_silence() -> None:
-    """Stopping a deciding turn must retain normal cancellation/recovery semantics."""
+    """Stopping a deciding reply keeps its cancellation; the gate stays undecided."""
 
-    class CancelledModel(ParticipationModel):
-        async def ainvoke(
-            self,
-            messages: list[Message],  # noqa: ARG002
-            **_kwargs: object,
-        ) -> ModelResponse:
-            raise asyncio.CancelledError
+    async def cancel() -> None:
+        raise asyncio.CancelledError
 
-    model = CancelledModel(ModelResponse())
-    original = model.ainvoke
-    with pytest.raises(asyncio.CancelledError), participation_model(model, ParticipationGate(), run_id="primary"):
-        await model.aresponse([Message(role="user", content="Question")], run_response=RunOutput(run_id="primary"))
-    assert model.ainvoke == original
+    gate = ParticipationGate()
+    with pytest.raises(asyncio.CancelledError):
+        await _reply(ScriptedModel([[Await(cancel)]]), gate)
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("action", ["respond", "stay_silent"])
-@pytest.mark.parametrize("cached", [False, True])
-async def test_agent_turn_applies_decision_before_model_answer(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    streaming: bool,
-    action: str,
-    cached: bool,
-) -> None:
-    """Both AI adapters must gate the actual Agno run and suppress decision text."""
-    model = ParticipationModel(ModelResponse(content='{"action":"' + action + '","reason":"Conversation context."}'))
-    model.cache_response = cached
-    monkeypatch.setattr(
-        model,
-        "_get_cached_model_response",
-        Mock(
-            return_value={
-                "result": {"content": "Cached answer"},
-                "streaming_responses": [{"content": "Cached answer"}],
-            },
-        ),
-    )
-    agent = Agent(model=model, name="general", telemetry=False)
-    monkeypatch.setattr("mindroom.ai._prepare_agent_and_prompt", AsyncMock(return_value=_prepared_prompt_result(agent)))
-    ctx = replace(
-        make_turn_context("general", session_id="session-1", run_id="run-1"),
-        participation=ParticipationGate(),
-    )
-    kwargs = {
-        "prompt": "test prompt",
-        "runtime_paths": _runtime_paths(tmp_path),
-        "config": _config(),
-        "show_tool_calls": False,
-    }
-    if streaming:
-        chunks = [chunk async for chunk in stream_agent_response(ctx, **kwargs)]
-        result = "".join(
-            chunk if isinstance(chunk, str) else str(chunk.content or "")
-            for chunk in chunks
-            if isinstance(chunk, str | RunContentEvent)
-        )
-    else:
-        result = await ai_response(ctx, **kwargs)
-    assert result == ("Useful answer" if action == "respond" else "")
-    assert len(model.requests) == (2 if action == "respond" else 1)
-    assert model.cache_response is cached
+    assert gate.decision is None
 
 
 @pytest.mark.asyncio
 async def test_decision_usage_is_included_in_run_metrics() -> None:
-    """The extra model request must not disappear from recorded token usage."""
-    model = ParticipationModel(
-        ModelResponse(
-            content='{"action":"respond","reason":"Help requested."}',
-            response_usage=MessageMetrics(input_tokens=40, output_tokens=8, cache_read_tokens=30),
+    """The decision request's tokens count toward the run like any other request."""
+    model = ScriptedModel([answer(_RESPOND, usage(40, 8, cache_read_tokens=30)), answer("Useful answer", usage(10, 2))])
+
+    _, record = await _reply(model, ParticipationGate())
+
+    assert record.metrics is not None
+    assert (
+        record.metrics.tokens.input_tokens,
+        record.metrics.tokens.output_tokens,
+        record.metrics.tokens.cache_read_tokens,
+    ) == (50, 10, 30)
+
+
+@pytest.mark.asyncio
+async def test_an_external_decider_answers_plain_text_conversations_without_a_model_request() -> None:
+    """A configured judgment backend sees the room text and, when it decides, the reply skips the model decision."""
+    decider = AsyncMock(return_value=ParticipationDecision(action="respond", reason="Open question."))
+    model = ScriptedModel([answer("Useful answer")])
+    messages = [
+        Message(role="system", content="Private rules"),
+        Message(role="user", content="Hello there"),
+        Message(role="assistant", content="Hi!"),
+        Message(role="user", content="Can anyone explain this?"),
+    ]
+
+    _, record = await _reply(model, ParticipationGate(decider=decider), messages)
+
+    assert record.content == "Useful answer"
+    assert len(model.requests) == 1
+    decider.assert_awaited_once_with(
+        (
+            JudgmentMessage(sender="user", text="Hello there"),
+            JudgmentMessage(sender="assistant", text="Hi!"),
+            JudgmentMessage(sender="user", text="Can anyone explain this?"),
         ),
     )
-    run = RunOutput(run_id="primary", metrics=RunMetrics())
-    with participation_model(model, ParticipationGate(), run_id="primary"):
-        await model.aresponse([Message(role="user", content="Question")], run_response=run)
-    assert run.metrics.input_tokens == 40
-    assert run.metrics.output_tokens == 8
-    assert run.metrics.cache_read_tokens == 30
 
 
 @pytest.mark.asyncio
-async def test_decision_uses_same_compressed_messages_as_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Checking before tool-result compression would miss the reusable prefix."""
-    manager = CompressionManager()
+async def test_an_abstaining_decider_falls_back_to_the_model_decision() -> None:
+    """When the backend abstains, the reply's own model decides as it would without a backend."""
+    decider = AsyncMock(return_value=None)
+    model = ScriptedModel([answer(_RESPOND), answer("Useful answer")])
 
-    async def compress(messages: list[Message], **_kwargs: object) -> None:
-        messages[:] = [Message(role="user", content="Compressed conversation")]
+    _, record = await _reply(model, ParticipationGate(decider=decider), run_id="run-1")
 
-    monkeypatch.setattr(manager, "ashould_compress", AsyncMock(return_value=True))
-    monkeypatch.setattr(manager, "acompress", compress)
-    model = ParticipationModel(ModelResponse(content='{"action":"respond","reason":"Open question."}'))
-    with participation_model(model, ParticipationGate(), run_id="primary"):
-        await model.aresponse(
-            [Message(role="user", content="Long conversation")],
-            compression_manager=manager,
-            run_response=RunOutput(run_id="primary"),
-        )
-    decision, reply = model.requests
-    assert decision["messages"][:-1] == reply["messages"]
-    assert decision["messages"][0].content == "Compressed conversation"
-    assert decision["compress_tool_results"] is True
-    assert reply["compress_tool_results"] is True
+    assert record.content == "Useful answer"
+    assert len(model.requests) == 2
+    decider.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_preparation_errors_do_not_publish_before_participation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    streaming: bool,
-) -> None:
-    """Failed preparation cannot bypass the participation decision with an error reply."""
-    monkeypatch.setattr(
-        "mindroom.ai._prepare_agent_and_prompt",
-        AsyncMock(side_effect=RuntimeError("Preparation failed")),
-    )
-    gate = ParticipationGate()
-    ctx = replace(make_turn_context("general", session_id="session-1"), participation=gate)
-    if streaming:
-        chunks = [
-            chunk
-            async for chunk in stream_agent_response(
-                ctx,
-                prompt="Question",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
-            )
-        ]
-        assert chunks == []
+@pytest.mark.parametrize("kind", ["media", "attachment_text", "history_attachment", "tool_calls"])
+async def test_conversations_with_more_than_room_text_skip_the_external_decider(kind: str) -> None:
+    """Media, attachments, and tool calls are not projected to a backend; the model decides on the full context."""
+    decider = AsyncMock(return_value=ParticipationDecision(action="stay_silent", reason="Nope."))
+    model = ScriptedModel([answer(_RESPOND), answer("Useful answer")])
+    message = Message(role="user", content="Any ideas?")
+    if kind == "media":
+        message.images = [Image(url="https://example.org/image.png")]
+    elif kind == "attachment_text":
+        message.content = "Attachments sent with the current message (use tool calls to inspect them):\nprivate.txt"
+    elif kind == "history_attachment":
+        message.content = "Can you inspect this? [attachments: att_123 (private.txt)]"
     else:
-        assert await ai_response(ctx, prompt="Question", runtime_paths=_runtime_paths(tmp_path), config=_config()) == ""
-    assert gate.is_silent
+        message = Message(role="assistant", content="Looking.", tool_calls=[tool_call("operate", "call-0")])
 
+    _, record = await _reply(model, ParticipationGate(decider=decider), [message])
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("approved", [False, True])
-async def test_compression_failure_is_quiet_until_participation_is_approved(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    streaming: bool,
-    approved: bool,
-) -> None:
-    """Agno errors before the provider boundary cannot authorize an error reply."""
-    manager = CompressionManager()
-    monkeypatch.setattr(manager, "ashould_compress", AsyncMock(side_effect=RuntimeError("Compression failed")))
-    model = ParticipationModel(ModelResponse())
-    agent = Agent(model=model, name="general", telemetry=False, compression_manager=manager)
-    monkeypatch.setattr("mindroom.ai._prepare_agent_and_prompt", AsyncMock(return_value=_prepared_prompt_result(agent)))
-    gate = ParticipationGate()
-    if approved:
-        gate.approve_existing_response()
-    ctx = replace(make_turn_context("general", session_id="session-1"), participation=gate)
-    kwargs = {"prompt": "Question", "runtime_paths": _runtime_paths(tmp_path), "config": _config()}
-    if streaming:
-        chunks = [chunk async for chunk in stream_agent_response(ctx, **kwargs)]
-        result = "".join(chunk for chunk in chunks if isinstance(chunk, str))
-    else:
-        result = await ai_response(ctx, **kwargs)
-    if approved:
-        assert "Compression failed" in result
-    else:
-        assert result == ""
-        assert gate.is_silent
-    assert model.requests == []
-
-
-@pytest.mark.asyncio
-async def test_stream_backed_provider_does_not_reenter_decision() -> None:
-    """A provider's blocking-to-stream delegation must reach the actual provider once."""
-
-    class StreamBackedModel(ParticipationModel):
-        async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
-            chunks = [chunk async for chunk in self.ainvoke_stream(messages, **kwargs)]
-            return chunks[0]
-
-        async def ainvoke_stream(self, messages: list[Message], **kwargs: object) -> AsyncIterator[ModelResponse]:
-            yield await super().ainvoke(messages, **kwargs)
-
-    model = StreamBackedModel(ModelResponse(content='{"action":"respond","reason":"Help requested."}'))
-    with participation_model(model, ParticipationGate(), run_id="primary"):
-        response = await model.aresponse(
-            [Message(role="user", content="Question")],
-            run_response=RunOutput(run_id="primary"),
-        )
-    assert response.content == "Useful answer"
+    assert record.content == "Useful answer"
+    decider.assert_not_awaited()
     assert len(model.requests) == 2

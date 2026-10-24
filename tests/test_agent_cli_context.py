@@ -2,48 +2,37 @@
 
 from __future__ import annotations
 
-from contextlib import ExitStack
 from dataclasses import replace
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import _messages
-from agno.learn import LearningMachine
-from agno.run import RunContext
-from agno.run.agent import RunInput, RunOutput
-from agno.session import AgentSession
-from agno.session.summary import SessionSummary
 
 from mindroom import agents
+from mindroom.agent_cli.minimal_agent import minimal_turn, prepare_minimal_catalog
+from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig
-from mindroom.history.replay import is_compaction_summary
-from mindroom.history.session_context import close_agent_runtime_state_dbs
-from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
+from mindroom.error_handling import MinimalModeUnavailableError
+from mindroom.hooks import EnrichmentItem
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.tool_access import ToolKey
 from tests.test_agent_cli_authority import _runtime_context
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.learn.stores.protocol import LearningStore
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-@pytest.mark.asyncio
-async def test_context_uses_same_agent_learning_and_replays_summary_as_history(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Normal SDK context reads remain available; only bootstrap reaches the provider."""
-    runtime = _runtime_context(tmp_path)
+def _minimal_build(runtime: ToolRuntimeContext) -> AgentBuild:
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
+        role="Keep the build machine healthy.",
+        instructions=["Check the disk before cleaning."],
         tools=["shell"],
         memory_backend="file",
-        learning=False,
     )
-    agent = agents.create_agent(
+    return agents.create_agent(
         "helper",
         runtime.config,
         runtime.runtime_paths,
@@ -51,94 +40,61 @@ async def test_context_uses_same_agent_learning_and_replays_summary_as_history(
         agent_mode="minimal",
         persist_runtime_state=False,
     )
-    agent.system_message = "small bootstrap"
-    agent.context_documents = {}
-    agent._learning = LearningMachine()
-    seen = []
 
-    async def context(_self: LearningMachine, **kwargs: object) -> str:
-        seen.append(kwargs)
-        return "private learned context"
 
-    monkeypatch.setattr(LearningMachine, "abuild_context", context)
-    session = AgentSession(
-        session_id="session",
-        user_id=runtime.requester_id,
-        summary=SessionSummary(summary="complete previous summary"),
+def test_only_the_bootstrap_and_required_context_reach_the_provider(tmp_path: Path) -> None:
+    """The full prompt, memory, and optional enrichment are documents; required enrichment stays inline."""
+    build = _minimal_build(_runtime_context(tmp_path))
+    turn = minimal_turn(
+        build,
+        session_preamble="Earlier the disk was nearly full.",
+        transient_memory="The user prefers short answers.",
+        system_enrichment=(
+            EnrichmentItem(key="required_system", text="Assigned task: rotate the logs.", minimal_required=True),
+            EnrichmentItem(key="optional_system", text="The weather is sunny."),
+        ),
+        transient_enrichment=(
+            EnrichmentItem(key="required_turn", text="Reply in the thread.", minimal_required=True),
+            EnrichmentItem(key="optional_turn", text="A colleague mentioned lunch."),
+        ),
     )
-    run = RunContext(run_id="run", session_id="session", user_id=runtime.requester_id, session_state={})
-    output = RunOutput(run_id="run", input=RunInput(input_content="current user message"))
-    with tool_runtime_context(runtime):
-        catalog = await agent.prepare_execution_catalog(output, run, session, user_id=runtime.requester_id)
-        await catalog.close()
-    result = await _messages.aget_run_messages(
-        agent,
-        run_response=output,
-        session=session,
-        run_context=run,
-        input="current user message",
-        add_history_to_context=True,
-    )
-    assert result.system_message.content == "small bootstrap"
-    assert is_compaction_summary(result.messages[1])
-    assert "complete previous summary" in str(result.messages[1].content)
-    assert "private learned context" in agent.context_documents["agent-context"]
-    assert "complete previous summary" not in agent.context_documents["agent-context"]
-    assert seen[0]["user_id"] == runtime.requester_id
-    assert seen[0]["message"] == "current user message"
 
-    async def failure(_self: LearningMachine, **_kwargs: object) -> str:
-        msg = "retrieval failed"
-        raise OSError(msg)
-
-    monkeypatch.setattr(LearningMachine, "abuild_context", failure)
-    with (
-        tool_runtime_context(runtime),
-        pytest.raises(RuntimeError, match=r"retrieval failed.*!mode helper standard") as error,
-    ):
-        await agent.prepare_execution_catalog(output, run, session, user_id=runtime.requester_id)
-    assert isinstance(error.value.__cause__, OSError)
-    assert agent.system_message == "small bootstrap"
+    system = turn.system_message.get_content_string()
+    assert system.startswith("You are Helper (helper) in minimal mode.\nBash starts in your workspace.")
+    assert "Assigned task: rotate the logs." in system
+    for hidden in ("Keep the build machine healthy.", "Check the disk", "nearly full", "sunny", "lunch"):
+        assert hidden not in system
+    assert "Reply in the thread." in turn.transient_context
+    assert "lunch" not in turn.transient_context
+    documents = turn.context_documents
+    assert "Keep the build machine healthy." in documents["agent-context"]
+    assert "Check the disk before cleaning." in documents["instructions"]
+    assert "nearly full" in documents["memory"]
+    assert "short answers" in documents["memory"]
+    assert "sunny" in documents["enrichment"]
+    assert "lunch" in documents["enrichment"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requester", ["@alice:example.test", "@bob:example.test"])
-async def test_hidden_generated_learning_keeps_authenticated_requester(tmp_path: Path, requester: str) -> None:
-    """Generated closures receive the actual requester explicitly for every minimal catalog."""
-    runtime = replace(_runtime_context(tmp_path), requester_id=requester)
-    runtime.config.agents["helper"] = AgentConfig(
-        display_name="Helper",
-        tools=["shell"],
-        memory_backend="file",
-        learning=False,
-    )
-    agent = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        build_execution_identity_from_runtime_context(runtime),
-        agent_mode="minimal",
-    )
-
-    async def tools(user_id: str, session_id: str, agent_id: str, **_kwargs: object) -> list:
-        async def remember(value: str) -> str:
-            return f"{agent_id}/{user_id}/{session_id}: {value}"
-
-        return [remember]
-
-    store = cast("LearningStore", SimpleNamespace(aget_tools=tools))
-    agent._learning = LearningMachine(custom_stores={"local": store})
-    with ExitStack() as resources, tool_runtime_context(runtime):
-        resources.callback(close_agent_runtime_state_dbs, agent)
-        catalog = await agent.prepare_execution_catalog(
-            RunOutput(run_id="run"),
-            RunContext(run_id="run", session_id=runtime.session_id, user_id=requester, session_state={}),
-            AgentSession(session_id=runtime.session_id),
-            user_id=requester,
+async def test_a_catalog_for_another_requester_names_the_recovery_command(tmp_path: Path) -> None:
+    """Minimal Bash is refused for anyone but the turn's own requester, with the way back to standard mode."""
+    runtime = _runtime_context(tmp_path)
+    build = _minimal_build(runtime)
+    session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
+    with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="!mode helper standard"):
+        await prepare_minimal_catalog(
+            build,
+            run=RunContext(run_id="run", session_id="session", user_id="@mallory:example.test", session=session),
+            store=None,
+            delegation_depth=0,
         )
-        try:
-            binding = await catalog.bind(ToolKey("agent", "remember"))
-            events = [event async for event in execute_agent_tool_call(binding, "inner", {"value": "lesson"})]
-            assert events[-1].execution.result == f"helper/{requester}/{runtime.session_id}: lesson"
-        finally:
-            await catalog.close()
+    with (
+        tool_runtime_context(runtime),
+        pytest.raises(MinimalModeUnavailableError, match="Start a new subagent without minimal"),
+    ):
+        await prepare_minimal_catalog(
+            replace(build, spec=replace(build.spec, toolkits=())),
+            run=RunContext(run_id="run", session_id="session", user_id=runtime.requester_id, session=session),
+            store=None,
+            delegation_depth=1,
+        )

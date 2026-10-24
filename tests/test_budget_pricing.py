@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
-from agno.metrics import ModelMetrics, RunMetrics
 
 from mindroom.budgets import pricing as pricing_module
 from mindroom.budgets.pricing import (
@@ -22,8 +21,8 @@ from mindroom.budgets.pricing import (
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.providers.model_loading import get_model_instance
-from mindroom.usage.stats import TokenTotals
+from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
+from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,7 +38,7 @@ def _paths(tmp_path: Path) -> RuntimePaths:
 
 def test_openai_cache_reads_are_charged_out_of_input() -> None:
     priced = PricedModel(ModelPricing(input=2.0, output=8.0, cache_read=0.5), input_includes_cache=True)
-    totals = TokenTotals(input_tokens=1_000_000, cache_read_tokens=400_000, output_tokens=100_000)
+    totals = TokenCounts(input_tokens=1_000_000, cache_read_tokens=400_000, output_tokens=100_000)
 
     assert cost_usd(totals, priced) == pytest.approx((600_000 * 2.0 + 400_000 * 0.5 + 100_000 * 8.0) / 1e6)
 
@@ -47,14 +46,14 @@ def test_openai_cache_reads_are_charged_out_of_input() -> None:
 def test_anthropic_cache_tokens_are_charged_beside_input() -> None:
     pricing = ModelPricing(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75)
     priced = PricedModel(pricing, input_includes_cache=False)
-    totals = TokenTotals(input_tokens=10_000, cache_read_tokens=90_000, cache_write_tokens=5_000, output_tokens=1_000)
+    totals = TokenCounts(input_tokens=10_000, cache_read_tokens=90_000, cache_write_tokens=5_000, output_tokens=1_000)
 
     assert cost_usd(totals, priced) == pytest.approx((10_000 * 3.0 + 90_000 * 0.3 + 5_000 * 3.75 + 1_000 * 15.0) / 1e6)
 
 
 def test_unset_cache_price_charges_cache_reads_at_input_price() -> None:
     priced = PricedModel(ModelPricing(input=2.0, output=8.0), input_includes_cache=True)
-    totals = TokenTotals(input_tokens=1_000_000, cache_read_tokens=400_000)
+    totals = TokenCounts(input_tokens=1_000_000, cache_read_tokens=400_000)
 
     assert cost_usd(totals, priced) == pytest.approx(2.0)
 
@@ -62,7 +61,7 @@ def test_unset_cache_price_charges_cache_reads_at_input_price() -> None:
 def test_inconsistent_cache_counters_never_make_input_negative() -> None:
     priced = PricedModel(ModelPricing(input=2.0, output=8.0, cache_read=0.5), input_includes_cache=True)
 
-    assert cost_usd(TokenTotals(input_tokens=10, cache_read_tokens=1_000_000), priced) == pytest.approx(0.5)
+    assert cost_usd(TokenCounts(input_tokens=10, cache_read_tokens=1_000_000), priced) == pytest.approx(0.5)
 
 
 def test_price_table_keys_models_by_their_recorded_provider_identity(tmp_path: Path) -> None:
@@ -87,13 +86,13 @@ def test_price_table_keys_models_by_their_recorded_provider_identity(tmp_path: P
 
     table = _price_table(config, paths).prices
 
-    sol = get_model_instance(config, paths, "sol")
-    opus = get_model_instance(config, paths, "opus")
-    codex = get_model_instance(config, paths, "codex")
-    assert set(table) == {(sol.get_provider(), "gpt-6.1-sol"), (opus.get_provider(), "claude-opus-5-5")}
-    assert (codex.get_provider(), "gpt-6.1-sol") not in table
-    assert table[(sol.get_provider(), "gpt-6.1-sol")].input_includes_cache is True
-    assert table[(opus.get_provider(), "claude-opus-5-5")].input_includes_cache is False
+    sol = build_model_provider(config, paths, "sol").identity
+    opus = build_model_provider(config, paths, "opus").identity
+    codex = build_model_provider(config, paths, "codex").identity
+    assert set(table) == {(sol.provider_name, "gpt-6.1-sol"), (opus.provider_name, "claude-opus-5-5")}
+    assert (codex.provider_name, "gpt-6.1-sol") not in table
+    assert table[(sol.provider_name, "gpt-6.1-sol")].input_includes_cache is True
+    assert table[(opus.provider_name, "claude-opus-5-5")].input_includes_cache is False
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "bedrock_claude", "vertexai_claude"])
@@ -155,7 +154,7 @@ def test_reasoning_tokens_are_charged_as_part_of_output(tmp_path: Path, provider
         },
     )
     (priced,) = _price_table(config, _paths(tmp_path)).prices.values()
-    totals = TokenTotals(input_tokens=1_000_000, output_tokens=500_000, reasoning_tokens=400_000)
+    totals = TokenCounts(input_tokens=1_000_000, output_tokens=500_000, reasoning_tokens=400_000)
 
     assert cost_usd(totals, priced) == pytest.approx(1.0 + 500_000 * 10.0 / 1e6)
 
@@ -195,7 +194,7 @@ def test_price_table_reports_a_priced_model_it_could_not_build(tmp_path: Path) -
         },
     )
 
-    with patch("mindroom.budgets.pricing.get_model_instance", side_effect=RuntimeError("missing SDK")):
+    with patch("mindroom.budgets.pricing.build_model_provider", side_effect=RuntimeError("missing SDK")):
         table = _price_table(config, _paths(tmp_path))
 
     assert table == _PriceTable(prices={}, complete=False)
@@ -219,12 +218,11 @@ def test_single_model_run_is_priced_from_usage() -> None:
 def test_team_details_are_priced_per_model() -> None:
     """A team reply whose member runs another model is charged that model's prices, not the leader's."""
     metrics = RunMetrics(
-        input_tokens=1_000_000,
-        output_tokens=1_000_000,
+        tokens=TokenCounts(input_tokens=1_000_000, output_tokens=1_000_000),
         details={
             "model": [
-                ModelMetrics(id="a", provider="P", input_tokens=1_000_000),
-                ModelMetrics(id="b", provider="P", output_tokens=1_000_000),
+                ModelMetrics(tokens=TokenCounts(input_tokens=1_000_000), id="a", provider="P"),
+                ModelMetrics(tokens=TokenCounts(output_tokens=1_000_000), id="b", provider="P"),
             ],
         },
     )
@@ -241,12 +239,12 @@ def test_team_details_are_priced_per_model() -> None:
 def test_summed_team_metrics_keep_each_member_model_priced() -> None:
     """Team replies add member metrics to the leader's, which must keep per-model details apart."""
     leader = RunMetrics(
-        input_tokens=1_000_000,
-        details={"model": [ModelMetrics(id="a", provider="P", input_tokens=1_000_000)]},
+        tokens=TokenCounts(input_tokens=1_000_000),
+        details={"model": [ModelMetrics(tokens=TokenCounts(input_tokens=1_000_000), id="a", provider="P")]},
     )
     member = RunMetrics(
-        output_tokens=1_000_000,
-        details={"model": [ModelMetrics(id="b", provider="P", output_tokens=1_000_000)]},
+        tokens=TokenCounts(output_tokens=1_000_000),
+        details={"model": [ModelMetrics(tokens=TokenCounts(output_tokens=1_000_000), id="b", provider="P")]},
     )
     prices = {
         ("P", "a"): PricedModel(ModelPricing(input=1, output=1), input_includes_cache=True),
@@ -260,8 +258,8 @@ def test_partly_priced_details_charge_only_priced_models() -> None:
     metrics = RunMetrics(
         details={
             "model": [
-                ModelMetrics(id="a", provider="P", input_tokens=1_000_000),
-                ModelMetrics(id="local", provider="Ollama", input_tokens=5_000_000),
+                ModelMetrics(tokens=TokenCounts(input_tokens=1_000_000), id="a", provider="P"),
+                ModelMetrics(tokens=TokenCounts(input_tokens=5_000_000), id="local", provider="Ollama"),
             ],
         },
     )

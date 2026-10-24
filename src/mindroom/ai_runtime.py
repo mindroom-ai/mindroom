@@ -3,23 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
-from agno.db.base import SessionType
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
-
-from mindroom.agno_compat_model_hooks import install_tool_result_callback
 from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
     QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
@@ -27,127 +17,41 @@ from mindroom.history.run_visibility import (
     is_queued_notice_message,
     queued_notice_marker,
 )
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
-from mindroom.media_inputs import MediaInputs
-from mindroom.session_storage.agent_storage import runs_without, save_runs
 
 if TYPE_CHECKING:
-    from agno.agent import Agent
-    from agno.db.base import BaseDb
-    from agno.models.base import Model
-    from agno.models.response import ModelResponse
+    from collections.abc import Callable, Generator, Sequence
 
+    from mindroom.agent_loop.model_loop import AfterToolBatchHook
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.judgment.state import JudgmentMessage
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.mid_turn import MidTurnGate, QueuedMessage
-    from mindroom.timing import DispatchPipelineTiming
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession, SessionKind
 
 __all__ = [
     "EMPTY_RESPONSE_NOTICE",
-    "AttemptModelRuntime",
-    "ModelRunInput",
-    "attach_media_to_run_input",
     "bind_mid_turn_conversation_context",
-    "cached_agent_run",
-    "copy_run_input",
     "discard_empty_completed_run",
     "finalize_queued_notice_response_turn_async",
-    "install_queued_message_notice_hook",
     "is_empty_completed_run",
-    "next_retry_run_id",
-    "note_attempt_run_id",
     "queued_message_signal_context",
+    "queued_notice_after_tool_batch",
+    "queued_notice_on_resume_entry",
     "register_queued_notice_storage",
-    "run_attempt_with_model",
+    "register_scope_notice_storage",
     "scrub_queued_notice_session_context",
-    "stream_attempt_with_model",
 ]
 
 logger = get_logger(__name__)
 
-type ModelRunInput = str | Sequence[Message]
-
-
-class AttemptModelRuntime(Protocol):
-    """Bind attempt-local model identity around provider execution."""
-
-    async def run_with_model[ResultT](
-        self,
-        *,
-        active_model_name: str,
-        operation: Callable[[], Awaitable[ResultT]],
-    ) -> ResultT:
-        """Run one blocking attempt with its model bound to runtime state."""
-
-    def stream_with_model[ChunkT](
-        self,
-        stream: AsyncIterator[ChunkT],
-        *,
-        active_model_name: str,
-    ) -> AsyncIterator[ChunkT]:
-        """Bind one streaming attempt's model during stream pulls and close."""
-
-
-async def run_attempt_with_model[ResultT](
-    runtime: AttemptModelRuntime | None,
-    *,
-    active_model_name: str,
-    operation: Callable[[], Awaitable[ResultT]],
-) -> ResultT:
-    """Run an attempt through its optional model-aware runtime boundary."""
-    if runtime is None:
-        return await operation()
-    return await runtime.run_with_model(
-        active_model_name=active_model_name,
-        operation=operation,
-    )
-
-
-def stream_attempt_with_model[ChunkT](
-    runtime: AttemptModelRuntime | None,
-    stream: AsyncIterator[ChunkT],
-    *,
-    active_model_name: str,
-) -> AsyncIterator[ChunkT]:
-    """Wrap a stream in its optional model-aware runtime boundary."""
-    if runtime is None:
-        return stream
-    return runtime.stream_with_model(
-        stream,
-        active_model_name=active_model_name,
-    )
-
 
 _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
-_QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
 
 EMPTY_RESPONSE_NOTICE = "The model returned an empty response — please try again."
-
-
-def _normalize_run_input(run_input: ModelRunInput) -> list[Message]:
-    """Coerce legacy string input into canonical provider messages."""
-    if isinstance(run_input, str):
-        return [Message(role="user", content=run_input)]
-    return [message.model_copy(deep=True) for message in run_input]
-
-
-def copy_run_input(run_input: ModelRunInput) -> list[Message]:
-    """Deep-copy canonical run input so retries can mutate safely."""
-    return _normalize_run_input(run_input)
-
-
-def attach_media_to_run_input(
-    run_input: ModelRunInput,
-    media_inputs: MediaInputs,
-) -> list[Message]:
-    """Attach media to the current user message."""
-    run_messages = copy_run_input(run_input)
-    current_message = run_messages[-1]
-    current_message.audio = media_inputs.audio
-    current_message.images = media_inputs.images
-    current_message.files = media_inputs.files
-    current_message.videos = media_inputs.videos
-    return run_messages
 
 
 class _SupportsQueuedMessageState(Protocol):
@@ -162,14 +66,14 @@ class _QueuedMessageNoticeContext:
     mid_turn_gate: MidTurnGate | None = None
     response_turn_id: str = field(default_factory=lambda: str(uuid4()))
     notice_fired: bool = False
-    storage_targets: dict[tuple[str, str, SessionType], _QueuedNoticeStorageTarget] = field(default_factory=dict)
+    storage_targets: dict[tuple[str, str, SessionKind], _QueuedNoticeStorageTarget] = field(default_factory=dict)
 
 
 @dataclass
 class _QueuedNoticeStorageTarget:
-    storage_factory: Callable[[], BaseDb]
+    storage_factory: Callable[[], ConversationStore]
     session_id: str
-    session_type: SessionType
+    session_kind: SessionKind
     entity_name: str
 
 
@@ -216,7 +120,7 @@ def _is_queued_notice_message(
     *,
     response_turn_id: str | None = None,
 ) -> bool:
-    """Return whether one Agno message is the hidden queued-message notice."""
+    """Return whether one message is the hidden queued-message notice."""
     if not is_queued_notice_message(message):
         return False
     if response_turn_id is None:
@@ -224,46 +128,24 @@ def _is_queued_notice_message(
     return _queued_notice_response_turn_id(message) == response_turn_id
 
 
-def _strip_queued_notice_messages(
-    messages: list[Message] | None,
-    *,
-    response_turn_id: str | None = None,
-) -> bool:
-    """Remove queued-message notices from one mutable message list."""
-    if not messages:
-        return False
-    filtered_messages = [
-        message
-        for message in messages
-        if not _is_queued_notice_message(
-            message,
-            response_turn_id=response_turn_id,
-        )
+def _strip_queued_notice_messages(messages: list[Message], *, response_turn_id: str) -> None:
+    """Remove one response's queued-message notices from a mutable message list."""
+    messages[:] = [
+        message for message in messages if not _is_queued_notice_message(message, response_turn_id=response_turn_id)
     ]
-    if len(filtered_messages) == len(messages):
-        return False
-    messages[:] = filtered_messages
-    return True
 
 
 def _append_queued_notice_if_needed(
     *,
     messages: list[Message],
-    function_call_results: Sequence[Message],
     notice_text: str,
     judged: bool = False,
 ) -> None:
     notice_context = _queued_message_notice_context.get()
-    if any(message.stop_after_tool_call for message in function_call_results):
+    if notice_context is None or (notice_context.mid_turn_gate is not None and not judged):
         return
-    if notice_context is not None and notice_context.mid_turn_gate is not None and not judged:
-        return
-    if notice_context is not None:
-        _strip_queued_notice_messages(
-            messages,
-            response_turn_id=notice_context.response_turn_id,
-        )
-    if notice_context is None or notice_context.state is None or not notice_context.state.has_pending_human_messages():
+    _strip_queued_notice_messages(messages, response_turn_id=notice_context.response_turn_id)
+    if notice_context.state is None or not notice_context.state.has_pending_human_messages():
         return
     messages.append(
         Message(
@@ -283,19 +165,19 @@ def _append_queued_notice_if_needed(
         )
 
 
-def _completed_trailing_tool_results(
+def _ends_with_completed_tool_batch(
     messages: list[Message],
     response_turn_id: str,
     *,
     after_tool_batch: bool = False,
-) -> list[Message] | None:
-    """Find a complete resumed batch without crossing a real user or assistant message."""
+) -> bool:
+    """Return whether the messages end with a complete tool batch, found without crossing a real user message."""
     results: list[Message] = []
     for message in reversed(messages):
         if _is_queued_notice_message(message, response_turn_id=response_turn_id):
             continue
         # Provider projections can insert trusted context between calls and results.
-        if message.role in {"system", "developer"}:
+        if message.role == "system":
             continue
         # Formatting may append user-role media after a just-completed batch, and a paused call's
         # result follows that media when the run resumes. Only a trailing user message is real input,
@@ -308,20 +190,9 @@ def _completed_trailing_tool_results(
         if message.role == "assistant" and message.tool_calls:
             call_ids = {call.get("id") for call in message.tool_calls}
             result_ids = {result.tool_call_id for result in results}
-            if None not in call_ids and call_ids <= result_ids:
-                return results
-        return None
-    return None
-
-
-def _append_queued_notice_after_resumed_tools(messages: list[Message], *, notice_text: str) -> None:
-    """Notify at response entry only after a complete trailing tool batch."""
-    context = _queued_message_notice_context.get()
-    if context is None or context.state is None or not context.state.has_pending_human_messages():
-        return
-    results = _completed_trailing_tool_results(messages, context.response_turn_id)
-    if results is not None:
-        _append_queued_notice_if_needed(messages=messages, function_call_results=results, notice_text=notice_text)
+            return None not in call_ids and call_ids <= result_ids
+        return False
+    return False
 
 
 async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> None:
@@ -337,97 +208,51 @@ async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> 
         current=lambda: not context.notice_fired and pending == state.pending_message_snapshot(),
     ):
         return
-    _append_queued_notice_if_needed(messages=messages, function_call_results=(), notice_text=notice_text, judged=True)
+    _append_queued_notice_if_needed(messages=messages, notice_text=notice_text, judged=True)
 
 
-async def _judge_resumed_tool_notice(messages: list[Message], *, notice_text: str) -> None:
-    context = _queued_message_notice_context.get()
-    if context is None or context.mid_turn_gate is None:
-        return
-    results = _completed_trailing_tool_results(messages, context.response_turn_id)
-    if results is not None and not any(message.stop_after_tool_call for message in results):
-        await _judge_queued_notice(
-            messages,
-            notice_text=notice_text,
-        )
+def queued_notice_after_tool_batch(notice_text: str) -> AfterToolBatchHook:
+    """Return the loop hook that appends the queued-message notice after a tool batch when a newer message waits.
+
+    Without a mid-turn judge the notice follows every batch while messages are queued; with one, the judge decides
+    after each completed batch. Calls paused for approval or delegation leave the batch unresolved; the response that
+    resumes it judges the completed batch, reusing this turn's decision for an unchanged queue.
+    """
+
+    async def after_tool_batch(messages: list[Message], _results: Sequence[Message]) -> None:
+        _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
+        context = _queued_message_notice_context.get()
+        if context is None or context.mid_turn_gate is None:
+            return
+        if not _ends_with_completed_tool_batch(messages, context.response_turn_id, after_tool_batch=True):
+            return
+        await _judge_queued_notice(messages, notice_text=notice_text)
+
+    return after_tool_batch
 
 
-def _strip_response_turn_notice_from_run_output(
-    run_output: RunOutput | TeamRunOutput,
-    *,
-    response_turn_id: str,
-) -> bool:
-    """Remove one response's notice from a top-level or nested run output."""
-    changed = _strip_queued_notice_messages(
-        run_output.messages,
-        response_turn_id=response_turn_id,
-    )
-    if isinstance(run_output, TeamRunOutput) and run_output.member_responses:
-        for member_response in run_output.member_responses:
-            if isinstance(member_response, RunOutput | TeamRunOutput):
-                changed = (
-                    _strip_response_turn_notice_from_run_output(
-                        member_response,
-                        response_turn_id=response_turn_id,
-                    )
-                    or changed
-                )
-    return changed
+def queued_notice_on_resume_entry(notice_text: str) -> AfterToolBatchHook:
+    """Return the loop hook that notifies a resumed run of a queued message after its completed tool batch."""
+
+    async def on_resume_entry(messages: list[Message], _results: Sequence[Message]) -> None:
+        context = _queued_message_notice_context.get()
+        if context is None or not _ends_with_completed_tool_batch(messages, context.response_turn_id):
+            return
+        if context.mid_turn_gate is not None:
+            await _judge_queued_notice(messages, notice_text=notice_text)
+        elif context.state is not None and context.state.has_pending_human_messages():
+            _append_queued_notice_if_needed(messages=messages, notice_text=notice_text)
+
+    return on_resume_entry
 
 
-def _load_queued_notice_session(
-    raw_session: AgentSession | TeamSession | dict[str, object],
-    *,
-    session_type: SessionType,
-) -> AgentSession | TeamSession | None:
-    """Deserialize one stored Agno session for queued-notice finalization."""
-    if isinstance(raw_session, dict):
-        session_mapping = cast("dict[str, Any]", raw_session)
-        return (
-            TeamSession.from_dict(session_mapping)
-            if session_type is SessionType.TEAM
-            else AgentSession.from_dict(session_mapping)
-        )
-    return raw_session
+def _run_notice_messages(run: AnyRunRecord, *, response_turn_id: str | None) -> list[Message]:
+    """Return the notices of one response, or of any response when ``response_turn_id`` is None, in a run.
 
-
-def _session_run_outputs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
-    return [run for run in session.runs or [] if isinstance(run, RunOutput | TeamRunOutput)]
-
-
-def _run_output_notice_messages(
-    run_output: RunOutput | TeamRunOutput,
-    *,
-    response_turn_id: str,
-) -> list[Message]:
-    matches = _top_level_queued_notice_messages(
-        run_output,
-        response_turn_id=response_turn_id,
-    )
-    if isinstance(run_output, TeamRunOutput) and run_output.member_responses:
-        for member_response in run_output.member_responses:
-            if isinstance(member_response, RunOutput | TeamRunOutput):
-                matches.extend(
-                    _run_output_notice_messages(
-                        member_response,
-                        response_turn_id=response_turn_id,
-                    ),
-                )
-    return matches
-
-
-def _top_level_queued_notice_messages(
-    run_output: RunOutput | TeamRunOutput,
-    *,
-    response_turn_id: str,
-) -> list[Message]:
+    Only a top-level run holds notices: team members run without them.
+    """
     return [
-        message
-        for message in run_output.messages or []
-        if _is_queued_notice_message(
-            message,
-            response_turn_id=response_turn_id,
-        )
+        message for message in run.messages if _is_queued_notice_message(message, response_turn_id=response_turn_id)
     ]
 
 
@@ -446,68 +271,39 @@ def _queued_notice_text_to_persist(
     *,
     destination_matches: Sequence[Message],
 ) -> str | None:
-    destination_live_notice = next(
-        (
-            message
-            for message in destination_matches
-            if queued_notice_marker(message) is True and isinstance(message.content, str)
-        ),
-        None,
-    )
-    if destination_live_notice is not None:
-        return cast("str", destination_live_notice.content)
-    persisted_source = next(
-        (
-            message
-            for message in destination_matches
-            if queued_notice_marker(message) == QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
-            and isinstance(message.content, str)
-        ),
-        None,
-    )
-    return cast("str", persisted_source.content) if persisted_source is not None else None
+    for message in destination_matches:
+        if queued_notice_marker(message) is True and isinstance(message.content, str):
+            return message.content
+    for message in destination_matches:
+        if queued_notice_marker(message) == QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER and isinstance(message.content, str):
+            return message.content
+    return None
 
 
 def _finalize_queued_notice_in_runs(
-    runs: Sequence[RunOutput | TeamRunOutput],
+    runs: Sequence[AnyRunRecord],
     *,
     response_turn_id: str,
-) -> list[RunOutput | TeamRunOutput]:
+) -> list[AnyRunRecord]:
     """Leave one exact persisted notice where the newest replayable run saw it.
 
     Returns copies of the runs that change; the given runs are left untouched
-    because agno shares loaded run objects across reads.
+    because loaded run objects are shared across readers of a session.
     """
     destination = next(
         (
             run
             for run in reversed(runs)
-            if is_model_history_visible_run(run)
-            and _top_level_queued_notice_messages(
-                run,
-                response_turn_id=response_turn_id,
-            )
+            if is_model_history_visible_run(run) and _run_notice_messages(run, response_turn_id=response_turn_id)
         ),
         None,
     )
-    all_matches = [
-        message
-        for run in runs
-        for message in _run_output_notice_messages(
-            run,
-            response_turn_id=response_turn_id,
-        )
-    ]
+    all_matches = [message for run in runs for message in _run_notice_messages(run, response_turn_id=response_turn_id)]
     if not all_matches and destination is None:
         return []
 
     destination_matches = (
-        _top_level_queued_notice_messages(
-            destination,
-            response_turn_id=response_turn_id,
-        )
-        if destination is not None
-        else []
+        _run_notice_messages(destination, response_turn_id=response_turn_id) if destination is not None else []
     )
     notice_text = _queued_notice_text_to_persist(
         destination_matches=destination_matches,
@@ -535,15 +331,12 @@ def _finalize_queued_notice_in_runs(
             None,
         )
 
-    edited: dict[int, RunOutput | TeamRunOutput] = {}
+    edited: dict[int, AnyRunRecord] = {}
     for run in runs:
-        if not _run_output_notice_messages(run, response_turn_id=response_turn_id):
+        if not _run_notice_messages(run, response_turn_id=response_turn_id):
             continue
         edited_run = deepcopy(run)
-        _strip_response_turn_notice_from_run_output(
-            edited_run,
-            response_turn_id=response_turn_id,
-        )
+        _strip_queued_notice_messages(edited_run.messages, response_turn_id=response_turn_id)
         edited[id(run)] = edited_run
 
     if destination is None or notice_text is None:
@@ -552,8 +345,6 @@ def _finalize_queued_notice_in_runs(
     if edited_destination is None:
         edited_destination = deepcopy(destination)
         edited[id(destination)] = edited_destination
-    if edited_destination.messages is None:
-        edited_destination.messages = []
     persisted_notice = _new_persisted_queued_notice(response_turn_id, notice_text)
     if insertion_index is None:
         edited_destination.messages.append(persisted_notice)
@@ -571,49 +362,49 @@ def _finalize_queued_notice_in_new_session_storage(
 ) -> None:
     """Finalize one response in a worker-owned session storage handle."""
     storage = target.storage_factory()
-    try:
-        raw_session = storage.get_session(target.session_id, target.session_type)
-        if raw_session is None:
-            return
-        session = _load_queued_notice_session(
-            cast("AgentSession | TeamSession | dict[str, object]", raw_session),
-            session_type=target.session_type,
-        )
-        if session is None:
-            return
-        changed_runs = _finalize_queued_notice_in_runs(
-            _session_run_outputs(session),
-            response_turn_id=response_turn_id,
-        )
-        if changed_runs:
-            save_runs(storage, session, changed_runs)
-    finally:
-        storage.close()
+    session = storage.load_session(target.session_id, target.session_kind)
+    if session is None:
+        return
+    changed_runs = _finalize_queued_notice_in_runs(
+        session.runs,
+        response_turn_id=response_turn_id,
+    )
+    if changed_runs:
+        storage.save_runs(session, changed_runs)
 
 
 def register_queued_notice_storage(
     *,
-    storage_factory: Callable[[], BaseDb] | None,
+    storage_factory: Callable[[], ConversationStore] | None,
     session_id: str | None,
-    session_type: SessionType,
+    session_kind: SessionKind,
     entity_name: str,
 ) -> None:
-    """Register storage touched by one response for queued-notice finalization."""
+    """Register storage touched by one response for queued-notice finalization; the first registration wins."""
     notice_context = _queued_message_notice_context.get()
-    if notice_context is None:
+    if notice_context is None or storage_factory is None or not session_id:
         return
-    if storage_factory is None or not session_id:
-        return
-    target_key = (entity_name, session_id, session_type)
-    target = notice_context.storage_targets.get(target_key)
-    if target is None:
-        target = _QueuedNoticeStorageTarget(
+    notice_context.storage_targets.setdefault(
+        (entity_name, session_id, session_kind),
+        _QueuedNoticeStorageTarget(
             storage_factory=storage_factory,
             session_id=session_id,
-            session_type=session_type,
+            session_kind=session_kind,
             entity_name=entity_name,
-        )
-        notice_context.storage_targets[target_key] = target
+        ),
+    )
+
+
+def register_scope_notice_storage(*, scope_context: ScopeSessionContext | None, entity_name: str) -> None:
+    """Register the storage of the scope one response ran in, by its context; a response without a scope has none."""
+    if scope_context is None:
+        return
+    register_queued_notice_storage(
+        storage_factory=scope_context.storage_factory,
+        session_id=scope_context.session_id,
+        session_kind=scope_context.scope.kind,
+        entity_name=entity_name,
+    )
 
 
 def _finalize_queued_notice_storage_targets(
@@ -632,7 +423,7 @@ def _finalize_queued_notice_storage_targets(
                 "Failed to finalize queued-message notice in session history",
                 entity=target.entity_name,
                 session_id=target.session_id,
-                session_type=target.session_type.value,
+                session_type=target.session_kind,
                 response_turn_id=response_turn_id,
             )
 
@@ -641,9 +432,7 @@ async def finalize_queued_notice_response_turn_async(
     notice_context: _QueuedMessageNoticeContext,
 ) -> None:
     """Finalize one delivered notice at the user-visible response boundary."""
-    if not notice_context.notice_fired:
-        return
-    if not notice_context.storage_targets:
+    if not notice_context.notice_fired or not notice_context.storage_targets:
         return
     storage_task = asyncio.create_task(
         asyncio.to_thread(
@@ -665,29 +454,18 @@ async def finalize_queued_notice_response_turn_async(
 
 
 def _queued_notice_response_turn_ids(
-    runs: Sequence[RunOutput | TeamRunOutput],
+    runs: Sequence[AnyRunRecord],
 ) -> set[str]:
     return {
         response_turn_id
         for run in runs
-        for message in _run_output_notice_messages_for_any_response(run)
+        for message in _run_notice_messages(run, response_turn_id=None)
         if (response_turn_id := _queued_notice_response_turn_id(message)) is not None
     }
 
 
-def _run_output_notice_messages_for_any_response(
-    run_output: RunOutput | TeamRunOutput,
-) -> list[Message]:
-    matches = [message for message in run_output.messages or [] if is_queued_notice_message(message)]
-    if isinstance(run_output, TeamRunOutput) and run_output.member_responses:
-        for member_response in run_output.member_responses:
-            if isinstance(member_response, RunOutput | TeamRunOutput):
-                matches.extend(_run_output_notice_messages_for_any_response(member_response))
-    return matches
-
-
 def _has_notice_marker_for_response(
-    runs: Sequence[RunOutput | TeamRunOutput],
+    runs: Sequence[AnyRunRecord],
     *,
     response_turn_id: str,
     marker: bool | str,
@@ -695,21 +473,18 @@ def _has_notice_marker_for_response(
     return any(
         queued_notice_marker(message) == marker
         for run in runs
-        for message in _run_output_notice_messages(
-            run,
-            response_turn_id=response_turn_id,
-        )
+        for message in _run_notice_messages(run, response_turn_id=response_turn_id)
     )
 
 
 def _recover_prior_queued_notices(
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     *,
     active_response_turn_id: str | None,
-) -> list[RunOutput | TeamRunOutput]:
+) -> list[AnyRunRecord]:
     """Return copies of the runs whose crash-left notices from earlier responses are finalized."""
-    runs = _session_run_outputs(session)
-    changed: dict[str | None, RunOutput | TeamRunOutput] = {}
+    runs = list(session.runs)
+    changed: dict[str | None, AnyRunRecord] = {}
     for response_turn_id in _queued_notice_response_turn_ids(runs):
         if response_turn_id == active_response_turn_id:
             continue
@@ -747,24 +522,21 @@ def scrub_queued_notice_session_context(
             active_response_turn_id=notice_context.response_turn_id if notice_context is not None else None,
         )
         if changed_runs:
-            save_runs(scope_context.storage, scope_context.session, changed_runs)
+            scope_context.storage.save_runs(scope_context.session, changed_runs)
     except Exception:
         logger.exception(
             "Failed to recover queued-message notice in loaded session history",
             entity=entity_name,
             session_id=scope_context.session.session_id,
-            session_type="team" if isinstance(scope_context.session, TeamSession) else "agent",
+            session_type=scope_context.session.kind,
         )
 
 
-def is_empty_completed_run(response: RunOutput | TeamRunOutput) -> bool:
+def is_empty_completed_run(record: AnyRunRecord) -> bool:
     """Return whether one run completed with no tool calls and no visible content."""
-    if response.status is not RunStatus.completed or response.tools:
+    if record.status is not RunStatus.completed or record.tools:
         return False
-    content = response.content
-    if content is None:
-        return True
-    return isinstance(content, str) and not content.strip()
+    return not (record.content or "").strip()
 
 
 def discard_empty_completed_run(
@@ -779,10 +551,7 @@ def discard_empty_completed_run(
 
     A persisted assistant turn with no content teaches the model that ending the
     turn immediately is the expected continuation, so the run is removed from both
-    the loaded session and storage before the next prompt is built. The store is
-    told directly: agno persisted the run through its own session object, so the
-    scope session loaded before the run never held it and cannot say whether the
-    row exists.
+    the loaded session and storage before the next prompt is built.
     """
     logger.warning(
         "model_returned_empty_response",
@@ -794,9 +563,7 @@ def discard_empty_completed_run(
     if scope_context is None or not run_id:
         return
     try:
-        scope_context.storage.delete_runs([run_id])
-        if scope_context.session is not None:
-            scope_context.session.runs = runs_without(_session_run_outputs(scope_context.session), [run_id])
+        scope_context.storage.delete_run_subtrees([run_id], session_id=session_id, session=scope_context.session)
     except Exception:
         logger.exception(
             "Failed to remove empty run from session history",
@@ -804,74 +571,3 @@ def discard_empty_completed_run(
             session_id=session_id,
             run_id=run_id,
         )
-
-
-def install_queued_message_notice_hook(model: Model, *, notice_text: str) -> None:
-    """Append a hidden notice after tool results when a newer message is queued."""
-
-    async def after_tools(messages: list[Message], _result: ModelResponse) -> None:
-        context = _queued_message_notice_context.get()
-        if context is None or context.mid_turn_gate is None:
-            return
-        results = _completed_trailing_tool_results(messages, context.response_turn_id, after_tool_batch=True)
-        if results is None:
-            # Calls paused for approval or delegation leave the batch unresolved; the response that
-            # resumes it judges the completed batch, reusing this turn's decision for an unchanged queue.
-            return
-        await _judge_queued_notice(
-            messages,
-            notice_text=notice_text,
-        )
-
-    install_tool_result_callback(
-        model,
-        marker=_QUEUED_MESSAGE_NOTICE_HOOK_ATTR,
-        callback=lambda messages, results: _append_queued_notice_if_needed(
-            messages=messages,
-            function_call_results=results,
-            notice_text=notice_text,
-        ),
-        before_response=lambda messages: _append_queued_notice_after_resumed_tools(messages, notice_text=notice_text),
-        before_response_async=lambda messages: _judge_resumed_tool_notice(messages, notice_text=notice_text),
-        after_tools_async=after_tools,
-    )
-
-
-def next_retry_run_id(run_id: str | None) -> str | None:
-    """Return a fresh Agno run identifier for a retry attempt."""
-    if run_id is None:
-        return None
-    return str(uuid4())
-
-
-def note_attempt_run_id(run_id_callback: Callable[[str], None] | None, run_id: str | None) -> None:
-    """Publish the current run_id before starting a real Agno run attempt."""
-    if run_id_callback is not None and run_id is not None:
-        run_id_callback(run_id)
-
-
-async def cached_agent_run(
-    agent: Agent,
-    run_input: ModelRunInput,
-    session_id: str,
-    *,
-    user_id: str | None = None,
-    run_id: str | None = None,
-    run_id_callback: Callable[[str], None] | None = None,
-    media: MediaInputs | None = None,
-    metadata: dict[str, Any] | None = None,
-    pipeline_timing: DispatchPipelineTiming | None = None,
-) -> RunOutput:
-    """Shared wrapper for one ``agent.arun()`` call."""
-    media_inputs = media or MediaInputs()
-    note_attempt_run_id(run_id_callback, run_id)
-    prepared_input = attach_media_to_run_input(run_input, media_inputs)
-    if pipeline_timing is not None:
-        pipeline_timing.mark_model_request()
-    return await agent.arun(
-        prepared_input,
-        session_id=session_id,
-        user_id=user_id,
-        run_id=run_id,
-        metadata=metadata,
-    )

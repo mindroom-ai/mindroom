@@ -1,59 +1,53 @@
 """Generated background subagent lifecycles checked against invariants that must hold on every path.
 
-Real Agno parents and children run scripted models through MindRoom's native delegation, background jobs, the
-approval cards each job posts for its child, parent waits, cancellation, client cancels, orderly restart, and crash recovery.
-The child's approval-gated tool records every execution, so the oracle compares effects with the decisions given.
+The leader's replies and the children's turns run scripted models on the owned loop through MindRoom's native
+delegation, background jobs, the approval cards each job posts for its child, parent waits, cancellation, client
+cancels, orderly restart, and crash recovery. The child's approval-gated tool records every execution, so the oracle
+compares effects with the decisions given.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.tools.function import Function
-
-from mindroom.agents import apply_tool_approval_capability
+from mindroom import ai, pre_model_preparation
 from mindroom.approval import manager as approval_manager
-from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
-from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
-from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.recovery import interrupt_stopped_child, read_child_run
 from mindroom.event_journal import BackgroundApprovalDecision
-from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
-from mindroom.session_storage import agno_compat_session_persistence as session_persistence
-from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.tool_jobs.approvals import _approval_run_id, settle_job_approvals
-from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, register_background_runtime
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.metadata import ToolCategory
+from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import lookup, run_journal_statements_inline, tool_job_runtime
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.tool_job_helpers import DelegatingLeader, lookup, run_journal_statements_inline, tool_job_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Sequence
     from pathlib import Path
 
     import pytest
-    from agno.db.base import BaseDb
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
-    from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
     from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
     from tests.tool_job_helpers import ProcessRuntime
@@ -131,7 +125,7 @@ class _Cards:
 @dataclass
 class _Child:
     script: ChildScript
-    responses: list[ModelResponse]
+    turns: list[Sequence[ScriptStep]]
     job_id: str | None = None
     session_id: str | None = None
     runs: int = 0
@@ -140,7 +134,32 @@ class _Child:
 @dataclass
 class _Turn:
     name: str
-    task: asyncio.Task[RunOutput | str]
+    task: asyncio.Task[RunRecord | str]
+
+
+class _NotesTools(Toolkit):
+    """The child's approval-gated tool, which records every execution with the running fuzz example."""
+
+    runner: ClassVar[DelegationFuzzRunner | None] = None
+
+    def __init__(self) -> None:
+        super().__init__(name="notes", tools=[self.write_report])
+
+    async def write_report(self, note: str) -> str:
+        """Write one report.
+
+        Args:
+            note: The report's note.
+
+        """
+        runner = type(self).runner
+        context = get_tool_runtime_context()
+        assert runner is not None
+        assert context is not None
+        runner.executed[note] += 1
+        if runner.children[runner._sessions[context.session_id]].script.hold_tool:
+            await runner.gate.wait()
+        return _WRITTEN
 
 
 class DelegationFuzzRunner:
@@ -153,10 +172,13 @@ class DelegationFuzzRunner:
             Config(
                 agents={
                     "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
-                    "code": AgentConfig(display_name="Code", tools=["file"]),
+                    "code": AgentConfig(display_name="Code", tools=["notes"]),
                 },
                 defaults=DefaultsConfig(tools=[]),
                 memory={"backend": "none"},
+                tool_approval=ToolApprovalConfig(
+                    rules=[ApprovalRuleConfig(match="write_report", action="require_approval")],
+                ),
             ),
             "code",
             users=[_REQUESTER],
@@ -177,24 +199,17 @@ class DelegationFuzzRunner:
         # What first stopped each job's work: a cancellation or a restart; the first cause stands.
         self.causes: dict[str, Literal["cancel", "restart"]] = {}
         self._sessions: dict[str, int] = {}
-        self._storages: list[BaseDb] = []
         pin_background_tool_jobs(self.config, self.paths)
         self.runtime: ProcessRuntime
-        self.toolkit = DelegateTools("leader", ["code"], self.paths, self.config, execution_identity=self.identity)
-        apply_tool_approval_capability(
-            self.toolkit,
-            self.config,
-            supports_native_tool_approval=True,
-            registered_tool_name="delegate",
-        )
-        bind_toolkit_authority(self.toolkit, authored_name="delegate")
-        self.storage = create_session_storage("leader", self.config, self.paths, self.identity)
-        monkeypatch.setattr("mindroom.agents.create_agent", self._build_child)
+        self._register_notes(monkeypatch)
+        self.agents = ScriptedAgents({})
+        self.agents.install(monkeypatch)
+        self._run_real_child = ai.run_delegated_child_response
         monkeypatch.setattr(approval_manager, "get_approval_store", lambda: self.approvals)
-        # Blocking work runs on the event loop, so an idle loop marks the end of each step and a crash lands between two
-        # awaits; synchronous session saves skip their thread lane for the same reason.
+        # Blocking work, agent builds included, runs on the event loop, so an idle loop marks the end of each step and a
+        # crash lands between two awaits.
         monkeypatch.setattr(asyncio, "to_thread", _inline)
-        monkeypatch.setattr(session_persistence, "_registered_lane", lambda _database: None)
+        monkeypatch.setattr(pre_model_preparation, "_AGENT_BUILD_EXECUTOR", _InlineExecutor())
         run_journal_statements_inline(monkeypatch)
 
     async def open(self) -> None:
@@ -248,98 +263,48 @@ class DelegationFuzzRunner:
         self.gate.set()
         await self._end_tasks()
         await self.runtime.close_journal()
-        self.storage.close()
-        for storage in self._storages:
-            storage.close()
+        restore_tool_registry_snapshot(self._registry)
 
-    def _build_child(self, *args: object, **kwargs: object) -> Agent:
-        child_identity = args[3]
-        assert isinstance(child_identity, ToolExecutionIdentity)
-        storage = kwargs.get("history_storage") or create_session_storage(
-            "code",
-            self.config,
-            self.paths,
-            child_identity,
-        )
-        self._storages.append(storage)  # type: ignore[arg-type]
-        record = self.children[self._sessions[child_identity.session_id]]
-
-        async def write_report(note: str) -> str:
-            self.executed[note] += 1
-            if record.script.hold_tool:
-                await self.gate.wait()
-            return _WRITTEN
-
-        function = Function.from_callable(write_report)
-        function.requires_confirmation = True
-        function.owning_toolkit = "file"
-        return Agent(
-            name="code",
-            id="code",
-            db=storage,  # type: ignore[arg-type]
-            tools=[function],
-            model=DelegationModel(id="test", responses=record.responses),
-        )
+    def _register_notes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Register the child's ``notes`` toolkit for this example; ``close`` restores the registries."""
+        monkeypatch.setattr(_NotesTools, "runner", self)
+        self._registry = capture_tool_registry_snapshot()
+        register_tool_with_metadata(
+            name="notes",
+            file_access=ToolFileAccess.NONE,
+            display_name="Notes",
+            description="Writes the reports a delegated child was asked for.",
+            category=ToolCategory.DEVELOPMENT,
+        )(lambda: _NotesTools)
 
     async def _run_child(
         self,
         child: DelegationChild,
-        *,
-        prompt: str,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        **_kwargs: object,
+        **kwargs: object,
     ) -> str:
         index = int(child.task.removeprefix("script"))
         record = self.children[index]
         record.job_id, record.session_id = child.delegation_id, child.session_id
         record.runs += 1
         self._sessions[child.session_id] = index
+        # The child's turns, its resumes after each decision included, are this child's own script.
+        self.agents.by_session[child.session_id] = ScriptedModel(record.turns)
         if record.script.hold_start:
             await self.gate.wait()
-        child_identity = replace(self.identity, agent_name="code", session_id=child.session_id)
-        agent = self._build_child("code", config, runtime_paths, child_identity)
-        response = await agent.arun(prompt, session_id=child.session_id, run_id=child.run_id, user_id=_REQUESTER)
-        paused = paused_attempt_from_response(
-            response,
-            fallback_session_id=child.session_id,
-            fallback_run_id=child.run_id,
-            toolkit_owners=toolkit_owners_for_agents([agent]),
-        )
-        if paused is not None:
-            raise ResponsePausedForApproval(paused)
-        return str(response.content)
+        return await self._run_real_child(child, **kwargs)  # type: ignore[arg-type]
 
-    def _parent(self, responses: list[ModelResponse]) -> Agent:
-        model = DelegationModel(id="test", responses=responses)
-        install_tool_job_execution(model)
-        return Agent(
-            name="leader",
-            db=self.storage,
-            tools=[self.toolkit, JobTools(self.paths, self.identity)],
-            model=model,
-        )
+    async def _drive(self, *turns: Sequence[ScriptStep]) -> RunRecord:
+        leader = DelegatingLeader(self.config, self.paths, self.identity, self.agents)
+        return await leader.reply(*turns, run_child=self._run_child, run_id=f"parent{self._turn_count}")
 
-    async def _drive(self, agent: Agent) -> RunOutput:
-        response = await agent.arun("Delegate", session_id="parent", user_id=_REQUESTER)
-        return await drive_delegations(
-            agent,
-            response,
-            run_child=self._run_child,
-            agent_name="leader",
-            config=self.config,
-            runtime_paths=self.paths,
-            execution_identity=self.identity,
-        )
-
-    def _start_turn(self, name: str, coroutine: Coroutine[object, object, RunOutput | str]) -> None:
+    def _start_turn(self, name: str, coroutine: Coroutine[object, object, RunRecord | str]) -> None:
         self._turn_count += 1
         context = replace(
             _delegate_runtime_context(self.config, self.paths, execution_identity=self.identity),
             membership_turn_id=f"$turn{self._turn_count}",
         )
 
-        async def run() -> RunOutput | str:
+        async def run() -> RunRecord | str:
             with tool_runtime_context(context):
                 return await coroutine
 
@@ -347,15 +312,14 @@ class DelegationFuzzRunner:
 
     async def _delegate(self, step: Step) -> None:
         index = len(self.children)
-        responses = [
-            ModelResponse(tool_calls=[_call("write_report", f"w{index}-{turn}", note=f"w{index}-{turn}")])
+        turns: list[Sequence[ScriptStep]] = [
+            calls(tool_call("write_report", f"w{index}-{turn}", note=f"w{index}-{turn}"))
             for turn in range(step.script.approvals)
         ]
-        self.children.append(_Child(step.script, [*responses, ModelResponse(content=f"Child {index} result")]))
+        self.children.append(_Child(step.script, [*turns, answer(f"Child {index} result")]))
         budget = {} if step.budget is None else {"background_after": step.budget}
-        call = _call("run_subagent", f"delegate{index}", agent_name="code", task=f"script{index}", **budget)
-        agent = self._parent([ModelResponse(tool_calls=[call]), ModelResponse(content="Parent done")])
-        self._start_turn(f"delegate{index}", self._drive(agent))
+        call = tool_call("run_subagent", f"delegate{index}", agent_name="code", task=f"script{index}", **budget)
+        self._start_turn(f"delegate{index}", self._drive(calls(call), answer("Parent done")))
 
     def _job(self, index: int) -> str | None:
         known = [child.job_id for child in self.children if child.job_id is not None]
@@ -365,9 +329,8 @@ class DelegationFuzzRunner:
         if (job_id := self._job(step.index)) is None:
             return
         budget = {} if step.budget is None else {"background_after": step.budget}
-        call = _call("job", f"wait{self._turn_count}", action="wait", job_id=job_id, **budget)
-        agent = self._parent([ModelResponse(tool_calls=[call]), ModelResponse(content="Parent read")])
-        self._start_turn(f"wait:{job_id}", self._drive(agent))
+        call = tool_call("job", f"wait{self._turn_count}", action="wait", job_id=job_id, **budget)
+        self._start_turn(f"wait:{job_id}", self._drive(calls(call), answer("Parent read")))
 
     async def _approve(self, step: Step) -> None:
         """Answer one card a job is still waiting on."""
@@ -484,7 +447,7 @@ class DelegationFuzzRunner:
             self.closed_turns.append(turn)
             result = turn.task.result()
             # A child's approvals never pause its parent; the job asks for them.
-            assert not (isinstance(result, RunOutput) and result.status == RunStatus.paused), turn.name
+            assert not (isinstance(result, RunRecord) and result.status is RunStatus.paused), turn.name
         waiting = {_approval_run_id(job.job_id) for job in await self._jobs() if job.status == "awaiting_approval"}
         answerable = {card.run_id for card in self.approvals.pending()}
         assert answerable <= waiting, (answerable, waiting)
@@ -504,7 +467,7 @@ class DelegationFuzzRunner:
             run = await read_child_run(delegation_child(job), self.config, self.paths)
             if job.status == "completed":
                 assert run is not None
-                assert run.status == RunStatus.completed, (job.job_id, run.status)
+                assert run.status is RunStatus.completed, (job.job_id, run.status)
             elif job.status in TERMINAL_STATUSES and run is not None:
                 assert run.status not in {RunStatus.running, RunStatus.paused}, (job.job_id, job.status, run.status)
             if job.status in {"completed", "cancelled"}:
@@ -523,3 +486,15 @@ class DelegationFuzzRunner:
 
 async def _inline[Result](function: Callable[..., Result], /, *args: object, **kwargs: object) -> Result:
     return function(*args, **kwargs)
+
+
+class _InlineExecutor(Executor):
+    """Run each submitted call at once on the calling thread, handing back its settled future."""
+
+    def submit[Result](self, fn: Callable[..., Result], /, *args: object, **kwargs: object) -> Future[Result]:
+        future: Future[Result] = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except Exception as error:
+            future.set_exception(error)
+        return future

@@ -559,23 +559,7 @@ class ThreadingBehaviorTestBase:
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
         # Initialize components that depend on client
-
-        # Mock the agent to return a response
-        mock_agent = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = "I can help you with that!"
-
-        # Make the agent's arun method return the response
-        async def mock_arun(*_args: object, **_kwargs: object) -> MagicMock:
-            return mock_response
-
-        mock_agent.arun = mock_arun
-
-        # Mock create_agent to return our mock agent
-        with patch("mindroom.bot.create_agent", return_value=mock_agent):
-            yield bot
-
-        # No cleanup needed since we're using mocks
+        yield bot
 
     @staticmethod
     def _sync_response(joined_rooms: dict[str, nio.RoomInfo]) -> nio.SyncResponse:

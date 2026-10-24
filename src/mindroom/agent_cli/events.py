@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
-from dataclasses import dataclass, fields, replace
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, cast
 
-from agno.models.response import ToolExecution
-from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
-
+from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
-from mindroom.tool_system.events import AuditedToolExecution
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -21,7 +18,6 @@ __all__ = [
     "emit_cli_run_event",
     "emit_cli_suspension",
     "emit_cli_tool_event",
-    "project_cli_execution",
     "stream_cli_events",
 ]
 
@@ -34,7 +30,7 @@ class _CliSuspension:
 
 
 def emit_cli_suspension(error: BaseException) -> None:
-    """Leave Agno through the response stream even when its tool runner catches errors."""
+    """Leave the run through the response stream even when its tool runner catches errors."""
     sink = _SINK.get()
     if sink is not None:
         sink(_CliSuspension(error))
@@ -43,50 +39,36 @@ def emit_cli_suspension(error: BaseException) -> None:
 def emit_cli_tool_event(event: AgentToolCallEvent, parent: str | None) -> None:
     """Publish trusted inner audit events, excluding the canonical outer shell alias."""
     sink = _SINK.get()
-    if sink is None or event.call_id == parent:
+    if (
+        sink is None
+        or event.call_id == parent
+        or event.call is None
+        or event.kind not in {"started", "completed", "failed", "continuation_required"}
+    ):
         return
-    if event.execution is None:
-        if event.progress is not None:
-            sink(event.progress)
-        return
-    if event.kind not in {"started", "completed", "failed", "continuation_required"}:
-        return
-    cls = ToolCallStartedEvent if event.kind == "started" else ToolCallCompletedEvent
-    emit_cli_run_event(cls(tool=event.execution), parent=parent, toolkit_name=event.key.toolkit)
+    cls = ToolStarted if event.kind == "started" else ToolCompleted
+    emit_cli_run_event(cls(event.call), parent=parent, toolkit_name=event.key.toolkit)
 
 
 def emit_cli_run_event(
-    event: ToolCallStartedEvent | ToolCallCompletedEvent,
+    event: ToolStarted | ToolCompleted,
     *,
     parent: str | None,
     toolkit_name: str | None,
 ) -> None:
     """Retain native event provenance while adding trusted hidden-call audit identity."""
     sink = _SINK.get()
-    if sink is None or event.tool is None:
+    if sink is None:
         return
-    sink(replace(event, tool=project_cli_execution(event.tool, parent=parent, toolkit_name=toolkit_name)))
+    sink(replace(event, origin=ToolCallOrigin(parent, toolkit_name)))
 
 
-def project_cli_execution(
-    tool: ToolExecution,
-    *,
-    parent: str | None,
-    toolkit_name: str | None,
-) -> AuditedToolExecution:
-    """Copy a native execution for live or paused presentation without changing its owner."""
-    return AuditedToolExecution(
-        **{item.name: getattr(tool, item.name) for item in fields(ToolExecution)},
-        parent_bash_call_id=parent,
-        toolkit_name=toolkit_name,
-    )
-
-
-async def stream_cli_events(source: AsyncIterator[object]) -> AsyncIterator[object]:
-    """Merge actual provider and hidden events; may start before tool preparation.
+async def stream_cli_events[EventT](
+    source: AsyncIterator[EventT],
+) -> AsyncIterator[EventT | ToolStarted | ToolCompleted]:
+    """Merge the run's own events with the hidden calls' tool events, which may start before tool preparation.
 
     The existing attempt and presentation consumers remain the only trace owners.
-    Bash stays a coroutine returning ToolResult, preserving Agno's media handling.
     """
 
     async def produce(on_event: Callable[[object], None]) -> None:
@@ -104,4 +86,5 @@ async def stream_cli_events(source: AsyncIterator[object]) -> AsyncIterator[obje
             if isinstance(event, _CliSuspension):
                 raise event.error
             if event is not None:
-                yield event
+                # The sink receives only the source's events and the hidden calls' ToolStarted and ToolCompleted.
+                yield cast("EventT | ToolStarted | ToolCompleted", event)

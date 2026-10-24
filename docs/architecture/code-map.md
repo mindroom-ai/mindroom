@@ -18,7 +18,7 @@ Matrix sync callback
        -> coalescing/ingress_lanes.py                            (per-(room, sender) receipt-order FIFO; STT readiness waits here)
        -> coalescing/gate.py                                     (ordinary text dispatches immediately; adaptive text and media debounce)
        -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
-       -> response_runner.py -> ai.py / teams.py                 (lifecycle lock, entity envelopes)
+       -> response_runner.py -> ai.py / teams/envelope.py        (lifecycle lock, entity envelopes)
             -> response_turn.py                                  (shared blocking/streaming turn drivers)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
        -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
@@ -40,7 +40,6 @@ Matrix sync callback
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
-| `team_exact_members.py` | Runtime resolution for exact team member materialization |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle, sync callbacks, and room behavior |
 | `turn_controller.py` | TurnController - owns one inbound turn from ingress to recorded outcome |
 | `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
@@ -52,7 +51,7 @@ Matrix sync callback
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
-| `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
+| `participation_hook.py` | The reply's participation check as a pre-request loop hook: a non-streaming decision request on the reply's exact messages, or the configured judgment backend, ending the run when it stays silent |
 | `judgment/` | Backend-independent boolean and choice questions, minimized context, shared execution limits, the bounded HTTP client, and LLM, System One, and OpenAI Decisions adapters |
 | `participation_judgment.py` | Bind the participation rubric to an opt-in LLM, TypeSafe, or OpenAI Decisions judge and map its result to a participation decision |
 | `mid_turn.py` | Per-response finish-or-wrap-up decisions over immutable queued-message snapshots |
@@ -61,7 +60,6 @@ Matrix sync callback
 | `judgment/cold_cache.py` | Decide from a thread's idle time and an opt-in judge whether the thread moves to the agent's cheap model |
 | `config/cold_cache.py` | Opt-in agent settings for the cold-cache judgment backend |
 | `providers/tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
-| `providers/groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
 | `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
@@ -84,7 +82,8 @@ Matrix sync callback
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
-| `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, model-switch continuation, empty-run retry, interrupt recording) |
+| `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, model-switch continuation, empty-run retry, interrupt recording), and the run metadata and request-log context a turn binds around its model requests and stream pulls |
+| `loop_hooks.py` | The hooks every run or resume installs on the owned loop, composed once in the order the turn applies them; `agent_loop_hooks` and `leader_loop_hooks` name what an agent's and a team leader's run differ by, and `HookTurn` holds what every run takes from its turn |
 | `response_attempt.py` | Runs one visible response attempt as its reply span's cancellable task |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
@@ -97,6 +96,7 @@ Matrix sync callback
 | `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools) |
 | `approval/tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval/execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
+| `approval/resume.py` | Resuming a persisted paused agent run on the owned loop with exact decisions: its history replay, native history, hooks, and the parent continuation the delegation driver injects |
 | `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
 | `approval/response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
 | `approval/manager.py` | Matrix-backed tool approval runtime state |
@@ -135,18 +135,17 @@ Matrix sync callback
 | `delegation/job_approvals.py` | A background child's approval requests, asked through its job's cards |
 | `tool_jobs/instances.py` | One per-storage-root instance: startup-pinned setting and published runtime |
 | `tool_jobs/settings.py` | Startup-pinned feature and toolkit exclusion settings |
-| `tool_jobs/agno_compat_execution.py` | SDK schema and exact tool-dispatch bindings |
-| `tool_jobs/agno_compat_functions.py` | Private SDK actor/context access and dispatch classification |
-| `tool_jobs/agno_execution.py` | Job eligibility, approved SDK call execution, and result capture |
-| `tool_jobs/consumption.py` | Exact durable acknowledgement after the SDK saves a consumed result |
+| `tool_jobs/execution.py` | The loop's job admission middleware, the managed call it runs, and the `background_after` definitions step |
+| `tool_jobs/consumption.py` | Exact durable acknowledgement after the parent run saves a consumed result |
 | `tool_jobs/execution_scope.py` | Response execution envelopes |
 | `tool_jobs/resources.py` | Retained resource cleanup ownership |
 | `tool_jobs/authorization.py` | Current local grants using shared construction policy |
-| `tool_jobs/execution_authority.py` | Application-entry authority checks |
+| `tool_jobs/execution_authority.py` | `JobTool` and `JobCall`, what job admission and grant checks read about an offered function and one call of it, and the application-entry authority checks on the call a task runs under |
 | `tool_jobs/provenance.py` | Exact MCP bridge identity for grant checks |
 | `tool_jobs/control.py` | Newer human messages that release waits, and cancellation checkpoints |
 | `tool_jobs/background_after.py` | The reserved `background_after` argument of managed calls and its validation |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
+| `tool_jobs/legacy_results.py` | Job result payloads in the shape the Agno-based executor saved them |
 | `tool_jobs/conversation.py` | The conversation key a reply finds its jobs by, and how long a reply waits for a job's approval |
 | `tool_jobs/notices.py` | The notice on a tool result and the turn-start note about jobs that ended |
 | `tool_jobs/publication.py` | Each agent's live jobs, published per room as state for the client jobs bar |
@@ -160,15 +159,26 @@ Matrix sync callback
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, card denial, follow-ups, and retention |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
-| `agents.py` | Agent creation and configuration |
+| `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, store, and surface into an `AgentBuild` |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
-| `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
+| `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
+| `teams/members.py` | Materializing a team's exact members as agent builds without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, and job controls with each member's prompt, role, and loop hooks |
+| `teams/spec.py` | `TeamMode`, `TeamMember`, and `TeamSpec`: what a team run is built from |
+| `teams/prompt.py` | The leader's system message in the layout Agno rendered: roster, mode block, tool instructions, provider note, context |
+| `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, and the pause a paused member propagates to the team run |
+| `teams/runtime.py` | `run_team` and `continue_team` over the owned loop: members as child runs, member decisions routed by member and call, team usage |
+| `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, the live document a resumed run publishes, and `format_team_response`, the blocking Matrix or API reply rendered from a finished run's records, which a stopped or failed blocking turn also records |
+| `teams/envelope.py` | `team_response` and `team_response_stream`: prepare a team turn, run its leader through the turn drivers, and render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
+| `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the records the run hands over, the text an interrupted turn records (a streamed turn's marker-free reply text, a blocking turn's document of the runs' records), and its run metadata |
+| `teams/storage.py` | Where a team's new runs and resumes store, the records a run hands over, and the team scope its tools address |
+| `teams/resume.py` | Resuming a paused team run: `TeamResume` routes decisions to the calls the team waits for, `drive_team_delegations` runs a member's delegations and continues with their results, `continue_paused_team_run` rebuilds the team from a saved approval, and the documents a streamed or blocking pause shows |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
-| `agent_cli/minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
-| `agent_cli/cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent` |
+| `agent_cli/minimal_agent.py` | Minimal mode: the bootstrap prompt and context documents from the build surface, and the turn's one provider-facing Bash tool over the build's catalog |
+| `agent_cli/checkpoint.py` | Minimal Bash's provider batch, saved as a `before_dispatch` hook before any Bash call takes effect |
+| `agent_cli/cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent`, bound per attempt |
 | `agent_cli/` | Response-owned CLI grants, call admission, shell access, discovery, and result projection |
 | `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |
 | `agent_cli/minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |
@@ -176,7 +186,7 @@ Matrix sync callback
 | `api/agent_cli.py` | Authenticated transport for response-owned CLI operations and live call receipts |
 | `agent_cli/cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
 | `agent_cli/cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
-| `tool_system/agent_tool_calls.py` | Prepared live-Agent catalog and serialized native execution of qualified tools |
+| `tool_system/agent_tool_calls.py` | The live turn's catalog of qualified tools and their serialized execution through the build's tool policy |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `memory/` | Mem0 memory: agent and team-scoped |
 | `memory/_entrypoint_snapshots.py` | In-process copy of each conversation's inlined `MEMORY.md`, reused while that copy only gains lines (not when a capped file drops its oldest kept entry) and that conversation's prompt cache may still be warm |
@@ -184,10 +194,13 @@ Matrix sync callback
 | `knowledge/file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `history/conversation_text.py` | What stored turns said, for background model calls: which turns and messages count and who said each |
+| `embeddings/` | The `Embedder` interface semantic indexes embed queries and documents through, its OpenAI-compatible, Ollama, and local sentence-transformers implementations, embedder health, and vector compatibility signatures |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `knowledge/collection_lifetime.py` | Compatible publication selection, shared reader locks, and exclusive collection reclamation |
-| `knowledge/collections.py` | Chroma collection lifecycle for one knowledge base: naming, opening, probing, deleting, reclaiming |
+| `knowledge/search.py` | What an agent searches: its published sources, the `search_knowledge_base` tool and its results, and the `<knowledge_base>` prompt block |
+| `knowledge/readers.py` | The Agno document readers and chunkers knowledge indexing reads files with; the only knowledge module that imports Agno |
+| `knowledge/collections.py` | Chroma collection lifecycle for one knowledge base: naming, opening, probing, writing a file's chunk rows, deleting, reclaiming |
 | `knowledge/git_source.py` | The Git checkout a knowledge base indexes: clone, fetch, force-align, LFS hydration, credential injection |
 | `knowledge/refresh_runner.py` | Dispatches one knowledge refresh: subprocess spawn, cancellation cleanup, publish and reconcile decisions |
 | `knowledge/refresh_locks.py` | Process-wide refresh serialization (in-loop and cross-process source-root locks) and active-refresh bookkeeping |
@@ -203,7 +216,7 @@ Matrix sync callback
 | `knowledge_graph/runtime.py` | Starts and stops the store and ingestion worker as agents enable the graph |
 | `config/knowledge_graph.py` | The `knowledge_graph` section: extraction model, extraction instructions, ingestion settings, aliases, and generation |
 | `custom_tools/knowledge_graph.py` | The read-only `knowledge_graph` tool |
-| `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
+| `tool_system/skills.py` | OpenClaw-compatible skill loading from skill roots and workspaces, and the read-only `SkillsToolkit` with its prompt block |
 | `tool_system/skill_usage.py` | Workspace skill usage records the skill learner's archival reads as an inactivity clock |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
@@ -216,26 +229,60 @@ Matrix sync callback
 | `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
-| `providers/model_loading.py` | Model instantiation and provider-specific loader selection |
+| `providers/model_loading.py` | Which key a configured model authenticates with: the dashboard key and the missing-key checks the CLI and dashboard report |
+| `providers/key_checks.py` | The request that proves a provider API key valid, which `mindroom doctor` and the dashboard's provider setup send |
+| `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, and `canonical_provider`, its normalized spelling, in a module that imports nothing |
+| `providers/anthropic/messages.py` | The owned Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
+| `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names; unknown keys fail at construction |
+| `providers/anthropic/wire.py` | Claude Messages API formatting of owned messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |
+| `providers/anthropic/repairs.py` | Replay-safe transforms of a Claude request body: citations, tool-result order, tool-search blocks, inline media budgets |
+| `providers/anthropic/prompt_cache.py` | The wire preparation of one Claude request body: history repairs, deferred tool search, tool choice, and the prompt-cache ladder |
+| `providers/cache_ladder.py` | The Claude prompt-cache ladder primitives (breakpoint markers, message rungs, the tools marker, the shared system prefix) shared by the Claude adapter and the OpenRouter Claude ladder |
+| `providers/anthropic/native_compaction.py` | Claude native compaction: the compaction edit, the checkpoint replay projection, and the checkpoint recorded on each response |
 | `model_catalog.py` | Allowlisted model metadata, Matrix icon upload/cache, and catalog revision |
 | `model_catalog_receiver.py` | Router discovery admission, authenticated responses, and scope/lifetime checks |
 | `model_selection.py` | Structured model request/result values and frozen acknowledgement metadata |
 | `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
-| `providers/media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
-| `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
+| `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, the Responses shared-prefix split and ordered output replay, and the history budget's size of explicitly replayed Responses input (`replay_estimate.py`) |
+| `providers/pipeline/` | Stages composed around a provider's `stream()`: the malformed tool-call guidance retry, portable deferred tool search (`llm/tool_search.py`), media fallback, stream retry with the idle limit, the typed safeguard refusal, and request logging |
+| `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `model_capabilities` reads a configured model's route capabilities from its bare adapter |
+| `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, Google Search grounding, decision-request config, and reply parsing |
+| `providers/ollama_adapter.py` | Owned Ollama adapter over the native chat API |
+| `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls |
+| `providers/model_http_client.py` | The runtime-owned HTTP client every provider SDK client sends its requests through |
+| `providers/prompt_cache_key.py` | Stable prompt-cache routing keys derived from execution identity |
+| `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys, and reports the non-secret settings that run metadata and request logs record as model params |
+| `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
+| `providers/assistant_turn.py` | What every adapter does to finish a turn: the `mindroom_model` provenance stamp and timings |
+| `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
+| `providers/remote_media.py` | Downloads URL media for the adapters that send media only inline |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
 | `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
-| `session_storage/agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store, running the preflight archive check and the one-time migrations first |
+| `session_storage/store.py` | The owned conversation store: one SQLite database of sessions, their run log, summary rows, and usage ledger, each operation in one transaction on its own connection, and the helper every one-time database migration runs through |
+| `session_storage/schema.py` | File and table names, table listing, and the layout of a conversation database, column for column as Agno 3 created it |
+| `session_storage/codec.py` | Run rows to run records and back, with the JSON keys stored runs carry |
+| `session_storage/types.py` | `ConversationSession` and the other values the store reads and writes |
+| `session_storage/lanes.py` | One FIFO lane per conversation database for storage operations started from async code |
+| `session_storage/legacy_agno2_runs.py` | Run data older Agno releases stored: Agno 2 run blobs, JSON columns encoded twice, and rows without a position |
+| `session_storage/legacy_tool_results.py` | Tool results an earlier release stored combined in one message, decoded as one message per result |
 | `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks, the event ids each row folds, and edit and redaction cuts |
 | `history/summary_rows_schema.py` | Summary-row table layout and the shared SQL for which runs a session load returns |
 | `history/legacy_compaction_state.py` | One-time conversion, when a conversation database opens, of earlier compaction state, the compaction archive, and unpositioned run rows into the log |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
+| `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, read in the current shape where stored history, compaction input, and paused runs become messages |
+| `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
 | `history/session_runs.py` | Finished Matrix turns of an agent's conversations, live and compacted, with the approval hold-back and redaction filter background workers share |
+| `history/` | Persisted history: what a request replays from stored runs, the replay budget, compaction before and during a reply, summary rows, and interrupted-turn replay |
+| `history/request_messages.py` | A model request assembled from a scope's stored runs, its compaction summary, and the current turn |
+| `history/replay.py` | Materializes, estimates, and fits persisted history within one replay budget |
+| `history/runtime.py` | Prepares a scope's history before a reply (replay plan and compaction check) and runs its mid-turn and run-local compactions |
+| `history/compaction.py` | Scoped compaction: summarizing a scope's runs, or a running turn, into its summary rows |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
 | `skill_learning/runner.py` | In-memory reply counts per conversation; starts a review when a count reaches the interval, stops it when a new response starts, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a redacted digest replay when the request cannot be forked or another review model is set |
@@ -300,7 +347,7 @@ Matrix sync callback
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments/storage.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachments/ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |
-| `attachments/media.py` | Convert attachment records to Agno media objects |
+| `attachments/media.py` | Convert attachment records to the model media values in `llm/media.py` |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `api/open_access.py` | Host allow-list and browser-origin guard for requests served without a credential (open dashboard auth, unauthenticated `/v1`) |
@@ -349,8 +396,23 @@ Matrix sync callback
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |
 | `tool_system/metadata.py` | Runtime tool lookup, validation, plugin resolution, and instance construction |
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
-| `tool_system/agno_compat_tool_hooks.py` | Private Agno hook-chain adapters installed by `tool_system/tool_hooks.py`; dispatch, approval, and cancellation ownership stay with the tool runtime |
-| `agno_compat_*.py` and subsystem-local `agno_compat_*.py` | Agno SDK repairs and private bindings; see `docs/architecture/agno-compatibility.md` for the boundary inventory and upstream tracking |
+| `tool_system/tool_function.py` | The owned tool values, free of Agno: `ToolFunction`, the only tool shape the owned loop sees (finished schema, loop flags, entrypoint, injected parameter names), `AdaptedToolkit`, and `ToolValue`, a finished tool value's text and media |
+| `tool_system/agno_toolkits.py` | Adapts Agno toolkits and functions to `ToolFunction` once, builds the Agno-shaped call-time arguments (run context, actor stand-in) their entrypoints expect, reads the Agno `ToolResult` values they return or stream into `ToolValue`, and is where modules outside the tool packages import Agno's tool types from |
+| `tool_system/toolkit_connections.py` | Connects the Agno toolkits that hold a connection for one run, MCP sessions and `requires_connect` toolkits such as Postgres, as Agno's agent did around a run, and registers an unconnected MCP toolkit's functions while an agent is built |
+| `tool_system/invocation.py` | Decodes a model's tool-call arguments and runs one call through middleware, to its outcome for the loop or to the tool's own value for runners outside it: injection, synchronous offload, generator draining, error text |
+| `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before and after hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |
+| `llm/` | Provider-neutral values the owned runtime shares: messages, media, usage, run records and their pause requirements, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
+| `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share, which every wire that sends tool-call arguments as an object uses to replay a call another provider stored |
+| `agent_loop/model_loop.py` | `run_model_loop`, the request and tool loop agents, team leaders, and skill reviews share: send the messages, append the answer, run its tool calls, and stop on a final answer, a stopping tool, a pause, a hook, or the request cap |
+| `agent_loop/run.py` | `run_agent` and `resume_agent`: agent runs and approval resumes over the model loop, each ending in one terminal record handed to the persist callback before the run ends |
+| `agent_loop/spec.py` | `AgentSpec` and `RunContext`: what an agent run is built from and the run's own identity |
+| `agent_loop/tools.py` | The tools a run offers, and one assistant message's tool calls planned, run, and answered: resolution, the tool-call limit, pause classification, and result messages |
+| `agent_loop/build.py` | `AgentBuild`, what `create_agent` produces for the loop, and `prompt_for_turn`, its system message with one turn's context appended |
+| `agent_loop/prompt.py` | `PromptSpec` and `render_system_message`: an agent's system message from its prompt inputs, in the layout Agno 3.0.9 sent |
+| `agent_loop/structured.py` | The JSON prompt a JSON-mode route needs for an output schema, and lenient parsing of answers into the schema |
+| `agent_loop/helper.py` | `complete_once`: one tool-less helper request, optionally read into a schema, with the run record its usage is saved from; `complete_prompt` renders the helper's system message for it |
+| `agent_loop/output_limit.py` | `output_limit_policy`: answers the tool calls of a response the output limit cut off instead of running them, and fails the run on the third cut-off response |
+| `tools/agno_compat_*.py`, `custom_tools/agno_compat_*.py`, and `oauth/agno_compat_google_auth.py` | Repairs of Agno toolkits and of Google auth's toolkit binding; see `docs/architecture/agno-compatibility.md` for the boundary inventory and upstream tracking |
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
@@ -363,9 +425,9 @@ Matrix sync callback
 | `room_model_overrides.py` | Durable per-room runtime model defaults backing `!room_model` |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
-| `stop.py` | `SpanRegistry`: cancels exactly the reply span a Stop reaches, then its Agno run; the Stop button reaction |
+| `stop.py` | `SpanRegistry`: cancels exactly the reply span a Stop reaches; the Stop button reaction |
 | `topic_generator.py` | Managed room topics from the configured description or generated with AI |
-| `debug_report.py` | Read-only collection of what the backend stored about one reported conversation: event journal, Agno runs, tool-call and LLM request logs, and log lines |
+| `debug_report.py` | Read-only collection of what the backend stored about one reported conversation: event journal, stored runs, tool-call and LLM request logs, and log lines |
 | `cli/main.py` | Main CLI entry point (Typer app) |
 | `cli/banner.py` | CLI startup banner |
 | `cli/config.py` | Config subcommand logic |
@@ -377,7 +439,7 @@ Matrix sync callback
 | `cli/local_stack.py` | Local stack setup command |
 | `credentials/sync.py` | Shared provider/bootstrap env to credentials sync |
 | `logging_config.py` | Structured logging setup |
-| `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
+| `knowledge/utils.py` | Resolves the knowledge bases an agent searches: published indexes, availability notices, and refresh scheduling |
 | `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
 | `custom_tools/stop_reply.py` | Agent tool that stops another agent's reply with a 🛑 reaction relaying the caller's requester |
 | `custom_tools/shared_directories.py` | Agent tool that creates shared directories and invites agents on behalf of a user who may use them |
@@ -391,5 +453,5 @@ Matrix sync callback
 ## Persistent State
 
 [Data Persistence](../deployment/storage.md#data-persistence) lists the main directories under the storage root (`mindroom_data/` by default, overridable via `MINDROOM_STORAGE_PATH`).
-An agent's Agno session database, including its traces, is `agents/<agent>/sessions/<agent>.db`, and private agents keep the same per-agent layout under their resolved private state roots.
+An agent's conversation database is `agents/<agent>/sessions/<agent>.db`, and private agents keep the same per-agent layout under their resolved private state roots.
 Its `<agent>_sessions_summaries` table holds compaction summary rows, and `<agent>_sessions_removed_runs` records runs that edits and redactions removed.

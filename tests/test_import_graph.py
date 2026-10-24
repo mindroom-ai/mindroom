@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 _PROVIDER_SDK_ROOTS = (
     "anthropic",
     "boto3",
-    "cerebras",
     "google.genai",
     "groq",
     "ollama",
@@ -41,11 +40,9 @@ _PROVIDER_SDK_ROOTS = (
 _HEAVY_OPTIONAL_RUNTIME_ROOTS = (
     # Provider-specific clients and authentication.
     *_PROVIDER_SDK_ROOTS,
-    "agno.models.vertexai.claude",
     "google.auth",
     "google.oauth2",
     # Storage engines.
-    "agno.vectordb.chroma",
     "chromadb",
     "falkordb",
     "graphiti_core",
@@ -86,8 +83,8 @@ _CONFIG_LAYER_ROOTS = frozenset(
 # The registry additionally carries httpx (sandbox proxy transport) and click
 # (tool CLI plumbing).
 _REGISTRY_ROOTS = _CONFIG_LAYER_ROOTS | frozenset({"brotli", "click", "httpx", "idna", "zstandard"})
-# The full tool-module sweep adds the agno toolkit runtime (redis-backed run
-# cancellation, opentelemetry via redis) and the httpx dependency tree.
+# The full tool-module sweep adds Agno's tool layer (docstring_parser and
+# packaging) and the httpx transport tree.
 _TOOLS_ROOTS = _REGISTRY_ROOTS | frozenset(
     {
         "agno",
@@ -100,17 +97,11 @@ _TOOLS_ROOTS = _REGISTRY_ROOTS | frozenset(
         "hpack",
         "httpcore",
         "hyperframe",
-        "importlib_metadata",
-        "opentelemetry",
         "outcome",
         "packaging",
-        "psutil",
-        "redis",
         "sniffio",
         "sortedcontainers",
         "trio",
-        "xxhash",
-        "zipp",
     },
 )
 # Top-level CLI help only needs command metadata and presentation libraries.
@@ -137,8 +128,10 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     # provider, storage, or other feature-specific dependency.
     "mindroom.cli.doctor": _CLI_ROOTS | _REGISTRY_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
-    "mindroom.providers.model_loading": _CONFIG_LAYER_ROOTS | frozenset({"agno"}),
+    "mindroom.providers.model_loading": _CONFIG_LAYER_ROOTS,
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
+    # The owned tool values import no Agno module; agno_toolkits builds them from Agno's tool objects.
+    "mindroom.tool_system.tool_function": frozenset({"dotenv"}),
     "mindroom.tool_system.metadata": _REGISTRY_ROOTS,
     "mindroom.tool_system.catalog": _REGISTRY_ROOTS,
     "mindroom.tool_system.registration": _CONFIG_LAYER_ROOTS,
@@ -433,12 +426,6 @@ print(json.dumps({
         "card_reserve_owner": "mindroom.event_journal.approval_card_state",
         "dispatcher_owner": "mindroom.event_journal.approvals",
     }
-
-
-def test_openai_wire_models_import_only_the_openai_sdk() -> None:
-    """Agno's azure package init pulls the anthropic SDK; only the azure branch should pay that."""
-    non_openai_roots = tuple(root for root in _PROVIDER_SDK_ROOTS if root != "openai")
-    _assert_probe_clean("mindroom.providers.openai_models", non_openai_roots)
 
 
 def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:

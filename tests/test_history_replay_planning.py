@@ -3,18 +3,17 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.media import Image
-from agno.models.message import Message
-from agno.session.summary import SessionSummary
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.history.compaction import _compaction_fallback_is_distinct
 from mindroom.history.policy import (
     classify_compaction_decision,
     context_budget_after_reserve,
@@ -22,14 +21,12 @@ from mindroom.history.policy import (
 )
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
-    apply_replay_plan,
     estimate_prompt_visible_history_tokens,
     plan_replay_that_fits,
 )
-from mindroom.history.runtime import _compaction_fallback_is_distinct
 from mindroom.history.storage import (
+    _with_scope_state,
     read_scope_state,
-    set_force_compaction_state,
 )
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
@@ -39,18 +36,15 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
     ResolvedReplayPlan,
+    ScopeSummary,
 )
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
+from mindroom.llm.media import Image
+from mindroom.llm.messages import Message
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_text_tokens
-from tests.conftest import (
-    FakeModel,
-    bind_runtime_paths,
-    prepare_history_for_run_for_test,
-    seed_session,
-)
-from tests.history_helpers import (  # noqa: F401
-    _agent,
-    _close_test_storages,
+from tests.conftest import bind_runtime_paths, prepare_history_for_run_for_test, seed_session
+from tests.fakes.summary_model import summary_model
+from tests.history_helpers import (
     _completed_run,
     _make_config,
     _runtime_paths,
@@ -109,7 +103,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
     """The planner and provider estimator see the same bounded newest-first media replay."""
     messages = [_viewed_image_message(index) for index in range(6)]
     session = _session("viewed-images", runs=[_completed_run("run-1", messages=messages)])
-    before = session.to_dict()
+    before = deepcopy(session)
     replay_model = _RecordingVisualReplayEstimate()
 
     estimate_prompt_visible_history_tokens(
@@ -126,7 +120,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
     replayed_ids = [image.id for message in replay_model.messages for image in message.images or []]
     assert replayed_ids == ["mindroom_viewed_2", "mindroom_viewed_3", "mindroom_viewed_4", "mindroom_viewed_5"]
     assert sum("omitted from replay" in str(message.content) for message in replay_model.messages) == 2
-    assert session.to_dict() == before
+    assert session == before
 
 
 @pytest.mark.parametrize("native_route", [None, "native-route"])
@@ -250,9 +244,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
     )
     seed_session(storage, session)
 
-    agent = _agent(db=storage)
     prepared = await prepare_history_for_run_for_test(
-        agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -263,7 +255,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
         session=session,
     )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -313,7 +305,6 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -324,7 +315,7 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -352,7 +343,6 @@ async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_sk
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -363,7 +353,7 @@ async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_sk
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -391,7 +381,6 @@ async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_un
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -917,12 +906,15 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
                     id="claude-sonnet-5",
                     context_window=32_000,
                 ),
+                # ``openai_codex`` is an alias of ``codex``, so both select the same route.
+                "codex-summary": ModelConfig(provider="codex", id="gpt-6.1-sol", context_window=32_000),
+                "codex-summary-alias": ModelConfig(provider="openai_codex", id="gpt-6.1-sol", context_window=32_000),
             },
         ),
         _runtime_paths(tmp_path),
     )
 
-    with patch("mindroom.history.runtime.logger.warning") as warning_mock:
+    with patch("mindroom.history.compaction.logger.warning") as warning_mock:
         assert (
             _compaction_fallback_is_distinct(
                 config,
@@ -950,13 +942,21 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
         assert (
             _compaction_fallback_is_distinct(
                 config,
+                primary_model_name="codex-summary",
+                fallback_model_name="codex-summary-alias",
+            )
+            is False
+        )
+        assert (
+            _compaction_fallback_is_distinct(
+                config,
                 primary_model_name="summary-model",
                 fallback_model_name="fallback-model",
             )
             is True
         )
 
-    assert warning_mock.call_count == 3
+    assert warning_mock.call_count == 4
     assert all(
         call.args[0] == "Compaction fallback resolves to the primary serving model; continuing without a fallback"
         for call in warning_mock.call_args_list
@@ -1366,11 +1366,10 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1381,7 +1380,7 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
         session=session,
     )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -1407,7 +1406,6 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage, num_history_runs=2),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1467,7 +1465,6 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage, num_history_runs=2),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1513,25 +1510,23 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
         ],
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
 
-    agent = _agent(db=storage)
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            "mindroom.history.compaction.build_model_provider",
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+                return_value="merged summary",
             ),
         ),
         pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"),
     ):
         await prepare_history_for_run_for_test(
-            agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1545,10 +1540,10 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
             available_history_budget=1,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "merged summary"
+    assert persisted.summary.text == "merged summary"
     assert persisted.runs == []
     state = read_scope_state(persisted, scope)
     assert len(folded_run_ids(storage)) == 2
@@ -1557,7 +1552,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
 
 def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_history() -> None:
     """A summary-only session must fail explicitly instead of returning an oversized replay plan."""
-    summary = SessionSummary(summary="Project fact. " * 2000)
+    summary = ScopeSummary(text="Project fact. " * 2000, updated_at=datetime.now(UTC))
     session = _session("summary-only", runs=[])
     session.summary = summary
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -1574,7 +1569,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
         )
 
     assert session.summary is summary
-    assert session.summary.summary == "Project fact. " * 2000
+    assert session.summary.text == "Project fact. " * 2000
     assert session.runs == []
 
     recovered = plan_replay_that_fits(
@@ -1594,7 +1589,7 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
         "summary-and-runs",
         runs=[_completed_run("run-1", messages=[Message(role="user", content="x" * 4000)])],
     )
-    session.summary = SessionSummary(summary="Project facts")
+    session.summary = ScopeSummary(text="Project facts", updated_at=datetime.now(UTC))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
     plan = plan_replay_that_fits(
@@ -1610,12 +1605,11 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
     )
     assert plan.mode == "disabled"
     assert 0 < plan.estimated_tokens <= 100
-    assert session.summary.summary == "Project facts"
+    assert session.summary.text == "Project facts"
 
 
 def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> None:
     available_history_budget = estimate_text_tokens("budget")
-    agent = _agent()
     session = _session(
         "session-1",
         runs=[
@@ -1645,10 +1639,9 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
             history_settings=history_settings,
         ),
     )
-    apply_replay_plan(target=agent, replay_plan=replay_plan)
 
     assert replay_plan.mode == "disabled"
     # History stays on with zero raw runs so the saved summary still replays first.
-    assert agent.add_history_to_context is True
-    assert agent.num_history_runs == 0
-    assert agent.num_history_messages is None
+    assert replay_plan.add_history_to_context is True
+    assert replay_plan.num_history_runs == 0
+    assert replay_plan.num_history_messages is None

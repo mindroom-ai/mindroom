@@ -77,9 +77,7 @@ _ATTACHMENT_SELECT = "id,name,size,contentType,isInline"
 _MESSAGE_PAGES = r"/me(/mailFolders/[^/]+)?/messages"
 _ATTACHMENT_PAGES = r"/me/messages/[^/]+/attachments"
 _AUTOMATIC_REPLY_STATUSES = frozenset({"disabled", "alwaysEnabled", "scheduled"})
-# The choice that sets Graph's "none" is named internal_only because Agno's argument parsing turns the string "none"
-# into None; tool_system/agno_compat_tool_arguments.py gives string parameters the model's string, and the clearer
-# name stays.
+# The choice that sets Graph's "none" is named internal_only, which says what it does.
 _EXTERNAL_AUDIENCES = {"internal_only": "none", "contactsOnly": "contactsOnly", "all": "all"}
 # Graph writes these values in either case; reads report them as the setter takes them.
 _READ_STATUSES = {status.casefold(): status for status in _AUTOMATIC_REPLY_STATUSES}

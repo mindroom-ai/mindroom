@@ -11,9 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import nio
 import pytest
-from agno.media import Audio
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom import interactive
 from mindroom.coalescing.batch import tagged_coalesced_prompt
@@ -30,6 +27,8 @@ from mindroom.event_journal import DeliveryStage, EventClass, EventKind, Inbound
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
 from mindroom.history.types import HistoryScope
+from mindroom.llm.media import Audio
+from mindroom.llm.runs import RunRecord
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.state import MatrixState
@@ -39,8 +38,9 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
-from mindroom.session_storage.agent_storage import get_agent_session
-from mindroom.teams import TeamMode, TeamOutcome, TeamResolution
+from mindroom.session_storage.types import ConversationSession
+from mindroom.teams.formation import TeamOutcome, TeamResolution
+from mindroom.teams.spec import TeamMode
 from mindroom.turn_store import TurnStore
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot, make_test_team_bot
@@ -759,7 +759,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         ) as mock_fetch_history,
         patch.object(
             bot._turn_store,
-            "_remove_stale_runs_for_turn_record",
+            "remove_stale_runs_for_edit",
             return_value=True,
         ) as mock_remove_stale_runs,
     ):
@@ -1997,10 +1997,13 @@ async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_f
 
     session_id = create_session_id("!test:example.com", None)
     storage = MagicMock()
-    storage.get_session.return_value = AgentSession(
+    storage.load_session.return_value = ConversationSession(
         session_id=session_id,
+        kind="agent",
+        owner_id="test_agent",
         runs=[
-            RunOutput(
+            RunRecord(
+                run_id="run-primary",
                 session_id=session_id,
                 metadata={
                     "matrix_event_id": "$primary:example.com",
@@ -2126,10 +2129,12 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
 
     session_id = create_session_id("!test:example.com", None)
     storage = MagicMock()
-    storage.get_session.return_value = AgentSession(
+    storage.load_session.return_value = ConversationSession(
         session_id=session_id,
+        kind="agent",
+        owner_id="test_agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="run-selection",
                 session_id=session_id,
                 metadata={
@@ -2263,10 +2268,12 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
 
     session_id = create_session_id("!test:example.com", None)
     storage = MagicMock()
-    storage.get_session.return_value = AgentSession(
+    storage.load_session.return_value = ConversationSession(
         session_id=session_id,
+        kind="agent",
+        owner_id="test_agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="run-selection",
                 session_id=session_id,
                 metadata={
@@ -2404,7 +2411,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
             bot._turn_store,
-            "_remove_stale_runs_for_turn_record",
+            "remove_stale_runs_for_edit",
         ) as mock_recorded_cleanup,
     ):
         mock_context.return_value = MagicMock(
@@ -2432,10 +2439,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
 def _persisted_run_metadata(bot: AgentBot, session_id: str) -> dict[str, object]:
     """Return the metadata of the newest run this bot persisted for one session."""
     storage = bot._conversation_state_writer.create_storage(None)
-    try:
-        session = get_agent_session(storage, session_id)
-    finally:
-        storage.close()
+    session = storage.load_session(session_id, "agent")
     assert session is not None
     assert session.runs is not None
     return session.runs[0].metadata

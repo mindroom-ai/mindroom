@@ -1,11 +1,13 @@
 """Tool image retention confines writes and registration to authorized storage."""
 
+import dataclasses
 import json
 import os
 from pathlib import Path
 
 import pytest
 
+from mindroom.config.models import ModelConfig
 from mindroom.media_delivery import image_result
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -175,3 +177,27 @@ def test_retention_does_not_traverse_replaced_directory_after_descriptor_teardow
     assert swapped
     assert result.images
     assert existing.read_bytes() == b"unrelated existing image"
+
+
+@pytest.mark.parametrize(("provider", "supported"), [("openai", True), ("anthropic", True), ("cerebras", False)])
+def test_viewed_image_is_reported_unsupported_when_the_active_model_takes_no_images(
+    tmp_path: Path,
+    provider: str,
+    *,
+    supported: bool,
+) -> None:
+    """A model route that never sends images gets an explicit unsupported receipt instead of a silent drop."""
+    context = _tool_context(tmp_path)
+    config = context.current_config.model_copy(
+        update={"models": {"default": ModelConfig(provider=provider, id="test-model")}},
+    )
+    context = dataclasses.replace(context, config=config, active_model_name="default")
+    result = image_result(image_bytes(), metadata={"view_status": "ready"})
+
+    with tool_runtime_context(context):
+        finalized = finalize_tool_media(result)
+
+    receipt = json.loads(finalized.content)
+    assert "attachment_id" in receipt
+    assert receipt["view_status"] == ("ready" if supported else "unsupported")
+    assert bool(finalized.images) is supported

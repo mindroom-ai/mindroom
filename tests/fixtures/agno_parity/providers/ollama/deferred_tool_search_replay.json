@@ -1,0 +1,363 @@
+{
+  "family": "ollama",
+  "input": {
+    "deferred_tool_search": {
+      "mode": "portable",
+      "tool_names": [
+        "lookup_order",
+        "send_invoice"
+      ]
+    },
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "Where is order A-1001?",
+        "from_history": true,
+        "role": "user"
+      },
+      {
+        "from_history": true,
+        "metrics": {
+          "input_tokens": 42,
+          "output_tokens": 12,
+          "provider_metrics": {
+            "eval_duration": 640000000,
+            "load_duration": 21000000,
+            "prompt_eval_duration": 120000000,
+            "total_duration": 812000000
+          },
+          "total_tokens": 54
+        },
+        "provider_data": {
+          "mindroom_model": {
+            "id": "qwen3.8:27b",
+            "provider": "Ollama"
+          }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"order_id\": \"A-1001\"}",
+              "name": "lookup_order"
+            },
+            "id": "parity-generated-call-1",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+        "from_history": true,
+        "role": "tool",
+        "tool_args": {
+          "order_id": "A-1001"
+        },
+        "tool_call_error": false,
+        "tool_call_id": "parity-generated-call-1",
+        "tool_name": "lookup_order"
+      }
+    ],
+    "model_config": {
+      "host": "http://localhost:11434",
+      "id": "qwen3.8:27b",
+      "provider": "ollama"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
+        "external_execution": false,
+        "name": "tool_search",
+        "parameters": {
+          "properties": {
+            "max_results": {
+              "description": "Maximum number of function definitions to return, at most 20.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+        "external_execution": false,
+        "name": "call_tool",
+        "parameters": {
+          "properties": {
+            "arguments": {
+              "description": "The function's arguments as a JSON object.",
+              "type": "object"
+            },
+            "name": {
+              "description": "Exact function name from tool_search.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Look up one order by id.",
+        "external_execution": false,
+        "name": "lookup_order",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Email the invoice for one order.",
+        "external_execution": false,
+        "name": "send_invoice",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "content": "Order A-1001 has shipped.",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "qwen3.8:27b",
+          "provider": "Ollama"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "eval_duration": 640000000,
+        "load_duration": 21000000,
+        "prompt_eval_duration": 120000000,
+        "total_duration": 812000000
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "model": "qwen3.8:27b",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": "Where is order A-1001?"
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "name": "call_tool",
+                "arguments": {
+                  "name": "lookup_order",
+                  "arguments": {
+                    "order_id": "A-1001"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "call_tool",
+            "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+            "parameters": {
+              "type": "object",
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "arguments": {
+                  "type": "object",
+                  "description": "The function's arguments as a JSON object."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Exact function name from tool_search."
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "description": "Return the forecast for one city.",
+            "parameters": {
+              "type": "object",
+              "required": [
+                "city"
+              ],
+              "properties": {
+                "city": {
+                  "type": "string",
+                  "description": "City name."
+                },
+                "unit": {
+                  "type": "string",
+                  "description": "Temperature unit.",
+                  "enum": [
+                    "celsius",
+                    "fahrenheit"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "tool_search",
+            "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
+            "parameters": {
+              "type": "object",
+              "required": [],
+              "properties": {
+                "max_results": {
+                  "type": "integer",
+                  "description": "Maximum number of function definitions to return, at most 20."
+                },
+                "query": {
+                  "type": "string",
+                  "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions."
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "http://localhost:11434/api/chat"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/x-ndjson"
+    },
+    "ndjson": [
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": false,
+        "message": {
+          "content": "Order A-1001",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b"
+      },
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": false,
+        "message": {
+          "content": " has shipped.",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b"
+      },
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": true,
+        "done_reason": "stop",
+        "eval_count": 12,
+        "eval_duration": 640000000,
+        "load_duration": 21000000,
+        "message": {
+          "content": "",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b",
+        "prompt_eval_count": 42,
+        "prompt_eval_duration": 120000000,
+        "total_duration": 812000000
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "deferred_tool_search_replay"
+}

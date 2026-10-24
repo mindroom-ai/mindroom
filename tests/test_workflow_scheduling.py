@@ -11,15 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE
+from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, ProviderError
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
@@ -44,8 +42,29 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.scheduling_helpers import serve_task_state_events
+
+
+def _parser_model(workflow: ScheduledWorkflow) -> ScriptedModel:
+    """Return a schedule parser model that answers with ``workflow`` as the JSON it would write."""
+    return ScriptedModel([answer(workflow.model_dump_json(exclude_unset=True))])
+
+
+def _parse_prompt(model: ScriptedModel) -> str:
+    """Return the user prompt of the parser's only request."""
+    [request] = model.requests
+    return request.messages[-1].get_content_string()
+
+
+async def _fail_parse() -> None:
+    msg = "AI service error"
+    raise ProviderError(msg, provider="Synthetic")
+
+
+async def _refuse_parse() -> None:
+    raise ModelSafeguardRefusal(provider="Anthropic")
 
 
 def _mid(name: str) -> MatrixID:
@@ -257,26 +276,21 @@ class TestScheduledWorkflow:
 class TestParseWorkflowSchedule:
     """Test parse_workflow_schedule function."""
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_research_email_workflow(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """Test parsing research + email workflow."""
-        # Setup mock agent response
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=CronSchedule(minute="0", hour="9", weekday="1"),
-            message="@research @email_assistant Please research the latest AI news and email me a summary",
-            description="Weekly AI news research and email",
+        mock_build.return_value = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                cron_schedule=CronSchedule(minute="0", hour="9", weekday="1"),
+                message="@research @email_assistant Please research the latest AI news and email me a summary",
+                description="Weekly AI news research and email",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         # Parse the request
         result = await _parse_workflow_schedule(
@@ -292,25 +306,21 @@ class TestParseWorkflowSchedule:
         assert "@research" in result.message
         assert "@email_assistant" in result.message
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_simple_reminder(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """Test parsing simple reminder without agents."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC) + timedelta(minutes=5),
-            message="Check the deployment status",
-            description="Deployment check reminder",
+        mock_build.return_value = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime.now(UTC) + timedelta(minutes=5),
+                message="Check the deployment status",
+                description="Deployment check reminder",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         result = await _parse_workflow_schedule(
             "ping me in 5 minutes to check the deployment",
@@ -323,20 +333,17 @@ class TestParseWorkflowSchedule:
         assert result.schedule_type == "once"
         assert result.message == "Check the deployment status"
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
-    async def test_parse_daily_task(self, mock_agent_class: Mock, mock_get_model: Mock, mock_config: MagicMock) -> None:  # noqa: ARG002
+    @patch("mindroom.scheduling.tasks.build_model_provider")
+    async def test_parse_daily_task(self, mock_build: Mock, mock_config: MagicMock) -> None:
         """Test parsing daily recurring task."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=CronSchedule(minute="0", hour="9"),
-            message="@finance Please provide a market analysis for today",
-            description="Daily market analysis",
+        mock_build.return_value = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                cron_schedule=CronSchedule(minute="0", hour="9"),
+                message="@finance Please provide a market analysis for today",
+                description="Daily market analysis",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         result = await _parse_workflow_schedule(
             "Daily at 9am, give me a market analysis",
@@ -350,26 +357,22 @@ class TestParseWorkflowSchedule:
         assert result.cron_schedule.to_cron_string() == "0 9 * * *"
         assert "@finance" in result.message
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_prompt_interprets_times_in_user_timezone(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """The parse prompt must carry the user's timezone and local wall-clock time."""
         mock_config.timezone = "America/Los_Angeles"
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime(2026, 7, 4, 6, 45, tzinfo=UTC),
-            message="Reminder",
-            description="Reminder",
+        mock_build.return_value = model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime(2026, 7, 4, 6, 45, tzinfo=UTC),
+                message="Reminder",
+                description="Reminder",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         await _parse_workflow_schedule(
             "Remind me today at 11:45 PM",
@@ -379,31 +382,27 @@ class TestParseWorkflowSchedule:
             current_time=datetime(2026, 7, 3, 16, 0, tzinfo=UTC),
         )
 
-        prompt = mock_agent.arun.call_args.args[0]
+        prompt = _parse_prompt(model)
         assert "Current time (UTC): 2026-07-03T16:00:00+00:00" in prompt
         assert "(America/Los_Angeles): 2026-07-03T09:00:00-07:00" in prompt
         assert "Interpret times in the request as America/Los_Angeles wall-clock times" in prompt
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_prompt_includes_history_limit_instructions(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """The parse prompt must teach the model when to set the per-schedule history limit."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=CronSchedule(minute="*/25"),
-            message="Poll the queue",
-            description="Queue poller",
-            history_limit=0,
+        mock_build.return_value = model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                cron_schedule=CronSchedule(minute="*/25"),
+                message="Poll the queue",
+                description="Queue poller",
+                history_limit=0,
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         result = await _parse_workflow_schedule(
             "every 25 minutes poll the queue with no history",
@@ -412,7 +411,7 @@ class TestParseWorkflowSchedule:
             available_responders=[_mid("general")],
         )
 
-        prompt = mock_agent.arun.call_args.args[0]
+        prompt = _parse_prompt(model)
         assert "Resolve history_limit using the conversation context rules below" in prompt
         assert '"with no history", "without context", or "context-free" -> history_limit=0' in prompt
         assert '"restore full history" or "use unlimited history" -> history_limit=null' in prompt
@@ -421,24 +420,20 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, ScheduledWorkflow)
         assert result.history_limit == 0
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_once_without_execute_at_returns_parse_error(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """A one-time parse without execute_at must fail instead of silently defaulting."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            message="Check deployment",
-            description="Deployment check",
+        mock_build.return_value = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                message="Check deployment",
+                description="Deployment check",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         result = await _parse_workflow_schedule(
             "in 10 minutes check the deployment",
@@ -450,24 +445,20 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, _WorkflowParseError)
         assert "when to run" in result.error
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_cron_without_schedule_returns_parse_error(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """A recurring parse without cron_schedule must fail instead of silently defaulting."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="cron",
-            message="Market analysis",
-            description="Daily market analysis",
+        mock_build.return_value = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                message="Market analysis",
+                description="Daily market analysis",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         result = await _parse_workflow_schedule(
             "give me a market analysis regularly",
@@ -479,18 +470,14 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, _WorkflowParseError)
         assert "recurring schedule" in result.error
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_error_handling(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """Test error handling in parse_workflow_schedule."""
-        mock_agent = AsyncMock()
-        mock_agent.arun.side_effect = Exception("AI service error")
-        mock_agent_class.return_value = mock_agent
+        mock_build.return_value = ScriptedModel([[Await(_fail_parse)]])
 
         result = await _parse_workflow_schedule(
             "Schedule something",
@@ -503,18 +490,14 @@ class TestParseWorkflowSchedule:
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_refusal_reports_declined_request_without_rephrase_hint(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """A parser model refusal must say the parser declined instead of asking for a more specific request."""
-        mock_agent = AsyncMock()
-        mock_agent.arun.return_value = RunOutput(content=MODEL_SAFEGUARD_REFUSAL_MESSAGE, status=RunStatus.error)
-        mock_agent_class.return_value = mock_agent
+        mock_build.return_value = ScriptedModel([[Await(_refuse_parse)]])
 
         result = await _parse_workflow_schedule(
             "Every day at 9am, summarize the news",
@@ -527,10 +510,10 @@ class TestParseWorkflowSchedule:
             error=f"The schedule parser model declined this request ({MODEL_SAFEGUARD_REFUSAL_MESSAGE}).",
         )
 
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_empty_available_responders_returns_parse_error(
         self,
-        mock_agent_class: Mock,
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """Empty responder sets should fail deterministically for direct callers."""
@@ -543,27 +526,23 @@ class TestParseWorkflowSchedule:
 
         assert isinstance(result, _WorkflowParseError)
         assert result.error == "No agents or teams available for scheduling."
-        mock_agent_class.assert_not_called()
+        mock_build.assert_not_called()
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_formats_available_agents_without_double_at(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """Available-agent prompt rendering should never produce @@ mentions."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC) + timedelta(minutes=5),
-            message="Check in",
-            description="Reminder",
+        mock_build.return_value = model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime.now(UTC) + timedelta(minutes=5),
+                message="Check in",
+                description="Reminder",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         await _parse_workflow_schedule(
             "remind me later",
@@ -578,30 +557,26 @@ class TestParseWorkflowSchedule:
             ],
         )
 
-        prompt = mock_agent.arun.call_args.args[0]
+        prompt = _parse_prompt(model)
         assert "Available agents and teams: @general, @research, @ops, @finance, @analyst" in prompt
         assert "@@" not in prompt
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_parse_conditional_schedule_accepts_numeric_cron(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
         mock_config: MagicMock,
     ) -> None:
         """Conditional schedules should accept numeric five-field crons because they recur."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="cron",
-            is_conditional=True,
-            cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
-            message="@general Check for messages containing urgent. If found, notify the team.",
-            description="Monitor urgent mentions",
+        mock_build.return_value = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                is_conditional=True,
+                cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
+                message="@general Check for messages containing urgent. If found, notify the team.",
+                description="Monitor urgent mentions",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         result = await _parse_workflow_schedule(
             "If someone mentions urgent then notify the team immediately",
@@ -1055,28 +1030,24 @@ class TestIntegrationWithScheduling:
             assert "recurring task" in message
             assert "0 9 * * *" in message
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_edit_reparse_preserves_message_and_can_clear_history_limit(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
     ) -> None:
         """An edit can clear a limit while preserving the original scheduled message."""
         original_message = "tool-audit schedule test — safe to ignore"
         client = AsyncMock()
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
 
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC) + timedelta(hours=6),
-            message=original_message,
-            description="Post a test reminder in the current thread.",
+        mock_build.return_value = model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime.now(UTC) + timedelta(hours=6),
+                message=original_message,
+                description="Post a test reminder in the current thread.",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         config = _runtime_bound_config(
             Config(
@@ -1154,7 +1125,7 @@ class TestIntegrationWithScheduling:
         )
 
         assert task_id == "task123"
-        prompt = mock_agent.arun.call_args.args[0]
+        prompt = _parse_prompt(model)
         assert "This request EDITS an existing scheduled task." in prompt
         assert f'"message": "{original_message}"' in prompt
         assert '"history_limit": 5' in prompt
@@ -1165,29 +1136,25 @@ class TestIntegrationWithScheduling:
         assert stored_workflow.message == original_message
         assert stored_workflow.history_limit is None
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
+    @patch("mindroom.scheduling.tasks.build_model_provider")
     async def test_edit_reparse_preserves_existing_history_limit_when_request_omits_context(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        mock_build: Mock,
     ) -> None:
         """A timing-only edit carries an existing history limit forward."""
         original_message = "tool-audit schedule test - safe to ignore"
         client = AsyncMock()
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
 
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC) + timedelta(hours=6),
-            message=original_message,
-            description="Post a test reminder in the current thread.",
-            history_limit=5,
+        mock_build.return_value = model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime.now(UTC) + timedelta(hours=6),
+                message=original_message,
+                description="Post a test reminder in the current thread.",
+                history_limit=5,
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
 
         config = _runtime_bound_config(
             Config(
@@ -1265,7 +1232,7 @@ class TestIntegrationWithScheduling:
         )
 
         assert task_id == "task123"
-        prompt = mock_agent.arun.call_args.args[0]
+        prompt = _parse_prompt(model)
         assert "keep the current history_limit unchanged" in prompt
         assert '"history_limit": 5' in prompt
 

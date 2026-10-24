@@ -8,7 +8,7 @@ import json
 import threading
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.approval import manager as approval_manager
@@ -28,8 +28,6 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
-    from agno.tools.function import Function
-
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
     from mindroom.event_journal import (
@@ -40,6 +38,7 @@ if TYPE_CHECKING:
         ScheduledCallOutcome,
         ScheduledCallRefusal,
     )
+    from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
@@ -67,7 +66,7 @@ __all__ = [
     "withdraw_scheduled_call_approval",
 ]
 
-# Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
+# The loop copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
 POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
 # A policy-gated call whose approval is the first phase of the background job it runs as, instead of a paused run.
 JOB_APPROVAL_TYPE = "mindroom_job"
@@ -118,20 +117,6 @@ class MatrixApprovalAction:
     scheduled_scope: str | None = None
 
 
-def _check_callable_from_module(
-    module: ModuleType,
-    resolved_path: Path,
-) -> Callable[[str, dict[str, Any], str], bool] | Callable[[str, dict[str, Any], str], Awaitable[bool]]:
-    check = getattr(module, "check", None)
-    if not callable(check):
-        msg = f"Approval script '{resolved_path}' must define callable check(tool_name, arguments, agent_name)."
-        raise ToolApprovalScriptError(msg)
-    return cast(
-        "Callable[[str, dict[str, Any], str], bool] | Callable[[str, dict[str, Any], str], Awaitable[bool]]",
-        check,
-    )
-
-
 def _load_script_module(
     script: str,
     runtime_paths: RuntimePaths,
@@ -171,23 +156,17 @@ def _load_script_module(
     return module, resolved_path
 
 
-def _clear_script_cache() -> None:
-    """Clear the shared approval-script cache under the cache lock."""
-    with _SCRIPT_CACHE_LOCK:
-        _SCRIPT_CACHE.clear()
-
-
 def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
     return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
 
 
-def approval_gated(function: Function) -> bool:
+def approval_gated(function: ToolFunction) -> bool:
     """Return whether a call waits for a human decision, by pausing its run or as the first phase of its job."""
     return bool(function.requires_confirmation or function.approval_type == JOB_APPROVAL_TYPE)
 
 
 def tool_may_require_approval(config: Config, tool_name: str) -> bool:
-    """Return whether one tool must use Agno's persisted confirmation boundary."""
+    """Return whether one tool must use the persisted confirmation boundary."""
     rule = _matching_tool_approval_rule(config, tool_name)
     if rule is None:
         return config.tool_approval.default == "require_approval"
@@ -233,7 +212,10 @@ async def evaluate_tool_approval(
 
     assert rule.script is not None
     module, resolved_path = _load_script_module(rule.script, runtime_paths)
-    check = _check_callable_from_module(module, resolved_path)
+    check = getattr(module, "check", None)
+    if not callable(check):
+        msg = f"Approval script '{resolved_path}' must define callable check(tool_name, arguments, agent_name)."
+        raise ToolApprovalScriptError(msg)
     try:
         result = check(tool_name, arguments, agent_name)
         if inspect.isawaitable(result):
@@ -411,4 +393,5 @@ async def shutdown_approval_runtime() -> None:
     try:
         await approval_manager.shutdown_approval_manager()
     finally:
-        _clear_script_cache()
+        with _SCRIPT_CACHE_LOCK:
+            _SCRIPT_CACHE.clear()

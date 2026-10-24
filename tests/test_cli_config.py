@@ -11,23 +11,20 @@ import subprocess
 import sys
 from contextlib import nullcontext
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast, get_args
 from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
-import agno.models.vertexai.claude as vertexai_claude_module
 import httpx
 import pytest
 import structlog
 import typer
 import yaml
-from anthropic import PermissionDeniedError
 from google.auth.exceptions import DefaultCredentialsError
+from google.oauth2.credentials import Credentials as GoogleCredentials
 from typer.testing import CliRunner
 
 import mindroom.cli.connect as cli_connect
 import mindroom.constants as constants_module
-import mindroom.providers.google_adc as google_adc_module
 import mindroom.workspaces as workspaces_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
@@ -57,6 +54,7 @@ from mindroom.model_defaults import (
     OPENAI_GPT_SOL,
     llama_cpp_server_command,
 )
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.model_loading import missing_model_api_key_provider
 from mindroom.services.config import InstallResult, ServiceManager, ServiceStatus
 from mindroom.startup_errors import PermanentStartupError
@@ -279,7 +277,7 @@ class TestConfigInit:
 
         assert mind["display_name"] == "Mind"
         assert mind["include_default_tools"] is False
-        assert mind["learning"] is False
+        assert "learning" not in mind
         assert mind["memory_backend"] == "file"
         assert mind["rooms"] == ["personal"]
         assert config["rooms"]["personal"]["description"]  # becomes the topic, so no model call writes one
@@ -3586,6 +3584,47 @@ def _record_doctor_requests(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, 
     return requests
 
 
+def _vertex_ok(_request: httpx.Request) -> httpx.Response:
+    message = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-5",
+        "content": [{"type": "text", "text": "OK"}],
+        "stop_reason": "max_tokens",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 5, "output_tokens": 1},
+    }
+    return httpx.Response(200, json=message)
+
+
+def _vertex_wire(
+    monkeypatch: pytest.MonkeyPatch,
+    respond: Callable[[httpx.Request], httpx.Response],
+) -> list[httpx.Request]:
+    """Answer the model requests doctor sends through the shared model HTTP client, recording each one."""
+    requests: list[httpx.Request] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return respond(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(record))
+    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", client.send)
+    return requests
+
+
+def _ambient_google_credentials(monkeypatch: pytest.MonkeyPatch, failure: Exception | None = None) -> None:
+    """Stand in for the host's Application Default Credentials, so no check reaches Google."""
+
+    def default(*_args: object, **_kwargs: object) -> tuple[GoogleCredentials, str]:
+        if failure is not None:
+            raise failure
+        return GoogleCredentials(token="ambient-token"), "ambient-project"  # noqa: S106 - synthetic credential
+
+    monkeypatch.setattr("google.auth.default", default)
+
+
 def _patch_homeserver_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch httpx.get to simulate a reachable homeserver."""
     resp = httpx.Response(200, json={"versions": ["v1.1"]})
@@ -3928,7 +3967,7 @@ class TestDoctor:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor validates Vertex AI Claude with a tiny messages smoke test."""
+        """Doctor validates Vertex AI Claude with one tiny Messages request through the runtime's Claude adapter."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
@@ -3937,98 +3976,54 @@ class TestDoctor:
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
-
-        called: dict[str, object] = {}
-
-        class _FakeMessages:
-            def create(self, **kwargs: object) -> SimpleNamespace:
-                called["kwargs"] = kwargs
-                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
-
-        class _FakeVertexModel:
-            def __init__(self, **kwargs: object) -> None:
-                called["model_id"] = kwargs["id"]
-                called["client_kwargs"] = kwargs
-                self.id = str(kwargs["id"])
-
-            def get_request_params(self) -> dict[str, object]:
-                return {"timeout": called["client_kwargs"]["timeout"]}
-
-            def get_client(self) -> SimpleNamespace:
-                return SimpleNamespace(messages=_FakeMessages())
-
-        monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
+        _ambient_google_credentials(monkeypatch)
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
         assert result.exit_code == 0
         assert "vertexai_claude connection valid for claude-sonnet-5" in result.output
-        assert called["model_id"] == "claude-sonnet-5"
-        assert called["client_kwargs"] == {
-            "id": "claude-sonnet-5",
-            "project_id": "mindroom-test",
-            "region": "us-central1",
-            "timeout": 10,
-        }
-        assert called["kwargs"] == {
-            "model": "claude-sonnet-5",
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "Reply with OK."}],
-            "timeout": 10,
-        }
+        [request] = requests
+        assert request.url.path == (
+            "/v1/projects/mindroom-test/locations/us-central1/publishers/anthropic/models/claude-sonnet-5:rawPredict"
+        )
+        assert request.headers["authorization"] == "Bearer ambient-token"
+        assert request.extensions["timeout"]["read"] == 10
+        body = json.loads(request.content)
+        assert (body["max_tokens"], body["messages"]) == (
+            1,
+            [{"role": "user", "content": [{"type": "text", "text": "Reply with OK."}]}],
+        )
 
     def test_vertexai_claude_connection_uses_runtime_adc_credentials(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor should pass resolved runtime ADC credentials to the Vertex client."""
+        """Doctor should authenticate with the credentials the runtime env names."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         (tmp_path / ".env").write_text("GOOGLE_APPLICATION_CREDENTIALS=adc.json\n", encoding="utf-8")
         storage = tmp_path / "storage"
-        fake_credentials = object()
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
+        loaded: list[str] = []
 
-        called: dict[str, object] = {}
+        def _load_adc(path: str) -> GoogleCredentials:
+            loaded.append(path)
+            return GoogleCredentials(token="file-token")  # noqa: S106 - synthetic credential
 
-        def _load_adc(path: str) -> object:
-            called["adc_path"] = path
-            return fake_credentials
-
-        class _FakeMessages:
-            def create(self, **kwargs: object) -> SimpleNamespace:
-                called["kwargs"] = kwargs
-                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
-
-        class _FakeVertexModel:
-            def __init__(self, **kwargs: object) -> None:
-                called["client_kwargs"] = kwargs
-                self.id = str(kwargs["id"])
-
-            def get_request_params(self) -> dict[str, object]:
-                return {"timeout": called["client_kwargs"]["timeout"]}
-
-            def get_client(self) -> SimpleNamespace:
-                return SimpleNamespace(messages=_FakeMessages())
-
-        monkeypatch.setattr(google_adc_module, "load_google_application_credentials", _load_adc)
-        monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
+        monkeypatch.setattr("mindroom.providers.anthropic.messages.load_google_application_credentials", _load_adc)
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
 
         assert result.exit_code == 0
-        assert called["adc_path"] == str((tmp_path / "adc.json").resolve())
-        assert called["client_kwargs"] == {
-            "id": "claude-sonnet-5",
-            "project_id": "mindroom-test",
-            "region": "us-central1",
-            "timeout": 10,
-            "client_params": {"credentials": fake_credentials},
-        }
+        assert loaded == [str((tmp_path / "adc.json").resolve())]
+        assert [request.headers["authorization"] for request in requests] == ["Bearer file-token"]
 
     def test_vertexai_claude_connection_checks_each_configured_model(
         self,
@@ -4044,33 +4039,18 @@ class TestDoctor:
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
-
-        created_models: list[str] = []
-        requested_models: list[str] = []
-
-        class _FakeMessages:
-            def create(self, **kwargs: object) -> SimpleNamespace:
-                requested_models.append(str(kwargs["model"]))
-                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
-
-        class _FakeVertexModel:
-            def __init__(self, **kwargs: object) -> None:
-                created_models.append(str(kwargs["id"]))
-
-            def get_request_params(self) -> dict[str, object]:
-                return {"timeout": 10}
-
-            def get_client(self) -> SimpleNamespace:
-                return SimpleNamespace(messages=_FakeMessages())
-
-        monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
+        _ambient_google_credentials(monkeypatch)
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
         assert result.exit_code == 0
         assert "vertexai_claude connection valid for claude-sonnet-5" in result.output
         assert "vertexai_claude connection valid for claude-haiku-4-5" in result.output
-        assert created_models == ["claude-sonnet-5", "claude-haiku-4-5"]
-        assert requested_models == ["claude-sonnet-5", "claude-haiku-4-5"]
+        assert [request.url.path.rsplit("/", 1)[-1] for request in requests] == [
+            "claude-sonnet-5:rawPredict",
+            "claude-haiku-4-5:rawPredict",
+        ]
 
     def test_vertexai_claude_missing_env_is_warning(
         self,
@@ -4099,7 +4079,7 @@ class TestDoctor:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor warns when Vertex AI Claude cannot load Google credentials."""
+        """Doctor warns when Vertex AI Claude cannot find Google credentials."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
@@ -4108,29 +4088,16 @@ class TestDoctor:
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
-
-        class _MissingCredentialsMessages:
-            def create(self, **_kwargs: object) -> None:
-                message = "ADC unavailable"
-                raise DefaultCredentialsError(message)
-
-        class _MissingCredentialsModel:
-            def __init__(self, **kwargs: object) -> None:
-                self.id = str(kwargs["id"])
-
-            def get_request_params(self) -> dict[str, object]:
-                return {"timeout": 10}
-
-            def get_client(self) -> SimpleNamespace:
-                return SimpleNamespace(messages=_MissingCredentialsMessages())
-
-        monkeypatch.setattr(vertexai_claude_module, "Claude", _MissingCredentialsModel)
+        _ambient_google_credentials(monkeypatch, DefaultCredentialsError("ADC unavailable"))
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
         assert result.exit_code == 0
-        assert "vertexai_claude: could not validate connection" in result.output
-        assert "ADC" in result.output
-        assert "unavailable" in result.output
+        output = normalize_console_output(result.output)
+        assert "vertexai_claude: could not validate connection" in output
+        assert "ADC unavailable" in output
+        assert requests == []
 
     def test_vertexai_claude_missing_adc_file_is_failure(
         self,
@@ -4178,12 +4145,22 @@ class TestDoctor:
         assert "vertexai_claude connection failed for claude-sonnet-5" in output
         assert "Failed to load GOOGLE_APPLICATION_CREDENTIALS" in output
 
-    def test_vertexai_claude_api_rejection_is_failure(
+    @pytest.mark.parametrize(
+        ("failure", "exit_code", "message"),
+        [
+            ("rejected", 1, "HTTP 403"),
+            ("offline", 0, "could not validate connection"),
+        ],
+    )
+    def test_vertexai_claude_api_failures(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+        exit_code: int,
+        message: str,
     ) -> None:
-        """Doctor fails when Vertex AI rejects the configured Claude request."""
+        """A rejected request fails the check; an unreachable endpoint only leaves it unverified."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
@@ -4192,29 +4169,21 @@ class TestDoctor:
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
+        _ambient_google_credentials(monkeypatch)
 
-        class _RejectedMessages:
-            def create(self, **_kwargs: object) -> None:
-                response = httpx.Response(403, request=httpx.Request("POST", "https://vertex.test"))
-                message = "denied"
-                raise PermissionDeniedError(message, response=response, body={"error": "denied"})
+        def respond(request: httpx.Request) -> httpx.Response:
+            if failure == "offline":
+                message = "unreachable"
+                raise httpx.ConnectError(message, request=request)
+            error = {"type": "error", "error": {"type": "permission_error", "message": "denied"}}
+            return httpx.Response(403, json=error)
 
-        class _RejectedModel:
-            def __init__(self, **kwargs: object) -> None:
-                self.id = str(kwargs["id"])
-
-            def get_request_params(self) -> dict[str, object]:
-                return {"timeout": 10}
-
-            def get_client(self) -> SimpleNamespace:
-                return SimpleNamespace(messages=_RejectedMessages())
-
-        monkeypatch.setattr(vertexai_claude_module, "Claude", _RejectedModel)
+        _vertex_wire(monkeypatch, respond)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
-        assert result.exit_code == 1
-        assert "vertexai_claude connection failed for claude-sonnet-5" in result.output
-        assert "HTTP 403" in result.output
+
+        assert result.exit_code == exit_code
+        assert message in normalize_console_output(result.output)
 
     def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor validates against custom base_url when configured."""
@@ -4504,9 +4473,10 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
 
         class _FakeEmbedder:
-            def get_embedding(self, text: str) -> list[float]:
-                assert text == "mindroom doctor embedder check"
-                return [0.1, 0.2, 0.3]
+            def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+                assert texts == ["mindroom doctor embedder check"]
+                assert purpose == "query"
+                return [[0.1, 0.2, 0.3]]
 
         monkeypatch.setattr(
             "mindroom.cli.doctor.create_sentence_transformers_embedder",

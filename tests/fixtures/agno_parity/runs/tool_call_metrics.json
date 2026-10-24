@@ -1,0 +1,67 @@
+{
+  "agent_code:run-tools.tools[0].metrics": {
+    "start_time": 1800000119.5,
+    "end_time": 1800000120,
+    "duration": 0.5
+  },
+  "agent_code:run-tools.tools[1].metrics": {
+    "start_time": 1800000119.5,
+    "end_time": 1800000120,
+    "duration": 0.5
+  },
+  "agent_code:run-tools.tools[2].metrics": {
+    "start_time": 1800000119.5,
+    "end_time": 1800000120,
+    "duration": 0.5
+  },
+  "agent_code:run-view.tools[0].metrics": {
+    "start_time": 1800000239.5,
+    "end_time": 1800000240,
+    "duration": 0.5
+  },
+  "agent_code:run-native-cancelled.tools[0].metrics": {
+    "start_time": 1800000599.5,
+    "end_time": 1800000600,
+    "duration": 0.5
+  },
+  "agent_code:run-c5.tools[0].metrics": {
+    "start_time": 1800000959.5,
+    "end_time": 1800000960,
+    "duration": 0.5
+  },
+  "agent_code:segment:2.tools[0].metrics": {
+    "start_time": 1800000959.5,
+    "end_time": 1800000960,
+    "duration": 0.5
+  },
+  "team_squad:00000000-0000-4000-8000-00000000004b.tools[0].metrics": {
+    "start_time": 1800001079.5,
+    "end_time": 1800001080,
+    "duration": 0.5
+  },
+  "team_squad:team-completed.tools[0].metrics": {
+    "start_time": 1800001079.5,
+    "end_time": 1800001080,
+    "duration": 0.5
+  },
+  "team_squad:team-member-error.tools[0].metrics": {
+    "start_time": 1800001139.5,
+    "end_time": 1800001140,
+    "duration": 0.5
+  },
+  "team_squad:team-paused.tools[0].metrics": {
+    "start_time": 1800001199.5,
+    "end_time": 1800001200,
+    "duration": 0.5
+  },
+  "team_squad:team-approved.tools[0].metrics": {
+    "start_time": 1800001679.5,
+    "end_time": 1800001680,
+    "duration": 0.5
+  },
+  "team_panel:panel-completed.tools[0].metrics": {
+    "start_time": 1800001259.5,
+    "end_time": 1800001260,
+    "duration": 0.5
+  }
+}

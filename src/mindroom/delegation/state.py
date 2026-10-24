@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.llm.runs import RunRequirement
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
+
+# The functions of the ``delegate`` toolkit, which run outside the loop: the driver runs the child and continues the
+# parent with its result.
+RUN_SUBAGENT = "run_subagent"
+CONTINUE_SUBAGENT = "continue_subagent"
+DELEGATION_FUNCTIONS = (RUN_SUBAGENT, CONTINUE_SUBAGENT)
+
+# A child, or its record, in one of these statuses is settled for good; a running or paused one can still advance.
+type DelegationTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]
+TERMINAL_CHILD_STATUSES: frozenset[str] = frozenset(get_args(DelegationTerminalStatus.__value__))
 
 type PersonaSourceKind = Literal["inline", "profile", "workflow"]
 _SOURCE_KINDS: tuple[PersonaSourceKind, ...] = ("inline", "profile", "workflow")
@@ -111,7 +122,7 @@ class DelegationChild:
     parent_requirement_id: str = ""
     storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     record_locator: dict[str, object] = field(default_factory=dict)
-    status: Literal["running", "paused", "completed", "failed", "cancelled", "denied"] = "running"
+    status: Literal["running", "paused"] | DelegationTerminalStatus = "running"
     result: str | None = None
     # LEGACY_COMPAT: Delegated children persisted without an agent mode.
     # Legacy format: Parent delegation state and subagent session records omitted agent_mode; every child ran in standard mode.
@@ -143,7 +154,7 @@ class DelegationHookState:
     execution_identity: dict[str, object]
     arguments: dict[str, Any]
     started_at: float
-    tool_name: str = "run_subagent"
+    tool_name: str = RUN_SUBAGENT
     blocked_result: str | None = None
     after_called: bool = False
 
@@ -177,7 +188,7 @@ class DelegationState:
 
     @classmethod
     def from_metadata(cls, metadata: dict[str, Any] | None) -> DelegationState:
-        """Read the driver-owned snapshot attached to an Agno run."""
+        """Read the driver-owned snapshot attached to a run's metadata."""
         stored = (metadata or {}).get(DELEGATION_STATE_KEY)
         if stored is None:
             return cls()
@@ -211,6 +222,62 @@ class DelegationState:
         self.pending_requirements = []
         self.pending_agent_name = None
         self.pending_child_id = None
+
+
+def delegation_card_id(member_id: str | None, call_id: str) -> str:
+    """Return the id of a delegation call's gate and approval card: ``member_id:call_id`` for a team member's call."""
+    return f"{member_id}:{call_id}" if member_id else call_id
+
+
+def member_delegation_card(requirement: RunRequirement, member_ids: Collection[str]) -> tuple[str, str] | None:
+    """Return the member and its own call id when ``requirement`` is the card of a delegation call a member made.
+
+    The team holds such a card, so its requirement names no member and its call id is ``member_id:call_id`` for one
+    of ``member_ids``. A child's call as its parent holds it (``child_card_id``) names no member, so it is not such a
+    card.
+    """
+    card_id = requirement.tool_execution.tool_call_id
+    if requirement.member_agent_id is not None or not card_id:
+        return None
+    member_id, _, call_id = card_id.partition(":")
+    return (member_id, call_id) if call_id and member_id in member_ids else None
+
+
+def pending_call_slot(requirement: RunRequirement, member_ids: Collection[str]) -> tuple[str | None, str | None]:
+    """Return the member whose slot shows the call ``requirement`` waits on, None for the team's, and its id there.
+
+    A member's own call shows in its member's slot, and the card of a member's own delegation call shows as that
+    call; the leader's own calls and a child's calls its parent holds show in the team's slot under their own id.
+    ``member_ids`` are the team's member ids, and a member it returns is as the requirement or card names it.
+    """
+    if card := member_delegation_card(requirement, member_ids):
+        return card
+    return requirement.member_agent_id, requirement.tool_execution.tool_call_id
+
+
+def member_slot_id(member_slots: Mapping[str, str], member: str | None, reported_name: str | None = None) -> str:
+    """Return the slot id of the team member that ``member`` names by its slot id or its config name.
+
+    ``member_slots`` maps each member's slot id to its config name, as a team presentation freezes them. A name that
+    is neither, None included, has no slot; ``reported_name`` is how the error names it then, if given.
+    """
+    if member is not None and member in member_slots:
+        return member
+    slot_id = next((slot_id for slot_id, config_name in member_slots.items() if config_name == member), None)
+    if slot_id is None:
+        msg = f"Team has no frozen member slot for {reported_name or member!r}"
+        raise RuntimeError(msg)
+    return slot_id
+
+
+def child_card_id(delegation_id: str, call_id: str) -> str:
+    """Return the id a delegated child's paused call has on its parent, ``delegation_id:call_id``, which its card uses."""
+    return f"{delegation_id}:{call_id}"
+
+
+def child_call_id(delegation_id: str, card_id: str) -> str:
+    """Return the child's own call id from the id ``child_card_id`` gave that call on the child's parent."""
+    return card_id.removeprefix(f"{delegation_id}:")
 
 
 class ChildResponseRunner(Protocol):

@@ -98,31 +98,25 @@ Design migrations around that assumption rather than adding machinery to coordin
 
 ### Agno Compatibility Policy
 
-- The goal is to identify Agno weaknesses, contribute focused upstream fixes or extension points, and remove local workarounds as those changes ship.
-  Judge an extraction by whether it makes that upstream work easier to understand, test, and retire.
-- Isolate substantive Agno monkey patches, copied SDK internals, private-API adapters, and upstream bug workarounds in `agno_compat_<subject>.py` beside their owning module.
-  Ordinary public-API usage and MindRoom's orchestration, approval, history, and storage policies remain with their current owners.
-  Tiny overrides may stay in a cohesive adapter when extraction would only add indirection, but require the same source comment.
-- Each distinct workaround must have a nearby source comment whose first line is `# AGNO_COMPAT: <short description of the upstream weakness>`.
-  Use one marker per independently removable workaround, including tiny overrides kept beside their owners, so `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists each gap with a useful summary.
+- MindRoom owns its run loop, providers, storage, teams, and history; Agno stays only as the tool library and the knowledge reader layer.
+  What stays Agno: the `Toolkit`, `Function`, `@tool`, and `ToolResult` authoring API for MindRoom, plugin, and vendor tools, Agno's tool schema generation and argument coercion, the vendor toolkits with MindRoom's per-toolkit overrides, and the knowledge readers and chunkers in `knowledge/readers.py`.
+- The owned loop sees tools only as `ToolFunction`, produced by `adapt_toolkit` and `adapt_function` in `tool_system/agno_toolkits.py`.
+  Only the modules `tests/test_agno_boundary.py` allows may import Agno; every other module must take Agno's tool types from `tool_system/agno_toolkits.py` and must not use Agno's agent, team, model, run, storage, or learning layers.
+- The goal is to fix Agno weaknesses upstream and remove local workarounds as those fixes ship.
+  Isolate substantive workarounds in `agno_compat_<subject>.py` beside their owning module; a tiny override may stay in a cohesive adapter.
+- Mark each independently removable workaround with a nearby source comment whose first line is `# AGNO_COMPAT: <short description of the upstream weakness>`, so `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists each gap.
   Follow the marker with these fields:
   - `Reason`: the concrete upstream behavior or missing extension point and its effect on MindRoom.
   - `Upstream issue`: a verified issue URL, or an explicit tracking gap and why the boundary is needed.
   - `Upstream PR`: a verified fix or API proposal URL when one exists; state when none is identified or the linked PR covers only part of the workaround.
   - `Remove when`: the exact upstream behavior that allows removal, including any MindRoom behavior that must remain.
   - `Coverage`: repository-relative regression test paths, preferably exact test node IDs.
-- Distinguish upstream bugs from missing public extension points and intentional application policy.
-  Never invent a tracking link or treat a related PR as a complete fix.
-  Separate removal conditions when one module handles multiple upstream gaps.
-- Treat an explicit tracking gap as unfinished upstream work.
-  Record the concrete failing behavior or required extension point in the inventory, search for existing tracking before opening a new item, and replace the gap with verified links when available.
-- For an upstream contribution, reduce the problem to an Agno-only reproducer and regression test where possible.
-  Keep MindRoom-specific policy out of the proposed fix and retain local integration coverage for the behavior MindRoom requires.
-- Keep patch installation explicit and idempotent, preserve optional-import boundaries, and retain version guards where private signatures or semantics require them.
-- Keep the weakness-to-upstream map and boundary inventory in `docs/architecture/agno-compatibility.md` aligned with contributions, extractions, and removals; source comments own exact upstream tracking and test references.
-- On each Agno upgrade, inspect these boundaries, verify which fixes the pinned release includes, and run their behavioral tests.
-  Remove a workaround only when the relevant tests pass without it; a merged PR alone is insufficient.
-  Retain regression coverage for behavior MindRoom still requires and update Tach boundaries with any extraction or removal.
+- Distinguish upstream bugs from missing extension points and MindRoom policy; never invent a tracking link or treat a related PR as a complete fix.
+  Treat a tracking gap as unfinished upstream work, and search for existing tracking before opening a new item.
+- For an upstream contribution, reduce the problem to an Agno-only reproducer, keep MindRoom policy out of the fix, and keep local coverage for the behavior MindRoom requires.
+- Keep the weakness-to-upstream map in `docs/architecture/agno-compatibility.md` aligned with the markers; source comments own exact upstream links and test references.
+- On each Agno upgrade, run `tests/tool_system/`, whose goldens pin the tool schemas and argument coercion Agno produces, verify which fixes the pinned release includes, and run each marker's coverage.
+  Remove a workaround only when its tests pass without it; a merged PR alone is insufficient.
 
 ### Security Trust Model
 

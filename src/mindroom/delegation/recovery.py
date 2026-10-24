@@ -1,4 +1,4 @@
-"""Recover retained child turns above the handle and Agno session stores."""
+"""Recover retained child turns above the handle and conversation stores."""
 
 from __future__ import annotations
 
@@ -7,19 +7,15 @@ from copy import deepcopy
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
-from agno.db.base import SessionType
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-
 from mindroom.delegation.hooks import after_delegation
 from mindroom.delegation.lifecycle import child_execution_identity, finish_child_turn, settle_child_response
 from mindroom.delegation.sessions import load_retained_subagent_turn, load_subagent, subagent_recovery_lock
-from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState
+from mindroom.delegation.state import DELEGATION_STATE_KEY, TERMINAL_CHILD_STATUSES, DelegationChild, DelegationState
 from mindroom.delegation.storage import delegation_storage_config
 from mindroom.history.session_context import create_scope_session_storage
+from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import get_background_runtime
@@ -29,6 +25,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
@@ -58,25 +55,22 @@ async def read_child_run(
     child: DelegationChild,
     config: Config,
     paths: RuntimePaths,
-) -> RunOutput | None:
+) -> RunRecord | None:
     """Read one exact run from the frozen child storage and validate its requester."""
     config = delegation_storage_config(config, child.storage_bindings)
 
-    def read() -> RunOutput | None:
+    def read() -> RunRecord | None:
         storage = create_session_storage(
             child.child_agent_name,
             config,
             paths,
             execution_identity=child_execution_identity(child),
         )
-        try:
-            session = storage.get_session(child.session_id, session_type=SessionType.AGENT)
-            # Each turn owns its exact run even after later follow-ups reuse the session.
-            runs = reversed(session.runs or ()) if isinstance(session, AgentSession) else ()
-            response = next((run for run in runs if run.run_id == child.run_id), None)
-            return deepcopy(response) if isinstance(response, RunOutput) else None
-        finally:
-            storage.close()
+        session = storage.load_session(child.session_id, "agent")
+        # Each turn owns its exact run even after later follow-ups reuse the session.
+        runs = reversed(session.runs) if session is not None else ()
+        response = next((run for run in runs if run.run_id == child.run_id), None)
+        return deepcopy(response) if isinstance(response, RunRecord) else None
 
     response = await asyncio.to_thread(read)
     if response is not None and (
@@ -135,7 +129,7 @@ async def interrupt_child(
     if retained is not None:
         child.run_id = retained.run_id
         child.model_name = retained.model_name
-        if retained.status in {"completed", "failed", "cancelled", "denied"}:
+        if retained.status in TERMINAL_CHILD_STATUSES:
             # A settlement saved before a crash stands; only finish projecting it.
             child.status, child.result = retained.status, retained.result
             await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
@@ -153,10 +147,9 @@ async def interrupt_child(
         for tool in response.tools or ():
             if tool.is_paused:
                 tool.result = reason
-                tool.tool_call_error = True
+                tool.is_error = True
             tool.requires_confirmation = False
             tool.external_execution_required = False
-            tool.requires_user_input = False
 
         def persist() -> None:
             storage = create_session_storage(
@@ -165,17 +158,20 @@ async def interrupt_child(
                 runtime_paths,
                 execution_identity=child_execution_identity(child),
             )
-            try:
-                storage.upsert_run(run=response, session_id=child.session_id, user_id=response.user_id)
-            finally:
-                storage.close()
+            session = storage.load_session(child.session_id, "agent") or new_scope_session(
+                session_id=child.session_id,
+                scope_id=child.child_agent_name,
+                is_team=False,
+            )
+            # The run exists; this rewrites its row without touching the usage ledger.
+            storage.save_runs(session, [response])
 
         await asyncio.to_thread(persist)
     await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
 
 
 async def _cancel_delegations(
-    response: RunOutput | TeamRunOutput,
+    response: AnyRunRecord,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -185,7 +181,7 @@ async def _cancel_delegations(
     state = DelegationState.from_metadata(response.metadata)
     background = get_background_runtime(runtime_paths)
     for child in state.children:
-        if child.status not in {"completed", "failed", "cancelled", "denied"}:
+        if child.status not in TERMINAL_CHILD_STATUSES:
             if background is not None and background.has_job(child.delegation_id):
                 # The job runtime owns this child and its approvals; its own cancellation settles it.
                 continue
@@ -215,6 +211,9 @@ async def cancel_approval_delegations(
     if not continuation.execution_identity:
         return
     config = delegation_storage_config(config, continuation.delegation_storage_bindings)
+    # TODO(simplify): this decodes the continuation's identity under the generic error prefix, the response runner
+    # under the approval prefix. Decode it once, typed, when the continuation loads. Operators would see one
+    # malformed-identity message.
     identity = parse_tool_execution_identity_payload(continuation.execution_identity, strict=True)
     if identity is None:
         return
@@ -233,17 +232,15 @@ async def cancel_approval_delegations(
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    try:
-        response = await asyncio.to_thread(storage.get_run, continuation.run_id)
-        if isinstance(response, (RunOutput, TeamRunOutput)) and bool(
-            (response.metadata or {}).get(DELEGATION_STATE_KEY),
-        ):
-            await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-            await asyncio.to_thread(
-                storage.upsert_run,
-                run=response,
+    response = await asyncio.to_thread(storage.get_run, continuation.run_id)
+    if response is not None and bool((response.metadata or {}).get(DELEGATION_STATE_KEY)):
+        await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
+        session = await asyncio.to_thread(storage.load_session, continuation.session_id, scope.kind)
+        if session is None:
+            session = new_scope_session(
                 session_id=continuation.session_id,
-                user_id=continuation.requester_id,
+                scope_id=scope.scope_id,
+                is_team=scope.kind == "team",
             )
-    finally:
-        storage.close()
+        # The run exists; this rewrites its row without touching the usage ledger.
+        await asyncio.to_thread(storage.save_runs, session, [response])

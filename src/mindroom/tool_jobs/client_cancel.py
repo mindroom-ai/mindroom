@@ -61,24 +61,6 @@ def _live_jobs(runtime: ToolJobRuntime, *, agent_name: str, room_id: str) -> lis
     ]
 
 
-async def _cancel_jobs(
-    runtime: ToolJobRuntime,
-    *,
-    agent_name: str,
-    room_id: str,
-    request: JobCancelRequest,
-) -> tuple[BackgroundJob, ...]:
-    """Cancel the agent's live jobs a request names in a room, and return them."""
-    live = _live_jobs(runtime, agent_name=agent_name, room_id=room_id)
-    if request.job_id is None:
-        targets = [job for job in live if request.thread_id in {None, job.owner.resolved_thread_id}]
-    else:
-        targets = [job for job in live if job.job_id == request.job_id]
-    for job in targets:
-        await runtime.request_cancel(job.job_id)
-    return tuple(targets)
-
-
 async def handle_job_cancel_event(
     runtime: ToolJobRuntime,
     *,
@@ -87,11 +69,18 @@ async def handle_job_cancel_event(
     content: Mapping[str, object],
     sender_may_cancel: bool,
 ) -> tuple[BackgroundJob, ...]:
-    """Apply a client's cancel event to this agent's jobs, when its sender may talk to the agent in the room."""
+    """Cancel the agent's live jobs a client's cancel event names in a room, when its sender may talk to the agent."""
     request = _parse_job_cancel(content)
     if request is None or not sender_may_cancel:
         return ()
-    return await _cancel_jobs(runtime, agent_name=agent_name, room_id=room_id, request=request)
+    live = _live_jobs(runtime, agent_name=agent_name, room_id=room_id)
+    if request.job_id is None:
+        targets = [job for job in live if request.thread_id in {None, job.owner.resolved_thread_id}]
+    else:
+        targets = [job for job in live if job.job_id == request.job_id]
+    for job in targets:
+        await runtime.request_cancel(job.job_id)
+    return tuple(targets)
 
 
 async def cancel_room_jobs(runtime: ToolJobRuntime, *, agent_name: str, room_id: str) -> None:

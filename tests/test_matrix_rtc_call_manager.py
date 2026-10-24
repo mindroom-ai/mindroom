@@ -33,6 +33,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
+from mindroom.llm.usage import TokenCounts
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_manager import (
@@ -81,18 +82,18 @@ from mindroom.matrix_rtc.voice_agent import (
     _RealtimeResponseUsage,
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
-from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.registry import build_model_provider
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import test_runtime_paths
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
-
-    from agno.models.openai.chat import OpenAIChat
 
     from mindroom.constants import RuntimePaths
 
@@ -534,6 +535,35 @@ async def test_manager_joins_call_when_remote_member_appears(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_realtime_call_hands_its_session_the_close_of_its_tools_connections(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A realtime call's tools run outside any agent run, so the call session closes what they connected."""
+    close_tools = AsyncMock()
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(
+            tools=(),
+            instructions="You are Helper.",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            close=close_tools,
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert isinstance(bridge.agent_options, VoiceAgentOptions)
+    assert bridge.agent_options.close_tools is close_tools
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_manager_joins_call_in_authorized_ad_hoc_invited_room(tmp_path: Path) -> None:
     """An accepted invite is sufficient room ownership for a calls-enabled agent."""
     client = _client()
@@ -968,7 +998,8 @@ def test_fully_local_speech_services_never_resolve_cloud_credentials(
     manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config(local=True))
 
     backend = manager._resolve_voice_backend(ROOM_ID)
-    model = cast("OpenAIChat", get_model_instance(manager._config, manager._runtime_paths))
+    model = bare_adapter(build_model_provider(manager._config, manager._runtime_paths))
+    assert isinstance(model, ChatAdapter)
 
     assert backend is not None
     assert backend.stt is not None
@@ -977,9 +1008,9 @@ def test_fully_local_speech_services_never_resolve_cloud_credentials(
     assert backend.tts.base_url == "http://127.0.0.1:9001/v1"
     assert backend.stt.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
     assert backend.tts.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
-    assert model.id == "local-chat-model"
-    assert model.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
-    assert model.base_url == "http://127.0.0.1:9292/v1"
+    assert model.identity.id == "local-chat-model"
+    assert model.settings.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
+    assert model.identity.endpoint == "http://127.0.0.1:9292/v1"
     assert manager._config.memory.backend == "none"
 
 
@@ -2621,7 +2652,7 @@ async def test_realtime_call_instructions_include_validated_origin_brief(
     assert client.room_get_state.await_count == 1
     record_usage = bridge.agent_options.record_usage
     assert record_usage is not None
-    response = _RealtimeResponseUsage(1_700_000_010, input_tokens=900, output_tokens=300)
+    response = _RealtimeResponseUsage(1_700_000_010, TokenCounts(input_tokens=900, output_tokens=300))
     await record_usage(RealtimeCallUsage("call-1", "gpt-realtime-2.1", 1_700_000_000, (response,)))
     report = collect_admin_usage(config=_config(), runtime_paths=test_runtime_paths(tmp_path))
     assert [(row.user_id, row.totals.total_tokens) for row in report.user_breakdown] == [("@alice:example.org", 1200)]

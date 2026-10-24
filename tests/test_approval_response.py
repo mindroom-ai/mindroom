@@ -1,25 +1,16 @@
-"""Focused tests for response-side native approval coordination."""
+"""Focused tests for response-side native approval coordination, on owned records and events."""
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import nullcontext
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ToolExecution
-from agno.run import RunContext
-from agno.run.agent import RunCompletedEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
-from agno.run.base import RunStatus
-from agno.run.requirement import RunRequirement
-from agno.session.agent import AgentSession
 
 from mindroom.approval.execution import _collect_agent_continuation
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
-from mindroom.approval.tool_owners import approval_denial_context
-from mindroom.event_journal import ApprovalCall
-from mindroom.providers.synthetic_model import SyntheticModel
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
 from tests.conftest import unwrap_extracted_collaborator
@@ -28,6 +19,8 @@ from tests.response_runner_helpers import _bot
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from mindroom.llm.events import RunEvent
 
 
 @pytest.mark.parametrize("member_agent_id", ["researcher-a", "Researcher_A"])
@@ -40,7 +33,7 @@ def test_identify_approval_tools_keeps_team_member_owner(member_agent_id: str) -
     )
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = member_agent_id
-    requirement.member_agent_name = "Researcher"
+    requirement.member_display_name = "Researcher"
 
     identified = identify_approval_tools(
         PausedAttempt(
@@ -75,7 +68,7 @@ def member_pause() -> PausedAttempt:
     tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True)
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = "test_agent"
-    requirement.member_agent_name = "Test Agent"
+    requirement.member_display_name = "Test Agent"
     return PausedAttempt(
         session_id="session-1",
         run_id="run-1",
@@ -133,7 +126,7 @@ def test_identify_approval_tools_rejects_unknown_member_owner(
     """Ownership requires an exact frozen identity even when the display name matches."""
     member_pause.requirements[0].member_agent_id = member_agent_id
 
-    with pytest.raises(RuntimeError, match="frozen member"):
+    with pytest.raises(RuntimeError, match=f"^Team has no frozen member slot for {member_agent_id!r}$"):
         identify_approval_tools(member_pause, default_agent_name="test-team")
 
 
@@ -162,6 +155,111 @@ def test_team_pause_rejects_ambiguous_frozen_member_identity(
         identify_approval_tools(member_pause, default_agent_name="test-team")
     with pytest.raises(RuntimeError):
         require_ordered_pause_presentation(member_pause, show_tool_calls=True)
+
+
+@pytest.mark.parametrize(
+    ("card_id", "anchor_id", "scope_key", "presented"),
+    [
+        # A member's own delegation card is shown by the member's call it asks about.
+        ("test_agent:call-1", "call-1", "agent:test-agent", True),
+        # A marker of its own in the team's slot is not that call.
+        ("test_agent:call-1", "test_agent:call-1", "team", False),
+        # Another member's slot does not show it.
+        ("other:call-1", "call-1", "agent:test-agent", False),
+        # A child's projected call names its delegation, not a member, and keeps its marker in the team's slot.
+        ("delegation-1:call-1", "delegation-1:call-1", "team", True),
+    ],
+)
+def test_a_team_delegation_card_is_presented_by_the_call_it_asks_about(
+    card_id: str,
+    anchor_id: str,
+    scope_key: str,
+    presented: bool,
+) -> None:
+    """The card the delegation driver raises carries no member identity of its own, only its id."""
+    tool = ToolExecution(tool_call_id=card_id, tool_name="run_subagent", requires_confirmation=True)
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(tool,),
+        requirements=(RunRequirement(tool_execution=tool),),
+        response_text="🔧 `run_subagent` [1] ⏳",
+        tool_trace=(
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="run_subagent",
+                tool_call_id=anchor_id,
+                scope_key=scope_key,
+            ),
+        ),
+        response_presentation_state={
+            "kind": "team_stream",
+            "version": 2,
+            "members": [
+                {"id": "test-agent", "config_name": "test_agent", "display_name": "Test Agent", "content": ""},
+                {"id": "other", "config_name": "other", "display_name": "Other", "content": ""},
+            ],
+            "consensus": "",
+        },
+        toolkit_owners={("test_agent", "run_subagent"): "delegate"},
+    )
+
+    if presented:
+        require_ordered_pause_presentation(paused, show_tool_calls=True)
+    else:
+        with pytest.raises(RuntimeError, match="ordered presentation"):
+            require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+
+def test_two_members_pending_on_one_provider_call_id_are_each_presented_in_their_own_slot() -> None:
+    """Providers number call ids per member, so two members' pending calls may share one; each slot shows its own."""
+    card = ToolExecution(tool_call_id="test_agent:call-1", tool_name="run_subagent", requires_confirmation=True)
+    gated = ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True)
+    gated_requirement = RunRequirement(tool_execution=gated)
+    gated_requirement.member_agent_id = "other"
+    card_anchor = ToolTraceEntry(
+        type="tool_call_started",
+        tool_name="run_subagent",
+        tool_call_id="call-1",
+        scope_key="agent:test-agent",
+    )
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(card, gated),
+        requirements=(RunRequirement(tool_execution=card), gated_requirement),
+        response_text="🔧 `run_subagent` [1] ⏳\n\n🔧 `dangerous` [2] ⏳",
+        tool_trace=(
+            card_anchor,
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="dangerous",
+                tool_call_id="call-1",
+                scope_key="agent:other",
+            ),
+        ),
+        response_presentation_state={
+            "kind": "team_stream",
+            "version": 2,
+            "members": [
+                {"id": "test-agent", "config_name": "test_agent", "display_name": "Test Agent", "content": ""},
+                {"id": "other", "config_name": "other", "display_name": "Other", "content": ""},
+            ],
+            "consensus": "",
+        },
+        toolkit_owners={("test_agent", "run_subagent"): "delegate", ("other", "dangerous"): "test_toolkit"},
+    )
+
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+    # A second pending marker of the call id in the card's own slot leaves the card without a unique anchor.
+    doubled = replace(
+        paused,
+        response_text=f"{paused.response_text}\n\n🔧 `run_subagent` [3] ⏳",
+        tool_trace=(*paused.tool_trace, replace(card_anchor)),
+    )
+    with pytest.raises(RuntimeError, match="ordered presentation"):
+        require_ordered_pause_presentation(doubled, show_tool_calls=True)
 
 
 def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> None:
@@ -198,21 +296,47 @@ def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> No
         require_ordered_pause_presentation(paused, show_tool_calls=True)
 
 
+def _finished(
+    *,
+    run_id: str = "run-1",
+    status: RunStatus = RunStatus.completed,
+    content: str | None = None,
+    tools: list[ToolExecution] | None = None,
+) -> RunFinished:
+    return RunFinished(RunRecord(run_id=run_id, session_id="session-1", status=status, content=content, tools=tools))
+
+
+async def _events(*items: RunEvent) -> AsyncIterator[RunEvent]:
+    for item in items:
+        yield item
+
+
 @pytest.mark.asyncio
 async def test_agent_continuation_defers_terminal_only_content() -> None:
-    """A provider completion event is the continuation delta when no content events were emitted."""
+    """A completed record's text is the continuation delta when no content deltas were streamed."""
     presentation = CollectedStreamPresentation(show_tool_calls=True, response_text="Before approval. ")
-    terminal = RunOutput(run_id="run-1", session_id="session-1", status=RunStatus.completed)
+    terminal = _finished(content="After approval.")
 
-    async def events() -> AsyncIterator[object]:
-        yield RunCompletedEvent(content="After approval.")
-        yield terminal
+    response = await _collect_agent_continuation(_events(terminal), presentation, progress=None)
 
-    response = await _collect_agent_continuation(events(), presentation, progress=None)
-
-    assert response.response is terminal
+    assert response.response is terminal.record
     assert response.terminal_content == "After approval."
     assert presentation.final_text() == "Before approval. "
+
+
+@pytest.mark.asyncio
+async def test_streamed_text_is_the_continuation_delta_and_the_record_adds_nothing() -> None:
+    """Text that streamed as deltas is not appended again from the completed record."""
+    presentation = CollectedStreamPresentation(show_tool_calls=True, response_text="Before approval. ")
+
+    response = await _collect_agent_continuation(
+        _events(TextDelta("After "), TextDelta("approval."), _finished(content="After approval.")),
+        presentation,
+        progress=None,
+    )
+
+    assert (response.terminal_content, response.has_visible_content) == ("", True)
+    assert presentation.final_text() == "Before approval. After approval."
 
 
 @pytest.mark.asyncio
@@ -235,13 +359,10 @@ async def test_agent_approval_completion_preserves_recovered_same_name_trace(com
         ],
     )
     tool = ToolExecution(tool_call_id="current-call", tool_name="inspect", result="current result")
+    events = [ToolCompleted(tool.call)] if completion_source == "stream" else []
+    events.append(_finished(run_id="current-run", tools=[tool]))
 
-    async def events() -> AsyncIterator[object]:
-        if completion_source == "stream":
-            yield ToolCallCompletedEvent(tool=tool)
-        yield RunOutput(run_id="current-run", session_id="session-1", status=RunStatus.completed, tools=[tool])
-
-    await _collect_agent_continuation(events(), presentation, progress=None)
+    await _collect_agent_continuation(_events(*events), presentation, progress=None)
 
     assert presentation.final_text().startswith(prefix)
     assert presentation.tool_trace[0] == ToolTraceEntry(type="tool_call_started", tool_name="inspect")
@@ -252,7 +373,7 @@ async def test_agent_approval_completion_preserves_recovered_same_name_trace(com
 
 @pytest.mark.asyncio
 async def test_agent_chained_pause_anchors_a_terminal_only_pending_tool() -> None:
-    """A paused final output supplies the pending anchor when Agno emitted no tool-start event."""
+    """A paused record supplies the pending anchor when no tool-start event announced the call."""
     tool = ToolExecution(
         tool_call_id="call-2",
         tool_name="publish_report",
@@ -260,17 +381,12 @@ async def test_agent_chained_pause_anchors_a_terminal_only_pending_tool() -> Non
         requires_confirmation=True,
     )
     presentation = CollectedStreamPresentation(show_tool_calls=True, response_text="Before approval.")
-    terminal = RunOutput(
-        run_id="run-2",
-        session_id="session-1",
-        status=RunStatus.paused,
-        tools=[tool],
+
+    await _collect_agent_continuation(
+        _events(_finished(run_id="run-2", status=RunStatus.paused, tools=[tool])),
+        presentation,
+        progress=None,
     )
-
-    async def events() -> AsyncIterator[object]:
-        yield terminal
-
-    await _collect_agent_continuation(events(), presentation, progress=None)
 
     assert presentation.response_text.endswith("🔧 `publish_report` [1] ⏳\n\n")
     assert len(presentation.tool_trace) == 1
@@ -281,35 +397,18 @@ async def test_agent_chained_pause_anchors_a_terminal_only_pending_tool() -> Non
 @pytest.mark.asyncio
 async def test_agent_continuation_keeps_text_after_a_stripped_tool_marker() -> None:
     """Continuation content without leading whitespace must not join the marker line."""
-    tool = ToolExecution(
-        tool_call_id="call-1",
-        tool_name="inspect",
-        tool_args={},
-        result="done",
-    )
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}, result="done")
     presentation = CollectedStreamPresentation(
         show_tool_calls=True,
         response_text="Before approval.\n\n🔧 `inspect` [1] ⏳",
-        tool_trace=[
-            ToolTraceEntry(
-                type="tool_call_started",
-                tool_name="inspect",
-                tool_call_id="call-1",
-            ),
-        ],
-    )
-    terminal = RunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        tools=[tool],
+        tool_trace=[ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")],
     )
 
-    async def events() -> AsyncIterator[object]:
-        yield RunCompletedEvent(content="After approval.")
-        yield terminal
-
-    collected = await _collect_agent_continuation(events(), presentation, progress=None)
+    collected = await _collect_agent_continuation(
+        _events(_finished(content="After approval.", tools=[tool])),
+        presentation,
+        progress=None,
+    )
     presentation.append_text(collected.terminal_content)
 
     assert presentation.final_text() == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
@@ -322,26 +421,14 @@ async def test_agent_continuation_reuses_an_existing_visible_tool_separator() ->
     presentation = CollectedStreamPresentation(
         show_tool_calls=True,
         response_text="Before approval.\n\n🔧 `inspect` [1] ⏳\n\n",
-        tool_trace=[
-            ToolTraceEntry(
-                type="tool_call_started",
-                tool_name="inspect",
-                tool_call_id="call-1",
-            ),
-        ],
-    )
-    terminal = RunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        tools=[tool],
+        tool_trace=[ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")],
     )
 
-    async def events() -> AsyncIterator[object]:
-        yield RunCompletedEvent(content="After approval.")
-        yield terminal
-
-    collected = await _collect_agent_continuation(events(), presentation, progress=None)
+    collected = await _collect_agent_continuation(
+        _events(_finished(content="After approval.", tools=[tool])),
+        presentation,
+        progress=None,
+    )
     presentation.append_text(collected.terminal_content)
 
     assert presentation.final_text() == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
@@ -354,27 +441,15 @@ async def test_hidden_agent_continuation_separates_text_across_the_tool_boundary
     presentation = CollectedStreamPresentation(
         show_tool_calls=False,
         response_text="Before approval.",
-        tool_trace=[
-            ToolTraceEntry(
-                type="tool_call_started",
-                tool_name="inspect",
-                tool_call_id="call-1",
-            ),
-        ],
+        tool_trace=[ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")],
         track_hidden_tools=True,
     )
-    terminal = RunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        tools=[tool],
+
+    collected = await _collect_agent_continuation(
+        _events(_finished(content="After approval.", tools=[tool])),
+        presentation,
+        progress=None,
     )
-
-    async def events() -> AsyncIterator[object]:
-        yield RunCompletedEvent(content="After approval.")
-        yield terminal
-
-    collected = await _collect_agent_continuation(events(), presentation, progress=None)
     presentation.append_text(collected.terminal_content)
 
     assert presentation.final_text() == "Before approval.\n\nAfter approval."
@@ -389,22 +464,16 @@ async def test_hidden_agent_continuation_separates_text_across_a_new_tool_bounda
         response_text="Before tool.",
         track_hidden_tools=True,
     )
-    terminal = RunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        tools=[tool],
+
+    collected = await _collect_agent_continuation(
+        _events(
+            ToolStarted(ToolExecution(tool_call_id="call-2", tool_name="inspect", tool_args={}).call),
+            ToolCompleted(tool.call),
+            _finished(content="After tool.", tools=[tool]),
+        ),
+        presentation,
+        progress=None,
     )
-
-    async def events() -> AsyncIterator[object]:
-        yield ToolCallStartedEvent(
-            tool=ToolExecution(tool_call_id="call-2", tool_name="inspect", tool_args={}),
-        )
-        yield ToolCallCompletedEvent(tool=tool)
-        yield RunCompletedEvent(content="After tool.")
-        yield terminal
-
-    collected = await _collect_agent_continuation(events(), presentation, progress=None)
     presentation.append_text(collected.terminal_content)
 
     assert presentation.final_text() == "Before tool.\n\nAfter tool."
@@ -439,48 +508,3 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
             thread_id="$thread",
         )
         assert plan.calls[0].toolkit_name == "calculator"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("exit_error", [None, RuntimeError, asyncio.CancelledError])
-async def test_denial_context_matches_run_identity_and_restores_lookup(exit_error: type[BaseException] | None) -> None:
-    """Exact denials survive retries but cannot affect other runs or outlive the continuation."""
-    actor = Agent(id="general", model=SyntheticModel(id="synthetic"), tools=[], telemetry=False)
-    call = ApprovalCall(tool_call_id="reused-id", tool_name="missing", invoking_agent="general", expires_at_ns=2**62)
-
-    async def lookup_twice(run_id: str) -> tuple[RunOutput, ToolExecution]:
-        tool = ToolExecution(
-            tool_call_id="reused-id",
-            tool_name="missing",
-            confirmed=False,
-            requires_confirmation=True,
-            confirmation_note="Declined by requester",
-        )
-        run = RunOutput(run_id=run_id, session_id="session", messages=[], tools=[tool])
-        for _ in range(2):
-            await actor.aget_tools(
-                run_response=run,
-                run_context=RunContext(run_id=run_id, session_id="session"),
-                session=AgentSession(session_id="session"),
-            )
-        return run, tool
-
-    with (
-        pytest.raises(exit_error) if exit_error is not None else nullcontext(),
-        approval_denial_context(actor, {"continued-run": (call,)}),
-    ):
-        for run_id in ("earlier-run", "continued-run", "later-run", "continued-run"):
-            run, tool = await lookup_twice(run_id)
-            if run_id == "continued-run":
-                assert len(run.messages or []) == 1
-                assert run.messages[0].tool_call_error is True
-                assert tool.requires_confirmation is False
-            else:
-                assert run.messages == []
-                assert tool.requires_confirmation is True
-        if exit_error is not None:
-            raise exit_error
-
-    run, tool = await lookup_twice("continued-run")
-    assert run.messages == []
-    assert tool.requires_confirmation is True

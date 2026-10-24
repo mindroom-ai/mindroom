@@ -42,9 +42,9 @@ if TYPE_CHECKING:
 
     import nio
     import structlog
-    from agno.media import Image
 
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.media import Image
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 

@@ -8,10 +8,6 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
 
 from mindroom.delegation.lifecycle import (
     finish_child_turn,
@@ -24,7 +20,10 @@ from mindroom.delegation.recovery import _cancel_delegations, read_child_run
 from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.conftest import test_runtime_paths
 from tests.test_delegation_audit import _child, _config, _identity, _record_dir
@@ -58,9 +57,12 @@ async def test_restart_cleanup_uses_latest_attempt_of_the_same_delegation(  # no
     await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
     # The parent's last checkpoint still points at the previously paused attempt.
     child.status = "paused"
-    parent = RunOutput(metadata={DELEGATION_STATE_KEY: DelegationState(children=[child]).to_dict()})
+    parent = RunRecord(
+        run_id="parent-run",
+        metadata={DELEGATION_STATE_KEY: DelegationState(children=[child]).to_dict()},
+    )
     original = replace(child)
-    completed = RunOutput(
+    completed = RunRecord(
         agent_id="child",
         run_id=child.run_id,
         session_id=child.session_id,
@@ -114,7 +116,7 @@ async def test_restart_cleanup_uses_latest_attempt_of_the_same_delegation(  # no
         owner=_identity("child", child.session_id),
         runtime_paths=paths,
     )
-    advanced = RunOutput(
+    advanced = RunRecord(
         agent_id="child",
         run_id=child.run_id,
         session_id=child.session_id,
@@ -122,7 +124,7 @@ async def test_restart_cleanup_uses_latest_attempt_of_the_same_delegation(  # no
         status=RunStatus.paused,
         metadata={DELEGATION_STATE_KEY: DelegationState(children=[descendant]).to_dict()},
     )
-    nested = RunOutput(
+    nested = RunRecord(
         agent_id="child",
         run_id=descendant.run_id,
         session_id=descendant.session_id,
@@ -131,13 +133,17 @@ async def test_restart_cleanup_uses_latest_attempt_of_the_same_delegation(  # no
         tools=[ToolExecution(tool_call_id="pending", tool_name="shell", requires_confirmation=True)],
     )
     storage = create_session_storage("child", config, paths, _identity("child", child.session_id))
-    try:
-        for turn in (child, descendant):
-            storage.upsert_session(AgentSession(session_id=turn.session_id, user_id=owner.requester_id))
-        for run in (completed, advanced, nested):
-            storage.upsert_run(run=run, session_id=run.session_id, user_id=run.user_id)
-    finally:
-        storage.close()
+    rows = {
+        turn.session_id: ConversationSession(
+            kind="agent",
+            session_id=turn.session_id,
+            owner_id="child",
+        )
+        for turn in (child, descendant)
+    }
+    for run in (completed, advanced, nested):
+        assert run.session_id is not None
+        storage.save_run(rows[run.session_id], run, record_usage=True)
     record_dir = await _record_dir(child, config, paths)
     if removed_config:
         config = config.model_copy(update={"agents": {}})
@@ -172,6 +178,31 @@ async def test_restart_cleanup_uses_latest_attempt_of_the_same_delegation(  # no
 
 
 @pytest.mark.asyncio
+async def test_a_failed_child_settled_from_its_stored_record_hands_over_its_redacted_reason(tmp_path: Path) -> None:
+    """A child's failed run read back after a restart has only its stored content, the raw error; it is redacted."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    child.storage_bindings = freeze_delegation_storage(config, ("leader", "child"))
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    raw = "provider down: api_key=example-secret"
+    stored = RunRecord.from_dict(
+        RunRecord(run_id=child.run_id, session_id=child.session_id, status=RunStatus.error, content=raw).to_dict(),
+    )
+
+    await settle_child_response(child, stored, config=config, runtime_paths=paths)
+
+    assert (child.status, child.result) == ("failed", redact_sensitive_text(raw))
+    assert "example-secret" not in str(child.result)
+
+
+@pytest.mark.asyncio
 async def test_a_child_that_plants_a_directory_over_its_record_export_is_still_settled(tmp_path: Path) -> None:
     """The approval decision commits, and cancelling from a stale parent snapshot of a failed child returns."""
     config = _config()
@@ -188,7 +219,7 @@ async def test_a_child_that_plants_a_directory_over_its_record_export_is_still_s
     handle = await DelegationRecordOwner(config, paths).reopen(DelegationRecordLocator.from_dict(child.record_locator))
     (handle.child_workspace / handle.scoped_path / "run.json").unlink()
     (handle.child_workspace / handle.scoped_path / "run.json").mkdir()
-    paused = RunOutput(
+    paused = RunRecord(
         run_id=child.run_id,
         session_id=child.session_id,
         status=RunStatus.paused,
@@ -197,7 +228,10 @@ async def test_a_child_that_plants_a_directory_over_its_record_export_is_still_s
 
     await settle_child_response(child, paused, config=config, runtime_paths=paths, decisions={"gated": True})
     # The parent's stored snapshot still holds the paused child after the child's failure settled its record.
-    parent = RunOutput(metadata={DELEGATION_STATE_KEY: DelegationState(children=[replace(child)]).to_dict()})
+    parent = RunRecord(
+        run_id="parent-run",
+        metadata={DELEGATION_STATE_KEY: DelegationState(children=[replace(child)]).to_dict()},
+    )
     await finish_child_turn(child, config=config, runtime_paths=paths, status="failed", reason="Child failed")
     await _cancel_delegations(parent, config=config, runtime_paths=paths, reason="Stopped")
 

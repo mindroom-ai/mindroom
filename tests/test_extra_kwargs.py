@@ -1,1212 +1,373 @@
-"""Test extra_kwargs functionality in model configuration."""
+"""A model's ``extra_kwargs`` and the runtime env shape its route's settings and the Claude prompt-cache ladder."""
 
-import asyncio
-import importlib
-import inspect
-import os
-import tempfile
-import threading
-from collections.abc import Callable, Coroutine
+from __future__ import annotations
+
+import json
+from copy import deepcopy
+from dataclasses import fields
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 import yaml
-from agno.models.anthropic import Claude
-from agno.models.aws.claude import Claude as AwsBedrockClaude
-from agno.models.azure import AzureOpenAI
-from agno.models.llama_cpp import LlamaCpp
-from agno.models.message import Message
-from agno.models.openai import OpenAIChat
-from agno.models.openai.like import OpenAILike
-from agno.models.response import ModelResponse
-from agno.models.vertexai.claude import Claude as VertexAIClaude
-from agno.utils.models.claude import format_messages
-from anthropic import AsyncAnthropic
-from anthropic.types import Message as AnthropicMessage
+from structlog.testing import capture_logs
 
-import mindroom.providers.bedrock_claude as bedrock_claude_module
+from mindroom.config import legacy_fields
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.config.models import DebugConfig, ModelConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import render_transient_context
-from mindroom.providers.agno_compat_claude import request_kwargs_with_replay_safe_tool_search_results
-from mindroom.providers.agno_compat_vertex_claude_tools import strip_vertex_claude_tool_strict
-from mindroom.providers.bedrock_claude import MindRoomBedrockClaude
-from mindroom.providers.claude_prompt_cache import (
-    _DEFERRED_TOOL_NAMES_ATTR,
-    MAX_CACHE_MARKERS,
-    _count_cache_markers,
-    _PromptCacheClientProxy,
-    _request_kwargs_with_prompt_cache_ladder,
-    _request_kwargs_without_unavailable_tool_references,
-    aclose_anthropic_async_client,
-    install_claude_deferred_tool_search,
-    install_claude_prompt_cache_hook,
-    native_tool_search_supported,
-    prewarm_anthropic_async_client,
-    prompt_cache_control,
-)
-from mindroom.providers.model_loading import get_model_instance
-from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, complete
+from mindroom.providers.anthropic import messages as claude_messages
+from mindroom.providers.anthropic.messages import build_provider as build_claude_provider
+from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
+from mindroom.providers.anthropic.settings import ACCEPTED_KEYS, ClaudeSettings
+from mindroom.providers.cache_ladder import MAX_CACHE_MARKERS, has_cache_marker, prompt_cache_control
+from mindroom.providers.extra_kwargs import settings_params
+from mindroom.providers.gemini.adapter import GeminiSettings
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.ollama_adapter import OllamaSettings
+from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
+from mindroom.providers.openai.build import build_provider as build_openai_provider
+from mindroom.providers.openai.settings import CODEX_FIELDS, ChatSettings, ResponsesSettings
+from mindroom.providers.registry import build_model_provider
+from mindroom.providers.synthetic_adapter import SyntheticSettings
+from mindroom.redaction import REDACTED
 from mindroom.startup_errors import PermanentStartupError
-from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.providers.anthropic_family_support import claude_turn, json_reply, route_provider
+from tests.providers.golden_support import Wire
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+    from mindroom.providers.anthropic.settings import ClaudeRouteKind
+
+_REQUEST_PARAMS = {"provider": {"order": ["Cerebras"], "allow_fallbacks": False}}
 
 
-def _config_with_runtime_paths(
-    config_data: dict[str, object],
-    process_env: dict[str, str] | None = None,
-) -> tuple[Config, RuntimePaths]:
-    runtime_root = Path(tempfile.mkdtemp())
-    runtime_paths = resolve_runtime_paths(
-        config_path=runtime_root / "config.yaml",
-        storage_path=runtime_root / "mindroom_data",
-        process_env=process_env or {},
+def _runtime_paths(root: Path, **process_env: str) -> RuntimePaths:
+    root.mkdir(parents=True, exist_ok=True)
+    return resolve_runtime_paths(
+        config_path=root / "config.yaml",
+        storage_path=root / "mindroom_data",
+        process_env=process_env,
     )
-    config = Config(**config_data)
-    return config, runtime_paths
 
 
-def test_model_config_with_extra_kwargs() -> None:
-    """Test that ModelConfig accepts and stores extra_kwargs."""
-    extra_kwargs = {
-        "request_params": {
-            "provider": {
-                "order": ["Cerebras"],
-                "allow_fallbacks": False,
-            },
-        },
-    }
+# --- Config -------------------------------------------------------------------------------------------------
 
+
+def test_model_config_keeps_extra_kwargs_as_authored() -> None:
+    """``extra_kwargs`` reach the route's settings parser unchanged."""
     model_config = ModelConfig(
         provider="openrouter",
         id="openai/gpt-6-astra",
-        extra_kwargs=extra_kwargs,
+        extra_kwargs={"request_params": _REQUEST_PARAMS},
     )
 
-    assert model_config.extra_kwargs == extra_kwargs
-    assert model_config.extra_kwargs["request_params"]["provider"]["order"] == ["Cerebras"]
+    assert model_config.extra_kwargs == {"request_params": _REQUEST_PARAMS}
 
 
-def test_config_yaml_with_extra_kwargs() -> None:
-    """Test loading config from YAML with extra_kwargs."""
-    config_data = {
-        "models": {
-            "test_model": {
-                "provider": "openrouter",
-                "id": "deepseek/deepseek-v4.1-flash",
-                "extra_kwargs": {
-                    "request_params": {
-                        "provider": {
-                            "order": ["Cerebras"],
-                            "allow_fallbacks": False,
-                        },
+def test_extra_kwargs_load_from_yaml(tmp_path: Path) -> None:
+    """Nested ``extra_kwargs`` in ``config.yaml`` load as the dicts and values authored."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        yaml.dump(
+            {
+                "models": {
+                    "test_model": {
+                        "provider": "openrouter",
+                        "id": "deepseek/deepseek-v4.1-flash",
+                        "extra_kwargs": {"request_params": _REQUEST_PARAMS, "temperature": 0.7, "max_tokens": 4096},
                     },
-                    "temperature": 0.7,
-                    "max_tokens": 4096,
                 },
+                "router": {"model": "test_model"},
+                "agents": {},
             },
-        },
-        "defaults": {
-            "markdown": True,
-        },
-        "router": {
-            "model": "test_model",
-        },
-        "memory": {
-            "embedder": {
-                "provider": "openai",
-                "config": {
-                    "model": "text-embedding-3-small",
-                },
-            },
-        },
-        "agents": {},
-    }
-
-    # Create a temporary YAML file
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        yaml.dump(config_data, f)
-        temp_path = f.name
-
-    try:
-        # Load config from YAML
-        with Path(temp_path).open() as f:
-            loaded_data = yaml.safe_load(f)
-
-        config = Config(**loaded_data)
-
-        # Check the model configuration
-        model = config.models["test_model"]
-        assert model.extra_kwargs is not None
-        assert model.extra_kwargs["request_params"]["provider"]["order"] == ["Cerebras"]
-        assert model.extra_kwargs["temperature"] == 0.7
-        assert model.extra_kwargs["max_tokens"] == 4096
-    finally:
-        # Clean up
-        Path(temp_path).unlink()
-
-
-def test_get_model_instance_with_extra_kwargs() -> None:
-    """Test that get_model_instance passes extra_kwargs to the model."""
-    os.environ["OPENROUTER_API_KEY"] = "test-key"
-
-    config_data = {
-        "models": {
-            "test_model": {
-                "provider": "openrouter",
-                "id": "deepseek/deepseek-v4.1-flash",
-                "extra_kwargs": {
-                    "request_params": {
-                        "provider": {
-                            "order": ["Cerebras"],
-                            "allow_fallbacks": False,
-                        },
-                    },
-                    "temperature": 0.8,
-                },
-            },
-        },
-        "defaults": {
-            "markdown": True,
-        },
-        "router": {
-            "model": "test_model",
-        },
-        "memory": {
-            "embedder": {
-                "provider": "openai",
-                "config": {
-                    "model": "text-embedding-3-small",
-                },
-            },
-        },
-        "agents": {},
-    }
-
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-
-    # Get the model instance
-    model = get_model_instance(config, runtime_paths, "test_model")
-
-    # Check that the model has the correct parameters
-    assert model.id == "deepseek/deepseek-v4.1-flash"
-    assert model.request_params is not None
-    assert model.request_params["provider"]["order"] == ["Cerebras"]
-    assert model.request_params["provider"]["allow_fallbacks"] is False
-
-    # Check that temperature was also passed
-    assert model.temperature == 0.8
-
-
-def test_openrouter_provider_defaults_to_uncapped_max_tokens() -> None:
-    """Agno's OpenRouter class caps output at 1024 tokens; the loader must lift that default."""
-    config_data = {
-        "models": {
-            "uncapped": {
-                "provider": "openrouter",
-                "id": "deepseek/deepseek-v4.1-flash",
-                "extra_kwargs": {"api_key": "test-key"},
-            },
-            "capped": {
-                "provider": "openrouter",
-                "id": "deepseek/deepseek-v4.1-flash",
-                "extra_kwargs": {"api_key": "test-key", "max_tokens": 4096},
-            },
-        },
-        "router": {"model": "uncapped"},
-        "agents": {},
-    }
-
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-
-    assert get_model_instance(config, runtime_paths, "uncapped").max_tokens is None
-    assert get_model_instance(config, runtime_paths, "capped").max_tokens == 4096
-
-
-def test_get_model_instance_supports_llama_cpp_provider() -> None:
-    """llama.cpp should use Agno's OpenAI-compatible local provider class."""
-    config_data = {
-        "models": {
-            "local_model": {
-                "provider": "llama_cpp",
-                "id": "local-model",
-                "extra_kwargs": {
-                    "api_key": "sk-no-key-required",
-                    "base_url": "http://llama.local/v1",
-                    "max_tokens": 32000,
-                },
-            },
-        },
-        "router": {
-            "model": "local_model",
-        },
-        "agents": {},
-    }
-
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-
-    model = get_model_instance(config, runtime_paths, "local_model")
-
-    assert isinstance(model, LlamaCpp)
-    assert model.id == "local-model"
-    assert model.api_key == "sk-no-key-required"
-    assert model.base_url == "http://llama.local/v1"
-    assert model.max_tokens == 32000
-    assert model.default_role_map["system"] == "system"
-
-
-def test_llama_cpp_provider_does_not_auto_fetch_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Custom llama.cpp configs without api_key should not consult shared credentials."""
-    config_data = {
-        "models": {
-            "local_model": {
-                "provider": "llama_cpp",
-                "id": "local-model",
-                "extra_kwargs": {
-                    "base_url": "http://llama.local/v1",
-                },
-            },
-        },
-        "router": {
-            "model": "local_model",
-        },
-        "agents": {},
-    }
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-    provider_lookups: list[str] = []
-
-    def get_api_key(provider: str, *, runtime_paths: RuntimePaths) -> str:
-        _ = runtime_paths
-        provider_lookups.append(provider)
-        return "unexpected-credential"
-
-    monkeypatch.setattr("mindroom.providers.model_loading.get_api_key_for_provider", get_api_key)
-
-    model = get_model_instance(config, runtime_paths, "local_model")
-
-    assert isinstance(model, LlamaCpp)
-    assert provider_lookups == []
-    assert model.api_key == "not-provided"
-
-
-def test_different_providers_with_extra_kwargs() -> None:
-    """Test that extra_kwargs works with different providers."""
-    os.environ["OPENAI_API_KEY"] = "test-key"
-    os.environ["ANTHROPIC_API_KEY"] = "test-key"
-
-    config_data = {
-        "models": {
-            "openai_model": {
-                "provider": "openai",
-                "id": "gpt-4",
-                "extra_kwargs": {
-                    "temperature": 0.5,
-                    "top_p": 0.9,
-                    "frequency_penalty": 0.3,
-                },
-            },
-            "anthropic_model": {
-                "provider": "anthropic",
-                "id": "claude-opus-5",
-                "extra_kwargs": {
-                    "temperature": 0.2,
-                    "max_tokens": 2048,
-                },
-            },
-        },
-        "defaults": {
-            "markdown": True,
-        },
-        "router": {
-            "model": "openai_model",
-        },
-        "memory": {
-            "embedder": {
-                "provider": "openai",
-                "config": {
-                    "model": "text-embedding-3-small",
-                },
-            },
-        },
-        "agents": {},
-    }
-
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-
-    # Test OpenAI model
-    openai_model = get_model_instance(config, runtime_paths, "openai_model")
-    assert openai_model.temperature == 0.5
-    assert openai_model.top_p == 0.9
-    assert openai_model.frequency_penalty == 0.3
-
-    # Test Anthropic model
-    anthropic_model = get_model_instance(config, runtime_paths, "anthropic_model")
-    assert anthropic_model.temperature == 0.2
-    assert anthropic_model.max_tokens == 2048
-    assert anthropic_model.cache_system_prompt is True
-    assert anthropic_model.extended_cache_time is True
-
-
-def test_model_without_extra_kwargs() -> None:
-    """Test that models work fine without extra_kwargs."""
-    os.environ["OPENAI_API_KEY"] = "test-key"
-
-    config_data = {
-        "models": {
-            "simple_model": {
-                "provider": "openai",
-                "id": "gpt-5.6-luna",
-                # No extra_kwargs
-            },
-        },
-        "defaults": {
-            "markdown": True,
-        },
-        "router": {
-            "model": "simple_model",
-        },
-        "memory": {
-            "embedder": {
-                "provider": "openai",
-                "config": {
-                    "model": "text-embedding-3-small",
-                },
-            },
-        },
-        "agents": {},
-    }
-
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-
-    # Should work without any issues
-    model = get_model_instance(config, runtime_paths, "simple_model")
-    assert model.id == "gpt-5.6-luna"
-    assert model.provider == "OpenAI"
-
-
-def test_vertexai_claude_provider() -> None:
-    """Test native Vertex Claude provider mapping."""
-    config_data = {
-        "models": {
-            "vertex_claude_model": {
-                "provider": "vertexai_claude",
-                "id": "claude-sonnet-5",
-                "context_window": 200000,
-                "extra_kwargs": {
-                    "project_id": "demo-project",
-                    "region": "us-central1",
-                },
-            },
-        },
-        "defaults": {
-            "markdown": True,
-        },
-        "router": {
-            "model": "vertex_claude_model",
-        },
-        "memory": {
-            "embedder": {
-                "provider": "openai",
-                "config": {
-                    "model": "text-embedding-3-small",
-                },
-            },
-        },
-        "agents": {},
-    }
-
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-    model = get_model_instance(config, runtime_paths, "vertex_claude_model")
-
-    assert isinstance(model, VertexAIClaude)
-    assert isinstance(model, MindroomVertexAIClaude)
-    assert model.id == "claude-sonnet-5"
-    assert model.provider == "VertexAI"
-    assert model.cache_system_prompt is True
-    assert model.extended_cache_time is True
-
-
-def test_bedrock_claude_provider_uses_runtime_env() -> None:
-    """Bedrock Claude provider should create Agno AWS Claude with runtime .env settings."""
-    runtime_root = Path(tempfile.mkdtemp())
-    env_path = runtime_root / ".env"
-    env_path.write_text(
-        "AWS_ACCESS_KEY_ID=aws-access\n"
-        "AWS_SECRET_ACCESS_KEY=aws-secret\n"
-        "AWS_SESSION_TOKEN=aws-session\n"
-        "AWS_REGION=us-east-1\n",
+        ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=runtime_root / "config.yaml",
-        storage_path=runtime_root / "mindroom_data",
-        process_env={},
-    )
-    config = Config(
-        models={
-            "bedrock_model": ModelConfig(
-                provider="bedrock_claude",
-                id="anthropic.claude-opus-5",
-                context_window=1_000_000,
-            ),
-        },
-        defaults={"markdown": True},
-        router={"model": "bedrock_model"},
-        memory={
-            "embedder": {
-                "provider": "sentence_transformers",
-                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
-            },
-        },
-        agents={},
-    )
 
-    model = get_model_instance(config, runtime_paths, "bedrock_model")
+    config = Config(**yaml.safe_load(config_file.read_text(encoding="utf-8")))
 
-    assert isinstance(model, AwsBedrockClaude)
-    assert model.id == "anthropic.claude-opus-5"
-    assert model.provider == "AwsBedrock"
-    assert model.aws_access_key == "aws-access"
-    assert model.aws_secret_key == "aws-secret"  # noqa: S105
-    assert model.aws_session_token == "aws-session"  # noqa: S105
-    assert model.aws_region == "us-east-1"
-    assert model.cache_system_prompt is True
-    assert model.extended_cache_time is True
-
-
-def test_session_backed_bedrock_async_client_is_retained(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A session-backed model must reuse the client built before its request."""
-    model = MindRoomBedrockClaude(
-        id="anthropic.claude-opus-5",
-        aws_region="us-east-1",
-        session=object(),
-    )
-    factory_calls: list[dict[str, object]] = []
-
-    class _FakeAsyncClient:
-        def is_closed(self) -> bool:
-            return False
-
-    built_client = _FakeAsyncClient()
-
-    def _build_client(**kwargs: object) -> _FakeAsyncClient:
-        factory_calls.append(kwargs)
-        return built_client
-
-    monkeypatch.setattr(bedrock_claude_module, "AsyncAnthropicBedrockMantle", _build_client)
-    vars(model)["_get_client_params"] = dict
-
-    first_client = model.get_async_client()
-    second_client = model.get_async_client()
-
-    assert first_client is built_client
-    assert second_client is built_client
-    assert model.async_client is built_client
-    assert factory_calls == [{}]
-
-
-def test_prewarm_anthropic_async_client_builds_cacheable_bedrock_client() -> None:
-    """A non-session Bedrock model should build its retained client off-loop."""
-    model = MindRoomBedrockClaude(
-        id="anthropic.claude-opus-5",
-        aws_region="us-east-1",
-    )
-    built_client = object()
-    calls: list[None] = []
-
-    def _build_client() -> object:
-        calls.append(None)
-        return built_client
-
-    vars(model)["get_async_client"] = _build_client
-
-    prewarm_anthropic_async_client(model)
-
-    assert calls == [None]
-
-
-@pytest.mark.asyncio
-async def test_aclose_anthropic_async_client_closes_cacheable_bedrock_client() -> None:
-    """A retained non-session Bedrock client should be closed and detached."""
-    model = MindRoomBedrockClaude(
-        id="anthropic.claude-opus-5",
-        aws_region="us-east-1",
-    )
-    closed = False
-
-    class _FakeAsyncClient:
-        async def close(self) -> None:
-            nonlocal closed
-            closed = True
-
-    model.async_client = _FakeAsyncClient()  # type: ignore[assignment]
-
-    await aclose_anthropic_async_client(model)
-
-    assert closed is True
-    assert model.async_client is None
-
-
-@pytest.mark.asyncio
-async def test_aclose_anthropic_async_client_closes_session_backed_bedrock_client() -> None:
-    """A retained session-backed client must have the same deterministic owner."""
-    model = MindRoomBedrockClaude(
-        id="anthropic.claude-opus-5",
-        aws_region="us-east-1",
-        session=object(),
-    )
-    closed = False
-
-    class _FakeAsyncClient:
-        async def close(self) -> None:
-            nonlocal closed
-            closed = True
-
-    model.async_client = _FakeAsyncClient()  # type: ignore[assignment]
-
-    await aclose_anthropic_async_client(model)
-
-    assert closed is True
-    assert model.async_client is None
-
-
-def test_prewarm_anthropic_async_client_closes_partial_client_on_failure() -> None:
-    """A client retained before a failed prewarm must not lose its owner."""
-    model = MindRoomBedrockClaude(
-        id="anthropic.claude-opus-5",
-        aws_region="us-east-1",
-    )
-    closed = False
-
-    class _FakeAsyncClient:
-        async def close(self) -> None:
-            nonlocal closed
-            closed = True
-
-    partial_client = _FakeAsyncClient()
-
-    def _fail_after_retaining_client() -> object:
-        model.async_client = partial_client  # type: ignore[assignment]
-        msg = "client initialization failed"
-        raise RuntimeError(msg)
-
-    vars(model)["get_async_client"] = _fail_after_retaining_client
-
-    with pytest.raises(RuntimeError, match="client initialization failed"):
-        prewarm_anthropic_async_client(model)
-
-    assert closed is True
-    assert model.async_client is None
-
-
-def test_bedrock_claude_provider_respects_explicit_profile_over_env_static_keys(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Bedrock Claude should respect configured aws_profile over env static keys."""
-    env_path = tmp_path / ".env"
-    env_path.write_text(
-        "AWS_ACCESS_KEY_ID=env-access\nAWS_SECRET_ACCESS_KEY=env-secret\nAWS_REGION=us-east-1\n",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
-    config = Config(
-        models={
-            "bedrock_model": ModelConfig(
-                provider="bedrock_claude",
-                id="anthropic.claude-opus-5",
-                context_window=1_000_000,
-                extra_kwargs={"aws_profile": "my-explicit-profile"},
-            ),
-        },
-        defaults={"markdown": True},
-        router={"model": "bedrock_model"},
-        memory={
-            "embedder": {
-                "provider": "sentence_transformers",
-                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
-            },
-        },
-        agents={},
-    )
-
-    class MockSession:
-        def __init__(self, **kwargs: object) -> None:
-            self.profile_name = kwargs.get("profile_name")
-            self.region_name = kwargs.get("region_name")
-
-    monkeypatch.setattr("boto3.session.Session", MockSession)
-
-    model = get_model_instance(config, runtime_paths, "bedrock_model")
-
-    assert isinstance(model, AwsBedrockClaude)
-    assert isinstance(model.session, MockSession)
-    assert model.session.profile_name == "my-explicit-profile"
-    assert model.session.region_name == "us-east-1"
-    assert model.aws_access_key is None
-    assert model.aws_secret_key is None
-
-
-def test_bedrock_claude_provider_auto_installs_boto3(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Bedrock Claude should use the optional dependency installer instead of a base dependency."""
-    config_data = {
-        "models": {
-            "bedrock_model": {
-                "provider": "bedrock_claude",
-                "id": "anthropic.claude-opus-5",
-                "extra_kwargs": {
-                    "aws_access_key": "aws-access",
-                    "aws_secret_key": "aws-secret",
-                    "aws_region": "us-east-1",
-                },
-            },
-        },
-        "defaults": {"markdown": True},
-        "router": {"model": "bedrock_model"},
-        "memory": {
-            "embedder": {
-                "provider": "sentence_transformers",
-                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
-            },
-        },
-        "agents": {},
-    }
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-    calls: list[tuple[list[str], str]] = []
-
-    def ensure(dependencies: list[str], extra_name: str, *_args: object, **_kwargs: object) -> bool:
-        calls.append((dependencies, extra_name))
-        return False
-
-    monkeypatch.setattr("mindroom.providers.model_loading.ensure_optional_deps", ensure)
-
-    get_model_instance(config, runtime_paths, "bedrock_model")
-
-    assert calls == [(["boto3"], "aws_bedrock")]
-
-
-def test_azure_openai_provider_uses_runtime_env() -> None:
-    """Azure provider should create Agno AzureOpenAI with runtime .env settings."""
-    runtime_root = Path(tempfile.mkdtemp())
-    env_path = runtime_root / ".env"
-    env_path.write_text(
-        "AZURE_OPENAI_API_KEY=sk-azure\n"
-        "AZURE_OPENAI_ENDPOINT=https://example-resource.openai.azure.com\n"
-        "AZURE_OPENAI_API_VERSION=2024-10-21\n",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=runtime_root / "config.yaml",
-        storage_path=runtime_root / "mindroom_data",
-        process_env={},
-    )
-    config = Config(
-        models={
-            "azure_model": ModelConfig(
-                provider="azure",
-                id="team-chat-deployment",
-                context_window=258_000,
-            ),
-        },
-        defaults={"markdown": True},
-        router={"model": "azure_model"},
-        memory={
-            "embedder": {
-                "provider": "sentence_transformers",
-                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
-            },
-        },
-        agents={},
-    )
-
-    model = get_model_instance(config, runtime_paths, "azure_model")
-
-    assert isinstance(model, AzureOpenAI)
-    assert model.id == "team-chat-deployment"
-    assert model.api_key == "sk-azure"
-    assert model.azure_endpoint == "https://example-resource.openai.azure.com"
-    assert model.api_version == "2024-10-21"
-
-
-def test_azure_openai_provider_uses_endpoint_file_and_canonical_runtime_env() -> None:
-    """Azure provider should support *_FILE endpoint secrets and Azure-specific overrides."""
-    runtime_root = Path(tempfile.mkdtemp())
-    endpoint_file = runtime_root / "azure-endpoint.txt"
-    endpoint_file.write_text("https://file-resource.openai.azure.com\n", encoding="utf-8")
-    env_path = runtime_root / ".env"
-    env_path.write_text(
-        "AZURE_OPENAI_API_KEY=sk-azure\n"
-        f"AZURE_OPENAI_ENDPOINT_FILE={endpoint_file}\n"
-        "OPENAI_API_VERSION=2023-01-01\n"
-        "AZURE_OPENAI_DEPLOYMENT=env-chat-deployment\n",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=runtime_root / "config.yaml",
-        storage_path=runtime_root / "mindroom_data",
-        process_env={},
-    )
-    config = Config(
-        models={
-            "azure_model": ModelConfig(
-                provider="azure",
-                id="config-chat-deployment",
-                context_window=258_000,
-            ),
-        },
-        defaults={"markdown": True},
-        router={"model": "azure_model"},
-        memory={
-            "embedder": {
-                "provider": "sentence_transformers",
-                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
-            },
-        },
-        agents={},
-    )
-
-    model = get_model_instance(config, runtime_paths, "azure_model")
-
-    assert isinstance(model, AzureOpenAI)
-    assert model.azure_endpoint == "https://file-resource.openai.azure.com"
-    assert model.azure_deployment == "env-chat-deployment"
-    assert model.api_version != "2023-01-01"
-
-
-def test_prompt_cache_control_ttl() -> None:
-    """Extended cache time selects the 1h TTL; the default omits the ttl field."""
-    assert prompt_cache_control() == {"type": "ephemeral"}
-    assert prompt_cache_control(extended_cache_time=True) == {"type": "ephemeral", "ttl": "1h"}
-
-
-def _strict_tool_definition() -> dict[str, object]:
-    return {
-        "type": "function",
-        "function": {
-            "name": "update_profile",
-            "description": "Update profile",
-            "strict": True,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "strict": {"type": "boolean"},
-                },
-                "required": ["name"],
-                "additionalProperties": False,
-            },
-        },
+    assert config.models["test_model"].extra_kwargs == {
+        "request_params": _REQUEST_PARAMS,
+        "temperature": 0.7,
+        "max_tokens": 4096,
     }
 
 
-def test_strip_vertex_claude_tool_strict_preserves_schema_and_input() -> None:
-    """Vertex Claude rejects provider-level strict, but schema fields named strict are valid."""
-    tool = _strict_tool_definition()
+# --- Model params ---------------------------------------------------------------------------------------------
 
-    sanitized = strip_vertex_claude_tool_strict([tool])
-
-    assert sanitized is not None
-    assert "strict" not in sanitized[0]["function"]
-    assert "strict" in sanitized[0]["function"]["parameters"]["properties"]
-    assert tool["function"]["strict"] is True
-
-
-def test_mindroom_vertexai_claude_request_kwargs_strip_tool_strict() -> None:
-    """Mindroom's Vertex Claude model should not send strict in the provider tool payload."""
-    model = MindroomVertexAIClaude(
-        id="claude-sonnet-5",
-        project_id="demo-project",
-        region="us-central1",
-        cache_system_prompt=False,
-    )
-
-    request_kwargs = model._prepare_request_kwargs("", tools=[_strict_tool_definition()])
-
-    assert request_kwargs["tools"] == [
-        {
-            "name": "update_profile",
-            "description": "Update profile",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": ""},
-                    "strict": {"type": "boolean", "description": ""},
-                },
-                "required": ["name"],
-                "additionalProperties": False,
+# Each route family's settings type, one request setting it records, and every field holding a credential, a
+# client, or headers or a query string that can carry one.
+_ROUTE_SETTINGS: list[tuple[type[Any], dict[str, Any], frozenset[str]]] = [
+    (
+        ChatSettings,
+        {"temperature": 0.3},
+        frozenset(
+            {
+                "api_key",
+                "azure_ad_token",
+                "azure_ad_token_provider",
+                "client_params",
+                "default_headers",
+                "default_query",
+                "extra_headers",
+                "extra_query",
             },
-        },
-    ]
-    assert model._has_beta_features(tools=[_strict_tool_definition()]) is False
+        ),
+    ),
+    (
+        ResponsesSettings,
+        {"temperature": 0.3},
+        frozenset({"api_key", "client_params", "default_headers", "default_query", "extra_headers", "extra_query"}),
+    ),
+    (
+        ClaudeSettings,
+        {"temperature": 0.3},
+        frozenset(
+            {
+                "api_key",
+                "auth_token",
+                "aws_access_key",
+                "aws_secret_key",
+                "aws_session_token",
+                "client_params",
+                "default_headers",
+                "session",
+            },
+        ),
+    ),
+    (GeminiSettings, {"temperature": 0.3}, frozenset({"api_key", "client_params", "credentials"})),
+    (OllamaSettings, {"options": {"num_ctx": 8192}}, frozenset({"api_key", "client_params"})),
+    (SyntheticSettings, {"seed": 7}, frozenset()),
+]
 
 
 @pytest.mark.parametrize(
-    "codex_provider_data",
-    [{"response_id": "response-1"}, {"signature": ""}],
-    ids=["missing-signature", "empty-signature"],
+    ("settings_type", "request_settings", "credential_fields"),
+    _ROUTE_SETTINGS,
+    ids=[settings_type.__name__ for settings_type, _, _ in _ROUTE_SETTINGS],
 )
-@pytest.mark.asyncio
-async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_provider_replay(
-    codex_provider_data: dict[str, str],
+def test_model_params_record_no_credential_of_any_route_family(
+    settings_type: type[Any],
+    request_settings: dict[str, Any],
+    credential_fields: frozenset[str],
 ) -> None:
-    """Codex reasoning without an Anthropic signature must not become a thinking block."""
-    model = MindroomVertexAIClaude(
-        id="claude-opus-5",
-        project_id="demo-project",
-        region="global",
-    )
-    codex_message = Message(
-        role="assistant",
-        content="Codex answer",
-        reasoning_content="Unsigned Codex reasoning",
-        provider_data=codex_provider_data,
-        tool_calls=[
-            {
-                "id": "call-1",
-                "type": "function",
-                "function": {"name": "demo_tool", "arguments": "{}"},
-            },
-        ],
-        from_history=True,
-    )
-    claude_message = Message(
-        role="assistant",
-        content="Claude answer",
-        reasoning_content="Signed Claude reasoning",
-        provider_data={"signature": "signature-1"},
-        from_history=True,
-    )
-    messages = [
-        Message(role="user", content="First question", from_history=True),
-        codex_message,
-        Message(role="user", content="Second question", from_history=True),
-        claude_message,
-        Message(role="user", content="Current question"),
-    ]
+    """Run metadata and the request log record a route's request settings, never a credential, even a JSON-safe one."""
+    credentials = {name: f"secret-{name}" for name in credential_fields}
 
-    fitted_messages = model._request_messages(messages)
-    chat_messages, _system_prompt = format_messages(fitted_messages)
+    params = settings_params(settings_type(**request_settings, **credentials))
 
-    assert [block.type for block in chat_messages[1]["content"]] == ["text", "tool_use"]
-    assert [block.type for block in chat_messages[3]["content"]] == ["thinking", "text"]
-    fitted_codex_message = fitted_messages[1]
-    assert fitted_codex_message is not codex_message
-    assert fitted_codex_message.reasoning_content is None
-    assert fitted_codex_message.content == "Codex answer"
-    assert fitted_codex_message.tool_calls == codex_message.tool_calls
-    assert fitted_codex_message.provider_data == codex_provider_data
-    assert fitted_messages[3] == claude_message
-    assert codex_message.reasoning_content == "Unsigned Codex reasoning"
-    assert codex_message.provider_data == codex_provider_data
+    assert params == settings_params(settings_type(**request_settings))
+    assert params.items() >= request_settings.items()
 
 
-def _vertex_claude_model(*, extended_cache_time: bool = True) -> VertexAIClaude:
-    return VertexAIClaude(
-        id="claude-sonnet-5",
-        project_id="demo-project",
-        region="us-central1",
-        cache_system_prompt=True,
-        extended_cache_time=extended_cache_time,
-    )
-
-
-def _tool_turn_messages(tool_content: str | list[dict[str, object]]) -> list[Message]:
-    return [
-        Message(role="system", content="System prompt"),
-        Message(role="user", content="Use the tool"),
-        Message(
-            role="assistant",
-            tool_calls=[
-                {
-                    "id": "toolu_1",
-                    "function": {"name": "demo_tool", "arguments": "{}"},
+@pytest.mark.asyncio
+async def test_model_params_mask_credentials_nested_in_request_params_and_extra_body(
+    tmp_path: Path,
+    chat_wire: Wire,
+) -> None:
+    """A credential authored inside ``request_params`` or ``extra_body`` is masked in run metadata as in the request log."""
+    log_dir = tmp_path / "request-logs"
+    config = Config(
+        models={
+            "default": ModelConfig(
+                provider="openrouter",
+                id="deepseek/deepseek-v4.1-flash",
+                extra_kwargs={
+                    "temperature": 0.2,
+                    "request_params": {
+                        "extra_headers": {"Authorization": "Bearer nested-header-secret", "X-Title": "MindRoom"},
+                        **_REQUEST_PARAMS,
+                    },
+                    "extra_body": {"api_key": "nested-body-secret", "transforms": ["middle-out"]},
                 },
-            ],
-        ),
-        Message(role="tool", tool_call_id="toolu_1", content=tool_content),
-    ]
+            ),
+        },
+        debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(log_dir)),
+    )
+    provider = build_model_provider(config, _runtime_paths(tmp_path, OPENROUTER_API_KEY="openrouter-key"))
+
+    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=False))
+
+    [request] = chat_wire.requests
+    assert request.headers["authorization"] == "Bearer nested-header-secret"
+    assert json.loads(request.content)["api_key"] == "nested-body-secret"
+    assert provider.model_params == {
+        "temperature": 0.2,
+        "request_params": {"extra_headers": {"Authorization": REDACTED, "X-Title": "MindRoom"}, **_REQUEST_PARAMS},
+        "extra_body": {"api_key": REDACTED, "transforms": ["middle-out"]},
+        "strict_output": True,
+        "cache_system_prompt": True,
+        "extended_cache_time": True,
+    }
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    [request_record] = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert request_record["model_params"] == provider.model_params
 
 
-def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> None:
-    """The ladder should mark the newest tool result, a prior boundary, and the last tool."""
-    chat_messages, _system_message = format_messages(_tool_turn_messages("ok"), compress_tool_results=True)
-    request_kwargs = {
-        "system": [{"type": "text", "text": "System prompt", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
-        "tools": [{"name": "demo_tool", "input_schema": {"type": "object"}}],
-        "messages": chat_messages,
+# --- The Claude prompt-cache ladder ---------------------------------------------------------------------------
+
+_ONE_HOUR = {"type": "ephemeral", "ttl": "1h"}
+_FIVE_MINUTES = {"type": "ephemeral"}
+
+
+def _prepared(
+    body: dict[str, Any],
+    *,
+    deferred: frozenset[str] = frozenset(),
+    cache: bool = True,
+    extended: bool = False,
+    route: ClaudeRouteKind = "anthropic",
+) -> dict[str, Any]:
+    return prepare_request_body(
+        body,
+        system="",
+        route=route,
+        deferred_tool_names=deferred,
+        tool_choice=None,
+        extended_cache_time=extended,
+        cache_system_prompt=cache,
+    )
+
+
+def _marker_count(body: dict[str, Any]) -> int:
+    blocks = [*(body.get("system") or []), *(body.get("tools") or [])]
+    blocks += [block for message in body.get("messages") or [] for block in message["content"]]
+    return sum(1 for block in blocks if has_cache_marker(block))
+
+
+def _tool(name: str) -> dict[str, Any]:
+    return {"name": name, "description": f"{name} description", "input_schema": {"type": "object"}}
+
+
+def _text(text: str) -> dict[str, Any]:
+    return {"type": "text", "text": text}
+
+
+def test_prompt_cache_control_selects_the_one_hour_lifetime_only_when_extended() -> None:
+    """``extended_cache_time`` selects the 1h TTL; the default sends no ttl field."""
+    assert prompt_cache_control() == _FIVE_MINUTES
+    assert prompt_cache_control(extended_cache_time=True) == _ONE_HOUR
+
+
+def test_the_ladder_marks_the_newest_tool_result_a_prior_boundary_and_the_last_tool() -> None:
+    """Every request of a tool loop extends the previous one's newest breakpoint, within the four-marker limit."""
+    body = {
+        "system": [{"type": "text", "text": "System prompt", "cache_control": _ONE_HOUR}],
+        "tools": [_tool("demo_tool")],
+        "messages": [
+            {"role": "user", "content": [_text("Use the tool")]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "demo_tool", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]},
+        ],
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(
-        request_kwargs,
-        prompt_cache_control(extended_cache_time=True),
-    )
+    prepared = _prepared(body, extended=True)
 
-    expected_cache_control = {"type": "ephemeral", "ttl": "1h"}
-    tool_result_block = prepared["messages"][-1]["content"][0]
-    assert tool_result_block["type"] == "tool_result"
-    assert tool_result_block["cache_control"] == expected_cache_control
-    assert prepared["messages"][0]["content"][-1]["cache_control"] == expected_cache_control
-    assert prepared["tools"][-1]["cache_control"] == expected_cache_control
-    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
+    assert prepared["messages"][-1]["content"][0]["cache_control"] == _ONE_HOUR
+    assert prepared["messages"][0]["content"][-1]["cache_control"] == _ONE_HOUR
+    assert prepared["tools"][-1]["cache_control"] == _ONE_HOUR
+    assert _marker_count(prepared) == MAX_CACHE_MARKERS
 
 
-def test_prompt_cache_ladder_preserves_adjacent_turn_prefix_with_transient_context() -> None:
-    """Transient context after the prompt takes no marker, so the next turn reuses the prompt's breakpoint."""
-    transient_context = render_transient_context(
+@pytest.mark.asyncio
+async def test_transient_context_takes_no_marker_so_the_next_turn_reuses_the_prompt_breakpoint(tmp_path: Path) -> None:
+    """Per-request context after the prompt stays unmarked, so the next turn replays the same cached prefix."""
+    transient = render_transient_context(
         ("<mindroom_message_context>Current location: Amsterdam</mindroom_message_context>",),
     )
-    first_turn_messages, _system_message = format_messages(
-        [
-            Message(role="user", content="Question one"),
-            Message(role="user", content=transient_context, add_to_agent_memory=False),
-        ],
-    )
-    second_turn_messages, _system_message = format_messages(
-        [
-            Message(role="user", content="Question one"),
-            Message(role="assistant", content="Answer one"),
-            Message(role="user", content="Question two"),
-            Message(role="user", content=transient_context, add_to_agent_memory=False),
-        ],
-    )
-    first_request = {
-        "system": [{"type": "text", "text": "Stable system", "cache_control": {"type": "ephemeral"}}],
-        "messages": first_turn_messages,
-    }
-    second_request = {
-        "system": [{"type": "text", "text": "Stable system", "cache_control": {"type": "ephemeral"}}],
-        "messages": second_turn_messages,
-    }
+    wire = Wire(json_reply([{"type": "text", "text": "A1"}]))
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"extended_cache_time": False})
+    system = Message(role="system", content="Stable system")
+    for history in ([], [Message(role="user", content="Q1"), Message(role="assistant", content="A1")]):
+        prompt = Message(role="user", content="Q2" if history else "Q1")
+        context = Message(role="user", content=transient)
+        await claude_turn(provider, ModelRequest(messages=[system, *history, prompt, context], stream=False))
 
-    first_prepared = _request_kwargs_with_prompt_cache_ladder(first_request, prompt_cache_control())
-    second_prepared = _request_kwargs_with_prompt_cache_ladder(second_request, prompt_cache_control())
-
-    first_current_turn = first_prepared["messages"][0]
-    second_replayed_turn = second_prepared["messages"][0]
-    second_current_turn = second_prepared["messages"][-1]
-
-    assert [block["text"] for block in first_current_turn["content"]] == ["Question one", transient_context]
-    assert first_current_turn["content"][0]["cache_control"] == {"type": "ephemeral"}
-    assert "cache_control" not in first_current_turn["content"][1]
-    assert first_current_turn["content"][:1] == second_replayed_turn["content"]
-    assert [block["text"] for block in second_current_turn["content"]] == ["Question two", transient_context]
-    assert second_current_turn["content"][0]["cache_control"] == {"type": "ephemeral"}
-    assert "cache_control" not in second_current_turn["content"][1]
+    current = wire.body(0)["messages"][0]["content"]
+    assert current[0]["cache_control"] == _FIVE_MINUTES
+    assert "cache_control" not in current[1]
+    second = wire.body(1)["messages"]
+    assert second[0]["content"] == current[:1]
+    assert second[-1]["content"][0]["cache_control"] == _FIVE_MINUTES
+    assert "cache_control" not in second[-1]["content"][1]
 
 
-def test_prompt_cache_ladder_does_not_double_count_existing_message_markers() -> None:
-    """A pre-existing message marker must consume budget once, not twice."""
-    request_kwargs = {
-        "system": [{"type": "text", "text": "S", "cache_control": {"type": "ephemeral"}}],
-        "tools": [{"name": "demo_tool", "input_schema": {"type": "object"}}],
+def test_an_existing_message_marker_uses_the_budget_once() -> None:
+    """A marker already on a message occupies a rung, so one new rung and the tools marker fill the limit."""
+    body = {
+        "system": [{"type": "text", "text": "S", "cache_control": _FIVE_MINUTES}],
+        "tools": [_tool("demo_tool")],
         "messages": [
-            {"role": "user", "content": [{"type": "text", "text": "m1"}]},
-            {"role": "user", "content": [{"type": "text", "text": "m2", "cache_control": {"type": "ephemeral"}}]},
-            {"role": "user", "content": [{"type": "text", "text": "m3"}]},
+            {"role": "user", "content": [_text("m1")]},
+            {"role": "user", "content": [{"type": "text", "text": "m2", "cache_control": _FIVE_MINUTES}]},
+            {"role": "user", "content": [_text("m3")]},
         ],
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
+    prepared = _prepared(body)
 
-    # Budget: 4 total minus system marker minus the pre-existing message
-    # marker leaves room for one new rung (on m3) and the tools marker.
-    assert prepared["messages"][-1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert prepared["messages"][-1]["content"][0]["cache_control"] == _FIVE_MINUTES
     assert "cache_control" not in prepared["messages"][0]["content"][0]
-    assert prepared["tools"][-1]["cache_control"] == {"type": "ephemeral"}
-    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
+    assert prepared["tools"][-1]["cache_control"] == _FIVE_MINUTES
+    assert _marker_count(prepared) == MAX_CACHE_MARKERS
 
 
-def test_prompt_cache_client_proxy_delegates_context_manager() -> None:
-    """Context-manager use of the proxied client must reach the real client."""
-    events: list[str] = []
-
-    class _FakeClient:
-        def __enter__(self) -> object:
-            events.append("enter")
-            return self
-
-        def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
-            events.append("exit")
-            return True
-
-    proxy = _PromptCacheClientProxy(_FakeClient(), _vertex_claude_model())
-    with proxy as entered:
-        assert entered is proxy
-    assert events == ["enter", "exit"]
-    # The delegate's __exit__ return value (exception suppression) is preserved.
-    assert proxy.__exit__(None, None, None) is True
-
-
-def test_prompt_cache_ladder_respects_marker_budget() -> None:
-    """A request already at the marker limit must pass through unchanged."""
-    marked_block = {"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}
-    request_kwargs = {
-        "system": [dict(marked_block)],
-        "tools": [dict(marked_block)],
+def test_a_request_already_at_the_marker_limit_passes_through() -> None:
+    """Four authored markers leave no budget, so the ladder adds none."""
+    marked = {"type": "text", "text": "x", "cache_control": _FIVE_MINUTES}
+    body = {
+        "system": [dict(marked)],
+        "tools": [dict(marked)],
         "messages": [
-            {"role": "user", "content": [dict(marked_block)]},
-            {"role": "user", "content": [dict(marked_block), {"type": "text", "text": "tail"}]},
+            {"role": "user", "content": [dict(marked)]},
+            {"role": "user", "content": [dict(marked), _text("tail")]},
         ],
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
-
-    assert prepared is request_kwargs
-    assert _count_cache_markers(prepared) == MAX_CACHE_MARKERS
+    assert _prepared(body) == body
 
 
-def test_prompt_cache_ladder_skips_unmarkable_blocks() -> None:
-    """Thinking blocks, SDK objects, and empty text must not carry cache markers."""
-    request_kwargs = {
+def test_thinking_and_empty_text_never_carry_a_marker() -> None:
+    """The ladder skips blocks the API cannot mark and marks the nearest earlier text instead."""
+    body = {
         "messages": [
-            {"role": "user", "content": [{"type": "text", "text": "earlier turn"}]},
+            {"role": "user", "content": [_text("earlier turn")]},
             {
                 "role": "assistant",
-                "content": [
-                    {"type": "thinking", "thinking": "reasoning", "signature": "sig"},
-                    {"type": "text", "text": ""},
-                ],
+                "content": [{"type": "thinking", "thinking": "reasoning", "signature": "sig"}, _text("")],
             },
         ],
     }
 
-    prepared = _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
+    prepared = _prepared(body)
 
-    assert "cache_control" not in str(prepared["messages"][1])
-    assert prepared["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
-
-
-def test_prompt_cache_ladder_does_not_mutate_input() -> None:
-    """The ladder must copy structures rather than mutating the caller's request."""
-    messages = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
-    tools = [{"name": "demo_tool", "input_schema": {"type": "object"}}]
-    request_kwargs = {"messages": messages, "tools": tools}
-
-    _request_kwargs_with_prompt_cache_ladder(request_kwargs, prompt_cache_control())
-
-    assert messages == [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
-    assert tools == [{"name": "demo_tool", "input_schema": {"type": "object"}}]
+    assert "cache_control" not in json.dumps(prepared["messages"][1])
+    assert prepared["messages"][0]["content"][0]["cache_control"] == _FIVE_MINUTES
 
 
-def _install_fake_sync_client(model: VertexAIClaude | Claude) -> list[dict[str, object]]:
-    """Install a capturing fake SDK client on a Claude model; return the capture list."""
-    captured_kwargs: list[dict[str, object]] = []
+def test_the_ladder_never_mutates_the_request_it_marks() -> None:
+    """Markers are added to copies, never to stored messages or reusable tool definitions."""
+    body = {"messages": [{"role": "user", "content": [_text("hello")]}], "tools": [_tool("demo_tool")]}
+    original = deepcopy(body)
 
-    class _FakeMessagesAPI:
-        def create(self, **kwargs: object) -> object:
-            captured_kwargs.append(kwargs)
-            return object()
+    _prepared(body)
 
-    class _FakeClient:
-        def __init__(self) -> None:
-            self.messages = _FakeMessagesAPI()
-
-    vars(model)["get_client"] = lambda: _FakeClient()
-    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
-    vars(model)["_has_beta_features"] = lambda **_kwargs: False
-    vars(model)["_parse_provider_response"] = lambda *_args, **_kwargs: ModelResponse(content="ok")
-    return captured_kwargs
+    assert body == original
 
 
-def test_prompt_cache_hook_applies_ladder_at_wire_level_without_rewriting_messages() -> None:
-    """The hooked client must add ladder markers without touching Agno messages or tool payloads."""
-    model = _vertex_claude_model()
-    captured_kwargs = _install_fake_sync_client(model)
-    install_claude_prompt_cache_hook(model)
+def test_a_disabled_prompt_cache_sends_no_markers() -> None:
+    """``cache_system_prompt: false`` leaves the request unmarked."""
+    body = {"system": [_text("System prompt")], "messages": [{"role": "user", "content": [_text("hi")]}]}
 
-    messages = _tool_turn_messages("ok")
-    tool_before = messages[3].to_dict()
-
-    response = model.response(messages=messages, compression_manager=None)
-
-    assert response.content == "ok"
-    assert messages[3].to_dict() == tool_before
-    assert len(captured_kwargs) == 1
-    wire_messages = captured_kwargs[0]["messages"]
-    expected_cache_control = {"type": "ephemeral", "ttl": "1h"}
-    assert wire_messages[-1]["content"][0]["type"] == "tool_result"
-    assert wire_messages[-1]["content"][0]["cache_control"] == expected_cache_control
-    assert wire_messages[-1]["content"][0]["content"] == "ok"
-    assert wire_messages[0]["content"] == [
-        {"type": "text", "text": "Use the tool", "cache_control": expected_cache_control},
-    ]
+    assert _marker_count(_prepared(body, cache=False)) == 0
 
 
-def test_prompt_cache_hook_inert_when_cache_disabled() -> None:
-    """Disabling cache_system_prompt must leave the wire request unmarked."""
-    model = _vertex_claude_model()
-    model.cache_system_prompt = False
-    captured_kwargs = _install_fake_sync_client(model)
-    install_claude_prompt_cache_hook(model)
-
-    model.response(messages=_tool_turn_messages("ok"), compression_manager=None)
-
-    wire_messages = captured_kwargs[0]["messages"]
-    assert _count_cache_markers({"messages": list(wire_messages)}) == 0
-
-
-def test_prompt_cache_hook_applies_to_direct_anthropic_claude() -> None:
-    """The hook must ladder direct Anthropic Claude models, not only Vertex."""
-    model = Claude(id="claude-sonnet-5", api_key="test-key", cache_system_prompt=True)
-    captured_kwargs = _install_fake_sync_client(model)
-    install_claude_prompt_cache_hook(model)
-
-    model.response(
-        messages=[Message(role="system", content="System prompt"), Message(role="user", content="Current turn")],
-        compression_manager=None,
-    )
-
-    wire_messages = captured_kwargs[0]["messages"]
-    assert wire_messages[0]["content"] == [
-        {"type": "text", "text": "Current turn", "cache_control": {"type": "ephemeral"}},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_prompt_cache_hook_wraps_async_client() -> None:
-    """The async client path must apply the ladder as well."""
-    model = _vertex_claude_model()
-    captured_kwargs: list[dict[str, object]] = []
-
-    class _FakeAsyncMessagesAPI:
-        async def create(self, **kwargs: object) -> object:
-            captured_kwargs.append(kwargs)
-            return object()
-
-    class _FakeAsyncClient:
-        def __init__(self) -> None:
-            self.messages = _FakeAsyncMessagesAPI()
-
-    vars(model)["get_async_client"] = lambda: _FakeAsyncClient()
-    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
-    vars(model)["_has_beta_features"] = lambda **_kwargs: False
-    vars(model)["_parse_provider_response"] = lambda *_args, **_kwargs: ModelResponse(content="ok")
-    install_claude_prompt_cache_hook(model)
-
-    await model.ainvoke(
-        messages=[
-            Message(role="system", content="System prompt"),
-            Message(role="user", content="Current turn"),
-        ],
-        assistant_message=Message(role="assistant"),
-    )
-
-    assert captured_kwargs[0]["messages"][-1]["content"] == [
-        {"type": "text", "text": "Current turn", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
-    ]
-
-
-def _wire_tool(name: str) -> dict[str, object]:
-    return {"name": name, "description": f"{name} description", "input_schema": {"type": "object"}}
+# --- Deferred tool search -------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1227,119 +388,71 @@ def _wire_tool(name: str) -> dict[str, object]:
         ("bedrock_claude", "anthropic.claude-opus-5", False),
     ],
 )
-def test_native_tool_search_supported_gating(provider: str, model_id: str, *, expected: bool) -> None:
-    """Claude-family providers qualify unless the model predates tool search."""
+def test_native_tool_search_gating(provider: str, model_id: str, *, expected: bool) -> None:
+    """Claude routes with server-side tool search qualify unless the model predates it."""
     assert native_tool_search_supported(provider, model_id) is expected
 
 
-def test_deferred_tool_search_tags_tools_and_injects_search_tool() -> None:
-    """Deferred tools ship tagged and name-sorted after the search tool and non-deferred tools."""
-    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=True)
-    captured_kwargs = _install_fake_sync_client(model)
-    # zeta_tool arrives pre-marked (as Agno's cache_tools flag would): the
-    # marker must be stripped because deferred tools may not carry one.
-    tools = [
-        _wire_tool("always_tool"),
-        {**_wire_tool("zeta_tool"), "cache_control": {"type": "ephemeral"}},
-        _wire_tool("alpha_tool"),
-    ]
-    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [dict(tool) for tool in tools]}
-    install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"zeta_tool", "alpha_tool"}))
+def test_deferred_tools_ship_tagged_after_the_search_tool_and_the_other_tools() -> None:
+    """The search tool comes first, then the other tools, then the deferred ones by name, none of them marked."""
+    tools = [_tool("always_tool"), {**_tool("zeta_tool"), "cache_control": _FIVE_MINUTES}, _tool("alpha_tool")]
 
-    model.response(messages=[Message(role="user", content="hi")], compression_manager=None)
+    prepared = _prepared({"tools": tools, "messages": []}, deferred=frozenset({"zeta_tool", "alpha_tool"}))
 
-    wire_tools = captured_kwargs[0]["tools"]
-    assert [tool.get("name") for tool in wire_tools] == [
-        "tool_search_tool_regex",
-        "always_tool",
-        "alpha_tool",
-        "zeta_tool",
-    ]
-    assert wire_tools[0] == {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}
-    # The cache-ladder marker must land on the last non-deferred tool: deferred
-    # tools may not carry cache_control (the API rejects the request).
-    assert wire_tools[1]["cache_control"] == {"type": "ephemeral"}
-    for deferred_tool in wire_tools[2:]:
-        assert deferred_tool["defer_loading"] is True
-        assert "cache_control" not in deferred_tool
+    sent = prepared["tools"]
+    assert [tool.get("name") for tool in sent] == ["tool_search_tool_regex", "always_tool", "alpha_tool", "zeta_tool"]
+    assert sent[0] == {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}
+    # Deferred tools may not carry cache_control, so the ladder's marker lands on the last ordinary tool.
+    assert sent[1]["cache_control"] == _FIVE_MINUTES
+    for deferred in sent[2:]:
+        assert deferred["defer_loading"] is True
+        assert "cache_control" not in deferred
 
 
-def test_deferred_tool_search_skips_tools_marker_when_all_tools_deferred() -> None:
-    """With every authored tool deferred, no tools marker is emitted at all.
+def test_an_all_deferred_tool_list_gets_no_tools_marker() -> None:
+    """Neither the search tool nor a deferred tool may take the marker, so the system breakpoint covers the tools."""
+    prepared = _prepared({"tools": [_tool("alpha_tool")], "messages": []}, deferred=frozenset({"alpha_tool"}))
 
-    Whether the API accepts cache_control on the search-tool type is
-    unverified, and deferred tools may never carry one, so the ladder leaves
-    the tools array unmarked and relies on the system-prompt breakpoint.
-    """
-    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=True)
-    captured_kwargs = _install_fake_sync_client(model)
-    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("alpha_tool")]}
-    install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"alpha_tool"}))
-
-    model.response(messages=[Message(role="user", content="hi")], compression_manager=None)
-
-    wire_tools = captured_kwargs[0]["tools"]
-    assert wire_tools[0]["name"] == "tool_search_tool_regex"
-    assert wire_tools[1]["defer_loading"] is True
-    assert _count_cache_markers({"tools": list(wire_tools)}) == 0
+    assert [tool["name"] for tool in prepared["tools"]] == ["tool_search_tool_regex", "alpha_tool"]
+    assert prepared["tools"][1]["defer_loading"] is True
+    assert _marker_count({"tools": prepared["tools"]}) == 0
 
 
-def test_deferred_tool_search_applies_without_cache_ladder_when_cache_disabled() -> None:
-    """Deferred tagging is independent of the cache ladder gate."""
-    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
-    captured_kwargs = _install_fake_sync_client(model)
-    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("alpha_tool")]}
-    install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"alpha_tool"}))
+def test_deferred_tools_are_tagged_with_the_prompt_cache_disabled() -> None:
+    """Deferring tools does not depend on the cache ladder."""
+    prepared = _prepared(
+        {"tools": [_tool("alpha_tool")], "messages": []},
+        deferred=frozenset({"alpha_tool"}),
+        cache=False,
+    )
 
-    model.response(messages=[Message(role="user", content="hi")], compression_manager=None)
-
-    request = captured_kwargs[0]
-    wire_tools = request["tools"]
-    assert wire_tools[0]["name"] == "tool_search_tool_regex"
-    assert wire_tools[1]["defer_loading"] is True
-    assert _count_cache_markers({"tools": list(wire_tools), "messages": list(request["messages"])}) == 0
+    assert prepared["tools"][1]["defer_loading"] is True
+    assert _marker_count(prepared) == 0
 
 
-def test_deferred_tool_search_leaves_requests_without_matching_tools_unchanged() -> None:
-    """The search tool is injected only when a deferred tool is present in the request."""
-    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=True)
-    captured_kwargs = _install_fake_sync_client(model)
-    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("always_tool")]}
-    install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"other_tool"}))
+def test_the_search_tool_is_added_only_when_a_deferred_tool_is_offered() -> None:
+    """A deferred name the request does not offer leaves the tools as they are."""
+    prepared = _prepared({"tools": [_tool("always_tool")], "messages": []}, deferred=frozenset({"other_tool"}))
 
-    model.response(messages=[Message(role="user", content="hi")], compression_manager=None)
-
-    assert [tool["name"] for tool in captured_kwargs[0]["tools"]] == ["always_tool"]
+    assert [tool["name"] for tool in prepared["tools"]] == ["always_tool"]
 
 
-def test_install_claude_deferred_tool_search_ignores_non_claude_and_empty_sets() -> None:
-    """The installer is a no-op for non-Claude models and empty name sets."""
-    llama = LlamaCpp(id="gemma", api_key="test-key", base_url="http://llama.local/v1")
-    install_claude_deferred_tool_search(llama, deferred_tool_names=frozenset({"alpha_tool"}))
-    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(llama)
+# --- Replayed tool search -------------------------------------------------------------------------------------
 
-    claude = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
-    install_claude_deferred_tool_search(claude, deferred_tool_names=frozenset())
-    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(claude)
-
-
-_SERVER_TOOL_USE_BLOCK = {
+_SEARCH_USE = {
     "type": "server_tool_use",
     "id": "srvtoolu_01ABC",
     "name": "tool_search_tool_regex",
     "input": {"pattern": "weather"},
 }
-_ORPHAN_TOOL_SEARCH_USE_BLOCK = {
-    **_SERVER_TOOL_USE_BLOCK,
-    "id": "srvtoolu_01ORPHAN",
-}
-_OTHER_SERVER_TOOL_USE_BLOCK = {
+_ORPHAN_SEARCH_USE = {**_SEARCH_USE, "id": "srvtoolu_01ORPHAN"}
+_OTHER_SERVER_TOOL_USE = {
     "type": "server_tool_use",
     "id": "srvtoolu_01OTHER",
     "name": "web_search",
     "input": {"query": "weather"},
 }
-_TOOL_SEARCH_RESULT_BLOCK = {
+_SEARCH_RESULT = {
     "type": "tool_search_tool_result",
     "tool_use_id": "srvtoolu_01ABC",
     "content": {
@@ -1347,138 +460,52 @@ _TOOL_SEARCH_RESULT_BLOCK = {
         "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
     },
 }
-# The shape the SDK response capture actually persists: response-only fields
-# (citations/parsed_output/text) ride along and the request schema rejects
-# them with "Extra inputs are not permitted".
-_DIRTY_TOOL_SEARCH_RESULT_BLOCK = {
-    **_TOOL_SEARCH_RESULT_BLOCK,
-    "citations": None,
-    "parsed_output": None,
-    "text": "Found 1 tool",
+_EMPTIED_SEARCH_RESULT = {
+    **_SEARCH_RESULT,
+    "content": {"type": "tool_search_tool_search_result", "tool_references": []},
 }
+# The shape the response capture persists: response-only fields the request schema rejects ride along.
+_DIRTY_SEARCH_RESULT = {**_SEARCH_RESULT, "citations": None, "parsed_output": None, "text": "Found 1 tool"}
 
 
-def _anthropic_response(content: list[dict[str, object]]) -> AnthropicMessage:
-    return AnthropicMessage.model_validate(
-        {
-            "id": "msg_test",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-opus-5",
-            "content": content,
-            "stop_reason": "end_turn",
-            "stop_sequence": None,
-            "usage": {"input_tokens": 1, "output_tokens": 1},
-        },
+def _replayed(*blocks: dict[str, Any], tools: list[str] | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"messages": [{"role": "assistant", "content": [dict(block) for block in blocks]}]}
+    if tools is not None:
+        body["tools"] = [_tool(name) for name in tools]
+    return body
+
+
+def _replayed_blocks(body: dict[str, Any]) -> list[dict[str, Any]]:
+    return _prepared(body, cache=False)["messages"][0]["content"]
+
+
+def test_replayed_search_results_carry_only_request_fields() -> None:
+    """Response-only fields stored with a search result are dropped, and the stored history keeps them."""
+    body = _replayed(_SEARCH_USE, _DIRTY_SEARCH_RESULT, _text("found it"), tools=["get_weather"])
+
+    assert _replayed_blocks(body) == [_SEARCH_USE, _SEARCH_RESULT, _text("found it")]
+    assert "citations" in body["messages"][0]["content"][1]
+
+
+def test_only_orphaned_search_uses_are_removed() -> None:
+    """A regex search without its result in the same turn goes; other server tools and paired searches stay."""
+    body = _replayed(
+        _ORPHAN_SEARCH_USE,
+        _OTHER_SERVER_TOOL_USE,
+        _SEARCH_USE,
+        _DIRTY_SEARCH_RESULT,
+        _text("found it"),
+        tools=["get_weather"],
     )
 
-
-def test_server_tool_search_blocks_round_trip_in_assistant_history() -> None:
-    """server_tool_use and tool_search_tool_result replay verbatim, in order, exactly once."""
-    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
-    first_response = _anthropic_response(
-        [
-            {"type": "text", "text": "I'll search for a weather tool."},
-            _SERVER_TOOL_USE_BLOCK,
-            _TOOL_SEARCH_RESULT_BLOCK,
-        ],
-    )
-    responses = iter([first_response, _anthropic_response([{"type": "text", "text": "Done."}])])
-    captured_kwargs: list[dict[str, object]] = []
-
-    class _FakeMessagesAPI:
-        def create(self, **kwargs: object) -> object:
-            captured_kwargs.append(kwargs)
-            return next(responses)
-
-    class _FakeClient:
-        def __init__(self) -> None:
-            self.messages = _FakeMessagesAPI()
-
-    vars(model)["get_client"] = lambda: _FakeClient()
-
-    messages = [Message(role="user", content="What is the weather?")]
-    model.response(messages=messages, compression_manager=None)
-    model.response(messages=messages, compression_manager=None)
-
-    assistant_wires = [message for message in captured_kwargs[1]["messages"] if message["role"] == "assistant"]
-    assert len(assistant_wires) == 1
-    assert assistant_wires[0]["content"] == [
-        {"type": "text", "text": "I'll search for a weather tool."},
-        _SERVER_TOOL_USE_BLOCK,
-        _TOOL_SEARCH_RESULT_BLOCK,
-    ]
+    assert _replayed_blocks(body) == [_OTHER_SERVER_TOOL_USE, _SEARCH_USE, _SEARCH_RESULT, _text("found it")]
+    assert body["messages"][0]["content"][0] == _ORPHAN_SEARCH_USE
 
 
-def test_server_tool_blocks_replay_to_non_anthropic_provider_without_crashing() -> None:
-    """History stored on the native path must stay replayable after a `!model` provider switch."""
-    assistant = Message(
-        role="assistant",
-        content="I'll search for a weather tool.",
-        provider_data={"server_tool_blocks": [dict(_SERVER_TOOL_USE_BLOCK), dict(_TOOL_SEARCH_RESULT_BLOCK)]},
-    )
-
-    formatted = OpenAIChat(id="gpt-6-astra", api_key="test-key")._format_message(assistant)
-
-    assert formatted["role"] == "assistant"
-    assert formatted["content"] == "I'll search for a weather tool."
-
-
-def test_replay_safe_tool_search_results_strips_response_only_fields() -> None:
-    """Replayed tool-search results must carry only request-schema fields."""
-    request_kwargs = {
-        "tools": [_wire_tool("get_weather")],
-        "messages": [
-            {
-                "role": "assistant",
-                "content": [dict(_DIRTY_TOOL_SEARCH_RESULT_BLOCK), {"type": "text", "text": "found it"}],
-            },
-        ],
-    }
-
-    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
-
-    assert prepared["messages"][0]["content"][0] == _TOOL_SEARCH_RESULT_BLOCK
-    assert prepared["messages"][0]["content"][1] == {"type": "text", "text": "found it"}
-    assert "citations" in request_kwargs["messages"][0]["content"][0]
-    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
-
-
-def test_replay_safe_tool_search_results_drops_only_orphaned_search_uses() -> None:
-    """Only regex-search uses missing a same-message result should be removed."""
-    request_kwargs = {
-        "tools": [_wire_tool("get_weather")],
-        "messages": [
-            {
-                "role": "assistant",
-                "content": [
-                    dict(_ORPHAN_TOOL_SEARCH_USE_BLOCK),
-                    dict(_OTHER_SERVER_TOOL_USE_BLOCK),
-                    dict(_SERVER_TOOL_USE_BLOCK),
-                    dict(_DIRTY_TOOL_SEARCH_RESULT_BLOCK),
-                    {"type": "text", "text": "found it"},
-                ],
-            },
-        ],
-    }
-
-    prepared = request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
-
-    assert prepared["messages"][0]["content"] == [
-        _OTHER_SERVER_TOOL_USE_BLOCK,
-        _SERVER_TOOL_USE_BLOCK,
-        _TOOL_SEARCH_RESULT_BLOCK,
-        {"type": "text", "text": "found it"},
-    ]
-    assert request_kwargs["messages"][0]["content"][0] == _ORPHAN_TOOL_SEARCH_USE_BLOCK
-    assert "citations" in request_kwargs["messages"][0]["content"][3]
-    assert request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
-
-
-def test_unavailable_tool_references_drops_unavailable_references() -> None:
-    """A replayed search result should retain only tools available on the current request."""
-    result_block = {
-        **_TOOL_SEARCH_RESULT_BLOCK,
+def test_references_to_tools_the_request_no_longer_offers_are_dropped() -> None:
+    """A replayed search result keeps only references to tools this request still offers."""
+    result = {
+        **_SEARCH_RESULT,
         "content": {
             "tool_references": [
                 {"type": "tool_reference", "tool_name": "get_weather"},
@@ -1488,135 +515,52 @@ def test_unavailable_tool_references_drops_unavailable_references() -> None:
             ],
         },
     }
-    request_kwargs = {
-        "tools": [_wire_tool("get_weather")],
-        "messages": [
-            {
-                "role": "assistant",
-                "content": [dict(_SERVER_TOOL_USE_BLOCK), result_block],
-            },
-        ],
-    }
+    body = _replayed(_SEARCH_USE, result, tools=["get_weather"])
 
-    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
-
-    assert prepared["messages"][0]["content"] == [
-        _SERVER_TOOL_USE_BLOCK,
+    assert _replayed_blocks(body) == [
+        _SEARCH_USE,
         {
             "type": "tool_search_tool_result",
             "tool_use_id": "srvtoolu_01ABC",
-            "content": {
-                "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
-            },
+            "content": {"tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}]},
         },
     ]
-    assert len(request_kwargs["messages"][0]["content"][1]["content"]["tool_references"]) == 4
-    assert _request_kwargs_without_unavailable_tool_references(prepared) is prepared
+    assert len(body["messages"][0]["content"][1]["content"]["tool_references"]) == 4
 
 
-def test_unavailable_tool_references_empties_result_when_all_references_are_unavailable() -> None:
-    """A search whose referenced tools are all unavailable keeps its pair with an empty result."""
-    request_kwargs = {
-        "tools": [_wire_tool("other_tool")],
+@pytest.mark.parametrize("tools", [["other_tool"], None], ids=["unavailable", "no-tools"])
+def test_a_search_whose_tools_are_all_gone_keeps_its_pair_with_an_empty_result(tools: list[str] | None) -> None:
+    """Without any referenced tool on the request, the search result is emptied rather than removed."""
+    body = _replayed(_OTHER_SERVER_TOOL_USE, _SEARCH_USE, _SEARCH_RESULT, tools=tools)
+
+    assert _replayed_blocks(body) == [_OTHER_SERVER_TOOL_USE, _SEARCH_USE, _EMPTIED_SEARCH_RESULT]
+    assert body["messages"][0]["content"][2] == _SEARCH_RESULT
+
+
+def test_a_replay_whose_references_are_available_is_unchanged() -> None:
+    """A clean replay keeps the stored blocks exactly."""
+    body = _replayed(_SEARCH_USE, _SEARCH_RESULT, _OTHER_SERVER_TOOL_USE, tools=["get_weather"])
+
+    assert _replayed_blocks(body) == [_SEARCH_USE, _SEARCH_RESULT, _OTHER_SERVER_TOOL_USE]
+
+
+@pytest.mark.parametrize("available", ["get_weather", "bridge_call_tool"], ids=["matched-nothing", "all-gone"])
+def test_a_search_between_signed_thinking_blocks_always_stays(available: str) -> None:
+    """Removing the search would make the tool loop's two thinking blocks adjacent, which the API rejects."""
+    before = {"type": "thinking", "thinking": "", "signature": "sig-before-search"}
+    after = {"type": "thinking", "thinking": "", "signature": "sig-after-search"}
+    result = _EMPTIED_SEARCH_RESULT if available == "get_weather" else _SEARCH_RESULT
+    body = {
+        "tools": [_tool(available)],
         "messages": [
+            {"role": "user", "content": [_text("What is the weather?")]},
             {
                 "role": "assistant",
                 "content": [
-                    dict(_OTHER_SERVER_TOOL_USE_BLOCK),
-                    dict(_SERVER_TOOL_USE_BLOCK),
-                    dict(_TOOL_SEARCH_RESULT_BLOCK),
-                    {"type": "text", "text": "found it"},
-                ],
-            },
-        ],
-    }
-
-    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
-
-    assert prepared["messages"][0]["content"] == [
-        _OTHER_SERVER_TOOL_USE_BLOCK,
-        _SERVER_TOOL_USE_BLOCK,
-        {
-            "type": "tool_search_tool_result",
-            "tool_use_id": "srvtoolu_01ABC",
-            "content": {"type": "tool_search_tool_search_result", "tool_references": []},
-        },
-        {"type": "text", "text": "found it"},
-    ]
-    assert request_kwargs["messages"][0]["content"][1] == _SERVER_TOOL_USE_BLOCK
-    assert request_kwargs["messages"][0]["content"][2] == _TOOL_SEARCH_RESULT_BLOCK
-    assert _request_kwargs_without_unavailable_tool_references(prepared) is prepared
-
-
-def test_unavailable_tool_references_empties_results_without_a_tools_array() -> None:
-    """Missing current tools means every replayed tool reference is stale, so the result is emptied."""
-    request_kwargs = {
-        "messages": [
-            {
-                "role": "assistant",
-                "content": [
-                    dict(_OTHER_SERVER_TOOL_USE_BLOCK),
-                    dict(_SERVER_TOOL_USE_BLOCK),
-                    dict(_TOOL_SEARCH_RESULT_BLOCK),
-                ],
-            },
-        ],
-    }
-
-    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
-
-    assert prepared["messages"][0]["content"] == [
-        _OTHER_SERVER_TOOL_USE_BLOCK,
-        _SERVER_TOOL_USE_BLOCK,
-        {
-            "type": "tool_search_tool_result",
-            "tool_use_id": "srvtoolu_01ABC",
-            "content": {"type": "tool_search_tool_search_result", "tool_references": []},
-        },
-    ]
-    assert request_kwargs["messages"][0]["content"] == [
-        _OTHER_SERVER_TOOL_USE_BLOCK,
-        _SERVER_TOOL_USE_BLOCK,
-        _TOOL_SEARCH_RESULT_BLOCK,
-    ]
-    assert _request_kwargs_without_unavailable_tool_references(prepared) is prepared
-
-
-def test_unavailable_tool_references_returns_original_when_references_are_available() -> None:
-    """A clean replay should preserve both payload bytes and object identity."""
-    request_kwargs = {
-        "tools": [_wire_tool("get_weather")],
-        "messages": [
-            {
-                "role": "assistant",
-                "content": [
-                    dict(_SERVER_TOOL_USE_BLOCK),
-                    dict(_TOOL_SEARCH_RESULT_BLOCK),
-                    dict(_OTHER_SERVER_TOOL_USE_BLOCK),
-                ],
-            },
-        ],
-    }
-
-    assert _request_kwargs_without_unavailable_tool_references(request_kwargs) is request_kwargs
-
-
-def test_unavailable_tool_references_keeps_empty_search_between_signed_thinking() -> None:
-    """A search that matched nothing must stay, or the tool loop's two thinking blocks become adjacent."""
-    request_kwargs = {
-        "tools": [_wire_tool("get_weather")],
-        "messages": [
-            {"role": "user", "content": [{"type": "text", "text": "What is the weather?"}]},
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "thinking", "thinking": "", "signature": "sig-before-search"},
-                    dict(_SERVER_TOOL_USE_BLOCK),
-                    {
-                        **_TOOL_SEARCH_RESULT_BLOCK,
-                        "content": {"type": "tool_search_tool_search_result", "tool_references": []},
-                    },
-                    {"type": "thinking", "thinking": "", "signature": "sig-after-search"},
+                    dict(before),
+                    dict(_SEARCH_USE),
+                    deepcopy(result),
+                    dict(after),
                     {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}},
                 ],
             },
@@ -1624,34 +568,8 @@ def test_unavailable_tool_references_keeps_empty_search_between_signed_thinking(
         ],
     }
 
-    assert _request_kwargs_without_unavailable_tool_references(request_kwargs) is request_kwargs
+    content = _prepared(body, cache=False)["messages"][1]["content"]
 
-
-def test_unavailable_tool_references_empties_filtered_search_between_signed_thinking() -> None:
-    """A search whose found tools are all gone keeps its pair, so signed thinking blocks never become adjacent."""
-    thinking_before = {"type": "thinking", "thinking": "", "signature": "sig-before-search"}
-    thinking_after = {"type": "thinking", "thinking": "", "signature": "sig-after-search"}
-    request_kwargs = {
-        "tools": [_wire_tool("bridge_call_tool")],
-        "messages": [
-            {"role": "user", "content": [{"type": "text", "text": "List the open jobs."}]},
-            {
-                "role": "assistant",
-                "content": [
-                    dict(thinking_before),
-                    dict(_SERVER_TOOL_USE_BLOCK),
-                    dict(_TOOL_SEARCH_RESULT_BLOCK),
-                    dict(thinking_after),
-                    {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}},
-                ],
-            },
-            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "done"}]},
-        ],
-    }
-
-    prepared = _request_kwargs_without_unavailable_tool_references(request_kwargs)
-
-    content = prepared["messages"][1]["content"]
     assert [block["type"] for block in content] == [
         "thinking",
         "server_tool_use",
@@ -1659,594 +577,387 @@ def test_unavailable_tool_references_empties_filtered_search_between_signed_thin
         "thinking",
         "tool_use",
     ]
-    assert content[0] == thinking_before
-    assert content[3] == thinking_after
+    assert (content[0], content[3]) == (before, after)
     assert content[2]["content"]["tool_references"] == []
-    assert request_kwargs["messages"][1]["content"][2] == _TOOL_SEARCH_RESULT_BLOCK
 
 
-@pytest.mark.asyncio
-async def test_prompt_cache_hook_drops_orphaned_search_use_from_streaming_replay() -> None:
-    """Mixed client/server tool history must remain valid on the next streamed request."""
-    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
-    captured_kwargs: list[dict[str, object]] = []
+# --- Route settings from the runtime env ----------------------------------------------------------------------
 
-    class _EmptyAsyncStream:
-        async def __aenter__(self) -> object:
-            return self
 
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        def __aiter__(self) -> object:
-            return self
-
-        async def __anext__(self) -> object:
-            raise StopAsyncIteration
-
-    class _FakeAsyncMessagesAPI:
-        def stream(self, **kwargs: object) -> object:
-            captured_kwargs.append(kwargs)
-            return _EmptyAsyncStream()
-
-    class _FakeAsyncClient:
-        def __init__(self) -> None:
-            self.messages = _FakeAsyncMessagesAPI()
-
-    vars(model)["get_async_client"] = lambda: _FakeAsyncClient()
-    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
-    vars(model)["_has_beta_features"] = lambda **_kwargs: False
-    install_claude_prompt_cache_hook(model)
-    messages = [
-        Message(role="user", content="Run the tool sweep."),
-        Message(
-            role="assistant",
-            content="Calling tools.",
-            tool_calls=[
-                {
-                    "id": "toolu_01CLIENT",
-                    "function": {"name": "demo_tool", "arguments": "{}"},
-                },
-            ],
-            provider_data={"server_tool_blocks": [dict(_ORPHAN_TOOL_SEARCH_USE_BLOCK)]},
-        ),
-        Message(role="tool", tool_call_id="toolu_01CLIENT", content="ok"),
-        Message(role="user", content="Continue."),
-    ]
-
-    responses = [
-        response
-        async for response in model.ainvoke_stream(
-            messages=messages,
-            assistant_message=Message(role="assistant"),
-        )
-    ]
-
-    assert responses == []
-    wire_messages = captured_kwargs[0]["messages"]
-    assistant_wire = next(message for message in wire_messages if message["role"] == "assistant")
-    assert not any(
-        isinstance(block, dict)
-        and block.get("type") == "server_tool_use"
-        and block.get("name") == "tool_search_tool_regex"
-        for block in assistant_wire["content"]
+def _vertex_config() -> ModelConfig:
+    return ModelConfig(
+        provider="vertexai_claude",
+        id="claude-sonnet-5",
+        extra_kwargs={"project_id": "demo-project", "region": "us-central1"},
     )
-    assert any(getattr(block, "type", None) == "tool_use" for block in assistant_wire["content"])
-    assert wire_messages[-1]["content"][0]["type"] == "tool_result"
 
 
-@pytest.mark.parametrize("use_beta", [False, True])
-@pytest.mark.asyncio
-async def test_prompt_cache_hook_constructs_async_stream_off_event_loop(*, use_beta: bool) -> None:
-    """Slow synchronous SDK stream setup must not block unrelated async work."""
-    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
-    stream_started = threading.Event()
-    heartbeat_seen = threading.Event()
-    allow_stream_return = threading.Event()
-    heartbeat_before_release: list[bool] = []
-    stream_thread_ids: list[int] = []
-    event_loop_thread_id = threading.get_ident()
-
-    class _EmptyAsyncStream:
-        async def __aenter__(self) -> object:
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        def __aiter__(self) -> object:
-            return self
-
-        async def __anext__(self) -> object:
-            raise StopAsyncIteration
-
-    class _BlockingAsyncMessagesAPI:
-        def stream(self, **_kwargs: object) -> object:
-            stream_thread_ids.append(threading.get_ident())
-            stream_started.set()
-            assert allow_stream_return.wait(2.0)
-            return _EmptyAsyncStream()
-
-    class _FakeBetaAPI:
-        def __init__(self) -> None:
-            self.messages = _BlockingAsyncMessagesAPI()
-
-    class _FakeAsyncClient:
-        def __init__(self) -> None:
-            self.messages = _BlockingAsyncMessagesAPI()
-            self.beta = _FakeBetaAPI()
-
-    def release_after_heartbeat() -> None:
-        assert stream_started.wait(2.0)
-        heartbeat_before_release.append(heartbeat_seen.wait(0.5))
-        allow_stream_return.set()
-
-    vars(model)["get_async_client"] = lambda: _FakeAsyncClient()
-    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
-    vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta
-    install_claude_prompt_cache_hook(model)
-    release_thread = threading.Thread(target=release_after_heartbeat)
-    release_thread.start()
-
-    async def consume_stream() -> list[ModelResponse]:
-        return [
-            response
-            async for response in model.ainvoke_stream(
-                messages=[Message(role="user", content="Current turn")],
-                assistant_message=Message(role="assistant"),
-            )
-        ]
-
-    stream_task = asyncio.create_task(consume_stream())
-    try:
-        assert await asyncio.to_thread(stream_started.wait, 2.0)
-        await asyncio.sleep(0)
-        heartbeat_seen.set()
-        assert await asyncio.wait_for(stream_task, timeout=2.0) == []
-    finally:
-        allow_stream_return.set()
-        await asyncio.to_thread(release_thread.join, 2.0)
-
-    assert heartbeat_before_release == [True]
-    assert stream_thread_ids
-    assert stream_thread_ids[0] != event_loop_thread_id
-
-
-@pytest.mark.parametrize("cancel_count", [1, 2])
-@pytest.mark.parametrize("cancel_before_setup", [False, True])
-@pytest.mark.parametrize("use_beta", [False, True])
-@pytest.mark.asyncio
-async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutine(
+@pytest.mark.parametrize(
+    ("adc_type", "loader"),
+    [
+        ("authorized_user", "google.oauth2.credentials.Credentials.from_authorized_user_file"),
+        ("service_account", "google.oauth2.service_account.Credentials.from_service_account_file"),
+    ],
+)
+def test_vertex_claude_loads_the_runtime_application_credentials(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    cancel_before_setup: bool,
-    cancel_count: int,
-    use_beta: bool,
+    adc_type: str,
+    loader: str,
 ) -> None:
-    """Cancellation during worker setup must dispose the SDK request coroutine."""
-    transport_calls = 0
+    """A runtime ``GOOGLE_APPLICATION_CREDENTIALS`` file becomes the client's credentials without google.auth."""
+    credentials_path = tmp_path / "google-credentials.json"
+    credentials_path.write_text(json.dumps({"type": adc_type}), encoding="utf-8")
+    fake_credentials = object()
 
-    class _RecordingTransport(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-            nonlocal transport_calls
-            transport_calls += 1
-            return httpx.Response(200, request=request)
+    def load(path: str, *, scopes: list[str]) -> object:
+        assert Path(path).resolve() == credentials_path.resolve()
+        assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
+        return fake_credentials
 
-    client = AsyncAnthropic(
-        api_key="test-key",
-        http_client=httpx.AsyncClient(transport=_RecordingTransport()),
+    def load_through_google_auth(*_args: object, **_kwargs: object) -> object:
+        msg = "google.auth should not be used for this credential type"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(loader, load)
+    monkeypatch.setattr("google.auth.load_credentials_from_file", load_through_google_auth)
+    runtime_paths = _runtime_paths(tmp_path, GOOGLE_APPLICATION_CREDENTIALS=str(credentials_path))
+
+    provider = build_claude_provider(_vertex_config(), runtime_paths)
+
+    assert provider.settings.client_params == {"credentials": fake_credentials}
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        (None, "GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist"),
+        ('{"type":"authorized_user"}\n', "Failed to load GOOGLE_APPLICATION_CREDENTIALS"),
+    ],
+    ids=["missing", "invalid"],
+)
+def test_vertex_claude_rejects_unusable_runtime_application_credentials(
+    tmp_path: Path,
+    content: str | None,
+    message: str,
+) -> None:
+    """A missing or unreadable credential file fails at startup with an actionable error."""
+    credentials_path = tmp_path / "google-credentials.json"
+    if content is not None:
+        credentials_path.write_text(content, encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path, GOOGLE_APPLICATION_CREDENTIALS=str(credentials_path))
+
+    with pytest.raises(PermanentStartupError, match=message):
+        build_claude_provider(_vertex_config(), runtime_paths)
+
+
+def test_bedrock_claude_prefers_an_explicit_profile_over_static_env_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured ``aws_profile`` resolves credentials through a boto3 session in the env's region."""
+    (tmp_path / ".env").write_text(
+        "AWS_ACCESS_KEY_ID=env-access\nAWS_SECRET_ACCESS_KEY=env-secret\nAWS_REGION=us-east-1\n",
+        encoding="utf-8",
     )
-    request_coroutines: list[Coroutine[object, object, object]] = []
-    request_created = threading.Event()
-    original_post: Callable[..., Coroutine[object, object, object]] = client.post
 
-    def observed_post(*args: object, **kwargs: object) -> Coroutine[object, object, object]:
-        request = original_post(*args, **kwargs)
-        request_coroutines.append(request)
-        request_created.set()
-        return request
+    class _Session:
+        def __init__(self, **kwargs: object) -> None:
+            self.profile_name = kwargs.get("profile_name")
+            self.region_name = kwargs.get("region_name")
 
-    # Observe the real SDK request before the messages resource binds client.post.
-    # Its closed state proves cleanup directly, without collecting the whole
-    # pytest worker's object graph repeatedly to provoke an unawaited warning.
-    monkeypatch.setattr(client, "post", observed_post)
-    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
-    setup_started = threading.Event()
-    allow_setup = threading.Event()
-    setup_finished = threading.Event()
+    monkeypatch.setattr("boto3.session.Session", _Session)
+    model_config = ModelConfig(
+        provider="bedrock_claude",
+        id="anthropic.claude-opus-5",
+        extra_kwargs={"aws_profile": "my-explicit-profile"},
+    )
 
-    def blocking_prepare(_model: object, request_kwargs: dict[str, object]) -> dict[str, object]:
-        setup_started.set()
-        assert allow_setup.wait(SETTLE_TIMEOUT_SECONDS)
-        setup_finished.set()
-        return request_kwargs
+    settings = build_claude_provider(model_config, _runtime_paths(tmp_path)).settings
 
-    monkeypatch.setattr("mindroom.providers.claude_prompt_cache._prepare_claude_request_kwargs", blocking_prepare)
-    vars(model)["get_async_client"] = lambda: client
-    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"max_tokens": 1}
-    vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta
-    install_claude_prompt_cache_hook(model)
-
-    async def consume_stream() -> list[ModelResponse]:
-        if cancel_before_setup:
-            current_task = asyncio.current_task()
-            assert current_task is not None
-            for _ in range(cancel_count):
-                current_task.cancel()
-        return [
-            response
-            async for response in model.ainvoke_stream(
-                messages=[Message(role="user", content="hello")],
-                assistant_message=Message(role="assistant"),
-            )
-        ]
-
-    setup_task = asyncio.create_task(consume_stream())
-    try:
-        assert await asyncio.to_thread(setup_started.wait, SETTLE_TIMEOUT_SECONDS)
-        if not cancel_before_setup:
-            for _ in range(cancel_count):
-                setup_task.cancel()
-        allow_setup.set()
-        with pytest.raises(asyncio.CancelledError):
-            await setup_task
-
-        assert await asyncio.to_thread(setup_finished.wait, SETTLE_TIMEOUT_SECONDS)
-        assert await asyncio.to_thread(request_created.wait, SETTLE_TIMEOUT_SECONDS)
-        assert setup_task.cancelling() == cancel_count
-        assert len(request_coroutines) == 1
-        assert inspect.getcoroutinestate(request_coroutines[0]) == inspect.CORO_CLOSED
-        assert transport_calls == 0
-    finally:
-        allow_setup.set()
-        await client.close()
-        for request in request_coroutines:
-            request.close()
+    assert isinstance(settings.session, _Session)
+    assert (settings.session.profile_name, settings.session.region_name) == ("my-explicit-profile", "us-east-1")
+    assert (settings.aws_access_key, settings.aws_secret_key) == (None, None)
 
 
-def _dirty_replay_messages() -> list[Message]:
-    """A conversation whose assistant turn replays a persisted dirty tool-search block."""
-    return [
-        Message(role="system", content="System prompt"),
-        Message(role="user", content="Find me a tool."),
-        Message(
-            role="assistant",
-            content="I'll search for a weather tool.",
-            provider_data={
-                "server_tool_blocks": [dict(_SERVER_TOOL_USE_BLOCK), dict(_DIRTY_TOOL_SEARCH_RESULT_BLOCK)],
-            },
-        ),
-        Message(role="user", content="Thanks, what did you find?"),
-    ]
+def test_bedrock_claude_installs_boto3_on_demand(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """boto3 is an optional dependency that the Bedrock route installs when it is first built."""
+    calls: list[tuple[list[str], str]] = []
+
+    def ensure(dependencies: list[str], extra_name: str, *_args: object, **_kwargs: object) -> bool:
+        calls.append((dependencies, extra_name))
+        return False
+
+    monkeypatch.setattr(claude_messages, "ensure_optional_deps", ensure)
+    model_config = ModelConfig(
+        provider="bedrock_claude",
+        id="anthropic.claude-opus-5",
+        extra_kwargs={"aws_access_key": "aws-access", "aws_secret_key": "aws-secret", "aws_region": "us-east-1"},
+    )
+
+    build_claude_provider(model_config, _runtime_paths(tmp_path))
+
+    assert calls == [(["boto3"], "aws_bedrock")]
 
 
-def _wire_tool_search_results(wire_messages: list[dict[str, object]]) -> list[object]:
-    return [
-        block
-        for message in wire_messages
-        for block in (message.get("content") or [])
-        if isinstance(block, dict) and block.get("type") == "tool_search_tool_result"
-    ]
+def test_bedrock_claude_records_none_of_the_aws_keys_it_reads_from_the_runtime_env(tmp_path: Path) -> None:
+    """Static AWS keys from the runtime ``.env`` authenticate requests but stay out of the route's model params."""
+    (tmp_path / ".env").write_text(
+        "AWS_ACCESS_KEY_ID=env-access\nAWS_SECRET_ACCESS_KEY=env-secret\nAWS_SESSION_TOKEN=env-session\n",
+        encoding="utf-8",
+    )
+    model_config = ModelConfig(
+        provider="bedrock_claude",
+        id="anthropic.claude-opus-5",
+        extra_kwargs={"aws_region": "us-east-1"},
+    )
+
+    provider = build_claude_provider(model_config, _runtime_paths(tmp_path))
+
+    settings = provider.settings
+    assert (settings.aws_access_key, settings.aws_secret_key, settings.aws_session_token) == (
+        "env-access",
+        "env-secret",
+        "env-session",
+    )
+    assert provider.model_params == {
+        "max_tokens": 8192,
+        "cache_system_prompt": True,
+        "extended_cache_time": True,
+        "timeout": 3600.0,
+        "aws_region": "us-east-1",
+    }
 
 
-_EMPTIED_TOOL_SEARCH_RESULT_BLOCK = {
-    "type": "tool_search_tool_result",
-    "tool_use_id": "srvtoolu_01ABC",
-    "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+_COMPLETION = {
+    "id": "chatcmpl-1",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "m",
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
 }
 
 
-def test_prompt_cache_hook_sanitizes_replayed_tool_search_results() -> None:
-    """A replayed search result with no currently available tool reaches the wire emptied and schema-clean."""
-    model = _vertex_claude_model()
-    captured_kwargs = _install_fake_sync_client(model)
-    install_claude_prompt_cache_hook(model)
-
-    model.response(messages=_dirty_replay_messages(), compression_manager=None)
-
-    assert _wire_tool_search_results(captured_kwargs[0]["messages"]) == [_EMPTIED_TOOL_SEARCH_RESULT_BLOCK]
+@pytest.fixture
+def chat_wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
+    """Answer every request sent through the shared model HTTP client with a finished chat completion."""
+    wire = Wire(httpx.Response(200, json=_COMPLETION))
+    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", wire.client.send)
+    return wire
 
 
-def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_tools() -> None:
-    """Sanitization must engage even when neither the ladder nor defer tagging does.
-
-    Pins the unconditional client proxying: a thread poisoned under a
-    tool-search model and continued via `!model` on a cache-disabled Claude
-    model with no deferred tools must still send schema-clean history, while
-    the disabled ladder stays inert.
-    """
-    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
-    captured_kwargs = _install_fake_sync_client(model)
-    install_claude_prompt_cache_hook(model)
-
-    model.response(messages=_dirty_replay_messages(), compression_manager=None)
-
-    wire_messages = captured_kwargs[0]["messages"]
-    assert _wire_tool_search_results(wire_messages) == [_EMPTIED_TOOL_SEARCH_RESULT_BLOCK]
-    assert _count_cache_markers({"messages": list(wire_messages)}) == 0
-
-
-def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Vertex Claude should translate runtime ADC paths into explicit client credentials."""
-    config_data = {
-        "models": {
-            "vertex_claude_model": {
-                "provider": "vertexai_claude",
-                "id": "claude-sonnet-5",
-                "extra_kwargs": {
-                    "project_id": "demo-project",
-                    "region": "us-central1",
-                },
-            },
-        },
-        "defaults": {
-            "markdown": True,
-        },
-        "router": {
-            "model": "vertex_claude_model",
-        },
-        "memory": {
-            "embedder": {
-                "provider": "openai",
-                "config": {
-                    "model": "text-embedding-3-small",
-                },
-            },
-        },
-        "agents": {},
-    }
-
-    runtime_root = Path(tempfile.mkdtemp())
-    credentials_path = runtime_root / "google-credentials.json"
-    credentials_path.write_text('{"type":"authorized_user"}\n', encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=runtime_root / "config.yaml",
-        storage_path=runtime_root / "mindroom_data",
-        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+async def _send(model_config: ModelConfig, runtime_paths: RuntimePaths) -> None:
+    config = Config(models={"default": model_config})
+    await complete(
+        build_model_provider(config, runtime_paths),
+        ModelRequest(messages=[Message(role="user", content="Hi")], stream=False),
     )
-    config = Config(**config_data)
-    fake_google_credentials = object()
-    import_order: list[str] = []
-
-    class FakeAuthorizedUserCredentials:
-        @classmethod
-        def from_authorized_user_file(cls, path: str, *, scopes: list[str]) -> object:
-            assert Path(path).resolve() == credentials_path.resolve()
-            assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
-            return fake_google_credentials
-
-    original_import_module = importlib.import_module
-
-    def fake_import_module(module_name: str) -> object:
-        import_order.append(module_name)
-        if module_name == "google.auth":
-            msg = "google.auth should not be used for authorized-user ADC"
-            raise AssertionError(msg)
-        if module_name == "google.oauth2.credentials":
-            return type("FakeOauthCredentialsModule", (), {"Credentials": FakeAuthorizedUserCredentials})
-        return original_import_module(module_name)
-
-    monkeypatch.setattr("mindroom.providers.google_adc.importlib.import_module", fake_import_module)
-
-    model = get_model_instance(config, runtime_paths, "vertex_claude_model")
-
-    assert isinstance(model, VertexAIClaude)
-    assert model.client_params is not None
-    assert model.client_params["credentials"] is fake_google_credentials
-    assert import_order == ["google.oauth2.credentials"]
 
 
-def test_vertexai_claude_rejects_missing_runtime_google_application_credentials() -> None:
-    """Missing GOOGLE_APPLICATION_CREDENTIALS should fail with an actionable error."""
-    config_data = {
-        "models": {
-            "vertex_claude_model": {
-                "provider": "vertexai_claude",
-                "id": "claude-sonnet-5",
-                "extra_kwargs": {
-                    "project_id": "demo-project",
-                    "region": "us-central1",
-                },
-            },
-        },
-        "router": {
-            "model": "vertex_claude_model",
-        },
-        "agents": {},
-    }
-
-    runtime_root = Path(tempfile.mkdtemp())
-    credentials_path = runtime_root / "missing-google-credentials.json"
-    runtime_paths = resolve_runtime_paths(
-        config_path=runtime_root / "config.yaml",
-        storage_path=runtime_root / "mindroom_data",
-        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+@pytest.mark.asyncio
+async def test_azure_takes_its_key_endpoint_and_version_from_the_runtime_env(tmp_path: Path, chat_wire: Wire) -> None:
+    """The Azure route reads ``AZURE_OPENAI_*`` from the runtime ``.env``."""
+    (tmp_path / ".env").write_text(
+        "AZURE_OPENAI_API_KEY=sk-azure\n"
+        "AZURE_OPENAI_ENDPOINT=https://example-resource.openai.azure.com\n"
+        "AZURE_OPENAI_API_VERSION=2024-10-21\n",
+        encoding="utf-8",
     )
-    config = Config(**config_data)
 
-    with pytest.raises(
-        PermanentStartupError,
-        match="GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist",
-    ):
-        get_model_instance(config, runtime_paths, "vertex_claude_model")
+    await _send(ModelConfig(provider="azure", id="team-chat-deployment"), _runtime_paths(tmp_path))
+
+    [request] = chat_wire.requests
+    assert request.url.host == "example-resource.openai.azure.com"
+    assert request.url.params["api-version"] == "2024-10-21"
+    assert "/deployments/team-chat-deployment/" in request.url.path
+    assert request.headers["api-key"] == "sk-azure"
 
 
-def test_vertexai_claude_rejects_invalid_runtime_google_application_credentials() -> None:
-    """Invalid ADC files should fail as permanent startup errors."""
-    config_data = {
-        "models": {
-            "vertex_claude_model": {
-                "provider": "vertexai_claude",
-                "id": "claude-sonnet-5",
-                "extra_kwargs": {
-                    "project_id": "demo-project",
-                    "region": "us-central1",
-                },
-            },
-        },
-        "router": {
-            "model": "vertex_claude_model",
-        },
-        "agents": {},
-    }
-
-    runtime_root = Path(tempfile.mkdtemp())
-    credentials_path = runtime_root / "invalid-google-credentials.json"
-    credentials_path.write_text('{"type":"authorized_user"}\n', encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=runtime_root / "config.yaml",
-        storage_path=runtime_root / "mindroom_data",
-        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+@pytest.mark.asyncio
+async def test_azure_reads_an_endpoint_file_and_only_azure_specific_variables(tmp_path: Path, chat_wire: Wire) -> None:
+    """``AZURE_OPENAI_ENDPOINT_FILE`` and ``AZURE_OPENAI_DEPLOYMENT`` apply; the generic ``OPENAI_API_VERSION`` does not."""
+    endpoint_file = tmp_path / "azure-endpoint.txt"
+    endpoint_file.write_text("https://file-resource.openai.azure.com\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "AZURE_OPENAI_API_KEY=sk-azure\n"
+        f"AZURE_OPENAI_ENDPOINT_FILE={endpoint_file}\n"
+        "OPENAI_API_VERSION=2023-01-01\n"
+        "AZURE_OPENAI_DEPLOYMENT=env-chat-deployment\n",
+        encoding="utf-8",
     )
-    config = Config(**config_data)
 
-    with pytest.raises(PermanentStartupError, match="Failed to load GOOGLE_APPLICATION_CREDENTIALS"):
-        get_model_instance(config, runtime_paths, "vertex_claude_model")
+    await _send(ModelConfig(provider="azure", id="config-chat-deployment"), _runtime_paths(tmp_path))
+
+    [request] = chat_wire.requests
+    assert request.url.host == "file-resource.openai.azure.com"
+    assert "/deployments/env-chat-deployment/" in request.url.path
+    assert request.url.params["api-version"] != "2023-01-01"
 
 
-def test_vertexai_claude_loads_service_account_credentials_directly(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_kwargs", "host"),
+    [({}, "api.z.ai"), ({"base_url": "https://open.bigmodel.cn/api/paas/v4"}, "open.bigmodel.cn")],
+    ids=["default", "custom"],
+)
+async def test_zai_sends_to_its_endpoint_with_the_runtime_env_key(
+    tmp_path: Path,
+    chat_wire: Wire,
+    extra_kwargs: dict[str, str],
+    host: str,
 ) -> None:
-    """Service-account ADC should avoid google-auth's authorized-user imports."""
-    config_data = {
-        "models": {
-            "vertex_claude_model": {
-                "provider": "vertexai_claude",
-                "id": "claude-sonnet-5",
-                "extra_kwargs": {
-                    "project_id": "demo-project",
-                    "region": "us-central1",
-                },
-            },
-        },
-        "router": {
-            "model": "vertex_claude_model",
-        },
-        "agents": {},
-    }
+    """Z.ai defaults to its own API and takes ``ZAI_API_KEY`` from the runtime env when the config sets none."""
+    runtime_paths = _runtime_paths(tmp_path, ZAI_API_KEY="env-zai-key")
 
-    runtime_root = Path(tempfile.mkdtemp())
-    credentials_path = runtime_root / "google-credentials.json"
-    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=runtime_root / "config.yaml",
-        storage_path=runtime_root / "mindroom_data",
-        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    await _send(ModelConfig(provider="zai", id="glm-5.3", extra_kwargs=extra_kwargs), runtime_paths)
+
+    [request] = chat_wire.requests
+    assert request.url.host == host
+    assert request.headers["authorization"] == "Bearer env-zai-key"
+
+
+@pytest.mark.asyncio
+async def test_zai_without_a_key_never_sends_the_openai_key(tmp_path: Path, chat_wire: Wire) -> None:
+    """A Z.ai model without a key sends the keyless placeholder, never ``OPENAI_API_KEY`` from the environment."""
+    runtime_paths = _runtime_paths(tmp_path, OPENAI_API_KEY="sk-openai")
+
+    await _send(ModelConfig(provider="zai", id="glm-5.3", extra_kwargs={"api_key": None}), runtime_paths)
+
+    [request] = chat_wire.requests
+    assert request.headers["authorization"] == "Bearer not-provided"
+
+
+def test_the_openai_family_builder_rejects_keys_its_route_does_not_take(tmp_path: Path) -> None:
+    """A misspelled setting fails at construction and names the keys the route accepts."""
+    model_config = ModelConfig(provider="zai", id="glm-5.3", extra_kwargs={"temprature": 0.2})
+
+    with pytest.raises(ValueError, match=r"Unsupported extra_kwargs for provider 'zai': temprature\. Accepted keys: "):
+        build_openai_provider(model_config, ProviderRuntime(runtime_paths=_runtime_paths(tmp_path)))
+
+
+# --- Retired Agno fields --------------------------------------------------------------------------------------
+
+_RETIRED_FIELD_WARNING = "Ignoring a retired config field; remove it from the config"
+
+
+def _load_with_retired_field_warnings(models: dict[str, dict[str, Any]]) -> tuple[Config, list[str]]:
+    """Load ``models`` in a fresh process state and return the config with the fields it warned about."""
+    legacy_fields._warn_retired_field.cache_clear()
+    with capture_logs() as logs:
+        config = Config.model_validate({"models": models})
+    return config, [log["field"] for log in logs if log["event"] == _RETIRED_FIELD_WARNING]
+
+
+@pytest.mark.asyncio
+async def test_a_retired_agno_field_loads_with_one_warning_and_the_model_answers(
+    tmp_path: Path,
+    chat_wire: Wire,
+) -> None:
+    """``retries`` on two OpenAI models warns once, leaves their settings, and the model still answers."""
+    retrying = {"provider": "openai", "id": "gpt-6-luna", "api": "chat_completions"}
+    config, warned = _load_with_retired_field_warnings(
+        {
+            "default": {**retrying, "extra_kwargs": {"retries": 3, "seed": 7}},
+            "helper": {**retrying, "extra_kwargs": {"retries": 1}},
+        },
     )
-    config = Config(**config_data)
-    fake_google_credentials = object()
-    import_order: list[str] = []
 
-    class FakeServiceAccountCredentials:
-        @classmethod
-        def from_service_account_file(cls, path: str, *, scopes: list[str]) -> object:
-            assert Path(path).resolve() == credentials_path.resolve()
-            assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
-            return fake_google_credentials
-
-    original_import_module = importlib.import_module
-
-    def fake_import_module(module_name: str) -> object:
-        import_order.append(module_name)
-        if module_name == "google.auth":
-            msg = "google.auth should not be used for service-account ADC"
-            raise AssertionError(msg)
-        if module_name == "google.oauth2.service_account":
-            return type("FakeServiceAccountModule", (), {"Credentials": FakeServiceAccountCredentials})
-        return original_import_module(module_name)
-
-    monkeypatch.setattr("mindroom.providers.google_adc.importlib.import_module", fake_import_module)
-
-    model = get_model_instance(config, runtime_paths, "vertex_claude_model")
-
-    assert isinstance(model, VertexAIClaude)
-    assert model.client_params is not None
-    assert model.client_params["credentials"] is fake_google_credentials
-    assert import_order == ["google.oauth2.service_account"]
+    assert warned == ["extra_kwargs.retries"]
+    assert config.models["default"].extra_kwargs == {"seed": 7}
+    assert config.models["helper"].extra_kwargs == {}
+    turn = await complete(
+        build_model_provider(config, _runtime_paths(tmp_path, OPENAI_API_KEY="sk-test")),
+        ModelRequest(messages=[Message(role="user", content="Hi")], stream=False),
+    )
+    assert turn.message.content == "ok"
+    [request] = chat_wire.requests
+    body = json.loads(request.content)
+    assert body["seed"] == 7
+    assert "retries" not in body
 
 
-def test_get_model_instance_supports_zai_provider() -> None:
-    """Z.ai should use Agno's OpenAI-compatible provider class with the Z.ai base URL."""
-    config_data = {
-        "models": {
-            "glm": {
-                "provider": "zai",
-                "id": "glm-5.3",
-                "extra_kwargs": {"api_key": "test-zai-key"},
-            },
-            "glm_custom": {
-                "provider": "zai",
-                "id": "glm-5.3",
-                "extra_kwargs": {
-                    "api_key": "test-zai-key",
-                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
-                },
-            },
+@pytest.mark.parametrize(
+    ("provider", "field"),
+    [
+        ("synthetic", "retry_with_guidance"),
+        ("groq", "cache_response"),
+        ("kimi", "modalities"),
+        ("openai", "background"),
+        ("codex", "temperature"),
+        ("openai_codex", "max_output_tokens"),
+        ("anthropic", "skills"),
+        ("vertexai_claude", "auth_token"),
+        ("google", "url_context"),
+        ("gemini", "speech_config"),
+    ],
+)
+def test_retired_agno_fields_load_with_one_warning_on_the_providers_that_took_them(provider: str, field: str) -> None:
+    """A field the provider's Agno model class took loads with one warning and leaves the model's other keys."""
+    config, warned = _load_with_retired_field_warnings(
+        {"default": {"provider": provider, "id": "m", "extra_kwargs": {field: True, "other": 1}}},
+    )
+
+    assert warned == [f"extra_kwargs.{field}"]
+    assert config.models["default"].extra_kwargs == {"other": 1}
+
+
+def test_a_retired_field_that_two_providers_took_warns_once() -> None:
+    """Agno's OpenAI Chat and Gemini models both took the metrics switch, so setting it on each still warns once."""
+    switch = {"collect_metrics_on_completion": True}
+    config, warned = _load_with_retired_field_warnings(
+        {
+            "default": {"provider": "openai", "id": "gpt-6-luna", "extra_kwargs": switch},
+            "gemini": {"provider": "google", "id": "gemini-3.8-flash", "extra_kwargs": switch},
         },
-        "router": {
-            "model": "glm",
-        },
-        "agents": {},
-    }
+    )
 
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-
-    model = get_model_instance(config, runtime_paths, "glm")
-    assert isinstance(model, OpenAILike)
-    assert model.id == "glm-5.3"
-    assert model.api_key == "test-zai-key"
-    assert model.base_url == "https://api.z.ai/api/paas/v4"
-    assert model.name == "ZAI"
-    assert model.provider == "ZAI"
-
-    custom_model = get_model_instance(config, runtime_paths, "glm_custom")
-    assert custom_model.base_url == "https://open.bigmodel.cn/api/paas/v4"
+    assert warned == ["extra_kwargs.collect_metrics_on_completion"]
+    assert (config.models["default"].extra_kwargs, config.models["gemini"].extra_kwargs) == ({}, {})
 
 
-def test_zai_provider_resolves_api_key_from_runtime_env() -> None:
-    """A zai model without an explicit key should resolve ZAI_API_KEY from the runtime env."""
-    config_data = {
-        "models": {
-            "glm": {
-                "provider": "zai",
-                "id": "glm-5.3",
-            },
-        },
-        "router": {
-            "model": "glm",
-        },
-        "agents": {},
-    }
+@pytest.mark.parametrize(
+    ("provider", "field"),
+    [("openai", "retriez"), ("openai", "skills"), ("groq", "audio"), ("anthropic", "url_context")],
+    ids=["typo", "claude-only", "chat-only", "gemini-only"],
+)
+def test_keys_no_agno_class_of_the_provider_took_still_fail_at_build(
+    tmp_path: Path,
+    provider: str,
+    field: str,
+) -> None:
+    """A typo or another provider's Agno field loads without a warning and fails at build with the accepted keys."""
+    config, warned = _load_with_retired_field_warnings(
+        {"default": {"provider": provider, "id": "m", "extra_kwargs": {field: True}}},
+    )
 
-    config, runtime_paths = _config_with_runtime_paths(config_data, process_env={"ZAI_API_KEY": "env-zai-key"})
-
-    model = get_model_instance(config, runtime_paths, "glm")
-
-    assert model.api_key == "env-zai-key"
-
-
-def test_zai_provider_drops_falsy_api_key() -> None:
-    """A falsy api_key must not reach the client, where agno would fall back to OPENAI_API_KEY."""
-    config_data = {
-        "models": {
-            "glm": {
-                "provider": "zai",
-                "id": "glm-5.3",
-                "extra_kwargs": {"api_key": None},
-            },
-        },
-        "router": {
-            "model": "glm",
-        },
-        "agents": {},
-    }
-
-    config, runtime_paths = _config_with_runtime_paths(config_data)
-
-    model = get_model_instance(config, runtime_paths, "glm")
-
-    assert model.api_key == "not-provided"
+    assert warned == []
+    with pytest.raises(
+        ValueError,
+        match=rf"Unsupported extra_kwargs for provider '{provider}': {field}\. Accepted keys: ",
+    ):
+        build_model_provider(config, _runtime_paths(tmp_path))
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def _accepted_keys(route: str) -> frozenset[str]:
+    """Return every ``extra_kwargs`` key ``route`` accepts, from the settings its adapter parses."""
+    if route in ACCEPTED_KEYS:
+        return ACCEPTED_KEYS[route]
+    if route == "codex":
+        return CODEX_FIELDS
+    settings_types = {
+        "google": [GeminiSettings],
+        "ollama": [OllamaSettings],
+        "synthetic": [SyntheticSettings],
+    }.get(route, [ChatSettings, ResponsesSettings])
+    return frozenset(field.name for settings_type in settings_types for field in fields(settings_type))
+
+
+def test_no_route_accepts_a_retired_agno_field_of_its_provider() -> None:
+    """Config load drops a retired field only where no route would take it, so no accepted setting is lost."""
+    routes = frozenset(ACCEPTED_KEYS) | OPENAI_FAMILY_PROVIDERS | {"google", "ollama", "synthetic"}
+
+    for retired in legacy_fields._RETIRED_MODEL_SETTINGS:
+        scope = routes if retired.providers is None else retired.providers
+        assert scope <= routes
+        for route in scope:
+            assert not retired.fields & _accepted_keys(route), route

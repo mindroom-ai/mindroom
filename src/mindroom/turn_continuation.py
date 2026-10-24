@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.models.response import ToolExecution
+    from mindroom.llm.events import ReportedCall
 
 __all__ = ["TURN_CONTINUATION_LIMIT", "continuation_decision_from_tools"]
 
@@ -46,7 +46,7 @@ def _json_object(result: object) -> dict[str, object] | None:
 
 
 def _model_switch_from_tools(
-    tools: Sequence[ToolExecution] | None,
+    tools: Sequence[ReportedCall] | None,
 ) -> tuple[str | None, str | None] | None:
     """Return the last successful thread-model switch in provider call order."""
     switch_seen = False
@@ -142,7 +142,7 @@ def _model_switch_decision(
 
 
 def continuation_decision_from_tools(
-    tools: Sequence[ToolExecution] | None,
+    tools: Sequence[ReportedCall] | None,
     *,
     original_prompt: str,
     continuation_count: int,

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.llm.usage import TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.dependencies import check_deps_installed
 
@@ -346,6 +347,8 @@ class VoiceAgentOptions:
     on_session_error: Callable[[str], None] | None = None
     #: Saves the speech model's cumulative token usage for the call after each update.
     record_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
+    #: Closes what the call's tools connected, once the call ends.
+    close_tools: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -391,13 +394,7 @@ class _RealtimeResponseUsage:
     """Token usage of one realtime speech-model response."""
 
     created_at: float
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    audio_input_tokens: int = 0
-    audio_output_tokens: int = 0
-    reasoning_tokens: int = 0
+    tokens: TokenCounts
 
 
 @dataclass(frozen=True)
@@ -527,6 +524,8 @@ class RealtimeVoiceBridge:
         else:
             model = realtime.RealtimeModel(model=options.model, api_key=options.api_key)
         self._owned_speech_resource_closers += (model.aclose,)
+        if options.close_tools is not None:
+            self._owned_speech_resource_closers += (options.close_tools,)
         session = AgentSession(llm=model)
         agent = Agent(instructions=options.instructions, tools=list(options.tools))
         await self._start_session(session, agent, options, rtc_module=rtc, room_io_module=room_io)
@@ -625,7 +624,7 @@ class RealtimeVoiceBridge:
         created_at = time.time()
         self._record_realtime_usage = record_usage
 
-        totals = (0, 0, 0, 0, 0, 0, 0)
+        totals = TokenCounts()
         responses: list[_RealtimeResponseUsage] = []
 
         def _on_usage(event: SessionUsageUpdatedEvent) -> None:
@@ -635,20 +634,20 @@ class RealtimeVoiceBridge:
             if not llm_usage:
                 return
             # LiveKit reports running totals after each response, so the increase is that response's usage.
-            current = (
-                sum(entry.input_tokens for entry in llm_usage),
-                sum(entry.output_tokens for entry in llm_usage),
-                sum(entry.input_cached_tokens for entry in llm_usage),
-                sum(entry.input_cache_creation_tokens for entry in llm_usage),
-                sum(entry.input_audio_tokens for entry in llm_usage),
-                sum(entry.output_audio_tokens for entry in llm_usage),
-                sum(entry.output_reasoning_tokens for entry in llm_usage),
+            current = TokenCounts(
+                input_tokens=sum(entry.input_tokens for entry in llm_usage),
+                output_tokens=sum(entry.output_tokens for entry in llm_usage),
+                cache_read_tokens=sum(entry.input_cached_tokens for entry in llm_usage),
+                cache_write_tokens=sum(entry.input_cache_creation_tokens for entry in llm_usage),
+                audio_input_tokens=sum(entry.input_audio_tokens for entry in llm_usage),
+                audio_output_tokens=sum(entry.output_audio_tokens for entry in llm_usage),
+                reasoning_tokens=sum(entry.output_reasoning_tokens for entry in llm_usage),
             )
-            increase = [now - then for now, then in zip(current, totals, strict=True)]
+            increase = current - totals
             totals = current
-            if not any(increase):
+            if increase == TokenCounts():
                 return
-            responses.append(_RealtimeResponseUsage(time.time(), *increase))
+            responses.append(_RealtimeResponseUsage(time.time(), increase))
             self._realtime_usage = RealtimeCallUsage(
                 usage_id=usage_id,
                 model=model,

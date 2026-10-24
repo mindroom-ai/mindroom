@@ -4,19 +4,15 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
 
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import tool_call_budget
+from mindroom.agent_loop.run import run_agent
 from mindroom.event_loop_stall import EventLoopStallDetector
 from mindroom.matrix.sync_diagnostics import SyncStallDiagnostics
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from agno.models.base import Model
+from tests.agent_loop.helpers import collect, context, spec, toolkit
+from tests.fakes.scripted_model import ScriptedModel, calls, tool_call
 
 _DOCS_PAGE = Path(__file__).resolve().parents[1] / "docs" / "deployment" / "operational-log-events.md"
 
@@ -77,24 +73,18 @@ async def test_matrix_sync_stall_diagnostics_keeps_its_name_and_fields() -> None
     assert _emitted_fields(logs, "matrix_sync_stall_diagnostics") == _STABLE_EVENTS["matrix_sync_stall_diagnostics"]
 
 
-def test_tool_call_limit_reached_keeps_its_name_and_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_tool_call_limit_reached_keeps_its_name_and_fields() -> None:
     """The model request refused after budget plus two requests logs the pinned warning."""
-    opened_gates: list[Callable[[int | None], Callable[[], bool] | None]] = []
 
-    def record_gate(
-        _model: Model,
-        *,
-        marker: str,  # noqa: ARG001
-        open_gate: Callable[[int | None], Callable[[], bool] | None],
-    ) -> None:
-        opened_gates.append(open_gate)
+    def probe() -> str:
+        """Record one call."""
+        return "probed"
 
-    monkeypatch.setattr(tool_call_budget, "install_response_request_gate", record_gate)
-    tool_call_budget.install_model_call_cap(cast("Model", object()), entity_name="general")
-    allow_request = opened_gates[0](0)
-    assert allow_request is not None
+    model = ScriptedModel([calls(tool_call("probe", f"call_{index}")) for index in range(3)])
 
     with capture_logs() as logs:
-        assert [allow_request() for _ in range(3)] == [True, True, False]
+        await collect(run_agent(spec(model, toolkit(probe), max_tool_calls_per_turn=0), [], ctx=context()))
 
+    assert len(model.requests) == 2
     assert _emitted_fields(logs, "tool_call_limit_reached") == _STABLE_EVENTS["tool_call_limit_reached"]

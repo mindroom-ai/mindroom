@@ -11,18 +11,14 @@ so after every step the test checks exactly what replay represents.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from agno.db.sqlite import SqliteDb
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
@@ -40,12 +36,25 @@ from mindroom.history.storage import (
 )
 from mindroom.history.summary_rows import Segment
 from mindroom.history.types import HistoryScope
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from tests.conftest import seed_session
 from tests.history_helpers import folded_run_ids, stored_run_ids
 
+if TYPE_CHECKING:
+    from mindroom.session_storage.store import ConversationStore
+
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 _SESSION = "session"
+
+
+def _session_row() -> ConversationSession:
+    """Return the conversation's row; each save gets its own, since a save updates the session it is given."""
+    return ConversationSession(kind="agent", session_id=_SESSION, owner_id="code")
+
+
 _LEGACY_RUNS = ("legacy-1", "legacy-2")
 
 
@@ -66,9 +75,9 @@ def _summary_of(run_ids: set[str]) -> str:
     return "|".join(sorted(run_ids))
 
 
-def _covered(session: AgentSession) -> set[str]:
+def _covered(session: ConversationSession) -> set[str]:
     """Return the run ids the replayed summary covers, and ``<run>~`` for each running turn part it folded."""
-    return set(session.summary.summary.split("|")) if session.summary is not None else set()
+    return set(session.summary.text.split("|")) if session.summary is not None else set()
 
 
 def _segment_owners(covered: set[str]) -> set[str]:
@@ -84,7 +93,7 @@ class _Runner:
         self._redacted: set[str] = set()
         self._removed: set[str] = set()
         self._paused: list[str] = []
-        self._snapshots: list[AgentSession] = []
+        self._snapshots: list[ConversationSession] = []
         # The lowest index a redaction in the current step may delete from; ``None`` when it may delete nothing.
         self._cut_floor: int | None = None
         self._moved: set[str] = set()
@@ -97,14 +106,15 @@ class _Runner:
         # Runs whose stored part a retirement may remove in the current step, because they folded mid-turn.
         self._retirable: set[str] = set()
         seeding = self._open()
+        seed_session(seeding, self._legacy_session() if legacy else _session_row())
         if legacy:
-            seed_session(seeding, self._legacy_session())
-        else:
-            seed_session(seeding, AgentSession(session_id=_SESSION, agent_id="code"))
-        seeding.close()
-        if legacy:
-            # Releases before the archive had no summary-row tables, so the next open adopts the state.
+            # Releases before the archive had no summary-row tables and replayed the session row's summary, so the
+            # next open adopts the state.
             with sqlite3.connect(root / "sessions" / "code.db") as connection:
+                connection.execute(
+                    "UPDATE code_sessions SET summary = ? WHERE session_id = ?",
+                    (json.dumps({"summary": _summary_of(set(_LEGACY_RUNS))}), _SESSION),
+                )
                 connection.execute("DROP TABLE IF EXISTS code_sessions_summaries")
                 connection.execute("DROP TABLE IF EXISTS code_sessions_removed_runs")
         self._storage = self._open()
@@ -137,21 +147,16 @@ class _Runner:
                 self._apply_redaction(event_id)
             self._check()
 
-    def close(self) -> None:
-        self._storage.close()
-
-    def _open(self) -> SqliteDb:
-        db = create_state_storage("code", self._root, subdir="sessions", session_table="code_sessions")
-        assert isinstance(db, SqliteDb)
-        return db
+    def _open(self) -> ConversationStore:
+        return create_state_storage("code", self._root)
 
     @staticmethod
-    def _legacy_session() -> AgentSession:
+    def _legacy_session() -> ConversationSession:
         """Return a session as the destructive compactor left it after folding the legacy runs."""
-        return AgentSession(
+        return ConversationSession(
+            kind="agent",
             session_id=_SESSION,
-            agent_id="code",
-            summary=SessionSummary(summary=_summary_of(set(_LEGACY_RUNS))),
+            owner_id="code",
             metadata={
                 constants.MINDROOM_COMPACTION_METADATA_KEY: {
                     "version": 2,
@@ -164,13 +169,13 @@ class _Runner:
             },
         )
 
-    def _load(self) -> AgentSession:
-        session = get_agent_session(self._storage, _SESSION)
+    def _load(self) -> ConversationSession:
+        session = self._storage.load_session(_SESSION, "agent")
         assert session is not None
         return session
 
-    def _new_run(self, run_id: str, status: RunStatus) -> RunOutput:
-        return RunOutput(
+    def _new_run(self, run_id: str, status: RunStatus) -> RunRecord:
+        return RunRecord(
             run_id=run_id,
             agent_id="code",
             session_id=_SESSION,
@@ -185,12 +190,12 @@ class _Runner:
 
     def _add(self, _action: Action) -> None:
         run_id = f"r{len(self._created)}"
-        self._storage.upsert_run(run=self._new_run(run_id, RunStatus.completed), session_id=_SESSION, user_id=None)
+        self._storage.save_run(_session_row(), self._new_run(run_id, RunStatus.completed), record_usage=True)
         self._created.append(run_id)
 
     def _pause(self, _action: Action) -> None:
         run_id = f"r{len(self._created)}"
-        self._storage.upsert_run(run=self._new_run(run_id, RunStatus.paused), session_id=_SESSION, user_id=None)
+        self._storage.save_run(_session_row(), self._new_run(run_id, RunStatus.paused), record_usage=True)
         self._created.append(run_id)
         self._paused.append(run_id)
 
@@ -201,33 +206,33 @@ class _Runner:
             return
         run_id = waiting[action.index % len(waiting)]
         self._paused.remove(run_id)
-        self._storage.upsert_run(run=self._new_run(run_id, RunStatus.completed), session_id=_SESSION, user_id=None)
+        self._storage.save_run(_session_row(), self._new_run(run_id, RunStatus.completed), record_usage=True)
         self._moved.add(run_id)
 
-    def _chunk(self, count: int) -> tuple[AgentSession, list[str], str] | None:
+    def _chunk(self, count: int) -> tuple[ConversationSession, list[str], str] | None:
         """Return the oldest loaded visible runs a compaction would fold next and the summary it would write."""
         session = self._load()
         chunk = [
             run.run_id
             for run in session.runs or []
-            if isinstance(run, RunOutput) and run.run_id and run.status == RunStatus.completed
+            if isinstance(run, RunRecord) and run.run_id and run.status == RunStatus.completed
         ][:count]
         if not chunk:
             return None
         return session, chunk, _summary_of(_covered(session) | set(chunk))
 
-    def _append(self, session: AgentSession, chunk: list[str], summary: str, basis: object) -> bool:
+    def _append(self, session: ConversationSession, chunk: list[str], summary: str, basis: object) -> bool:
         return append_compaction_chunk(
             storage=self._storage,
             session=session,
             scope=_SCOPE,
             basis=basis,  # type: ignore[arg-type]
             included_run_ids=chunk,
-            summary=SessionSummary(summary=summary),
+            summary=summary,
             summary_model="fuzz-model",
         )
 
-    def _basis(self, session: AgentSession, run_ids: list[str]) -> object:
+    def _basis(self, session: ConversationSession, run_ids: list[str]) -> object:
         return read_chunk_basis(
             self._storage,
             session,
@@ -286,7 +291,7 @@ class _Runner:
         run_id = self._running
         if run_id in self._fold_stopped:
             return
-        session = AgentSession(session_id=_SESSION, agent_id="code")
+        session = ConversationSession(kind="agent", session_id=_SESSION, owner_id="code")
         basis = read_fold_basis(self._storage, session, _SCOPE)
         assert basis is not None
         previous = set(basis.summary.split("|")) if basis.summary is not None else set()
@@ -327,7 +332,7 @@ class _Runner:
             return
         status = (RunStatus.completed, RunStatus.cancelled, RunStatus.paused)[outcome]
         stored_paused = run_id in self._stored and run_id not in self._stored_visible()
-        self._storage.upsert_run(run=self._new_run(run_id, status), session_id=_SESSION, user_id=None)
+        self._storage.save_run(_session_row(), self._new_run(run_id, status), record_usage=True)
         if status == RunStatus.paused:
             self._paused.append(run_id)
         elif status == RunStatus.completed and stored_paused:
@@ -364,9 +369,10 @@ class _Runner:
         self._snapshots.append(self._load())
 
     def _stale_write(self, action: Action) -> None:
-        """Write an older snapshot's whole session row back, as a concurrent run's end would."""
+        """Write an older snapshot's session state back, as a concurrent run's end would."""
         if self._snapshots:
-            self._storage.upsert_session(self._snapshots[action.index % len(self._snapshots)])
+            snapshot = self._snapshots[action.index % len(self._snapshots)]
+            self._storage.save_session_state(snapshot, session_state_snapshot(snapshot.session_state))
 
     def _resurrect(self, action: Action) -> None:
         """Save an old copy of a run that no longer loads, as a late run save would."""
@@ -374,7 +380,7 @@ class _Runner:
         copies = [run for snapshot in self._snapshots for run in snapshot.runs or [] if run.run_id not in loaded]
         if copies:
             run = copies[action.index % len(copies)]
-            self._storage.upsert_run(run=run, session_id=_SESSION, user_id=None)
+            self._storage.save_run(_session_row(), run, record_usage=True)
 
     def _redact(self, action: Action) -> None:
         events = [_event(run_id) for run_id in (*_LEGACY_RUNS, *self._created)]
@@ -398,7 +404,7 @@ class _Runner:
             floor = None
         segment_rows = self._segment_rows()
         barrier = self._latest_barrier()
-        _remove_redacted_event_from_history(self._storage, self._load(), _SCOPE, event_id=event_id)
+        _remove_redacted_event_from_history(self._storage, session=self._load(), scope=_SCOPE, event_id=event_id)
         # A run goes whole, so a cut that removed one of its fold rows starts right after that row.
         remaining = self._segment_rows()
         for row_id, (after_run_index, owner) in segment_rows.items():
@@ -416,7 +422,6 @@ class _Runner:
         self._redacted.add(event_id)
 
     def _reopen(self, _action: Action) -> None:
-        self._storage.close()
         self._storage = self._open()
 
     def _run_indexes(self) -> dict[str, int]:
@@ -640,8 +645,4 @@ _ACTIONS = st.builds(
 def test_generated_compaction_histories_keep_the_log_invariants(actions: list[Action], *, legacy: bool) -> None:
     """Interleaved compaction, races, approvals, stale writes, and redaction never lose, repeat, or leak history."""
     with tempfile.TemporaryDirectory() as root:
-        runner = _Runner(Path(root), legacy=legacy)
-        try:
-            runner.run(actions)
-        finally:
-            runner.close()
+        _Runner(Path(root), legacy=legacy).run(actions)

@@ -12,13 +12,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
-from agno.agent import Agent
-from agno.media import Audio
-from agno.metrics import MessageMetrics, RunMetrics
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.attachments.storage import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.config.voice import normalize_speech_base_url
@@ -34,12 +29,16 @@ from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.helper_usage import record_system_usage
+from mindroom.llm.media import Audio, canonical_mime_type
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
 from mindroom.matrix.mentions import format_message_with_mentions, resolve_entity_name_for_mention_localpart
-from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
-from mindroom.providers import model_loading
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_BASE_URL_DEFAULT
+from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -89,16 +88,6 @@ class _NormalizedVoiceMessage:
 
     attachment_id: str | None
     transcribed_message: str | None
-
-
-@dataclass(frozen=True)
-class _TranscriptionTokenUsage:
-    """Provider counters for one token-metered transcription request."""
-
-    input_tokens: int
-    output_tokens: int
-    total_tokens: int
-    audio_tokens: int | None = None
 
 
 _VOICE_NORMALIZATION_CACHE_MAX_ENTRIES = 128
@@ -470,7 +459,7 @@ async def _download_audio(
     client: nio.AsyncClient,
     event: AudioMessageEvent,
 ) -> Audio | None:
-    """Download Matrix audio and convert it to an agno Audio media object."""
+    """Download Matrix audio as an audio clip."""
     audio_data = await download_media_bytes(client, event)
     if audio_data is None:
         return None
@@ -480,7 +469,7 @@ async def _download_audio(
 
 def _stt_upload_filename_and_mime_type(mime_type: str | None) -> tuple[str, str]:
     """Return multipart filename and MIME type for an STT upload."""
-    normalized_mime_type = (mime_type or "audio/ogg").split(";", 1)[0].strip().lower() or "audio/ogg"
+    normalized_mime_type = canonical_mime_type(mime_type) or "audio/ogg"
     if not normalized_mime_type.startswith("audio/"):
         logger.warning(
             "Non-audio MIME type declared for STT upload; using OGG fallback",
@@ -505,7 +494,7 @@ def _token_counter(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
-def _transcription_token_usage(result: object) -> _TranscriptionTokenUsage | None:
+def _transcription_token_usage(result: object) -> TokenCounts | None:
     """Accept only complete, consistent provider-reported token counters."""
     if not isinstance(result, dict):
         return None
@@ -527,42 +516,28 @@ def _transcription_token_usage(result: object) -> _TranscriptionTokenUsage | Non
     audio_tokens = (
         cast("dict[str, object]", token_details).get("audio_tokens") if isinstance(token_details, dict) else None
     )
-    if audio_tokens is not None:
-        audio_count = _token_counter(audio_tokens)
-        if audio_count is None or audio_count > input_tokens:
-            return None
-        return _TranscriptionTokenUsage(input_tokens, output_tokens, total_tokens, audio_count)
-    return _TranscriptionTokenUsage(input_tokens, output_tokens, total_tokens)
+    audio_count = 0 if audio_tokens is None else _token_counter(audio_tokens)
+    if audio_count is None or audio_count > input_tokens:
+        return None
+    counts = TokenCounts(input_tokens=input_tokens, output_tokens=output_tokens, audio_input_tokens=audio_count)
+    return counts.with_totals()
 
 
 def _transcription_usage_run(
-    usage: _TranscriptionTokenUsage,
+    usage: TokenCounts,
     *,
     model: str | None,
     provider: str | None,
     created_at: int,
-) -> RunOutput:
+) -> RunRecord:
     """Represent one provider response without retaining transcription content."""
-    run_metrics = RunMetrics(
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_tokens=usage.total_tokens,
-    )
-    message_metrics = MessageMetrics(
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_tokens=usage.total_tokens,
-    )
-    if usage.audio_tokens is not None:
-        run_metrics.audio_input_tokens = run_metrics.audio_total_tokens = usage.audio_tokens
-        message_metrics.audio_input_tokens = message_metrics.audio_total_tokens = usage.audio_tokens
-    return RunOutput(
+    return RunRecord(
         run_id=str(uuid.uuid4()),
         model=model,
         model_provider=provider,
         created_at=created_at,
-        metrics=run_metrics,
-        messages=[Message(role="assistant", created_at=created_at, metrics=message_metrics)],
+        metrics=RunMetrics(tokens=usage),
+        messages=[Message(role="assistant", created_at=created_at, metrics=MessageMetrics(tokens=usage))],
     )
 
 
@@ -587,9 +562,7 @@ async def _transcribe_audio(
     """
     try:
         stt_base_url = normalize_speech_base_url(config.voice.stt.host)
-        url = (
-            f"{stt_base_url}/audio/transcriptions" if stt_base_url else "https://api.openai.com/v1/audio/transcriptions"
-        )
+        url = f"{stt_base_url or OPENAI_BASE_URL_DEFAULT}/audio/transcriptions"
 
         api_key = config.voice.stt.api_key
         if api_key is None:
@@ -705,46 +678,31 @@ async def _process_transcription(
             transcription=transcription,
         )
 
-        # Get the AI model to process the transcription
-        model = model_loading.get_model_instance(config, runtime_paths, config.voice.intelligence.model)
+        provider = build_model_provider(config, runtime_paths, config.voice.intelligence.model)
 
-        # Create an agent for voice transcript normalization
-        agent = Agent(
-            name="VoiceTranscriptionNormalizer",
-            role="Normalize voice transcriptions while preserving natural language and mention intent",
-            model=model,
-            telemetry=False,
-        )
-
-        # Process the transcription with the agent. The transcription is already
-        # usable, so a slow or hung normalizer model fails open to it instead of
+        # The transcription is already usable, so a slow or hung normalizer model fails open to it instead of
         # blocking voice readiness (and the ingress lane serialized behind it).
-        session_id = f"voice_process_{uuid.uuid4()}"
         try:
             async with asyncio.timeout(_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS):
-                response = await agent.arun(prompt, session_id=session_id)
+                response = await complete_prompt(
+                    provider,
+                    prompt,
+                    role="Normalize voice transcriptions while preserving natural language and mention intent",
+                )
         except TimeoutError:
             logger.warning(
                 "voice_transcription_normalizer_timeout",
                 timeout_seconds=_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS,
             )
-            response = None
-
-        if response is not None:
-            await record_system_usage(response, runtime_paths=runtime_paths, kind="voice_normalization")
-            if response.status == RunStatus.error:
-                # Agno returns a provider failure as the run's content; the transcription is still usable.
-                logger.warning("voice_transcription_normalizer_failed", error=str(response.content))
-                response = None
-
-        # Extract the content from the response
-        if response and response.content:
-            return _sanitize_unavailable_mentions(
-                response.content.strip(),
-                allowed_entities=set(agent_names) | set(team_names),
-                config=config,
-                runtime_paths=runtime_paths,
-            )
+        else:
+            await record_system_usage(response.record, runtime_paths=runtime_paths, kind="voice_normalization")
+            if response.content:
+                return _sanitize_unavailable_mentions(
+                    response.content.strip(),
+                    allowed_entities=set(agent_names) | set(team_names),
+                    config=config,
+                    runtime_paths=runtime_paths,
+                )
 
     except Exception:
         logger.exception("Error processing transcription")

@@ -6,15 +6,14 @@ response reports is read off that client while a MindRoom memory write is in pro
 
 from __future__ import annotations
 
-import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
-from agno.models.message import Message
-from agno.run.agent import RunOutput
+from mindroom.llm.messages import Message, model_provenance, read_model_provenance
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -26,69 +25,48 @@ _calls: ContextVar[list[Message] | None] = ContextVar("mem0_usage_calls", defaul
 _PROVIDER_LABELS = {"openai": "OpenAI", "openrouter": "OpenRouter", "anthropic": "Anthropic", "ollama": "Ollama"}
 
 
-def _metrics(
-    input_tokens: int,
-    output_tokens: int,
-    *,
-    cache_read_tokens: int = 0,
-    cache_write_tokens: int = 0,
-    reasoning_tokens: int = 0,
-) -> MessageMetrics:
-    return MessageMetrics(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_write_tokens=cache_write_tokens,
-        reasoning_tokens=reasoning_tokens,
-    )
-
-
 def _openai_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an OpenAI SDK chat completion
     usage = response.usage
     if usage is None:
         return MessageMetrics()
     prompt_details = usage.prompt_tokens_details
     completion_details = usage.completion_tokens_details
-    return _metrics(
-        usage.prompt_tokens or 0,
-        usage.completion_tokens or 0,
+    counts = TokenCounts(
+        input_tokens=usage.prompt_tokens or 0,
+        output_tokens=usage.completion_tokens or 0,
         cache_read_tokens=(prompt_details.cached_tokens or 0) if prompt_details else 0,
         reasoning_tokens=(completion_details.reasoning_tokens or 0) if completion_details else 0,
     )
+    return MessageMetrics(tokens=counts.with_totals())
 
 
 def _anthropic_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an Anthropic SDK message
     usage = response.usage
-    return _metrics(
-        usage.input_tokens or 0,
-        usage.output_tokens or 0,
+    counts = TokenCounts(
+        input_tokens=usage.input_tokens or 0,
+        output_tokens=usage.output_tokens or 0,
         cache_read_tokens=usage.cache_read_input_tokens or 0,
         cache_write_tokens=usage.cache_creation_input_tokens or 0,
     )
+    return MessageMetrics(tokens=counts.with_totals())
 
 
 def _ollama_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an Ollama client chat response
-    return _metrics(response.prompt_eval_count or 0, response.eval_count or 0)
+    counts = TokenCounts(input_tokens=response.prompt_eval_count or 0, output_tokens=response.eval_count or 0)
+    return MessageMetrics(tokens=counts.with_totals())
 
 
 def install_mem0_usage_capture(llm: Any, provider: str) -> None:  # noqa: ANN401 - a Mem0 LLM of the configured provider
     """Read token usage off the client a newly built Mem0 LLM of the MindRoom ``provider`` calls."""
-    model = {"id": str(llm.config.model), "provider": _PROVIDER_LABELS.get(provider, provider)}
+    model_id, label = str(llm.config.model), _PROVIDER_LABELS.get(provider, provider)
 
     def counted(call: Callable[..., Any], read: Callable[[Any], MessageMetrics]) -> Callable[..., Any]:
         def counted_call(*args: object, **kwargs: object) -> object:
             response = call(*args, **kwargs)
             calls = _calls.get()
-            if calls is not None and (metrics := read(response)).total_tokens:
-                calls.append(
-                    Message(
-                        role="assistant",
-                        created_at=int(time.time()),
-                        metrics=metrics,
-                        provider_data={"mindroom_model": model},
-                    ),
-                )
+            if calls is not None and (metrics := read(response)).tokens.total_tokens:
+                provenance = model_provenance(model_id, label)
+                calls.append(Message(role="assistant", metrics=metrics, provider_data=provenance))
             return response
 
         return counted_call
@@ -113,28 +91,21 @@ def counted_mem0_usage() -> Iterator[list[Message]]:
         _calls.reset(token)
 
 
-def mem0_usage_run(calls: list[Message]) -> RunOutput | None:
+def mem0_usage_run(calls: list[Message]) -> RunRecord | None:
     """Return the calls as one run to record, or None when none reported tokens."""
     if not calls:
         return None
-    # One memory write runs every call on the configured memory model.
-    first = cast("dict[str, dict[str, str]]", calls[0].provider_data)["mindroom_model"]
-    model = ModelMetrics(id=first["id"], provider=first["provider"])
+    # One memory write runs every call on the configured memory model, which each call's message records.
+    model = read_model_provenance(calls[0].provider_data)
+    assert model is not None
+    metrics = RunMetrics()
     for call in calls:
-        model.accumulate(ModelMetrics(**call.metrics.to_dict()))
-    return RunOutput(
+        metrics.add(call.metrics, model_id=model.model_id, provider=model.provider)
+    return RunRecord(
         run_id=uuid4().hex,
-        model=model.id,
+        model=model.model_id,
         model_provider=model.provider,
         created_at=calls[0].created_at,
-        metrics=RunMetrics(
-            input_tokens=model.input_tokens,
-            output_tokens=model.output_tokens,
-            total_tokens=model.total_tokens,
-            cache_read_tokens=model.cache_read_tokens,
-            cache_write_tokens=model.cache_write_tokens,
-            reasoning_tokens=model.reasoning_tokens,
-            details={"model": [model]},
-        ),
+        metrics=metrics,
         messages=calls,
     )

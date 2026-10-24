@@ -10,9 +10,10 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
-from mindroom.budgets.pricing import model_prices, provider_identity
+from mindroom.budgets.pricing import model_prices
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
 from mindroom.logging_config import get_logger
+from mindroom.providers.names import provider_route
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
@@ -50,9 +51,9 @@ def _is_priced(config: Config, model_name: str) -> bool:
     model_config = config.models.get(model_name)
     if model_config is None:
         return False
-    identity = (provider_identity(model_config.provider), model_config.id)
+    identity = (provider_route(model_config.provider), model_config.id)
     return any(
-        other.pricing is not None and (provider_identity(other.provider), other.id) == identity
+        other.pricing is not None and (provider_route(other.provider), other.id) == identity
         for other in config.models.values()
     )
 

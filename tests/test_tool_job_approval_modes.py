@@ -11,14 +11,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Literal
 
 import pytest
-from agno.agent import Agent
-from agno.db.sqlite import SqliteDb
-from agno.models.response import ModelResponse, ToolExecution
-from agno.run.base import RunStatus
-from agno.team import Team
-from agno.tools import Toolkit
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
@@ -28,24 +21,29 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.event_journal import ApprovalCall, BackgroundApprovalDecision
-from mindroom.response_turn import paused_attempt_from_response
+from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.approvals import ask_job_approvals, end_tool_call_approval
-from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import JobControl, job_control_context, pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, register_background_runtime
+from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.tool_approval_helpers import gated_functions
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
-    assembled_function,
+    job_actor,
     job_owner,
+    job_tool,
+    resume_job_turn,
+    run_job_turn,
     saved_jobs,
     tool_job_runtime,
+    toolkit_job_tools,
     wait_for_status,
     write_saved_job,
 )
@@ -53,9 +51,8 @@ from tests.tool_job_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.run.agent import RunOutput
-
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
+    from mindroom.llm.runs import RunRecord
 
 
 class _NativeTools(Toolkit):
@@ -63,7 +60,6 @@ class _NativeTools(Toolkit):
         self.observed = observed
         super().__init__(name="native", tools=[self.native_step])
         bind_toolkit_construction(self, ToolConstruction("native_plugin", None))
-        bind_toolkit_authority(self, authored_name="native_plugin")
         self.get_async_functions()["native_step"].requires_confirmation = True
 
     async def native_step(self, **options: int) -> str:
@@ -74,14 +70,8 @@ class _NativeTools(Toolkit):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("team", [False, True])
 @pytest.mark.parametrize("initially_excluded", [False, True])
-async def test_approved_call_follows_exclusions_current_at_resume(
-    tmp_path: Path,
-    *,
-    team: bool,
-    initially_excluded: bool,
-) -> None:
+async def test_approved_call_follows_exclusions_current_at_resume(tmp_path: Path, *, initially_excluded: bool) -> None:
     """Waiting policy is decided when an approved call executes, so a restart with new exclusions applies to it."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(
@@ -97,44 +87,23 @@ async def test_approved_call_follows_exclusions_current_at_resume(
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     observed: list[int] = []
-    storage = SqliteDb(db_file=str(tmp_path / "approvals.db"))
-
-    def actor(model: DelegationModel) -> Agent | Team:
-        install_tool_job_execution(model)
-        kwargs = {"id": "leader", "model": model, "tools": [_NativeTools(observed)], "db": storage, "telemetry": False}
-        return Team(**kwargs, members=[]) if team else Agent(**kwargs)
-
+    actor = job_actor(*toolkit_job_tools(_NativeTools(observed), authored_name="native_plugin").values())
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                paused = await actor(
-                    DelegationModel(
-                        id="test",
-                        responses=[ModelResponse(tool_calls=[_call("native_step", "approved", background_after=3)])],
-                    ),
-                ).arun("Execute", session_id=context.session_id)
-                assert paused.status is RunStatus.paused
-                captured = paused_attempt_from_response(
-                    paused,
-                    fallback_session_id=context.session_id,
-                    fallback_run_id=paused.run_id,
-                    toolkit_owners={("leader", "native_step"): "native_plugin"},
+                paused = await run_job_turn(
+                    actor,
+                    ScriptedModel([calls(tool_call("native_step", "approved", background_after=3))]),
+                    "Execute",
+                    session_id=context.session_id,
                 )
-                assert captured is not None
+                assert paused.status is RunStatus.paused
 
                 # A changed exclusion list takes effect when the instance starts again.
                 config.background_tool_jobs.exclude_toolkits = [] if initially_excluded else ["native_plugin"]
                 pin_background_tool_jobs(config, paths)
                 register_background_runtime(paths, runtime)
-                for requirement in paused.requirements or ():
-                    requirement.confirm()
-                completed = await actor(
-                    DelegationModel(id="test", responses=[ModelResponse(content="done")]),
-                ).acontinue_run(
-                    run_id=paused.run_id,
-                    session_id=context.session_id,
-                    requirements=paused.requirements,
-                )
+                completed = await resume_job_turn(actor, ScriptedModel([answer("done")]), paused)
                 for job in await runtime.list_jobs(owner=owner, depth=0):
                     await runtime.wait(job.job_id, owner=owner, depth=0)
         assert completed.status is RunStatus.completed
@@ -143,7 +112,6 @@ async def test_approved_call_follows_exclusions_current_at_resume(
         assert len(await runtime.list_jobs(owner=owner, depth=0)) == (1 if initially_excluded else 0)
     finally:
         await runtime.shutdown()
-        storage.close()
 
 
 @pytest.mark.asyncio
@@ -168,21 +136,14 @@ async def test_nested_native_owner_keeps_slow_child_tool_after_human_signal(tmp_
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("slow_child_tool", "child-call")]),
-            ModelResponse(content="child done"),
-        ],
-    )
-    install_tool_job_execution(model, depth=1)
-    actor = Agent(id="leader", model=model, tools=[assembled_function(slow_child_tool)], telemetry=False)
+    model = ScriptedModel([calls(tool_call("slow_child_tool", "child-call")), answer("child done")])
+    actor = job_actor(job_tool(slow_child_tool), depth=1)
     signal = asyncio.Event()
     task = None
     try:
         async with execution_resources():
             with tool_runtime_context(context), pending_human_messages_context(signal):
-                task = asyncio.create_task(actor.arun("Work", session_id=context.session_id, metadata={}))
+                task = asyncio.create_task(run_job_turn(actor, model, "Work", session_id=context.session_id))
                 await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
                 signal.set()
                 done, _ = await asyncio.wait({task}, timeout=0.05)
@@ -208,7 +169,6 @@ class _GatedTools(Toolkit):
         self.gate = gate
         super().__init__(name="reports", tools=[self.write_report])
         bind_toolkit_construction(self, ToolConstruction("reports", None))
-        bind_toolkit_authority(self, authored_name="reports")
 
     async def write_report(self, title: str) -> str:
         """Write one report."""
@@ -284,36 +244,27 @@ class _GatedRun:
         register_background_runtime(self.paths, self.runtime)
         self.cards = _Cards(asyncio.get_running_loop().create_future())
         self.monkeypatch.setattr(approval_manager, "get_approval_store", lambda: self.cards)
-        self.storage = SqliteDb(db_file=str(self.tmp_path / "gated.db"))
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
         await self.runtime.shutdown()
-        self.storage.close()
 
-    def agent(self, **budget: float) -> Agent:
-        toolkit = apply_tool_approval_capability(
-            _GatedTools(self.effects, self.gate),
-            self.config,
-            supports_native_tool_approval=True,
-            approvals_as_jobs=True,
-        )
-        model = DelegationModel(
-            id="test",
-            responses=[
-                ModelResponse(tool_calls=[_call("write_report", "write-1", title="q3", **budget)]),
-                ModelResponse(content="done"),
-            ],
-        )
-        install_tool_job_execution(model)
-        return Agent(id="leader", model=model, tools=[toolkit], db=self.storage, telemetry=False)
+    async def turn(self, *, generated: bool = False, **budget: float) -> RunRecord:
+        """Run the leader's reply that makes the gated call, its function a generated one when ``generated``."""
+        toolkit = _GatedTools(self.effects, self.gate)
+        [function] = gated_functions(toolkit, self.config, approvals_as_jobs=True).values()
+        [tool] = toolkit_job_tools(toolkit, authored_name="reports").values()
+        model = ScriptedModel([calls(tool_call("write_report", "write-1", title="q3", **budget)), answer("done")])
+        if generated:
+            return await run_job_turn(job_actor(), model, "Write", generated=(function,))
+        return await run_job_turn(job_actor(replace(tool, function=function)), model, "Write")
 
     def decide(self, status: Literal["approved", "denied"]) -> None:
         self.cards.decision.set_result(BackgroundApprovalDecision(status, None if status == "approved" else "No."))
 
 
-def _tool_result(response: RunOutput) -> str:
-    [tool] = response.tools or []
+def _tool_result(record: RunRecord) -> str:
+    [tool] = record.tools or []
     return str(tool.result)
 
 
@@ -328,7 +279,7 @@ async def test_gated_call_waits_for_its_approval_then_runs_once(
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run:
         async with execution_resources():
             with tool_runtime_context(run.context):
-                reply = asyncio.create_task(run.agent().arun("Write", session_id=run.context.session_id))
+                reply = asyncio.create_task(run.turn())
                 await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
                 # The card shows the exact arguments, and nothing ran before the decision.
                 [(_, tool_name, arguments)] = run.cards.requested
@@ -346,13 +297,31 @@ async def test_gated_call_waits_for_its_approval_then_runs_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reason", [None, ""])
+async def test_a_call_denied_without_a_reason_tells_the_model_it_was_not_approved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str | None,
+) -> None:
+    """A denial that gives no reason answers the model with the note every other denial path records."""
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run:
+        async with execution_resources():
+            with tool_runtime_context(run.context):
+                reply = asyncio.create_task(run.turn())
+                await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+                run.cards.decision.set_result(BackgroundApprovalDecision("denied", reason))
+                response = await asyncio.wait_for(reply, JOB_TEST_TIMEOUT)
+        assert (_tool_result(response), run.effects) == ("Not approved by requester", [])
+
+
+@pytest.mark.asyncio
 async def test_reply_goes_on_while_its_call_waits_for_approval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """After the wait, the reply continues and the job runs the call once approved."""
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0.05) as run:
         async with execution_resources():
             with tool_runtime_context(run.context):
                 response = await asyncio.wait_for(
-                    run.agent().arun("Write", session_id=run.context.session_id),
+                    run.turn(),
                     JOB_TEST_TIMEOUT,
                 )
                 assert response.status is RunStatus.completed
@@ -369,7 +338,7 @@ async def test_cancelled_job_denies_the_card_it_waits_on(tmp_path: Path, monkeyp
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0) as run:
         async with execution_resources():
             with tool_runtime_context(run.context):
-                response = await run.agent().arun("Write", session_id=run.context.session_id)
+                response = await run.turn()
                 job_id = json.loads(_tool_result(response))["job_id"]
                 await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
                 await run.runtime.cancel(job_id, owner=run.owner, depth=0)
@@ -392,22 +361,18 @@ async def test_gated_call_that_cannot_become_a_job_never_runs(
     SDK generates them.
     """
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run:
-        agent = run.agent()
-        if missing == "toolkit binding":
-            for toolkit in agent.tools or []:
-                for function in toolkit.get_async_functions().values():
-                    function.owning_toolkit = None
+        generated = missing == "toolkit binding"
         if missing == "resources":
             with tool_runtime_context(run.context):
-                response = await agent.arun("Write", session_id=run.context.session_id)
+                response = await run.turn()
         elif missing == "context":
             async with execution_resources():
-                response = await agent.arun("Write", session_id=run.context.session_id)
+                response = await run.turn()
         else:
             inside_a_job = job_control_context(JobControl()) if missing == "managed mode" else nullcontext()
             async with execution_resources():
                 with tool_runtime_context(run.context), inside_a_job:
-                    response = await agent.arun("Write", session_id=run.context.session_id)
+                    response = await run.turn(generated=generated)
         assert "needs approval" in _tool_result(response)
         assert (run.effects, run.cards.requested) == ([], [])
 
@@ -420,7 +385,7 @@ async def test_shutdown_while_a_call_waits_for_approval_says_it_did_not_run(
     """Unlike other interrupted work, a call stopped while it asked for approval has no effects to check."""
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0) as run, execution_resources():
         with tool_runtime_context(run.context):
-            response = await run.agent().arun("Write", session_id=run.context.session_id)
+            response = await run.turn()
             job_id = json.loads(_tool_result(response))["job_id"]
             await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
     # Leaving the run shuts its runtime down while the call still waits for its approval.
@@ -443,7 +408,7 @@ async def test_a_call_stopped_after_its_approval_may_have_taken_effect(
         execution_resources(),
     ):
         with tool_runtime_context(run.context):
-            response = await run.agent().arun("Write", session_id=run.context.session_id)
+            response = await run.turn()
             job_id = json.loads(_tool_result(response))["job_id"]
             await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
             run.decide("approved")
@@ -497,12 +462,15 @@ async def test_a_restart_denies_the_card_a_crashed_call_waited_on(
 async def test_a_call_its_policy_approves_waits_like_any_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only a human decision is bounded: a call the policy approves on its own blocks until it finishes."""
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0, gate=asyncio.Event()) as run:
-        agent = run.agent()
+        reply_toolkit = _GatedTools(run.effects, run.gate)
+        [function] = gated_functions(reply_toolkit, run.config, approvals_as_jobs=True).values()
+        [tool] = toolkit_job_tools(reply_toolkit, authored_name="reports").values()
         # The function asks as its job, but the policy approves this call, as a script or exemption can.
         run.config.tool_approval = ToolApprovalConfig(default="auto_approve")
+        model = ScriptedModel([calls(tool_call("write_report", "write-1", title="q3")), answer("done")])
         async with execution_resources():
             with tool_runtime_context(run.context):
-                reply = asyncio.create_task(agent.arun("Write", session_id=run.context.session_id))
+                reply = asyncio.create_task(run_job_turn(job_actor(replace(tool, function=function)), model, "Write"))
                 while not run.effects:  # noqa: ASYNC110
                     await asyncio.sleep(0.01)
                 await asyncio.sleep(0.05)
@@ -534,7 +502,7 @@ async def test_a_job_call_skips_its_card_only_inside_the_requesters_auto_approve
         )
         async with execution_resources():
             with tool_runtime_context(run.context):
-                reply = asyncio.create_task(run.agent().arun("Write", session_id=run.context.session_id))
+                reply = asyncio.create_task(run.turn())
                 if window_thread == "other":
                     await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
                     run.decide("denied")
@@ -556,7 +524,7 @@ async def test_a_calls_own_budget_does_not_outlast_its_approval_wait(
         async with execution_resources():
             with tool_runtime_context(run.context):
                 response = await asyncio.wait_for(
-                    run.agent(background_after=600).arun("Write", session_id=run.context.session_id),
+                    run.turn(background_after=600),
                     JOB_TEST_TIMEOUT,
                 )
         handle = json.loads(_tool_result(response))
@@ -572,7 +540,7 @@ async def test_retrieving_a_job_that_awaits_approval_waits_no_longer_than_its_ca
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0.05) as run:
         async with execution_resources():
             with tool_runtime_context(run.context):
-                response = await run.agent().arun("Write", session_id=run.context.session_id)
+                response = await run.turn()
                 job_id = json.loads(_tool_result(response))["job_id"]
                 waited = await asyncio.wait_for(JobTools(run.paths, run.owner).job("wait", job_id), JOB_TEST_TIMEOUT)
         assert json.loads(waited)["status"] == "awaiting_approval"

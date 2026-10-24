@@ -5,9 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from agno.run.base import RunStatus
-
 from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build_interrupted_replay_snapshot
+from mindroom.llm.runs import RunStatus
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -33,7 +32,7 @@ class TurnRecorder:
     # Tool calls a mid-turn compaction folded into its summary; an interrupted record leaves their previews out.
     folded_tool_call_ids: set[str] = field(default_factory=set)
 
-    def set_run_metadata(self, metadata: dict[str, Any] | None) -> None:
+    def set_run_metadata(self, metadata: Mapping[str, Any] | None) -> None:
         """Replace the current Matrix run metadata snapshot."""
         self.run_metadata = dict(metadata) if metadata is not None else None
 
@@ -42,24 +41,12 @@ class TurnRecorder:
         self.folded_tool_call_ids.update(tool_call_ids)
 
     def set_run_id(self, run_id: str | None) -> None:
-        """Replace the current top-level Agno run identifier."""
+        """Replace the current top-level run identifier."""
         self.run_id = run_id or None
 
     def set_response_event_id(self, response_event_id: str | None) -> None:
         """Replace the current visible Matrix response event identifier."""
         self.response_event_id = response_event_id or None
-
-    def set_assistant_text(self, text: str) -> None:
-        """Replace the canonical assistant text observed so far."""
-        self.assistant_text = text
-
-    def set_completed_tools(self, tools: list[ToolTraceEntry]) -> None:
-        """Replace the completed tool list."""
-        self.completed_tools = list(tools)
-
-    def set_interrupted_tools(self, tools: list[ToolTraceEntry]) -> None:
-        """Replace the in-flight interrupted tool list."""
-        self.interrupted_tools = list(tools)
 
     def sync_partial_state(
         self,
@@ -71,10 +58,10 @@ class TurnRecorder:
     ) -> None:
         """Refresh the latest observed streaming state without deciding the final outcome."""
         if run_metadata is not None:
-            self.set_run_metadata(dict(run_metadata))
-        self.set_assistant_text(assistant_text)
-        self.set_completed_tools(list(completed_tools))
-        self.set_interrupted_tools(list(interrupted_tools))
+            self.set_run_metadata(run_metadata)
+        self.assistant_text = assistant_text
+        self.completed_tools = list(completed_tools)
+        self.interrupted_tools = list(interrupted_tools)
 
     def record_completed(
         self,
@@ -84,11 +71,12 @@ class TurnRecorder:
         completed_tools: Sequence[ToolTraceEntry],
     ) -> None:
         """Record one completed top-level turn."""
-        if run_metadata is not None:
-            self.set_run_metadata(dict(run_metadata))
-        self.set_assistant_text(assistant_text)
-        self.set_completed_tools(list(completed_tools))
-        self.set_interrupted_tools([])
+        self.sync_partial_state(
+            run_metadata=run_metadata,
+            assistant_text=assistant_text,
+            completed_tools=completed_tools,
+            interrupted_tools=(),
+        )
         self.mark_completed()
 
     def record_interrupted(
@@ -101,11 +89,12 @@ class TurnRecorder:
         original_status: RunStatus = RunStatus.cancelled,
     ) -> None:
         """Record one interrupted top-level turn."""
-        if run_metadata is not None:
-            self.set_run_metadata(dict(run_metadata))
-        self.set_assistant_text(assistant_text)
-        self.set_completed_tools(list(completed_tools))
-        self.set_interrupted_tools(list(interrupted_tools))
+        self.sync_partial_state(
+            run_metadata=run_metadata,
+            assistant_text=assistant_text,
+            completed_tools=completed_tools,
+            interrupted_tools=interrupted_tools,
+        )
         self.mark_interrupted(original_status)
 
     def mark_completed(self) -> None:

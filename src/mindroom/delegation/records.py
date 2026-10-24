@@ -20,6 +20,7 @@ from weakref import WeakValueDictionary
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import primary_records_dir
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, write_file_within_root
@@ -38,12 +39,11 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import SubagentPersona
+    from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
 
 logger = get_logger(__name__)
 
 type _DelegationActiveStatus = Literal["running", "paused"]
-type DelegationTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]
 type _DelegationEventKind = Literal[
     "delegation_started",
     "delegation_finished",
@@ -74,7 +74,6 @@ _FINISH_EVENT_HEADROOM_BYTES = 1 << 20
 # A new run.json keeps room for the three inline values and timestamps finish adds.
 _FINISH_RUN_HEADROOM_BYTES = 3 * _MAX_INLINE_VALUE_BYTES + 256
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
-_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
 # Writers of one record exclude each other in this process, without a lock file worker code could hold.
 _RECORD_LOCKS: WeakValueDictionary[Path, threading.Lock] = WeakValueDictionary()
 _RECORD_LOCKS_GUARD = threading.Lock()
@@ -243,6 +242,10 @@ class DelegationRecordOwner:
         """Re-resolve and validate one record from its persisted identity."""
         return await run_blocking_until_complete(self._reopen, locator)
 
+    async def highest_event_index(self, handle: DelegationRecordHandle, prefix: str) -> int:
+        """Return the largest integer a committed event id carries after ``prefix``, or 0 when none does."""
+        return await run_blocking_until_complete(self._highest_event_index, handle, prefix)
+
     async def append_event(
         self,
         handle: DelegationRecordHandle,
@@ -350,6 +353,15 @@ class DelegationRecordOwner:
             _load_state(handle)
         return handle
 
+    def _highest_event_index(self, handle: DelegationRecordHandle, prefix: str) -> int:
+        handle = self._validated_handle(handle)
+        with _record_lock(handle):
+            state = _load_state(handle)
+            if state is None:
+                return 0
+            indexes = (_event_index(json.loads(line)["event_id"], prefix) for line in _committed_lines(handle, state))
+            return max(indexes, default=0)
+
     def _append_event(self, handle: DelegationRecordHandle, event: DelegationEvent) -> None:
         handle = self._validated_handle(handle)
         with _record_lock(handle):
@@ -381,7 +393,7 @@ class DelegationRecordOwner:
         error: object | None,
         usage: object | None,
     ) -> None:
-        if status not in _TERMINAL_STATUSES:
+        if status not in TERMINAL_CHILD_STATUSES:
             msg = f"Invalid delegation terminal status: {status}"
             raise ValueError(msg)
         handle = self._validated_handle(handle)
@@ -392,7 +404,7 @@ class DelegationRecordOwner:
             line = b""
             artifacts: dict[str, bytes] = {}
             # The first terminal outcome stands, so a later finish, even with another status, only refreshes exports.
-            if state.run["status"] not in _TERMINAL_STATUSES:
+            if state.run["status"] not in TERMINAL_CHILD_STATUSES:
                 sequence = state.run["event_count"] + 1
                 terminal_data, artifacts = _redacted_event_data(
                     sequence=sequence,
@@ -563,6 +575,14 @@ def _event_id_digest(event_id: str) -> str:
     return hashlib.blake2b(event_id.encode("utf-8", "surrogatepass"), digest_size=16).hexdigest()
 
 
+def _event_index(event_id: object, prefix: str) -> int:
+    """Return the integer ``event_id`` carries after ``prefix``, or 0 for an id of another shape."""
+    if not isinstance(event_id, str) or not event_id.startswith(prefix):
+        return 0
+    suffix = event_id[len(prefix) :]
+    return int(suffix) if suffix.isascii() and suffix.isdigit() else 0
+
+
 @contextmanager
 def _record_directory(handle: DelegationRecordHandle, *, create: bool = False) -> Iterator[int]:
     """Pin the workspace record directory by a no-follow walk from the child workspace."""
@@ -617,7 +637,7 @@ def _commit_event(
 
 
 def _ensure_active(run: Mapping[str, Any]) -> None:
-    if run["status"] in _TERMINAL_STATUSES:
+    if run["status"] in TERMINAL_CHILD_STATUSES:
         msg = f"Delegation record is already terminal: {run['delegation_id']}"
         raise ValueError(msg)
 

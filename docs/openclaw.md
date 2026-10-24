@@ -57,7 +57,6 @@ Not included:
         model: default
         rooms: [personal]
         include_default_tools: false
-        learning: false
         memory_backend: file
 
         instructions:

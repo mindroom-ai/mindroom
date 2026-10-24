@@ -10,7 +10,6 @@ from unittest.mock import MagicMock
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom.agents import get_agent_toolkit_names
 from mindroom.config.agent import AgentConfig
 from mindroom.config.egress_broker import EgressService
 from mindroom.config.main import Config
@@ -26,6 +25,7 @@ from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup
@@ -458,7 +458,9 @@ def test_an_agent_gets_the_tool_only_while_the_broker_is_on(tmp_path: Path, *, b
     agent = AgentConfig(display_name="Code", tools=["shell", "egress_credentials"], worker_scope="user_agent")
     config = bind_runtime_paths(Config(agents={"code": agent}), runtime_paths)
 
-    toolkit_names = get_agent_toolkit_names("code", config)
+    toolkit_names = [
+        entry.name for entry in visible_tool_surface(agent_name="code", config=config).runtime_tool_configs
+    ]
 
     assert config.agents["code"].tool_names == ["shell", "egress_credentials"]
     assert "shell" in toolkit_names

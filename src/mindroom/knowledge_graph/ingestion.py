@@ -37,14 +37,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from agno.run.agent import RunOutput
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_runs import RedactedEventIds
     from mindroom.knowledge_graph.names import EntityNames
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.store import GraphStore
+    from mindroom.llm.runs import RunRecord
 
 logger = get_logger(__name__)
 
@@ -93,7 +92,7 @@ class _GraphState(TypedDict):
 class _DueSession:
     session_id: str
     updated_at: int
-    runs: list[RunOutput]
+    runs: list[RunRecord]
 
 
 def wake_knowledge_graph_ingestion(*, after_seconds: float = 0) -> None:
@@ -119,9 +118,9 @@ def _new_session_state() -> _SessionState:
     }
 
 
-def _start_after_backfill_window(entry: _SessionState, runs: list[RunOutput], *, cutoff: float) -> None:
+def _start_after_backfill_window(entry: _SessionState, runs: list[RunRecord], *, cutoff: float) -> None:
     """Mark the runs before the backfill window as done, so a long conversation adds only its recent turns."""
-    older = [run for run in runs if (run.created_at or 0) < cutoff]
+    older = [run for run in runs if run.created_at < cutoff]
     if older:
         done = [*run_key(older[-1]), RUN_DONE]
         entry["markers"] = {kind: list(done) for kind in _EPISODE_KINDS}
@@ -324,40 +323,36 @@ class KnowledgeGraphIngestionWorker:
             self.runtime_paths,
             execution_identity=scope.execution_identity,
         )
-        try:
-            since = int(state["started_at"]) - settings.backfill_days * _DAY_SECONDS
-            due: list[_DueSession] = []
-            changed = False
-            unreadable: list[Exception] = []
-            for session_id, updated_at in updated_sessions(storage, scope.agent_name, since=since):
-                if len(due) >= limit:
-                    break
-                entry = state["sessions"].get(session_id)
-                if entry is not None and (
-                    entry["retry_at"] > now
-                    or (updated_at <= entry["updated_at"] and not 0 < entry["recheck_at"] <= now)
-                ):
-                    continue
-                if now - updated_at < settings.idle_seconds:
-                    continue
-                try:
-                    runs = session_runs(storage, session_id)
-                except Exception as exc:
-                    # One conversation that cannot be read must not stop the agent's others.
-                    unreadable.append(exc)
-                    _back_off(state["sessions"].setdefault(session_id, _new_session_state()), now)
-                    changed = True
-                    continue
-                if not runs:
-                    # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
-                    # ingest, so it does not take a place in the pass.
-                    _finish(state["sessions"].setdefault(session_id, _new_session_state()), updated_at, 0)
-                    changed = True
-                    continue
-                due.append(_DueSession(session_id, updated_at, runs))
-            return due, changed, unreadable
-        finally:
-            storage.close()
+        since = int(state["started_at"]) - settings.backfill_days * _DAY_SECONDS
+        due: list[_DueSession] = []
+        changed = False
+        unreadable: list[Exception] = []
+        for session_id, updated_at in updated_sessions(storage, scope.agent_name, since=since):
+            if len(due) >= limit:
+                break
+            entry = state["sessions"].get(session_id)
+            if entry is not None and (
+                entry["retry_at"] > now or (updated_at <= entry["updated_at"] and not 0 < entry["recheck_at"] <= now)
+            ):
+                continue
+            if now - updated_at < settings.idle_seconds:
+                continue
+            try:
+                runs = session_runs(storage, session_id)
+            except Exception as exc:
+                # One conversation that cannot be read must not stop the agent's others.
+                unreadable.append(exc)
+                _back_off(state["sessions"].setdefault(session_id, _new_session_state()), now)
+                changed = True
+                continue
+            if not runs:
+                # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
+                # ingest, so it does not take a place in the pass.
+                _finish(state["sessions"].setdefault(session_id, _new_session_state()), updated_at, 0)
+                changed = True
+                continue
+            due.append(_DueSession(session_id, updated_at, runs))
+        return due, changed, unreadable
 
     async def _ingest(
         self,

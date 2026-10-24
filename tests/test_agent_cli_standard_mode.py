@@ -12,38 +12,35 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
 from agno.run import RunContext  # noqa: TC002 - Agno injects the tool argument by its annotation
-from agno.run.agent import RunContentEvent
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
-from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, _cli_callable
-from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
+from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, _cli_callable
+from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.delegation.lifecycle import child_execution_identity
-from mindroom.history.session_context import close_agent_runtime_state_dbs
+from mindroom.llm.events import TextDelta
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.access_schema_support import with_responder_access
 from tests.conftest import test_runtime_paths
+from tests.delegation_helpers import ScriptedAgents
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
-from tests.minimal_agent_fixtures import ScriptedProvider
+from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_agent_cli_shell_access import running_api  # noqa: F401 - pytest fixture
-from tests.test_delegation_execution import DelegationModel
 from tests.tool_job_helpers import job_owner
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_cli.session import TurnToolRegistry
-    from mindroom.delegation.state import DelegationChild
+    from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -58,7 +55,6 @@ def _helper_runtime(
         display_name="Helper",
         tools=["shell", "calculator"],
         memory_backend=memory_backend,
-        learning=False,
     )
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
@@ -90,11 +86,15 @@ async def _respond_streaming(runtime: ToolRuntimeContext) -> str:
                 supports_native_tool_approval=True,
             )
         ]
-    return "".join(str(chunk.content) for chunk in chunks if isinstance(chunk, RunContentEvent))
+    return "".join(chunk.text for chunk in chunks if isinstance(chunk, TextDelta))
+
+
+def _tool_outputs(provider: ScriptedProvider, request: int = 1) -> list[str]:
+    return [message.get_content_string() for message in provider.requests[request].messages if message.role == "tool"]
 
 
 def _tool_output(provider: ScriptedProvider) -> str:
-    return next(str(message["content"]) for message in provider.requests[1]["messages"] if message["role"] == "tool")
+    return _tool_outputs(provider)[0]
 
 
 @pytest.mark.asyncio
@@ -120,8 +120,8 @@ async def test_standard_shell_command_calls_another_tool_through_mindroom_agent(
     assert "done" in await _respond(runtime)
 
     first = provider.requests[0]
-    assert {"run_shell_command", "add"} <= {tool["function"]["name"] for tool in first["tools"]}
-    assert STANDARD_CLI_NOTE in str(first["messages"])
+    assert {"run_shell_command", "add"} <= set(offered_tools(first))
+    assert STANDARD_CLI_NOTE in str(first.messages)
     output = _tool_output(provider)
     assert '"status":"completed"' in output.replace(" ", ""), output
     assert "5" in output, output
@@ -198,7 +198,7 @@ async def test_parallel_native_shell_calls_each_reach_the_cli(
     async with asyncio.timeout(60):
         assert "done" in await _respond(runtime)
 
-    outputs = [str(message["content"]) for message in provider.requests[1]["messages"] if message["role"] == "tool"]
+    outputs = _tool_outputs(provider)
     assert len(outputs) == 2
     assert all('"status":"completed"' in output.replace(" ", "") for output in outputs), outputs
     assert any("11" in output for output in outputs), outputs
@@ -233,7 +233,7 @@ async def test_native_shell_calls_in_one_batch_run_at_the_same_time(
     async with asyncio.timeout(60):
         assert "done" in await _respond(runtime)
 
-    outputs = [str(message["content"]) for message in provider.requests[1]["messages"] if message["role"] == "tool"]
+    outputs = _tool_outputs(provider)
     assert len(outputs) == 2
     assert all("overlapped" in output for output in outputs), outputs
 
@@ -259,7 +259,7 @@ async def test_approval_gated_tools_stay_native_only(
 
     assert "done" in await _respond(runtime)
 
-    assert "add" in {tool["function"]["name"] for tool in provider.requests[0]["tools"]}
+    assert "add" in offered_tools(provider.requests[0])
     listing = _tool_output(provider).replace(" ", "")
     assert '"function":"subtract"' in listing, listing
     assert '"function":"add"' not in listing, listing
@@ -268,7 +268,7 @@ async def test_approval_gated_tools_stay_native_only(
 def test_the_job_controls_are_not_offered_to_the_cli(tmp_path: Path) -> None:
     """A job read through the CLI is never saved as the reply's own call, so the reply reads its jobs directly."""
     job = JobTools(test_runtime_paths(tmp_path), job_owner()).get_async_functions()["job"]
-    assert not _cli_callable(job)
+    assert not _cli_callable(adapt_function(job))
 
 
 @pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])
@@ -293,11 +293,8 @@ def test_a_shell_that_needs_approval_gets_the_cli_only_as_a_job(tmp_path: Path, 
     finally:
         clear_api_server_address()
 
-    try:
-        assert isinstance(agent, CliShellAgent) is jobs
-        assert (STANDARD_CLI_NOTE in agent.instructions) is jobs
-    finally:
-        close_agent_runtime_state_dbs(agent)
+    assert agent.surface.cli_shell is jobs
+    assert (STANDARD_CLI_NOTE in agent.prompt.instructions) is jobs
 
 
 @pytest.mark.parametrize("managed", [False, True], ids=["excluded-shell", "managed-shell"])
@@ -321,10 +318,7 @@ def test_a_shell_gets_the_cli_whether_or_not_it_runs_as_a_job(tmp_path: Path, *,
     finally:
         clear_api_server_address()
 
-    try:
-        assert isinstance(agent, CliShellAgent)
-    finally:
-        close_agent_runtime_state_dbs(agent)
+    assert agent.surface.cli_shell
 
 
 @pytest.mark.parametrize(
@@ -354,13 +348,9 @@ def test_cli_shell_agent_needs_a_matrix_response_turn_and_the_running_api(
     finally:
         clear_api_server_address()
 
-    try:
-        eligible = channel == "matrix" and api_running and response_turn
-        assert isinstance(agent, CliShellAgent) is eligible
-        assert isinstance(agent, KnowledgeToolDescribingAgent)
-        assert (STANDARD_CLI_NOTE in agent.instructions) is eligible
-    finally:
-        close_agent_runtime_state_dbs(agent)
+    eligible = channel == "matrix" and api_running and response_turn
+    assert agent.surface.cli_shell is eligible
+    assert (STANDARD_CLI_NOTE in agent.prompt.instructions) is eligible
 
 
 def test_a_subagent_gets_no_cli_of_its_own_or_its_callers(tmp_path: Path) -> None:
@@ -379,15 +369,11 @@ def test_a_subagent_gets_no_cli_of_its_own_or_its_callers(tmp_path: Path) -> Non
     finally:
         clear_api_server_address()
 
-    try:
-        assert not isinstance(agent, CliShellAgent)
-        assert STANDARD_CLI_NOTE not in agent.instructions
-        shell = next(tool for tool in agent.tools if isinstance(tool, Toolkit) and tool.name == "shell_tools")
-        run = shell.get_async_functions()["run_shell_command"].entrypoint
-        assert run is not None
-        assert run.__name__ != "windowed"
-    finally:
-        close_agent_runtime_state_dbs(agent)
+    assert not agent.surface.cli_shell
+    assert STANDARD_CLI_NOTE not in agent.prompt.instructions
+    shell = next(toolkit for toolkit in agent.spec.toolkits if toolkit.name == "shell_tools")
+    run = next(function for function in shell.functions if function.name == "run_shell_command").entrypoint
+    assert run.__code__.co_name != "windowed"
 
 
 @pytest.mark.asyncio
@@ -401,7 +387,7 @@ async def test_cli_calls_share_state_with_the_run_a_subagent_result_continues(
     # Delegation reads the managed runtime's spend monitor, which this harness leaves out.
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=running_api, budgets=None))
     runtime.config.agents["helper"].delegate_to = ["code"]
-    runtime.config.agents["code"] = AgentConfig(display_name="Code", learning=False)
+    runtime.config.agents["code"] = AgentConfig(display_name="Code")
     with_responder_access(runtime.config, "code", users=[runtime.requester_id])
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
 
@@ -420,27 +406,8 @@ async def test_cli_calls_share_state_with_the_run_a_subagent_result_continues(
         return Toolkit(name="calculator", tools=[remember, recall])
 
     monkeypatch.setattr(agents, "get_tool_by_name", build)
-
-    async def child_response(child: DelegationChild, **_kwargs: object) -> str:
-        child_agent = Agent(
-            id="code",
-            db=create_session_storage("code", runtime.config, runtime.runtime_paths, child_execution_identity(child)),
-            model=DelegationModel(id="test", responses=[ModelResponse(content="child done")]),
-        )
-        try:
-            await child_agent.arun(
-                child.task,
-                run_id=child.run_id,
-                session_id=child.session_id,
-                user_id=runtime.requester_id,
-            )
-        finally:
-            child_agent.db.close()
-        return "child done"
-
-    monkeypatch.setattr(ai, "run_delegated_child_response", child_response)
     provider = ScriptedProvider()
-    provider.install(monkeypatch)
+    ScriptedAgents({"helper": provider, "code": ScriptedModel([answer("child done")])}).install(monkeypatch)
     command = _call_and_wait("00000000-0000-4000-8000-000000000005", "calculator", "remember", {"value": 7})
     provider.steps = [
         [("run_subagent", {"agent_name": "code", "task": "work"})],
@@ -452,9 +419,7 @@ async def test_cli_calls_share_state_with_the_run_a_subagent_result_continues(
     async with asyncio.timeout(60):
         assert "done" in await _respond(runtime)
 
-    tool_outputs = [
-        str(message["content"]) for message in provider.requests[3]["messages"] if message["role"] == "tool"
-    ]
+    tool_outputs = _tool_outputs(provider, 3)
     assert '"status":"completed"' in tool_outputs[-2].replace(" ", ""), tool_outputs[-2]
     assert tool_outputs[-1] == "recalled:7", tool_outputs
 
@@ -468,13 +433,16 @@ async def test_a_timer_cancelled_during_a_reply_does_not_keep_its_agent_alive(
     *,
     streaming: bool,
 ) -> None:
-    """A cancelled timer keeps the context it was scheduled from until its deadline, which must not hold the Agent."""
+    """A cancelled timer keeps the context it was scheduled from until its deadline, which must not hold the CLI catalog."""
     runtime = _helper_runtime(tmp_path, running_api)
     timers: list[asyncio.TimerHandle] = []
-    replying_agents: list[weakref.ref[Agent]] = []
+    catalogs: list[weakref.ref[PreparedAgentToolCatalog]] = []
 
-    async def wait(agent: Agent) -> str:
-        replying_agents.append(weakref.ref(agent))
+    async def wait() -> str:
+        lifetime = current_cli_lifetime()
+        assert lifetime is not None
+        assert lifetime.owner is not None
+        catalogs.append(weakref.ref(lifetime.owner.catalog))
         # Like a request timeout that was not needed: cancelled, yet scheduled until its deadline.
         timer = asyncio.get_running_loop().call_later(3600, lambda: None)
         timer.cancel()
@@ -498,4 +466,4 @@ async def test_a_timer_cancelled_during_a_reply_does_not_keep_its_agent_alive(
 
     assert _tool_output(provider) == "waited"
     assert timers[0].cancelled()
-    assert replying_agents[0]() is None
+    assert catalogs[0]() is None

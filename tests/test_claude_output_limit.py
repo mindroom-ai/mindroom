@@ -2,31 +2,26 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from itertools import chain, repeat
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from agno.models.message import Message
-from agno.tools.function import Function
 from structlog.testing import capture_logs
 
+from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
-from mindroom.providers import model_loading
+from mindroom.llm.errors import ModelOutputLimitError
+from mindroom.llm.messages import Message
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from agno.models.base import Model
-
-    from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _OUTPUT_LIMIT = 32768
 # Anthropic streams tool input one complete key and value at a time, so a call cut off before its last
@@ -168,7 +163,7 @@ def _http_response(body: dict[str, Any], message: dict[str, Any]) -> httpx.Respo
 
 
 def _fake_claude(monkeypatch: pytest.MonkeyPatch, responses: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Serve scripted Messages API responses to every Claude model MindRoom loads; return the request bodies.
+    """Serve scripted Messages API responses to every Claude model MindRoom builds; return the request bodies.
 
     The last response repeats for every further request, as a model that keeps doing the same thing would.
     Only compaction asks for a summary without tools, so such a request gets a summary instead.
@@ -182,19 +177,7 @@ def _fake_claude(monkeypatch: pytest.MonkeyPatch, responses: list[dict[str, Any]
         message = next(pending) if "tools" in body else _answer("The agent started writing big.py in one call.")
         return _http_response(body, message)
 
-    load_model = model_loading.get_model_instance
-
-    def get_model_instance(
-        config: Config,
-        runtime_paths: RuntimePaths,
-        model_name: str = "default",
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> Model:
-        model = load_model(config, runtime_paths, model_name, execution_identity)
-        model.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-        return model
-
-    monkeypatch.setattr(model_loading, "get_model_instance", get_model_instance)
+    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", httpx.AsyncClient(transport=httpx.MockTransport(handle)).send)
     return bodies
 
 
@@ -312,74 +295,28 @@ async def test_compaction_between_cut_offs_does_not_renew_the_retries(
     assert "smaller steps" in response
 
 
-async def _respond(model: Model, messages: list[Message], *, stream: bool, ran: list[str]) -> None:
-    """Run one Agno response loop of ``model`` over ``messages``, which it extends, recording each file it saves."""
-
-    def save_file(file_name: str, contents: str) -> str:
-        """Write a file; the model's cut-off calls to it are never run."""
-        ran.append(file_name)
-        return f"Saved {len(contents)} characters to {file_name}."
-
-    tools = [Function.from_callable(save_file)]
-    if not stream:
-        await model.aresponse(messages=messages, tools=tools)
-        return
-    async for _event in model.aresponse_stream(messages=messages, tools=tools):
-        pass
+def _cut_off_call() -> Message:
+    call = {"id": "toolu_cut", "type": "function", "function": {"name": "save_file", "arguments": "{}"}}
+    return Message(role="assistant", tool_calls=[call])
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
-async def test_a_new_response_loop_gets_its_own_retries(
-    config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
-) -> None:
-    """A loop that continues a finished loop's messages, as the skill review's fork does, has two retries of its own."""
-    bodies = _fake_claude(
-        monkeypatch,
-        [_cut_off_write(), _cut_off_write(), _answer("Done."), _cut_off_write(), _answer("Reviewed.")],
-    )
-    model = model_loading.get_model_instance(config, runtime_paths_for(config), "claude")
-    ran: list[str] = []
-    turn = [Message(role="user", content="Write the full simulation script to big.py.")]
-    await _respond(model, turn, stream=stream, ran=ran)
+def test_each_run_gets_its_own_cut_off_retries() -> None:
+    """A loop that continues a finished loop's messages, as the skill review's fork does, has two retries of its own.
 
-    review = [*turn, Message(role="user", content="Review this conversation.")]
-    await _respond(model, review, stream=stream, ran=ran)
-
-    assert len(bodies) == 5
-    assert review[-1].content == "Reviewed."
-    assert ran == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
-async def test_concurrent_response_loops_count_their_cut_offs_apart(config: Config, stream: bool) -> None:
-    """Two runs that share one model and are each cut off twice both finish, so neither spends the other's retries."""
-    prompts = ("Write a.py.", "Write b.py.")
-    scripts = {prompt: [_cut_off_write(), _cut_off_write(), _answer(f"Done: {prompt}")] for prompt in prompts}
-    both_sent = asyncio.Barrier(len(prompts))
-
-    async def handle(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        script = scripts[body["messages"][0]["content"][0]["text"]]
-        message = script.pop(0)
-        if script:
-            # A cut-off response is answered only once the other run has sent its request too, so the runs interleave.
-            async with asyncio.timeout(5):
-                await both_sent.wait()
-        return _http_response(body, message)
-
-    model = model_loading.get_model_instance(config, runtime_paths_for(config), "claude")
-    model.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-    turns = [[Message(role="user", content=prompt)] for prompt in prompts]
-    ran: list[str] = []
-
-    await asyncio.gather(*(_respond(model, turn, stream=stream, ran=ran) for turn in turns))
-
-    assert [turn[-1].content for turn in turns] == [f"Done: {prompt}" for prompt in prompts]
-    assert ran == []
+    Two runs that share one model count their cut-offs apart, so neither spends the other's retries.
+    """
+    first, second = output_limit_policy(), output_limit_policy()
+    for _ in range(2):
+        [result] = first(_cut_off_call(), "output_limit") or []
+        assert (result.tool_call_id, result.content, result.tool_call_error) == (
+            "toolu_cut",
+            CUT_OFF_TOOL_CALL_RESULT,
+            True,
+        )
+        assert second(_cut_off_call(), "output_limit")
+    assert first(_cut_off_call(), "tool_use") is None
+    with pytest.raises(ModelOutputLimitError, match="smaller steps"):
+        first(_cut_off_call(), "output_limit")
 
 
 @pytest.mark.asyncio

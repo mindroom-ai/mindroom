@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.run.agent import RunOutput
 
 import mindroom.commands.handler as handler_module
 import mindroom.routing
@@ -19,7 +18,6 @@ from mindroom.commands.parsing import Command, CommandType, command_parser, get_
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.history.session_context import close_team_runtime_state_dbs
 from mindroom.message_target import MessageTarget
 from mindroom.room_model_overrides import (
     _store_path,
@@ -27,11 +25,12 @@ from mindroom.room_model_overrides import (
     resolve_room_model_override,
     set_room_model_override,
 )
-from mindroom.teams import materialize_exact_team_members
+from mindroom.teams.members import materialize_exact_team_members
 from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -351,18 +350,11 @@ async def test_runtime_room_override_selects_router_model(tmp_path: Path) -> Non
     )
     selected_models: list[str] = []
 
-    def load_model(_config: Config, _runtime_paths: object, model_name: str) -> MagicMock:
+    def load_model(_config: Config, _runtime_paths: object, model_name: str) -> ScriptedModel:
         selected_models.append(model_name)
-        return MagicMock(id=f"{model_name}-model")
+        return ScriptedModel([answer(json.dumps({"entity_name": "assistant", "reasoning": "Only candidate"}))])
 
-    router = AsyncMock()
-    router.arun.return_value = RunOutput(
-        content={"entity_name": "assistant", "reasoning": "Only candidate"},
-    )
-    with (
-        patch("mindroom.routing.model_loading.get_model_instance", side_effect=load_model),
-        patch("mindroom.routing.Agent", return_value=router),
-    ):
+    with patch("mindroom.routing.build_model_provider", side_effect=load_model):
         result = await mindroom.routing.suggest_responder(
             "Help me",
             ["assistant"],
@@ -399,11 +391,7 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             session_id=None,
         ),
     )
-    try:
-        assert members.agents[0].model is not None
-        assert members.agents[0].model.id == "large-model"
-    finally:
-        close_team_runtime_state_dbs(agents=members.agents, team_db=None)
+    assert members.builds[0].spec.model.identity.id == "large-model"
 
     thread_id = "$thread:localhost"
     set_thread_model_override(
@@ -427,11 +415,7 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             session_id=f"{ROOM_ID}:{thread_id}",
         ),
     )
-    try:
-        assert thread_members.agents[0].model is not None
-        assert thread_members.agents[0].model.id == "default-model"
-    finally:
-        close_team_runtime_state_dbs(agents=thread_members.agents, team_db=None)
+    assert thread_members.builds[0].spec.model.identity.id == "default-model"
 
 
 def test_stale_runtime_room_override_falls_back_to_static_room_model(

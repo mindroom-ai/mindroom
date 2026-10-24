@@ -5,18 +5,18 @@ Use it to tune replay depth, set up or disable compaction, or explain why an age
 
 ## History Settings
 
-Set these fields in `defaults` or on an agent; teams use the same fields except `compress_tool_results` (see [Team History and Compaction](#team-history-and-compaction)).
+Set these fields in `defaults`, on an agent, or on a team (see [Team History and Compaction](#team-history-and-compaction)).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `num_history_runs` | int, >= 1 | `null` | Number of prior runs to replay as history (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int, >= 1 | `null` | Maximum messages replayed from history (`null` = no limit). Mutually exclusive with `num_history_runs` |
-| `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits `defaults.compress_tool_results` (default `false`). On Anthropic and Vertex AI Claude models, `true` can invalidate prompt caching |
 | `max_tool_calls_from_history` | int, >= 0 | `null` | Maximum tool-call messages replayed from history. `null` inherits `defaults.max_tool_calls_from_history`; no limit when that is also `null` |
 | `compaction` | object | `defaults.compaction` | Compaction overrides; see [Agent Compaction Settings](#agent-compaction-settings) |
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
+The retired `compress_tool_results` field is ignored with a warning, and tool results replay unchanged.
 
 ## Context Window
 

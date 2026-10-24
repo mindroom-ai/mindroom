@@ -8,9 +8,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from agno.run.agent import RunCancelledEvent, RunContentEvent, RunErrorEvent, RunOutput, ToolCallStartedEvent
-from agno.run.base import RunStatus
-
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.monitor import budget_model
@@ -25,9 +22,10 @@ from mindroom.delegation.audit import observe_child_event as record_child_event
 from mindroom.delegation.personas import caller_toolkit_names, self_only_refusal
 from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
-from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
-from mindroom.error_handling import run_error_event_text
+from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.progress import cap_progress, report_tool_progress
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
@@ -40,7 +38,8 @@ if TYPE_CHECKING:
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import SubagentPersona
+    from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
+    from mindroom.llm.events import RunEvent
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -48,23 +47,39 @@ MAX_DELEGATION_DEPTH = 3
 
 type _DelegationGrant = Literal["delegate", "dynamic_workflow"]
 
-type _ChildTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]
-_TERMINAL = frozenset({"completed", "failed", "cancelled", "denied"})
-
 
 @dataclass
 class _ChildRunObservation:
-    """Exact terminal evidence collected while one child response envelope runs."""
+    """Exact terminal evidence collected while one child response envelope runs.
+
+    ``response`` is the terminal record of the child's latest run: the record the run ended with when it ran in this
+    context, which also carries what storage never holds, such as a failure's ``error``, else the outcome the envelope
+    read back from storage. A child that is cancelled leaves no record here: the loop stores its terminal row, which
+    the interruption reads, and the cancellation propagates to the driver.
+    """
 
     child: DelegationChild
     parent: _ChildRunObservation | None = None
-    response: RunOutput | None = None
-    terminal: tuple[str, _ChildTerminalStatus, str] | None = None
+    response: RunRecord | None = None
     # The tail of what the child said and which tools it called, reported as its caller's progress.
     activity: str = ""
 
+    def keep_outcome(self, record: RunRecord) -> None:
+        """Keep the outcome the envelope returned, unless this context already holds the record that run ended with.
+
+        The envelope reads a run it started back from storage, and the stored copy lacks what is never stored.
+        """
+        if self.response is None or self.response.run_id != record.run_id:
+            self.response = record
+
 
 _CHILD_RUN: ContextVar[_ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
+
+
+def running_child_id() -> str | None:
+    """Return the delegation id of the child turn running in this context, or None outside one."""
+    observation = _CHILD_RUN.get()
+    return None if observation is None else observation.child.delegation_id
 
 
 def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, str, _DelegationGrant], ...]:
@@ -118,14 +133,11 @@ def note_child_run_id(
     run_id: str,
     runtime_paths: RuntimePaths,
     *,
-    model_name: str | None = None,
+    model_name: str,
 ) -> None:
-    """Publish the exact attempt and bound model before it can execute tools."""
+    """Publish the exact attempt and the model it runs on before it can execute tools."""
     child.run_id = run_id
-    context = get_tool_runtime_context()
-    if model_name is None and context is not None:
-        model_name = context.active_model_name
-    if model_name is not None and model_name != child.model_name:
+    if model_name != child.model_name:
         # A model switch during the run is what the child's follow-ups ask for next.
         child.requested_model_name = model_name
         child.model_name = model_name
@@ -159,27 +171,33 @@ async def start_child_turn(
 
 async def settle_child_response(
     child: DelegationChild,
-    response: RunOutput,
+    response: RunRecord,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     decisions: Mapping[str, bool] | None = None,
     denial_reasons: Mapping[str, str | None] | None = None,
-    error_message: str | None = None,
 ) -> None:
-    """Derive operational state from one exact run, then publish its audit view."""
+    """Derive operational state from one exact run, then publish its audit view.
+
+    A finished run's result is what it hands over (``handover_content``), so a failed run's is why it failed.
+    """
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
+    # TODO(simplify): A resumed child that wrote nothing hands over its carried pause notice ("I have tools to
+    # execute, but I need confirmation.") after its call ran, as main did. Hand over only what the resume added
+    # (``new_handover_content``) or the completion note below. The delegating parent's model would notice.
+    content = response.handover_content
     if response.status == RunStatus.completed:
         child.status = "completed"
-        child.result = str(response.content or "Agent completed the task but returned no content.")
+        child.result = content or "Agent completed the task but returned no content."
     elif response.status == RunStatus.cancelled:
         child.status = "cancelled"
-        child.result = str(response.content or "Delegation cancelled.")
+        child.result = content or "Delegation cancelled."
     elif response.status in {RunStatus.error, RunStatus.regenerated}:
         child.status = "failed"
-        child.result = error_message or str(response.content or response.status)
+        child.result = str(content or response.status)
     else:
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None
@@ -194,11 +212,11 @@ async def settle_child_response(
             denial_reasons=denial_reasons,
         )
     except DelegationRecordLimitError:
-        if child.status not in _TERMINAL:
+        if child.status not in TERMINAL_CHILD_STATUSES:
             raise
         # A full record keeps room for its terminal event, so settle it without the remaining ordinary events.
         usage = child_response_usage(response)
-    if child.status in _TERMINAL:
+    if child.status in TERMINAL_CHILD_STATUSES:
         await finish_child_record(child, config=config, runtime_paths=runtime_paths, usage=usage)
 
 
@@ -207,14 +225,14 @@ async def finish_child_turn(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    status: _ChildTerminalStatus | None = None,
+    status: DelegationTerminalStatus | None = None,
     reason: str | None = None,
 ) -> str:
     """Settle an interruption without overwriting an already retained terminal outcome."""
-    if status is not None and child.status not in _TERMINAL:
+    if status is not None and child.status not in TERMINAL_CHILD_STATUSES:
         child.status = status
         child.result = reason
-    if child.status not in _TERMINAL:
+    if child.status not in TERMINAL_CHILD_STATUSES:
         msg = f"Cannot finish active delegation: {child.delegation_id}"
         raise ValueError(msg)
     await update_subagent_turn(child, runtime_paths)
@@ -240,62 +258,44 @@ async def child_run_context(
         try:
             response = observation.response
             if response is not None and response.run_id == child.run_id:
-                terminal = observation.terminal
-                await settle_child_response(
-                    child,
-                    response,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    error_message=(
-                        terminal[2]
-                        if terminal is not None and terminal[0] == response.run_id and terminal[1] == "failed"
-                        else None
-                    ),
-                )
-            elif observation.terminal is not None and observation.terminal[0] == child.run_id:
-                _, status, reason = observation.terminal
-                await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
+                await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
         finally:
             _CHILD_RUN.reset(token)
 
 
-def _report_child_activity(observation: _ChildRunObservation, event: RunContentEvent | ToolCallStartedEvent) -> None:
-    if isinstance(event, RunContentEvent):
-        text = event.content if isinstance(event.content, str) else ""
-    else:
-        text = f"\nCalling {event.tool.tool_name}\n" if event.tool is not None else ""
+def _report_child_activity(observation: _ChildRunObservation, event: TextDelta | ToolStarted) -> None:
+    text = event.text if isinstance(event, TextDelta) else f"\nCalling {event.call.tool_name}\n"
     if text:
         observation.activity = cap_progress(observation.activity + text)
         report_tool_progress(observation.activity)
 
 
-async def observe_child_event(event: object) -> None:
-    """Retain execution evidence and report the child's activity before forwarding the event to the audit adapter."""
+async def observe_child_event(event: RunEvent) -> None:
+    """Retain execution evidence and report the child's activity before forwarding the event to the audit adapter.
+
+    The loop's events carry no run identity; they are the events of the child turn running in this context, whose
+    terminal record names the run it ended.
+    """
     observation = _CHILD_RUN.get()
-    if observation is not None and isinstance(
-        event,
-        (RunOutput, RunCancelledEvent, RunErrorEvent, RunContentEvent, ToolCallStartedEvent),
-    ):
-        child = observation.child
-        if event.run_id == child.run_id and event.session_id == child.session_id:
-            if isinstance(event, (RunContentEvent, ToolCallStartedEvent)):
-                _report_child_activity(observation, event)
-            elif isinstance(event, RunOutput):
-                # Failed outputs can retain stale text; keep the matching error event's details.
-                observation.response = event
-                if event.status != RunStatus.error:
-                    observation.terminal = None
-            else:
-                observation.response = None
-                if isinstance(event, RunCancelledEvent):
-                    observation.terminal = (child.run_id, "cancelled", event.reason or "Delegation cancelled.")
-                else:
-                    observation.terminal = (
-                        child.run_id,
-                        "failed",
-                        run_error_event_text(event),
-                    )
+    if observation is not None and isinstance(event, (TextDelta, ToolStarted)):
+        _report_child_activity(observation, event)
+    if isinstance(event, RunFinished) and isinstance(event.record, RunRecord):
+        observe_child_record(event.record)
     await record_child_event(event)
+
+
+def observe_child_record(record: RunRecord) -> None:
+    """Retain the terminal record of the child turn running in this context, as the loop stored it.
+
+    A completed or paused record arrives with ``RunFinished``; a run that failed stores its ``ERROR`` record and
+    raises instead, so the turn that caught the failure hands the record over here.
+    """
+    observation = _CHILD_RUN.get()
+    if observation is None:
+        return
+    child = observation.child
+    if record.run_id == child.run_id and record.session_id == child.session_id:
+        observation.response = record
 
 
 def delegation_grant(child: DelegationChild) -> _DelegationGrant:

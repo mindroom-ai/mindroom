@@ -20,7 +20,6 @@ from unittest.mock import patch
 
 import mcp.types as mcp_types
 import pytest
-from agno.models.openai import OpenAIChat
 from authlib.integrations.base_client.errors import OAuthError
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
@@ -4746,21 +4745,17 @@ async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path
 
     bind_mcp_server_manager(manager)
     try:
-        model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-        with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
-            agent = create_agent(
-                "code",
-                config,
-                runtime_paths,
-                execution_identity=worker_target.execution_identity,
-                include_interactive_questions=False,
-            )
+        agent = create_agent(
+            "code",
+            config,
+            runtime_paths,
+            execution_identity=worker_target.execution_identity,
+            include_interactive_questions=False,
+        )
     finally:
         await manager.shutdown()
 
-    function_names = [
-        function_name for tool in agent.tools for function_name in (*tool.get_functions(), *tool.get_async_functions())
-    ]
+    function_names = [function.name for toolkit in agent.spec.toolkits for function in toolkit.functions]
     assert "shared_connection_status" not in function_names
     assert "shared_list_tools" not in function_names
     assert "shared_call_tool" not in function_names
@@ -5163,33 +5158,28 @@ async def test_oauth_mcp_catalog_projection_hides_function_colliding_with_deferr
 
     bind_mcp_server_manager(manager)
     try:
-        with patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            side_effect=lambda *_args, **_kwargs: OpenAIChat(id="gpt-4o-mini", api_key="sk-test"),
-        ):
-            await manager.get_request_catalog(
-                "demo",
-                credentials_manager=get_runtime_credentials_manager(runtime_paths),
-                worker_target=worker_target,
-            )
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=get_runtime_credentials_manager(runtime_paths),
+            worker_target=worker_target,
+        )
 
-            agent = create_agent(
-                "code",
-                config,
-                runtime_paths,
-                execution_identity=worker_target.execution_identity,
-                include_interactive_questions=False,
-            )
+        agent = create_agent(
+            "code",
+            config,
+            runtime_paths,
+            execution_identity=worker_target.execution_identity,
+            include_interactive_questions=False,
+        )
     finally:
         await manager.shutdown()
 
-    mcp_toolkit = next(tool for tool in agent.tools if tool.name == "mcp_demo")
-    function_names = [
-        function_name for tool in agent.tools for function_name in (*tool.get_functions(), *tool.get_async_functions())
-    ]
+    mcp_toolkit = next(toolkit for toolkit in agent.spec.toolkits if toolkit.name == "mcp_demo")
+    mcp_functions = {function.name for function in mcp_toolkit.functions}
+    function_names = [function.name for toolkit in agent.spec.toolkits for function in toolkit.functions]
     assert function_names.count("run_shell_command") == 1
-    assert "run_shell_command" not in mcp_toolkit.get_async_functions()
-    assert "run_call_tool" in mcp_toolkit.get_async_functions()
+    assert "run_shell_command" not in mcp_functions
+    assert "run_call_tool" in mcp_functions
 
 
 @pytest.mark.asyncio
@@ -5234,16 +5224,14 @@ async def test_failed_deferred_non_oauth_mcp_server_is_left_out_of_agent_constru
     assert manager.failed_server_ids() == {"demo"}
 
     bind_mcp_server_manager(manager)
-    model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
-        agent = create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            include_interactive_questions=False,
-        )
-    tool_names = [tool.name for tool in agent.tools]
+    agent = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        include_interactive_questions=False,
+    )
+    tool_names = [toolkit.name for toolkit in agent.spec.toolkits]
     assert "mcp_demo" not in tool_names
     assert "dynamic_tools" not in tool_names
 
@@ -5294,19 +5282,17 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
 
     bind_mcp_server_manager(manager)
     try:
-        model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-        with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
-            agent = create_agent(
-                "code",
-                config,
-                runtime_paths,
-                execution_identity=None,
-                include_interactive_questions=False,
-            )
+        agent = create_agent(
+            "code",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            include_interactive_questions=False,
+        )
     finally:
         await manager.shutdown()
 
-    assert not any(tool.name == "mcp_demo" for tool in agent.tools)
+    assert not any(toolkit.name == "mcp_demo" for toolkit in agent.spec.toolkits)
 
 
 @pytest.mark.asyncio

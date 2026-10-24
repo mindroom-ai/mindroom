@@ -25,11 +25,10 @@ from mindroom.config.access import (
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.cold_cache import ColdCacheConfig  # noqa: TC001
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
-from mindroom.config.legacy_fields import reject_legacy_agent_fields
+from mindroom.config.legacy_fields import drop_retired_fields, reject_legacy_agent_fields
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
 from mindroom.config.mid_turn import MidTurnConfig  # noqa: TC001
 from mindroom.config.models import (
-    AgentLearningMode,
     CompactionOverrideConfig,
     FileAccess,
     ToolConfigEntry,
@@ -46,6 +45,11 @@ _PrivateWorkerScope = Literal["user", "user_agent"]
 # Everything the primary writes beside a private workspace in its private state root;
 # tests/test_private_root_reservations.py enumerates the writers. Workers mount only
 # the private workspace, so it must never be, or contain, one of these.
+# LEGACY_COMPAT: Agno Learning databases left in private state roots.
+# Legacy format: `learning/<agent>.db` holding requester profiles and memories, written while Learning was enabled.
+# Last legacy release: v2026.10.478; replacement: unreleased.
+# Handling: Keep `learning` reserved, so a worker never mounts a leftover learning database as a private workspace.
+# Coverage: tests/test_private_root_reservations.py::test_primary_state_written_beside_a_private_workspace_is_reserved.
 _RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset(
     {
         ".sessions-recovery.lock",
@@ -293,14 +297,9 @@ class AgentConfig(BaseModel):
         ),
     )
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
-    learning: bool | None = Field(default=None, description="Enable Agno Learning (defaults to true when omitted)")
     knowledge_graph: bool | None = Field(
         default=None,
         description="Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
-    )
-    learning_mode: AgentLearningMode | None = Field(
-        default=None,
-        description="Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
     )
     model: str = Field(
         default="default",
@@ -357,19 +356,12 @@ class AgentConfig(BaseModel):
     num_history_runs: int | None = Field(
         default=None,
         ge=1,
-        description="Number of prior Agno runs to include as history context (per-agent override)",
+        description="Number of prior runs to include as history context (per-agent override)",
     )
     num_history_messages: int | None = Field(
         default=None,
         ge=1,
         description="Max messages from history (mutually exclusive with num_history_runs)",
-    )
-    compress_tool_results: bool | None = Field(
-        default=None,
-        description=(
-            "Compress tool results in history to save context (per-agent override). On Anthropic/Vertex Claude, "
-            "setting this to true can mutate replayed tool messages and invalidate prompt-cache prefixes."
-        ),
     )
     max_tool_calls_from_history: int | None = Field(
         default=None,
@@ -456,8 +448,8 @@ class AgentConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_legacy_agent_fields(cls, data: object) -> object:
-        """Reject removed legacy fields to prevent silent misconfiguration."""
-        return reject_legacy_agent_fields(data)
+        """Ignore retired fields with a warning, then reject removed legacy fields to prevent silent misconfiguration."""
+        return reject_legacy_agent_fields(drop_retired_fields(data))
 
     @field_validator("thread_exports", mode="before")
     @classmethod

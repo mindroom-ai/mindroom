@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
 import tempfile
@@ -14,11 +15,14 @@ import typer
 from rich.markup import escape
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
+from mindroom.constants import RuntimePaths, env_key_for_provider
 from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
-from mindroom.embeddings.signatures import create_sentence_transformers_embedder
+from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
+from mindroom.llm.errors import AuthenticationFailed, ProviderError
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.matrix.health import (
     MSC4186_UNSTABLE_FEATURE,
     matrix_versions_url,
@@ -31,17 +35,20 @@ from mindroom.matrix.provisioning_env import (
     provisioning_url_from_env,
     registration_token_from_env,
 )
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
+from mindroom.providers.model_http_client import closing_model_connections
+from mindroom.providers.model_loading import model_uses_own_credential
+from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
 from .config import activate_cli_runtime, console, load_config_quiet
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
-    from anthropic import APIStatusError
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError
+    from google.auth.exceptions import DefaultCredentialsError
 
     from mindroom.config.models import ModelConfig
 
@@ -56,9 +63,10 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
     """
     console.print("[bold]MindRoom Doctor[/bold]\n")
 
-    passed = 0
-    failed = 0
-    warnings = 0
+    totals = [0, 0, 0]  # passed, failed, warnings
+
+    def add(counts: Sequence[int]) -> None:
+        totals[:] = [total + count for total, count in zip(totals, counts, strict=True)]
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config_path = runtime_paths.config_path
@@ -73,41 +81,23 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
         sync_env_to_credentials(runtime_paths=runtime_paths)
     except (OSError, ValueError) as exc:
         console.print(f"[yellow]![/yellow] Could not sync env credentials into the store ({exc})")
-        warnings += 1
+        add((0, 0, 1))
 
     # 1. Config file exists
-    p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
-    passed += p
-    failed += f
-    warnings += w
+    add(_run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path)))
 
     # 2+. Config validity + provider API key validation (skip if file missing)
     config: Config | None = None
     if config_path.is_file():
-        config, p, f, w = _run_doctor_step(
-            "Validating configuration...",
-            lambda: _check_config_valid(runtime_paths),
-        )
-        passed += p
-        failed += f
-        warnings += w
+        config, *counts = _run_doctor_step("Validating configuration...", lambda: _check_config_valid(runtime_paths))
+        add(counts)
         if config is not None:
-            p, f, w = _run_doctor_step(
-                "Checking providers...",
-                lambda: _check_providers(config, runtime_paths=runtime_paths),
-            )
-            passed += p
-            failed += f
-            warnings += w
-
-            # 4. Memory LLM & embedder
-            p, f, w = _run_doctor_step(
-                "Checking memory config...",
-                lambda: _check_memory_config(config, runtime_paths=runtime_paths),
-            )
-            passed += p
-            failed += f
-            warnings += w
+            # 3-4. Providers, then the memory LLM & embedder
+            for message, check in (
+                ("Checking providers...", lambda: _check_providers(config, runtime_paths=runtime_paths)),
+                ("Checking memory config...", lambda: _check_memory_config(config, runtime_paths=runtime_paths)),
+            ):
+                add(_run_doctor_step(message, check))
 
     # 5+. Matrix homeserver, hosted pairing, storage, and encryption stores
     for message, check in (
@@ -116,12 +106,10 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
         ("Checking storage...", lambda: _check_storage_writable(runtime_paths)),
         ("Checking encryption stores...", lambda: _check_e2ee_stores(runtime_paths)),
     ):
-        p, f, w = _run_doctor_step(message, check)
-        passed += p
-        failed += f
-        warnings += w
+        add(_run_doctor_step(message, check))
 
     # Summary
+    passed, failed, warnings = totals
     console.print(f"\n{passed} passed, {failed} failed, {warnings} warning{'s' if warnings != 1 else ''}")
 
     if failed > 0:
@@ -200,24 +188,8 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
     return config, 1, 0, 0
 
 
-_PROVIDER_VALIDATE_URLS: dict[str, str] = {
-    "anthropic": "https://api.anthropic.com/v1/models",
-    "openai": "https://api.openai.com/v1/models",
-    "google": "https://generativelanguage.googleapis.com/v1beta/models",
-    "openrouter": f"{OPENROUTER_BASE_URL_DEFAULT}/models",
-    "deepseek": "https://api.deepseek.com/v1/models",
-    "cerebras": "https://api.cerebras.ai/v1/models",
-    "groq": "https://api.groq.com/openai/v1/models",
-    # No "zai" entry: Z.ai's paas/v4 OpenAPI spec exposes no GET /models
-    # listing endpoint, so a URL probe would misreport valid keys as broken.
-}
-
-
 def _models_using_shared_key(config: Config, env_key: str, runtime_paths: RuntimePaths) -> list[ModelConfig] | None:
     """Return the models the runtime sends the shared ``env_key`` to, or None when the credential store is unreadable."""
-    # model_loading pulls in the Agno runtime, which doctor only needs once a provider is checked.
-    from mindroom.providers.model_loading import model_uses_own_credential  # noqa: PLC0415
-
     try:
         return [
             model
@@ -239,15 +211,10 @@ def _get_custom_base_url(models: list[ModelConfig], provider: str) -> str | None
     return None
 
 
-def _http_check(
-    url: str,
-    headers: dict[str, str] | None = None,
-    *,
-    verify: bool = True,
-) -> tuple[bool | None, str]:
+def _http_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool | None, str]:
     """Make a lightweight GET request and return (True, ""), (False, reason), or (None, reason)."""
     try:
-        resp = httpx.get(url, headers=headers or {}, timeout=5, verify=verify)
+        resp = httpx.get(url, headers=headers or {}, timeout=5)
     except httpx.HTTPError as exc:
         return None, str(exc)
     if resp.is_success:
@@ -299,56 +266,29 @@ def _validate_provider_key(
     api_key: str,
     base_url: str | None = None,
 ) -> tuple[bool | None, str]:
-    """Validate an API key with a lightweight models-list request.
+    """Validate an API key with the provider's key check, sent to a custom endpoint's model list when one is set.
+
+    A provider without a key check is never probed, at a custom endpoint either: its key style and a model list
+    are unknown, so a probe could report a valid key as invalid.
 
     Returns (True, "") if valid, (False, reason) if invalid,
-    (None, reason) if inconclusive (e.g. connection error).
+    (None, reason) if inconclusive (e.g. connection error, or a provider without a key check).
     """
-    # Normalize aliases so we look up a single URL and auth style
-    canonical = "google" if provider == "gemini" else provider
-
-    if base_url:
-        url = base_url.rstrip("/") + "/models"
-    elif canonical in _PROVIDER_VALIDATE_URLS:
-        url = _PROVIDER_VALIDATE_URLS[canonical]
-    else:
-        return None, "unknown provider"
-
-    headers: dict[str, str] = {}
-    if canonical == "anthropic":
-        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
-    elif canonical == "google":
-        url = f"{url}?key={api_key}"
-    else:
-        headers = {"Authorization": f"Bearer {api_key}"}
-
+    check = PROVIDER_KEY_CHECKS.get(provider_route(provider))
+    if check is None:
+        return None, "no key check for this provider"
+    url, headers = check.request(api_key, url=base_url.rstrip("/") + "/models" if base_url else None)
     return _http_check(url, headers)
 
 
 def _classify_vertexai_claude_error(
-    exc: APIStatusError
-    | DefaultCredentialsError
-    | RefreshError
-    | RuntimeError
-    | TypeError
-    | ValueError
-    | httpx.HTTPError,
+    exc: ProviderError | DefaultCredentialsError | RuntimeError | TypeError | ValueError,
 ) -> tuple[bool | None, str]:
-    """Classify one Vertex AI Claude validation failure for doctor output."""
-    from anthropic import APIStatusError  # noqa: PLC0415
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError  # noqa: PLC0415
+    """Classify one Vertex AI Claude validation failure for doctor output, with an actionable message.
 
-    if isinstance(exc, APIStatusError):
-        return False, _vertexai_claude_api_error_detail(exc)
-    if isinstance(exc, DefaultCredentialsError):
-        return None, str(exc)
-    if isinstance(exc, RefreshError):
-        return False, str(exc)
-    return None, str(exc)
-
-
-def _vertexai_claude_api_error_detail(exc: APIStatusError) -> str:
-    """Turn a Vertex Claude API error into an actionable doctor message.
+    The Claude adapter types every failure of a request, rejected Google credentials included, so rejected
+    credentials fail with the reason their error carries and another rejected request with its status. Credentials
+    that cannot be found and a service that cannot be reached leave the check inconclusive.
 
     Model availability on Vertex is per project and region: a project can have
     the Vertex AI API enabled yet still 404 on a Claude model when Anthropic
@@ -356,24 +296,31 @@ def _vertexai_claude_api_error_detail(exc: APIStatusError) -> str:
     wrong for Vertex (current-generation ids are bare, e.g. the anthropic
     default; older ones are dated snapshots with an @ separator).
     """
+    if isinstance(exc, AuthenticationFailed):
+        return False, str(exc)
+    if not isinstance(exc, ProviderError) or exc.status_code is None:
+        return None, str(exc)
     if exc.status_code == httpx.codes.NOT_FOUND:
-        return (
+        return False, (
             "HTTP 404: model not available in this project/region — verify the Vertex model id form "
             "(bare current-generation id or dated @ snapshot) and that Anthropic models are enabled "
-            f"in the project's Model Garden ({exc.message})"
+            f"in the project's Model Garden ({exc})"
         )
     if exc.status_code == httpx.codes.FORBIDDEN:
-        if "SERVICE_DISABLED" in exc.message:
-            return "HTTP 403: the Vertex AI API (aiplatform.googleapis.com) is not enabled in this project"
-        return "HTTP 403: permission denied — check the credentials' IAM access to Vertex AI in this project"
-    return f"HTTP {exc.status_code}"
+        if "SERVICE_DISABLED" in str(exc):
+            return False, "HTTP 403: the Vertex AI API (aiplatform.googleapis.com) is not enabled in this project"
+        return False, "HTTP 403: permission denied — check the credentials' IAM access to Vertex AI in this project"
+    return False, f"HTTP {exc.status_code}"
 
 
 def _validate_vertexai_claude_connection(
     model_config: ModelConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[bool | None, str]:
-    """Validate the configured Vertex AI Claude model with the runtime request path."""
+    """Validate the configured Vertex AI Claude model with one tiny request through the runtime's Claude adapter.
+
+    An unreachable endpoint or token service leaves the check inconclusive rather than failed.
+    """
     extra_kwargs = dict(model_config.extra_kwargs or {})
     project_env = VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]
     region_env = VERTEXAI_CLAUDE_ENV_BY_KEY["region"]
@@ -387,46 +334,23 @@ def _validate_vertexai_claude_connection(
     if missing:
         return None, f"missing {', '.join(missing)}"
 
-    client_params = dict(extra_kwargs.get("client_params") or {})
-    google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-    if "credentials" not in client_params and google_application_credentials is not None:
-        from mindroom.providers.google_adc import load_google_application_credentials  # noqa: PLC0415
+    from google.auth.exceptions import DefaultCredentialsError  # noqa: PLC0415
 
-        try:
-            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
-        except PermanentStartupError as exc:
-            return False, str(exc)
-    if client_params:
-        extra_kwargs["client_params"] = client_params
+    # The anthropic SDK loads only when a Vertex Claude model is checked.
+    from mindroom.providers.anthropic.messages import build_provider  # noqa: PLC0415
 
-    extra_kwargs.setdefault("project_id", project_id)
-    extra_kwargs.setdefault("region", region)
-    extra_kwargs.setdefault("timeout", 10)
-
-    from agno.models.vertexai.claude import Claude as VertexAIClaude  # noqa: PLC0415
-    from anthropic import APIStatusError  # noqa: PLC0415
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError  # noqa: PLC0415
-
+    probe_config = model_config.model_copy(update={"extra_kwargs": {"timeout": 10, **extra_kwargs, "max_tokens": 1}})
+    request = ModelRequest(
+        messages=[Message(role="user", content="Reply with OK.")],
+        overrides=RequestOverrides(prompt_cache=False, disable_thinking=True),
+        stream=False,
+    )
     try:
-        model = VertexAIClaude(id=model_config.id, **extra_kwargs)
-        request_kwargs = model.get_request_params().copy()
-        request_kwargs["model"] = model_config.id
-        request_kwargs["messages"] = [{"role": "user", "content": "Reply with OK."}]
-        request_kwargs.setdefault("max_tokens", 1)
-        request_kwargs["timeout"] = request_kwargs.get("timeout", 10)
-        client = model.get_client()
-        client.messages.create(
-            **request_kwargs,
-        )
-    except (
-        APIStatusError,
-        DefaultCredentialsError,
-        RefreshError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-        httpx.HTTPError,
-    ) as exc:
+        provider = build_provider(probe_config, runtime_paths)
+        asyncio.run(closing_model_connections(complete(provider, request)))
+    except PermanentStartupError as exc:
+        return False, str(exc)
+    except (ProviderError, DefaultCredentialsError, RuntimeError, TypeError, ValueError) as exc:
         return _classify_vertexai_claude_error(exc)
 
     return True, ""
@@ -706,11 +630,11 @@ def _validate_sentence_transformers_embedder(runtime_paths: RuntimePaths, model:
     """Validate a local sentence-transformers model with a tiny embedding request."""
     try:
         embedder = create_sentence_transformers_embedder(runtime_paths, model)
-        embedding = embedder.get_embedding("mindroom doctor embedder check")
+        embedding = embedder.embed(["mindroom doctor embedder check"], purpose="query")[0]
     except Exception as exc:
         return False, str(exc)
 
-    if not isinstance(embedding, list) or not embedding:
+    if not embedding:
         return False, "empty embedding vector"
     return True, ""
 

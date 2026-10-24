@@ -10,23 +10,29 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agno.models.message import Message
 
 import mindroom.ai as ai_module
 import mindroom.knowledge.utils as knowledge_utils
 import mindroom.memory._file_backend as file_backend_module
-import mindroom.pre_model_preparation as pre_model_preparation_module
+from mindroom.agent_loop.build import AgentBuild, AgentSurface
+from mindroom.agent_loop.prompt import PromptSpec
+from mindroom.agent_loop.spec import AgentSpec
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.history.types import PreparedHistoryState
+from mindroom.history.request_messages import TurnMessages
+from mindroom.history.types import HistoryPolicy, PreparedHistoryState, ResolvedHistorySettings
 from mindroom.hooks import render_transient_context
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import bind_runtime_paths, make_turn_context, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 
@@ -195,6 +201,34 @@ def _prompt_preparation_config(memory_backend: str = "mem0") -> Config:
     )
 
 
+def _build(turn_context: str | None = None) -> AgentBuild:
+    """Return a minimal agent build whose prompt carries ``turn_context`` as the build's own context."""
+    return AgentBuild(
+        spec=AgentSpec(id="general", name="General", model=ScriptedModel([]), system_message=None),
+        prompt=PromptSpec(role="test", turn_context=turn_context),
+        request_template=ModelRequest(messages=()),
+        history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        store=None,
+        tool_owners={},
+        surface=AgentSurface(mode="standard", cli_shell=False),
+    )
+
+
+def _prepared_execution(
+    prompt: str,
+    transient: Sequence[Message] = (),
+    *,
+    unseen_event_ids: Sequence[str] = (),
+    prepared_context_tokens: int | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        prepared_history=PreparedHistoryState(prepared_context_tokens=prepared_context_tokens),
+        replay_plan=None,
+        unseen_event_ids=list(unseen_event_ids),
+        turn=TurnMessages(prompt=Message(role="user", content=prompt), transient=tuple(transient)),
+    )
+
+
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
     tmp_path: Path,
@@ -203,12 +237,12 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
     """A slow agent build (workspace and context-file I/O) must not stall the loop."""
     gate = threading.Event()
     build_started = threading.Event()
-    built_agent = MagicMock()
+    build = _build()
 
-    def gated_create_agent(*_args: object, **_kwargs: object) -> MagicMock:
+    def gated_create_agent(*_args: object, **_kwargs: object) -> AgentBuild:
         build_started.set()
         gate.wait()
-        return built_agent
+        return build
 
     monkeypatch.setattr(ai_module, "create_agent", gated_create_agent)
     monkeypatch.setattr(
@@ -216,16 +250,10 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
         "build_memory_prompt_parts",
         AsyncMock(return_value=MemoryPromptParts()),
     )
-    prepared_execution = SimpleNamespace(
-        prepared_history=PreparedHistoryState(),
-        replay_plan=None,
-        unseen_event_ids=(),
-        messages=[],
-    )
     monkeypatch.setattr(
         ai_module,
         "prepare_agent_execution_context",
-        AsyncMock(return_value=prepared_execution),
+        AsyncMock(return_value=_prepared_execution("hello")),
     )
 
     config = Config.model_validate({"agents": {"general": {"display_name": "General", "role": "test"}}})
@@ -245,7 +273,7 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
 
     gate.set()
     prepared_run = await prepare_task
-    assert prepared_run.agent is built_agent
+    assert prepared_run.build is build
 
 
 @pytest.mark.asyncio
@@ -264,12 +292,10 @@ async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_histor
     agent_started = threading.Event()
     agent_release = threading.Event()
     agent_finished = threading.Event()
-    prompt_composed = asyncio.Event()
     history_started = asyncio.Event()
     context_marker = ContextVar("prompt_preparation_context", default="missing")
     context_token = context_marker.set("preserved")
-    built_agent = MagicMock()
-    built_agent.additional_context = "existing context"
+    build = _build("existing context")
 
     async def gated_memory(*_args: object, **_kwargs: object) -> MemoryPromptParts:
         memory_started.set()
@@ -280,44 +306,30 @@ async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_histor
         memory_finished.set()
         return MemoryPromptParts(session_preamble="session memory", transient_turn_context="turn memory")
 
-    def gated_create_agent(*_args: object, **_kwargs: object) -> MagicMock:
+    def gated_create_agent(*_args: object, **_kwargs: object) -> AgentBuild:
         assert context_marker.get() == "preserved"
         agent_started.set()
         if not agent_release.wait(5.0):
             msg = "timed out waiting to release agent construction"
             raise TimeoutError(msg)
         agent_finished.set()
-        return built_agent
+        return build
 
     async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
         history_started.set()
-        assert kwargs["agent"] is built_agent
+        assert memory_finished.is_set()
+        assert agent_finished.is_set()
+        assert kwargs["build"] is build
         assert kwargs["prompt"] == "raw prompt\n\nmodel metadata"
+        assert str(kwargs["system_message"].content).endswith("existing context\n\nsession memory")
         assert len(kwargs["transient_context_messages"]) == 1
         assert kwargs["transient_context_messages"][0].content == render_transient_context(("turn memory",))
         assert kwargs["transient_context_messages"][0].add_to_agent_memory is False
         assert kwargs["resolved_runtime_model"].model_name == "default"
-        return SimpleNamespace(
-            prepared_history=PreparedHistoryState(),
-            replay_plan=None,
-            unseen_event_ids=[],
-            messages=(Message(role="user", content=kwargs["prompt"]),),
-        )
-
-    original_compose = ai_module._compose_current_turn_prompt
-
-    def compose_prompt(*, raw_prompt: str, model_prompt: str | None) -> str:
-        assert memory_finished.is_set()
-        assert agent_finished.is_set()
-        prompt_composed.set()
-        return original_compose(
-            raw_prompt=raw_prompt,
-            model_prompt=model_prompt,
-        )
+        return _prepared_execution(kwargs["prompt"], kwargs["transient_context_messages"])
 
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", gated_memory)
     monkeypatch.setattr(ai_module, "create_agent", gated_create_agent)
-    monkeypatch.setattr(ai_module, "_compose_current_turn_prompt", compose_prompt)
     monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
 
     config = _prompt_preparation_config(memory_backend)
@@ -343,7 +355,6 @@ async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_histor
             agent_release.set()
             assert await asyncio.to_thread(agent_finished.wait, 1.0)
         await asyncio.sleep(0)
-        assert not prompt_composed.is_set()
         assert not history_started.is_set()
 
         memory_release.set()
@@ -354,9 +365,10 @@ async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_histor
         memory_release.set()
         agent_release.set()
 
-    assert prepared_run.agent is built_agent
-    assert prepared_run.prompt_text == "raw prompt\n\nmodel metadata"
-    assert built_agent.additional_context == "existing context\n\nsession memory"
+    assert prepared_run.build is build
+    assert prepared_run.spec.system_message is not None
+    assert str(prepared_run.spec.system_message.content).endswith("existing context\n\nsession memory")
+    assert prepared_run.prompt_text.startswith("raw prompt\n\nmodel metadata")
     assert pipeline_timing.metadata["prompt_branches_parallel"] is True
     assert pipeline_timing.metadata["prompt_branches_memory_backend"] == memory_backend
     assert "prompt_branches_start" in pipeline_timing.marks
@@ -370,8 +382,7 @@ async def test_prepare_agent_and_prompt_keeps_cold_default_workspace_serial(
 ) -> None:
     """Cold default workspace stays serial so construction cannot change memory reads."""
     memory_finished = False
-    built_agent = MagicMock()
-    built_agent.additional_context = ""
+    build = _build()
 
     async def prepare_memory(*_args: object, **_kwargs: object) -> MemoryPromptParts:
         nonlocal memory_finished
@@ -379,20 +390,13 @@ async def test_prepare_agent_and_prompt_keeps_cold_default_workspace_serial(
         memory_finished = True
         return MemoryPromptParts()
 
-    def build_agent(*_args: object, **_kwargs: object) -> MagicMock:
+    def build_agent(*_args: object, **_kwargs: object) -> AgentBuild:
         assert memory_finished
-        return built_agent
+        return build
 
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", prepare_memory)
     monkeypatch.setattr(ai_module, "create_agent", build_agent)
-    prepare_history = AsyncMock(
-        return_value=SimpleNamespace(
-            prepared_history=PreparedHistoryState(),
-            replay_plan=None,
-            unseen_event_ids=[],
-            messages=(Message(role="user", content="hello"),),
-        ),
-    )
+    prepare_history = AsyncMock(return_value=_prepared_execution("hello"))
     monkeypatch.setattr(
         ai_module,
         "prepare_agent_execution_context",
@@ -427,108 +431,28 @@ async def test_prepare_agent_and_prompt_keeps_cold_default_workspace_serial(
         pipeline_timing=pipeline_timing,
     )
 
-    assert prepared.agent is built_agent
+    assert prepared.build is build
     assert prepare_history.await_args.kwargs["resolved_runtime_model"].model_name == "default"
     assert pipeline_timing.metadata["prompt_branches_parallel"] is False
     assert pipeline_timing.metadata["prompt_branches_serial_reason"] == "default_workspace_scaffold_pending"
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_closes_built_agent_when_history_preparation_fails(
+async def test_serial_agent_build_cancellation_drains_the_build(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A built per-turn agent must be closed when later preparation fails."""
-    built_agent = MagicMock()
-    built_agent.additional_context = ""
-    close_runtime = MagicMock()
-    close_client = AsyncMock()
-    preparation_error = RuntimeError("history preparation failed")
-
-    monkeypatch.setattr(ai_module, "build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
-    monkeypatch.setattr(ai_module, "create_agent", MagicMock(return_value=built_agent))
-    monkeypatch.setattr(
-        ai_module,
-        "prepare_agent_execution_context",
-        AsyncMock(side_effect=preparation_error),
-    )
-    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_runtime)
-    monkeypatch.setattr(
-        pre_model_preparation_module,
-        "aclose_anthropic_async_client",
-        close_client,
-        raising=False,
-    )
-
-    with pytest.raises(RuntimeError) as raised:
-        await ai_module._prepare_agent_and_prompt(
-            make_turn_context("general"),
-            prompt="hello",
-            runtime_paths=test_runtime_paths(tmp_path),
-            config=_prompt_preparation_config(),
-        )
-
-    assert raised.value is preparation_error
-    close_runtime.assert_called_once_with(built_agent, shared_scope_storage=None)
-    close_client.assert_awaited_once_with(built_agent.model)
-
-
-@pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_closes_built_agent_when_prewarm_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed client prewarm must reclaim the agent built in the worker."""
-    built_agent = MagicMock()
-    close_runtime = MagicMock()
-
-    monkeypatch.setattr(ai_module, "build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
-    monkeypatch.setattr(ai_module, "create_agent", MagicMock(return_value=built_agent))
-    monkeypatch.setattr(
-        pre_model_preparation_module,
-        "prewarm_anthropic_async_client",
-        MagicMock(side_effect=RuntimeError("prewarm failed")),
-    )
-    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_runtime)
-
-    with pytest.raises(RuntimeError, match="prewarm failed"):
-        await ai_module._prepare_agent_and_prompt(
-            make_turn_context("general"),
-            prompt="hello",
-            runtime_paths=test_runtime_paths(tmp_path),
-            config=_prompt_preparation_config(),
-        )
-
-    close_runtime.assert_called_once_with(built_agent, shared_scope_storage=None)
-
-
-@pytest.mark.asyncio
-async def test_serial_agent_build_cancellation_drains_and_closes_result(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cancellation must wait for a serial build and close its unreturned agent."""
+    """Cancellation must wait for a serial build before it propagates."""
     build_started = threading.Event()
     release_build = threading.Event()
-    built_agent = MagicMock()
-    built_agent.additional_context = ""
-    close_runtime = MagicMock()
-    close_client = AsyncMock()
 
-    def blocked_create_agent(*_args: object, **_kwargs: object) -> MagicMock:
+    def blocked_create_agent(*_args: object, **_kwargs: object) -> AgentBuild:
         build_started.set()
         assert release_build.wait(timeout=5)
-        return built_agent
+        return _build()
 
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
     monkeypatch.setattr(ai_module, "create_agent", blocked_create_agent)
-    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_runtime)
-    monkeypatch.setattr(
-        pre_model_preparation_module,
-        "aclose_anthropic_async_client",
-        close_client,
-        raising=False,
-    )
 
     task = asyncio.create_task(
         ai_module._prepare_agent_and_prompt(
@@ -551,33 +475,26 @@ async def test_serial_agent_build_cancellation_drains_and_closes_result(
         release_build.set()
         await asyncio.gather(task, return_exceptions=True)
 
-    close_runtime.assert_called_once_with(built_agent, shared_scope_storage=None)
-    close_client.assert_awaited_once_with(built_agent.model)
-
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_file_memory_preserves_reusable_agent(
+async def test_prepare_agent_and_prompt_file_memory_preserves_reusable_build(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """File-memory overlap reuses caller-owned agent without rebuilding it."""
-    reusable_agent = MagicMock()
-    reusable_agent.additional_context = "caller context"
-    create_agent_mock = MagicMock(side_effect=AssertionError("caller-owned agent must not be rebuilt"))
+    """File-memory overlap reuses the caller-owned build without rebuilding it, and renders its context per turn."""
+    reusable_build = _build("caller context")
+    create_agent_mock = MagicMock(side_effect=AssertionError("caller-owned build must not be rebuilt"))
 
     async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
-        assert kwargs["agent"] is reusable_agent
+        assert kwargs["build"] is reusable_build
         assert kwargs["resolved_runtime_model"].model_name == "default"
         transient_messages = kwargs["transient_context_messages"]
         assert [message.content for message in transient_messages] == [render_transient_context(("turn memory",))]
-        return SimpleNamespace(
-            prepared_history=PreparedHistoryState(prepared_context_tokens=42),
-            replay_plan=None,
+        return _prepared_execution(
+            kwargs["prompt"],
+            transient_messages,
             unseen_event_ids=["$memory"],
-            messages=(
-                *transient_messages,
-                Message(role="user", content=kwargs["prompt"]),
-            ),
+            prepared_context_tokens=42,
         )
 
     monkeypatch.setattr(
@@ -598,11 +515,14 @@ async def test_prepare_agent_and_prompt_file_memory_preserves_reusable_agent(
         prompt="hello",
         runtime_paths=test_runtime_paths(tmp_path),
         config=_prompt_preparation_config("file"),
-        reusable_agent=reusable_agent,
+        reusable_build=reusable_build,
     )
 
-    assert prepared.agent is reusable_agent
-    assert reusable_agent.additional_context == "caller context\n\nsession memory"
+    assert prepared.build is reusable_build
+    assert prepared.spec.system_message is not None
+    assert str(prepared.spec.system_message.content).endswith("caller context\n\nsession memory")
+    # The build's own prompt is never changed by a turn.
+    assert reusable_build.prompt.turn_context == "caller context"
     assert prepared.unseen_event_ids == ["$memory"]
     assert prepared.prepared_history.prepared_context_tokens == 42
     create_agent_mock.assert_not_called()
@@ -614,20 +534,13 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Parallel file preparation preserves sequential prompt and history results."""
-    built_agents: list[MagicMock] = []
-    history_inputs: list[tuple[str, tuple[str, ...], str]] = []
+    history_inputs: list[tuple[str, tuple[object, ...], str]] = []
 
     async def prepare_memory(*_args: object, **_kwargs: object) -> MemoryPromptParts:
         return MemoryPromptParts(
             session_preamble="session memory",
             transient_turn_context="retrieved memory",
         )
-
-    def build_agent(*_args: object, **_kwargs: object) -> MagicMock:
-        agent = MagicMock()
-        agent.additional_context = "base context"
-        built_agents.append(agent)
-        return agent
 
     async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
         transient_messages = tuple(kwargs["transient_context_messages"])
@@ -638,19 +551,15 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
                 kwargs["resolved_runtime_model"].model_name,
             ),
         )
-        return SimpleNamespace(
-            prepared_history=PreparedHistoryState(prepared_context_tokens=73),
-            replay_plan=None,
+        return _prepared_execution(
+            kwargs["prompt"],
+            transient_messages,
             unseen_event_ids=["$one", "$two"],
-            messages=(
-                Message(role="system", content="stable system context"),
-                *transient_messages,
-                Message(role="user", content=kwargs["prompt"]),
-            ),
+            prepared_context_tokens=73,
         )
 
     monkeypatch.setattr(ai_module, "build_memory_prompt_parts", prepare_memory)
-    monkeypatch.setattr(ai_module, "create_agent", build_agent)
+    monkeypatch.setattr(ai_module, "create_agent", lambda *_args, **_kwargs: _build("base context"))
     monkeypatch.setattr(ai_module, "prepare_agent_execution_context", prepare_history)
 
     config = _prompt_preparation_config("file")
@@ -672,17 +581,18 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
         model_prompt="model metadata",
     )
 
-    assert [(message.role, message.content, message.add_to_agent_memory) for message in parallel.messages] == [
-        (message.role, message.content, message.add_to_agent_memory) for message in sequential.messages
-    ]
+    def shape(messages: Sequence[Message]) -> list[tuple[str, object, bool]]:
+        return [(message.role, message.content, message.add_to_agent_memory) for message in messages]
+
+    assert shape(parallel.turn.in_request_order()) == shape(sequential.turn.in_request_order())
     assert parallel.prompt_text == sequential.prompt_text
     assert parallel.unseen_event_ids == sequential.unseen_event_ids == ["$one", "$two"]
     assert parallel.prepared_history == sequential.prepared_history
     assert parallel.runtime_model_name == sequential.runtime_model_name
-    assert [agent.additional_context for agent in built_agents] == [
-        "base context\n\nsession memory",
-        "base context\n\nsession memory",
-    ]
+    assert parallel.spec.system_message is not None
+    assert sequential.spec.system_message is not None
+    assert parallel.spec.system_message.content == sequential.spec.system_message.content
+    assert str(parallel.spec.system_message.content).endswith("base context\n\nsession memory")
     assert history_inputs == [
         (
             "raw prompt\n\nmodel metadata",

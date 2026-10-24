@@ -72,7 +72,7 @@ Totals support cost estimates, but provider-specific charging rules and calls ou
 
 With [prices](https://docs.mindroom.chat/configuration/models/#model-config-fields) set on a model, each agent or team reply that uses it records its cost in USD, priced the same way as [budget spend](https://docs.mindroom.chat/budgets/#how-spend-is-counted).
 In MindRoom Chat, open **Reply details** from a reply's ⓘ button or message menu to see its cost and the conversation's cost up to that reply.
-A reply's cost covers every model call made within the reply, including team members on other models, [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction), and [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning) updates.
+A reply's cost covers every model call made within the reply, including team members on other models and [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction).
 Subagents it delegates to and separate helper work, such as text compaction summaries, memory-backend extraction, and thread titles, are left out of it but still count toward budgets.
 The conversation cost adds up the replies MindRoom Chat has loaded and reads "at least" while older messages are not loaded.
 A regenerated reply shows the cost of its latest run only.

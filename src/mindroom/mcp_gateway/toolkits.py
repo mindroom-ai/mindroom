@@ -17,16 +17,15 @@ from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sy
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
+from mindroom.tool_system.toolkit_connections import shielded_lifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
-    from agno.tools import Toolkit
-    from agno.tools.function import ToolResult
-
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
+    from mindroom.tool_system.agno_toolkits import Toolkit, ToolResult
 
 _CLEANUP_TASKS: set[asyncio.Task[None]] = set()
 # Toolkit construction, connect, and close, synchronous tool bodies, and the worker proxy requests of
@@ -48,9 +47,7 @@ async def _lifecycle(operation: Callable[[], object]) -> None:
         result = operation()
     else:
         # Like run_gateway_sync, a cancelled caller stops waiting while the call keeps owning the thread.
-        task = asyncio.create_task(_on_tool_pool(operation))
-        retain_execution_task(task)
-        result = await asyncio.shield(task)
+        result = await shielded_lifecycle(_on_tool_pool(operation), retain=retain_execution_task)
     if inspect.isawaitable(result):
         await result
 

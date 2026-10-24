@@ -1,0 +1,477 @@
+{
+  "family": "llama_cpp",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "Parse the scheduling request into a workflow.",
+        "role": "system"
+      },
+      {
+        "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris.",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+      "provider": "llama_cpp"
+    },
+    "portable_replay": null,
+    "response_format": {
+      "json_schema": {
+        "$defs": {
+          "CronSchedule": {
+            "description": "Standard cron-like schedule definition.",
+            "properties": {
+              "day": {
+                "default": "*",
+                "description": "1-31, *, or comma-separated",
+                "title": "Day",
+                "type": "string"
+              },
+              "hour": {
+                "default": "*",
+                "description": "0-23, *, */2, or comma-separated",
+                "title": "Hour",
+                "type": "string"
+              },
+              "minute": {
+                "default": "*",
+                "description": "0-59, *, */5, or comma-separated",
+                "title": "Minute",
+                "type": "string"
+              },
+              "month": {
+                "default": "*",
+                "description": "1-12, *, or comma-separated",
+                "title": "Month",
+                "type": "string"
+              },
+              "weekday": {
+                "default": "*",
+                "description": "0-6 (0=Sunday), *, or comma-separated",
+                "title": "Weekday",
+                "type": "string"
+              }
+            },
+            "title": "CronSchedule",
+            "type": "object"
+          }
+        },
+        "description": "Structured representation of a scheduled task or workflow.",
+        "properties": {
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Created By"
+          },
+          "cron_schedule": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CronSchedule"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "execute_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Execute At"
+          },
+          "history_limit": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Max recent thread messages the responding agent sees when the task fires; 0 means no history",
+            "title": "History Limit"
+          },
+          "is_conditional": {
+            "default": false,
+            "title": "Is Conditional",
+            "type": "boolean"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Configured model alias for this scheduled run only",
+            "title": "Model"
+          },
+          "new_thread": {
+            "default": false,
+            "title": "New Thread",
+            "type": "boolean"
+          },
+          "pre_approved_call": {
+            "default": false,
+            "description": "Whether the requester approved this one-time task's tool call while scheduling it",
+            "title": "Pre Approved Call",
+            "type": "boolean"
+          },
+          "room_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Room Id"
+          },
+          "schedule_type": {
+            "enum": [
+              "once",
+              "cron"
+            ],
+            "title": "Schedule Type",
+            "type": "string"
+          },
+          "silent": {
+            "default": false,
+            "title": "Silent",
+            "type": "boolean"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Thread Id"
+          }
+        },
+        "required": [
+          "schedule_type",
+          "message",
+          "description"
+        ],
+        "title": "ScheduledWorkflow",
+        "type": "object"
+      },
+      "model": "mindroom.scheduling.tasks:ScheduledWorkflow",
+      "type": "pydantic"
+    },
+    "stream": false,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
+      "from_history": false,
+      "provider_data": {
+        "finish_reason": "stop",
+        "id": "chatcmpl-parity",
+        "mindroom_model": {
+          "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+          "provider": "LlamaCpp"
+        },
+        "system_fingerprint": "fp_parity"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": "stop"
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "Parse the scheduling request into a workflow."
+        },
+        {
+          "role": "user",
+          "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
+        }
+      ],
+      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "ScheduledWorkflow",
+          "schema": {
+            "$defs": {
+              "CronSchedule": {
+                "description": "Standard cron-like schedule definition.",
+                "properties": {
+                  "minute": {
+                    "default": "*",
+                    "description": "0-59, *, */5, or comma-separated",
+                    "title": "Minute",
+                    "type": "string"
+                  },
+                  "hour": {
+                    "default": "*",
+                    "description": "0-23, *, */2, or comma-separated",
+                    "title": "Hour",
+                    "type": "string"
+                  },
+                  "day": {
+                    "default": "*",
+                    "description": "1-31, *, or comma-separated",
+                    "title": "Day",
+                    "type": "string"
+                  },
+                  "month": {
+                    "default": "*",
+                    "description": "1-12, *, or comma-separated",
+                    "title": "Month",
+                    "type": "string"
+                  },
+                  "weekday": {
+                    "default": "*",
+                    "description": "0-6 (0=Sunday), *, or comma-separated",
+                    "title": "Weekday",
+                    "type": "string"
+                  }
+                },
+                "title": "CronSchedule",
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "minute",
+                  "hour",
+                  "day",
+                  "month",
+                  "weekday"
+                ]
+              }
+            },
+            "description": "Structured representation of a scheduled task or workflow.",
+            "properties": {
+              "schedule_type": {
+                "enum": [
+                  "once",
+                  "cron"
+                ],
+                "title": "Schedule Type",
+                "type": "string"
+              },
+              "is_conditional": {
+                "default": false,
+                "title": "Is Conditional",
+                "type": "boolean"
+              },
+              "execute_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Execute At"
+              },
+              "cron_schedule": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CronSchedule"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "message": {
+                "title": "Message",
+                "type": "string"
+              },
+              "description": {
+                "title": "Description",
+                "type": "string"
+              },
+              "history_limit": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Max recent thread messages the responding agent sees when the task fires; 0 means no history",
+                "title": "History Limit"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Configured model alias for this scheduled run only",
+                "title": "Model"
+              },
+              "created_by": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Created By"
+              },
+              "thread_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Thread Id"
+              },
+              "room_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Room Id"
+              },
+              "new_thread": {
+                "default": false,
+                "title": "New Thread",
+                "type": "boolean"
+              },
+              "silent": {
+                "default": false,
+                "title": "Silent",
+                "type": "boolean"
+              },
+              "pre_approved_call": {
+                "default": false,
+                "description": "Whether the requester approved this one-time task's tool call while scheduling it",
+                "title": "Pre Approved Call",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "schedule_type",
+              "is_conditional",
+              "execute_at",
+              "cron_schedule",
+              "message",
+              "description",
+              "history_limit",
+              "model",
+              "created_by",
+              "thread_id",
+              "room_id",
+              "new_thread",
+              "silent",
+              "pre_approved_call"
+            ],
+            "title": "ScheduledWorkflow",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "strict": true
+        }
+      }
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "http://127.0.0.1:8080/v1/chat/completions"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "json": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1792540800,
+      "id": "chatcmpl-parity",
+      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_parity",
+      "usage": {
+        "completion_tokens": 12,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 42,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 54
+      }
+    },
+    "status": 200
+  },
+  "scenario": "structured_output_nested"
+}

@@ -4,7 +4,7 @@ Exposes MindRoom agents as an OpenAI-compatible API so any chat frontend
 (LibreChat, Open WebUI, LobeChat, etc.) can use them as selectable "models".
 
 Route handlers orchestrate: parse (``openai_request_parsing``) ->
-resolve identity -> core execution seam (``ai.py`` / ``teams.py``) ->
+resolve identity -> core execution seam (``ai.py`` / ``teams/envelope.py``) ->
 protocol formatting (``openai_streaming_protocol``).
 """
 
@@ -14,17 +14,11 @@ import asyncio
 import hashlib
 import time
 import weakref
-from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
 
-from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent, RunOutput
-from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
-from agno.run.team import RunContentEvent as TeamContentEvent
-from agno.run.team import RunErrorEvent as TeamRunErrorEvent
-from agno.run.team import TeamRunOutput
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictStr, TypeAdapter
@@ -39,78 +33,58 @@ from mindroom.api.openai_request_parsing import (
     AUTO_MODEL_NAME,
     RESERVED_MODEL_NAMES,
     TEAM_MODEL_PREFIX,
+    ChatMessage,
+    convert_messages,
+    derive_session_id,
     openai_compatible_agent_names,
+    openai_incompatible_agents,
     parse_chat_completion_body,
     validate_chat_request,
-)
-from mindroom.api.openai_request_parsing import (
-    ChatMessage as _ChatMessage,
-)
-from mindroom.api.openai_request_parsing import (
-    convert_messages as _convert_messages,
-)
-from mindroom.api.openai_request_parsing import (
-    derive_session_id as _derive_session_id,
-)
-from mindroom.api.openai_request_parsing import (
-    openai_incompatible_agents as _openai_incompatible_agents,
 )
 from mindroom.api.openai_streaming_protocol import (
     SSE_DONE,
     CompletionStreamState,
+    OpenAIJSONResponse,
+    OpenAIStreamingResponse,
+    error_response,
     extract_agent_stream_failure,
     extract_stream_text,
     finalize_pending_tools,
     format_stream_tool_event,
+    is_error_response,
     new_completion_id,
     sse_chunk,
-)
-from mindroom.api.openai_streaming_protocol import (
-    OpenAIJSONResponse as _OpenAIJSONResponse,
-)
-from mindroom.api.openai_streaming_protocol import (
-    OpenAIStreamingResponse as _OpenAIStreamingResponse,
-)
-from mindroom.api.openai_streaming_protocol import (
-    error_response as _error_response,
-)
-from mindroom.api.openai_streaming_protocol import (
-    is_error_response as _is_error_response,
 )
 from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.execution_preparation import render_prepared_team_messages_text
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.session_context import (
-    ScopeSessionContext,
-    close_team_runtime_state_dbs,
-    open_bound_scope_session_context,
-)
+from mindroom.history.session_context import ScopeSessionContext, load_bound_scope_session
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
-from mindroom.llm_request_logging import (
-    bind_llm_request_log_context,
-    build_llm_request_log_context,
-    stream_with_llm_request_log_context,
-)
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
+from mindroom.response_turn import build_llm_request_log_context, stream_with_llm_request_log_context
 from mindroom.routing import suggest_responder
-from mindroom.teams import (
-    TeamMode,
+from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
+from mindroom.teams.members import (
+    BuiltTeam,
+    ResolvedExactTeamMembers,
     TeamTurnModelSelection,
-    build_materialized_team_instance,
-    format_team_response,
-    is_cancelled_run_output,
-    is_errored_run_output,
+    build_team_spec,
     materialize_exact_team_members,
-    prepare_materialized_team_execution,
+    team_label,
 )
-from mindroom.tool_system.context_bound_streams import context_bound_async_stream
+from mindroom.teams.presentation import format_team_response
+from mindroom.teams.runtime import MemberEvent, team_usage_runs
+from mindroom.teams.spec import TeamMode
+from mindroom.teams.storage import TeamRunRecords
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.runtime_context import DetachedRequesterContext, detached_requester_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -122,19 +96,16 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 
-    from agno.agent import Agent
-    from agno.db.base import BaseDb
-    from agno.knowledge.knowledge import Knowledge
-    from agno.run.agent import RunOutputEvent
-    from agno.run.team import TeamRunOutputEvent
-    from agno.team import Team
-
     from mindroom.api.openai_request_parsing import ChatCompletionRequest
     from mindroom.api.openai_streaming_protocol import ToolStreamState
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.search import AgentKnowledge
+    from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.teams.envelope import PreparedTeamExecution
+    from mindroom.teams.runtime import TeamRunEvent
 
 logger = get_logger(__name__)
 
@@ -142,7 +113,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
 # Per-session completion locks keep same-session /v1 completions from
-# interleaving Agno session writes and post-response history compaction.
+# interleaving session writes and post-response history compaction.
 # The mapping holds weak references: every in-flight request keeps a strong
 # reference to its lock (locally and via the attached response finalizer),
 # so an entry lives exactly as long as some request for that session is
@@ -184,7 +155,7 @@ def _attach_openai_completion_lock_release(
     completion_lock: asyncio.Lock,
     budget_monitor: BudgetMonitor | None,
 ) -> JSONResponse | StreamingResponse:
-    if not isinstance(response, (_OpenAIJSONResponse, _OpenAIStreamingResponse)):
+    if not isinstance(response, (OpenAIJSONResponse, OpenAIStreamingResponse)):
         _release_openai_completion_lock(completion_lock)
         msg = f"OpenAI completion response must use a finalizer-safe response class, got {type(response).__name__}"
         raise TypeError(msg)
@@ -192,34 +163,28 @@ def _attach_openai_completion_lock_release(
     return response
 
 
-@dataclass(frozen=True, slots=True)
-class _PreparedOpenAITeamPrompt:
-    """Prepared team prompt plus the run metadata that must reach Agno."""
-
-    prompt: str
-    run_metadata: dict[str, object] | None
-
-
 def _openai_team_request_log_context(
     *,
     team_name: str,
     session_id: str,
     requester_id: str | None,
-    prompt: str,
-    metadata: dict[str, object] | None,
+    prepared: PreparedTeamExecution,
 ) -> dict[str, object]:
+    metadata = prepared.run_metadata
     correlation_id = metadata.get("correlation_id") if metadata is not None else None
     return build_llm_request_log_context(
-        agent_id=f"team/{team_name}",
-        session_id=session_id,
-        room_id=None,
-        thread_id=None,
-        reply_to_event_id=None,
-        requester_id=requester_id,
-        correlation_id=correlation_id if isinstance(correlation_id, str) else uuid4().hex,
-        prompt=prompt,
+        RequestAttribution(
+            agent_id=f"team/{team_name}",
+            session_id=session_id,
+            room_id=None,
+            thread_id=None,
+            reply_to_event_id=None,
+            requester_id=requester_id,
+            correlation_id=correlation_id if isinstance(correlation_id, str) else uuid4().hex,
+        ),
+        prompt=prepared.prompt_text,
         model_prompt=None,
-        full_prompt=prompt,
+        full_prompt=prepared.prompt_text,
         metadata=metadata,
     )
 
@@ -249,7 +214,7 @@ class _ChatCompletionChoice(BaseModel):
     """A single choice in a chat completion response."""
 
     index: int = 0
-    message: _ChatMessage
+    message: ChatMessage
     finish_reason: str = "stop"
 
 
@@ -304,21 +269,15 @@ def _usage_from_run_metadata(run_metadata: dict[str, Any]) -> _UsageInfo:
     )
 
 
-def _usage_from_team_output(response: TeamRunOutput | RunOutput) -> _UsageInfo:
-    """Sum usage over the leader and every member run, normalizing each run for its own provider."""
-    runs: list[TeamRunOutput | RunOutput] = [response]
+def _usage_from_team_output(record: TeamRunRecord) -> _UsageInfo:
+    """Sum usage over the runs of a team turn, normalizing each run for its own provider."""
     total = _UsageInfo()
-    while runs:
-        run = runs.pop()
-        if isinstance(run, TeamRunOutput):
-            runs.extend(run.member_responses)
-        if run.metrics is None:
-            continue
+    for run, metrics in team_usage_runs(record, record.ended_member_runs):
         usage = _usage_info(
-            input_tokens=run.metrics.input_tokens,
-            output_tokens=run.metrics.output_tokens,
-            cache_read_tokens=run.metrics.cache_read_tokens,
-            cache_write_tokens=run.metrics.cache_write_tokens,
+            input_tokens=metrics.tokens.input_tokens,
+            output_tokens=metrics.tokens.output_tokens,
+            cache_read_tokens=metrics.tokens.cache_read_tokens,
+            cache_write_tokens=metrics.tokens.cache_write_tokens,
             provider=run.model_provider,
             model_id=run.model,
         )
@@ -391,9 +350,9 @@ def _authenticate_request(  # noqa: PLR0911
             # A completion runs an agent with its tools, so a rebound or cross-site page must not trigger one.
             rejection = open_access_rejection(request.headers, request.method, runtime_paths)
             if rejection is not None:
-                return _error_response(rejection.status_code, rejection.detail, code="permission_denied")
+                return error_response(rejection.status_code, rejection.detail, code="permission_denied")
             return _AuthenticatedCaller(session_namespace="noauth", requester_id=None)
-        return _error_response(
+        return error_response(
             401,
             "OpenAI-compatible API keys are not configured",
             code="invalid_api_key",
@@ -402,7 +361,7 @@ def _authenticate_request(  # noqa: PLR0911
     valid_keys = {k.strip() for k in keys_env.split(",") if k.strip()}
 
     if not authorization or not authorization.startswith("Bearer "):
-        return _error_response(
+        return error_response(
             401,
             "Missing or invalid Authorization header",
             code="invalid_api_key",
@@ -410,7 +369,7 @@ def _authenticate_request(  # noqa: PLR0911
 
     token = authorization.removeprefix("Bearer ").strip()
     if token not in valid_keys:
-        return _error_response(401, "Invalid API key", code="invalid_api_key")
+        return error_response(401, "Invalid API key", code="invalid_api_key")
 
     requester_id = _api_key_requester(token, runtime_paths)
     if isinstance(requester_id, JSONResponse):
@@ -430,7 +389,7 @@ def _api_key_requester(token: str, runtime_paths: RuntimePaths) -> JSONResponse 
         mappings = TypeAdapter(dict[StrictStr, StrictStr]).validate_json(mappings_env)
         validate_concrete_matrix_user_ids(list(set(mappings.values())), field_name="API requesters")
     except (ValueError, TypeError):
-        return _error_response(503, "Invalid API requester configuration", error_type="server_error")
+        return error_response(503, "Invalid API requester configuration", error_type="server_error")
     return mappings.get(token)
 
 
@@ -453,9 +412,9 @@ def _parse_chat_request(
     if validation_error:
         return validation_error
 
-    prompt, thread_history = _convert_messages(req.messages)
+    prompt, thread_history = convert_messages(req.messages)
     if not prompt:
-        return _error_response(400, "No user message content found in messages")
+        return error_response(400, "No user message content found in messages")
 
     return req, config, runtime_paths, prompt, thread_history
 
@@ -471,7 +430,7 @@ def _requester_authority(
         return None
     requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
     if not is_human_requester_id(requester_id, config, runtime_paths):
-        return _error_response(403, "API requester must be a human identity", code="permission_denied")
+        return error_response(403, "API requester must be a human identity", code="permission_denied")
     trigger_runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
 
     def current_config() -> Config | None:
@@ -525,9 +484,9 @@ async def _resolve_auto_route(
     if authority is not None:
         available = [name for name in available if _requester_allows_model(name, authority)]
         if not available:
-            return _error_response(403, "No agents are authorized for this requester", code="permission_denied")
+            return error_response(403, "No agents are authorized for this requester", code="permission_denied")
     if not available:
-        return _error_response(
+        return error_response(
             500,
             "No OpenAI-compatible agents configured for auto-routing",
             error_type="server_error",
@@ -539,7 +498,7 @@ async def _resolve_auto_route(
         logger.warning("Auto-routing failed, falling back", agent=routed)
         return routed
     if selection.entity_name is None:
-        return _error_response(
+        return error_response(
             400,
             "No suitable agent for this request; choose a model explicitly or rephrase the request",
             code="no_suitable_responder",
@@ -548,9 +507,26 @@ async def _resolve_auto_route(
     return selection.entity_name
 
 
-def _request_knowledge_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | None:
-    """Return the app-scoped background knowledge refresh scheduler, if configured."""
-    return config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
+def _openai_turn_context(
+    entity_label: str,
+    *,
+    session_id: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    model_name: str | None = None,
+) -> ResponseTurnContext:
+    """Build the turn context for one OpenAI-compatible completion, which has no Matrix conversation."""
+    return ResponseTurnContext(
+        entity_label=entity_label,
+        session_id=session_id,
+        run_id=None,
+        correlation_id=uuid4().hex,
+        reply_to_event_id=None,
+        room_id=None,
+        thread_id=None,
+        requester_id=execution_identity.requester_id if execution_identity is not None else None,
+        matrix_run_metadata=None,
+        active_model_name=model_name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +585,7 @@ async def list_models(
     for team_name, team_config in (config.teams or {}).items():
         if not _requester_allows_model(f"{TEAM_MODEL_PREFIX}{team_name}", authority):
             continue
-        if _openai_incompatible_agents(team_config.agents, config):
+        if openai_incompatible_agents(team_config.agents, config):
             continue
         models.append(
             _ModelObject(
@@ -692,13 +668,13 @@ async def _chat_completions(  # noqa: C901, PLR0912
         agent_name = result
 
     if not _requester_allows_model(agent_name, authority):
-        return _error_response(403, "This requester is not authorized for the model", code="permission_denied")
+        return error_response(403, "This requester is not authorized for the model", code="permission_denied")
 
     activity.responder = agent_name
     activity.requester_id = authority.requester_id if authority is not None else None
 
     # Derive a key-namespaced session ID from request headers or fallback UUID.
-    session_id = _derive_session_id(agent_name, request, session_namespace)
+    session_id = derive_session_id(agent_name, request, session_namespace)
     if authority is not None:
         requester_digest = hashlib.sha256(authority.requester_id.encode()).hexdigest()
         session_id = f"requester:{requester_digest}:{session_id}"
@@ -719,7 +695,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
         thread_id=None,
         resolved_thread_id=None,
     )
-    knowledge_refresh_scheduler = _request_knowledge_refresh_scheduler(request)
+    knowledge_refresh_scheduler = config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
     budget_monitor = config_lifecycle.app_state(request.app).budget_monitor
     budget = partial(budget_model, config, runtime_paths, budget_monitor, execution_identity.requester_id)
     completion_lock = _openai_completion_lock(
@@ -819,28 +795,6 @@ async def _chat_completions(  # noqa: C901, PLR0912
 # ---------------------------------------------------------------------------
 
 
-def _openai_agent_turn_context(
-    agent_name: str,
-    *,
-    session_id: str,
-    model_name: str,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> ResponseTurnContext:
-    """Build the turn context for one OpenAI-compatible agent completion."""
-    return ResponseTurnContext(
-        entity_label=agent_name,
-        session_id=session_id,
-        run_id=None,
-        correlation_id=uuid4().hex,
-        reply_to_event_id=None,
-        room_id=None,
-        thread_id=None,
-        requester_id=execution_identity.requester_id if execution_identity is not None else None,
-        matrix_run_metadata=None,
-        active_model_name=model_name,
-    )
-
-
 async def _non_stream_completion(
     agent_name: str,
     prompt: str,
@@ -848,7 +802,7 @@ async def _non_stream_completion(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: Knowledge | None = None,
+    knowledge: AgentKnowledge | None = None,
     *,
     model_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -857,7 +811,7 @@ async def _non_stream_completion(
     """Handle non-streaming chat completion."""
     run_metadata: dict[str, Any] = {}
     response_text = await ai_response(
-        _openai_agent_turn_context(
+        _openai_turn_context(
             agent_name,
             session_id=session_id,
             model_name=model_name,
@@ -877,9 +831,9 @@ async def _non_stream_completion(
     )
 
     # Detect error responses from ai_response()
-    if _is_error_response(response_text):
+    if is_error_response(response_text):
         logger.warning("AI response returned error", model=agent_name, session_id=session_id, error=response_text)
-        return _error_response(500, "Agent execution failed", error_type="server_error")
+        return error_response(500, "Agent execution failed", error_type="server_error")
 
     logger.info("Chat completion sent", model=agent_name, stream=False, session_id=session_id)
     response = _ChatCompletionResponse(
@@ -888,12 +842,12 @@ async def _non_stream_completion(
         model=agent_name,
         choices=[
             _ChatCompletionChoice(
-                message=_ChatMessage(role="assistant", content=response_text),
+                message=ChatMessage(role="assistant", content=response_text),
             ),
         ],
         usage=_usage_from_run_metadata(run_metadata),
     )
-    return _OpenAIJSONResponse(content=response.model_dump())
+    return OpenAIJSONResponse(content=response.model_dump())
 
 
 # ---------------------------------------------------------------------------
@@ -901,14 +855,14 @@ async def _non_stream_completion(
 # ---------------------------------------------------------------------------
 
 
-async def _stream_completion(  # noqa: C901, PLR0915
+async def _stream_completion(
     agent_name: str,
     prompt: str,
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: Knowledge | None = None,
+    knowledge: AgentKnowledge | None = None,
     *,
     model_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -920,7 +874,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
         stream_with_tool_execution_identity(
             execution_identity,
             stream_factory=lambda: stream_agent_response(
-                _openai_agent_turn_context(
+                _openai_turn_context(
                     agent_name,
                     session_id=session_id,
                     model_name=model_name,
@@ -943,7 +897,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
     first_event = await anext(aiter(stream), None)
     if first_event is None:
         await stream.aclose()
-        return _error_response(500, "Agent returned empty response", error_type="server_error")
+        return error_response(500, "Agent returned empty response", error_type="server_error")
 
     first_error = extract_agent_stream_failure(first_event)
     if first_error is not None:
@@ -954,39 +908,25 @@ async def _stream_completion(  # noqa: C901, PLR0915
             error=first_error,
         )
         await stream.aclose()
-        return _error_response(500, "Agent execution failed", error_type="server_error")
+        return error_response(500, "Agent execution failed", error_type="server_error")
 
     state = CompletionStreamState.begin(agent_name)
     stream_completed = False
-    stream_failed = False
 
     async def event_generator() -> AsyncIterator[str]:
-        nonlocal stream_completed, stream_failed
-        saw_text_delta = False
+        nonlocal stream_completed
+        saw_text_delta = stream_failed = False
         completed_body: str | None = None
         try:
-            # 1. Initial role announcement
             yield sse_chunk(state, {"role": "assistant"})
-
-            # 2. Yield the peeked first event
-            if isinstance(first_event, RunCompletedEvent):
-                completed_body = str(first_event.content) if first_event.content is not None else None
-            else:
-                text = extract_stream_text(first_event, state.tool_state)
-                if text:
-                    if isinstance(first_event, (RunContentEvent, str)):
-                        saw_text_delta = True
-                    yield sse_chunk(state, {"content": text})
-
-            # 3. Stream remaining content
-            # Error strings after the first event are sent as content chunks
-            # since we can't switch to an error HTTP status mid-stream.
-            async for event in stream:
-                if isinstance(event, RunCompletedEvent):
-                    completed_body = str(event.content) if event.content is not None else completed_body
-                    continue
-                failure_text = extract_agent_stream_failure(event)
-                if failure_text is not None:
+            # The peeked first event, then the rest. A failure after the first event is sent as a content chunk,
+            # since the HTTP status is already sent.
+            event: AIStreamChunk | None = first_event
+            while event is not None:
+                if isinstance(event, RunFinished):
+                    content = event.record.content
+                    completed_body = content if content is not None else completed_body
+                elif (failure_text := extract_agent_stream_failure(event)) is not None:
                     stream_failed = True
                     logger.warning(
                         "Stream emitted terminal failure",
@@ -996,26 +936,22 @@ async def _stream_completion(  # noqa: C901, PLR0915
                     )
                     yield sse_chunk(state, {"content": failure_text})
                     break
-                text = extract_stream_text(event, state.tool_state)
-                if text:
-                    if isinstance(event, (RunContentEvent, str)):
+                elif text := extract_stream_text(event, state.tool_state):
+                    if isinstance(event, TextDelta | str):
                         saw_text_delta = True
                     yield sse_chunk(state, {"content": text})
+                event = await anext(stream, None)
 
             if completed_body and not saw_text_delta and not stream_failed:
                 yield sse_chunk(state, {"content": completed_body})
-
-            # 4. Final chunk with finish_reason
             logger.info("Chat completion sent", model=agent_name, stream=True)
             yield sse_chunk(state, {}, finish_reason="stop")
-
-            # 5. Stream terminator
             yield SSE_DONE
             stream_completed = not stream_failed
         finally:
             await stream.aclose()
 
-    response = _OpenAIStreamingResponse(
+    response = OpenAIStreamingResponse(
         event_generator(),
         media_type="text/event-stream",
     )
@@ -1049,8 +985,8 @@ def _build_team(
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     *,
     models: TeamTurnModelSelection,
-) -> tuple[list[Agent], Team, TeamMode]:
-    """Create member agents and build one agno.Team for a configured team.
+) -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
+    """Create member builds and build one team for a configured team.
 
     Raises when the configured team cannot be materialized.
     """
@@ -1069,68 +1005,37 @@ def _build_team(
         reason_prefix=f"Team '{team_name}'",
         active_model_names=models.member_model_names,
     )
-    try:
-        team = build_materialized_team_instance(
-            requested_agent_names=team_members.requested_agent_names,
-            agents=team_members.agents,
-            mode=mode,
-            config=config,
-            runtime_paths=runtime_paths,
-            model_name=models.team_model_name,
-            configured_team_name=team_name,
-            scope_context=scope_context,
-            execution_identity=execution_identity,
-        )
-    except Exception:
-        close_team_runtime_state_dbs(
-            agents=team_members.agents,
-            team_db=None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
-        raise
-    return team_members.agents, team, mode
+    built = build_team_spec(
+        members=team_members,
+        mode=mode,
+        config=config,
+        runtime_paths=runtime_paths,
+        team_display_name=team_label(team_members.requested_agent_names),
+        scope_context=scope_context,
+        execution_identity=execution_identity,
+        model_name=models.team_model_name,
+        configured_team_name=team_name,
+    )
+    return team_members, built, mode
 
 
-def _format_team_output(response: TeamRunOutput | RunOutput) -> str:
-    """Format a TeamRunOutput into a single string for the API response."""
-    parts = format_team_response(response)
-    return "\n\n".join(parts) if parts else str(response.content or "")
-
-
-def _is_failed_team_output(response: TeamRunOutput | RunOutput) -> bool:
-    """Return whether a fallback team output ended in a terminal non-success state."""
-    return is_errored_run_output(response) or is_cancelled_run_output(response)
-
-
-async def _prepare_openai_team_prompt(
+async def _prepare_openai_team_execution(
     *,
     scope_context: ScopeSessionContext | None,
     team_name: str,
-    agents: list[Agent],
-    team: Team,
+    built: BuiltTeam,
     prompt: str,
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     team_model_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> _PreparedOpenAITeamPrompt:
-    """Prepare the final prompt for one OpenAI-compatible team run."""
-    prepared_execution = await prepare_materialized_team_execution(
-        ResponseTurnContext(
-            entity_label=team_name,
-            session_id=None,
-            run_id=None,
-            correlation_id=uuid4().hex,
-            reply_to_event_id=None,
-            room_id=None,
-            thread_id=None,
-            requester_id=execution_identity.requester_id if execution_identity is not None else None,
-            matrix_run_metadata=None,
-        ),
+) -> PreparedTeamExecution:
+    """Prepare one OpenAI-compatible team turn: the scope summary, the replayed history, then the turn."""
+    return await prepare_materialized_team_execution(
+        _openai_turn_context(team_name, session_id=None, execution_identity=execution_identity),
         scope_context=scope_context,
-        agents=agents,
-        team=team,
+        spec=built.spec,
         message=prompt,
         thread_history=thread_history,
         config=config,
@@ -1140,10 +1045,67 @@ async def _prepare_openai_team_prompt(
         current_sender_id=None,
         configured_team_name=team_name,
     )
-    return _PreparedOpenAITeamPrompt(
-        prompt=render_prepared_team_messages_text(prepared_execution.messages),
-        run_metadata=cast("dict[str, object] | None", prepared_execution.run_metadata),
+
+
+async def _prepare_team_turn(
+    team_name: str,
+    prompt: str,
+    session_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    team_models: TeamTurnModelSelection,
+    scope_context: ScopeSessionContext | None,
+    *,
+    execution_identity: ToolExecutionIdentity | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    stream: bool,
+) -> tuple[BuiltTeam, PreparedTeamExecution] | JSONResponse:
+    """Build the team and prepare its turn, or return the error response a failure of either gets."""
+    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+    try:
+        with tool_execution_identity(execution_identity):
+            members, built, mode = await asyncio.to_thread(
+                _build_team,
+                team_name,
+                config,
+                runtime_paths,
+                execution_identity,
+                scope_context,
+                unavailable_bases,
+                refresh_scheduler,
+                models=team_models,
+            )
+    except Exception:
+        logger.exception("Team build failed", team=team_name)
+        return error_response(500, "Team execution failed", error_type="server_error")
+
+    # TODO(simplify): team requests log under a different name per stream mode, while agent requests log one name
+    # with a stream field. Log "Team completion request" with stream for both. Operators reading logs would notice.
+    logger.info(
+        "Team streaming request" if stream else "Team completion request",
+        team=team_name,
+        mode=mode.value,
+        members=len(members.builds),
+        session_id=session_id,
     )
+
+    try:
+        prepared = await _prepare_openai_team_execution(
+            scope_context=scope_context,
+            team_name=team_name,
+            built=built,
+            prompt=prepend_knowledge_availability_notice(prompt, unavailable_bases),
+            config=config,
+            runtime_paths=runtime_paths,
+            thread_history=thread_history,
+            team_model_name=team_models.team_model_name,
+            execution_identity=execution_identity,
+        )
+    except Exception:
+        logger.exception("Team member preparation failed", team=team_name)
+        return error_response(500, "Team execution failed", error_type="server_error")
+    return built, prepared
 
 
 async def _non_stream_team_completion(
@@ -1159,125 +1121,84 @@ async def _non_stream_team_completion(
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
-    agents: list[Agent] = []
-    team: Team | None = None
-    scope_context: ScopeSessionContext | None = None
-    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+    requester_id = execution_identity.requester_id if execution_identity is not None else None
+    scope_context = load_bound_scope_session(
+        member_names=[],
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        team_name=team_name,
+    )
+    turn = await _prepare_team_turn(
+        team_name,
+        prompt,
+        session_id,
+        config,
+        runtime_paths,
+        thread_history,
+        team_models,
+        scope_context,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        stream=False,
+    )
+    if isinstance(turn, JSONResponse):
+        return turn
+    built, prepared = turn
+    records = TeamRunRecords()
     try:
-        with open_bound_scope_session_context(
-            agents=[],
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            team_name=team_name,
-        ) as opened_scope_context:
-            scope_context = opened_scope_context
-            try:
-                agents, team, mode = await asyncio.to_thread(
-                    _build_team,
-                    team_name,
-                    config,
-                    runtime_paths,
-                    execution_identity,
-                    scope_context,
-                    unavailable_bases,
-                    refresh_scheduler,
-                    models=team_models,
-                )
-            except Exception:
-                logger.exception("Team build failed", team=team_name)
-                return _error_response(500, "Team execution failed", error_type="server_error")
-
-            logger.info(
-                "Team completion request",
-                team=team_name,
-                mode=mode.value,
-                members=len(agents),
-                session_id=session_id,
-            )
-
-            try:
-                prompt = prepend_knowledge_availability_notice(
-                    prompt,
-                    unavailable_bases,
-                )
-                prepared_team_run = await _prepare_openai_team_prompt(
-                    scope_context=scope_context,
+        with (
+            bind_llm_request_log_context(
+                **_openai_team_request_log_context(
                     team_name=team_name,
-                    agents=agents,
-                    team=team,
-                    prompt=prompt,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    thread_history=thread_history,
-                    team_model_name=team_models.team_model_name,
-                    execution_identity=execution_identity,
-                )
-            except Exception:
-                logger.exception("Team member preparation failed", team=team_name)
-                return _error_response(500, "Team execution failed", error_type="server_error")
-            try:
-                with (
-                    bind_llm_request_log_context(
-                        **_openai_team_request_log_context(
-                            team_name=team_name,
-                            session_id=session_id,
-                            requester_id=execution_identity.requester_id if execution_identity else None,
-                            prompt=prepared_team_run.prompt,
-                            metadata=prepared_team_run.run_metadata,
-                        ),
-                    ),
-                    # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
-                    helper_usage_context(scope_context),
-                ):
-                    response = await team.arun(
-                        prepared_team_run.prompt,
-                        session_id=session_id,
-                        user_id=execution_identity.requester_id if execution_identity else None,
-                        metadata=prepared_team_run.run_metadata,
-                    )
-            except Exception:
-                logger.exception("Team execution failed", team=team_name)
-                return _error_response(500, "Team execution failed", error_type="server_error")
-            if isinstance(response, (TeamRunOutput, RunOutput)) and _is_failed_team_output(response):
-                logger.warning(
-                    "Team response returned terminal failure",
-                    team=team_name,
-                    error=str(response.content or "Unknown team failure"),
-                )
-                return _error_response(500, "Team execution failed", error_type="server_error")
-            response_text = (
-                _format_team_output(response) if isinstance(response, (TeamRunOutput, RunOutput)) else str(response)
-            )
-
-            if _is_error_response(response_text):
-                logger.warning("Team response returned error", team=team_name, error=response_text)
-                return _error_response(500, "Team execution failed", error_type="server_error")
-
-            logger.info("Team completion sent", team=team_name, stream=False)
-            result = _ChatCompletionResponse(
-                id=new_completion_id(),
-                created=int(time.time()),
-                model=model_id,
-                choices=[
-                    _ChatCompletionChoice(
-                        message=_ChatMessage(role="assistant", content=response_text),
-                    ),
-                ],
-                usage=(
-                    _usage_from_team_output(response)
-                    if isinstance(response, (TeamRunOutput, RunOutput))
-                    else _UsageInfo()
+                    session_id=session_id,
+                    requester_id=requester_id,
+                    prepared=prepared,
                 ),
+            ),
+            # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
+            helper_usage_context(scope_context),
+        ):
+            events = run_prepared_team(
+                built,
+                prepared,
+                config=config,
+                runtime_paths=runtime_paths,
+                scope_context=scope_context,
+                team_name=team_name,
+                session_id=session_id,
+                user_id=requester_id,
+                stream=False,
             )
-            return _OpenAIJSONResponse(content=result.model_dump())
-    finally:
-        close_team_runtime_state_dbs(
-            agents=agents,
-            team_db=cast("BaseDb | None", team.db) if team is not None else None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
+            async with closing_async_stream(events):
+                async for event in events:
+                    records.collect(event)
+    except Exception:
+        logger.exception("Team execution failed", team=team_name)
+        return error_response(500, "Team execution failed", error_type="server_error")
+    record = records.terminal(team_name)
+    # The blocking Matrix reply's member and consensus document, which API clients replay as history. A run where
+    # nobody wrote anything gives empty text, where the Matrix reply falls back to the leader's own messages.
+    response_text = format_team_response(record)
+
+    if is_error_response(response_text):
+        logger.warning("Team response returned error", team=team_name, error=response_text)
+        return error_response(500, "Team execution failed", error_type="server_error")
+
+    logger.info("Team completion sent", team=team_name, stream=False)
+    result = _ChatCompletionResponse(
+        id=new_completion_id(),
+        created=int(time.time()),
+        model=model_id,
+        choices=[
+            _ChatCompletionChoice(
+                message=ChatMessage(role="assistant", content=response_text),
+            ),
+        ],
+        usage=_usage_from_team_output(record),
+    )
+    return OpenAIJSONResponse(content=result.model_dump())
 
 
 async def _stream_team_completion(  # noqa: C901, PLR0915
@@ -1293,273 +1214,130 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
-    stack = ExitStack()
-    agents: list[Agent] = []
-    team: Team | None = None
-    scope_context: ScopeSessionContext | None = None
-    stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
-    unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+    stream: AsyncGenerator[TeamRunEvent, None] | None = None
+    requester_id = execution_identity.requester_id if execution_identity is not None else None
 
     async def _cleanup() -> None:
         if stream is not None:
             await stream.aclose()
-        stack.close()
-        close_team_runtime_state_dbs(
-            agents=agents,
-            team_db=cast("BaseDb | None", team.db) if team is not None else None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
 
+    scope_context = load_bound_scope_session(
+        member_names=[],
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        team_name=team_name,
+    )
+    turn = await _prepare_team_turn(
+        team_name,
+        prompt,
+        session_id,
+        config,
+        runtime_paths,
+        thread_history,
+        team_models,
+        scope_context,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        stream=True,
+    )
+    if isinstance(turn, JSONResponse):
+        return turn
+    built, prepared = turn
     try:
-        scope_context = stack.enter_context(
-            open_bound_scope_session_context(
-                agents=[],
-                session_id=session_id,
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=execution_identity,
-                team_name=team_name,
-            ),
-        )
-        try:
-            with tool_execution_identity(execution_identity):
-                agents, team, mode = await asyncio.to_thread(
-                    _build_team,
-                    team_name,
-                    config,
-                    runtime_paths,
-                    execution_identity,
-                    scope_context,
-                    unavailable_bases,
-                    refresh_scheduler,
-                    models=team_models,
-                )
-        except Exception:
-            logger.exception("Team build failed", team=team_name)
-            await _cleanup()
-            return _error_response(500, "Team execution failed", error_type="server_error")
-
-        logger.info(
-            "Team streaming request",
-            team=team_name,
-            mode=mode.value,
-            members=len(agents),
+        request_log_context = _openai_team_request_log_context(
+            team_name=team_name,
             session_id=session_id,
+            requester_id=requester_id,
+            prepared=prepared,
         )
-
-        try:
-            prompt = prepend_knowledge_availability_notice(
-                prompt,
-                unavailable_bases,
-            )
-            prepared_team_run = await _prepare_openai_team_prompt(
-                scope_context=scope_context,
-                team_name=team_name,
-                agents=agents,
-                team=team,
-                prompt=prompt,
-                config=config,
-                runtime_paths=runtime_paths,
-                thread_history=thread_history,
-                team_model_name=team_models.team_model_name,
-                execution_identity=execution_identity,
-            )
-        except Exception:
-            logger.exception("Team member preparation failed", team=team_name)
-            await _cleanup()
-            return _error_response(500, "Team execution failed", error_type="server_error")
-        try:
-            request_log_context = _openai_team_request_log_context(
-                team_name=team_name,
-                session_id=session_id,
-                requester_id=execution_identity.requester_id if execution_identity else None,
-                prompt=prepared_team_run.prompt,
-                metadata=prepared_team_run.run_metadata,
-            )
-            stream = cast(
-                "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
-                stream_with_tool_execution_identity(
-                    execution_identity,
-                    # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
-                    stream_factory=lambda: context_bound_async_stream(
-                        context_factory=lambda: helper_usage_context(scope_context),
-                        stream_factory=lambda: stream_with_llm_request_log_context(
-                            cast(
-                                "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
-                                team.arun(
-                                    prepared_team_run.prompt,
-                                    stream=True,
-                                    stream_events=True,
-                                    session_id=session_id,
-                                    user_id=execution_identity.requester_id if execution_identity else None,
-                                    metadata=prepared_team_run.run_metadata,
-                                ),
-                            ),
-                            request_context=request_log_context,
+        stream = cast(
+            "AsyncGenerator[TeamRunEvent, None]",
+            stream_with_tool_execution_identity(
+                execution_identity,
+                # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
+                stream_factory=lambda: context_bound_async_stream(
+                    context_factory=lambda: helper_usage_context(scope_context),
+                    stream_factory=lambda: stream_with_llm_request_log_context(
+                        run_prepared_team(
+                            built,
+                            prepared,
+                            config=config,
+                            runtime_paths=runtime_paths,
+                            scope_context=scope_context,
+                            team_name=team_name,
+                            session_id=session_id,
+                            user_id=requester_id,
+                            stream=True,
                         ),
+                        request_context=request_log_context,
                     ),
                 ),
-            )
-            first_event = await anext(stream, None)
-        except Exception:
-            logger.exception("Team execution failed", team=team_name)
-            await _cleanup()
-            return _error_response(500, "Team execution failed", error_type="server_error")
-
-        if first_event is None:
-            await _cleanup()
-            return _error_response(500, "Team returned empty response", error_type="server_error")
-        first_error = _extract_team_stream_failure(first_event)
-        if first_error is not None:
-            logger.warning("Team streaming returned terminal failure", team=team_name, error=first_error)
-            await _cleanup()
-            return _error_response(500, "Team execution failed", error_type="server_error")
-
-        state = CompletionStreamState.begin(model_id)
-        stream_completed = False
-        stream_failed = False
-
-        def mark_stream_failed() -> None:
-            nonlocal stream_failed
-            stream_failed = True
-
-        async def _event_generator() -> AsyncGenerator[str, None]:
-            nonlocal stream_completed
-            try:
-                async for chunk in _team_stream_event_generator(
-                    stream=stream,
-                    first_event=first_event,
-                    state=state,
-                    team_name=team_name,
-                    mark_stream_failed=mark_stream_failed,
-                ):
-                    yield chunk
-                    if chunk == SSE_DONE and not stream_failed:
-                        stream_completed = True
-            finally:
-                await _cleanup()
-
-        response = _OpenAIStreamingResponse(
-            _event_generator(),
-            media_type="text/event-stream",
+            ),
         )
-        response.completion_predicate = lambda: stream_completed and not stream_failed
+        first_event = await anext(stream, None)
     except Exception:
-        stack.close()
-        close_team_runtime_state_dbs(
-            agents=agents,
-            team_db=cast("BaseDb | None", team.db) if team is not None else None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
-        raise
-    else:
-        return response
+        logger.exception("Team execution failed", team=team_name)
+        await _cleanup()
+        return error_response(500, "Team execution failed", error_type="server_error")
 
+    if first_event is None:
+        await _cleanup()
+        return error_response(500, "Team returned empty response", error_type="server_error")
 
-def _extract_team_stream_failure(
-    event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput,
-) -> str | None:
-    """Extract explicit terminal-failure text from a team stream event."""
-    if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
-        return str(event.content or "Unknown team error")
-    if isinstance(event, TeamRunCancelledEvent):
-        return str(event.reason or event.content or "Unknown team failure")
-    if isinstance(event, (TeamRunOutput, RunOutput)) and _is_failed_team_output(event):
-        formatted_output = _format_team_output(event).strip()
-        return formatted_output or "Unknown team failure"
-    return None
+    state = CompletionStreamState.begin(model_id)
+    stream_completed = False
 
+    async def _event_generator() -> AsyncGenerator[str, None]:
+        """Yield the SSE chunks of the team stream, starting with ``first_event``, which was already pulled.
 
-def _classify_team_event(
-    event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput,
-    tool_state: ToolStreamState,
-) -> str | None:
-    """Classify a team stream event and return formatted content, or ``None`` to skip.
-
-    Team leader content (``TeamContentEvent``) is streamed directly — it is the
-    synthesized answer and never interleaves.
-    Member agent content (``RunContentEvent``) is skipped to prevent interleaving
-    from parallel members.
-    Tool events (agent-level and team-level) are emitted for progress feedback.
-    """
-    # Some providers fall back to a single final TeamRunOutput or RunOutput in streaming mode.
-    if isinstance(event, (TeamRunOutput, RunOutput)):
-        formatted_output = _format_team_output(event).strip()
-        return formatted_output or None
-
-    # Tool events — emit for progress feedback
-    tool_text = format_stream_tool_event(event, tool_state)
-    if tool_text is not None:
-        return tool_text
-
-    # Team leader content — stream directly (synthesized answer)
-    if isinstance(event, TeamContentEvent) and event.content:
-        return str(event.content)
-
-    # Everything else (member content, reasoning, memory, hooks, etc.) — skip.
-    return None
-
-
-async def _team_stream_event_generator(
-    *,
-    stream: AsyncIterator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput],
-    first_event: RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput,
-    state: CompletionStreamState,
-    team_name: str,
-    mark_stream_failed: Callable[[], None],
-) -> AsyncIterator[str]:
-    """Yield SSE chunks for team streaming responses.
-
-    Streams team leader content (``TeamContentEvent``) directly for real-time output.
-    Skips member agent content (``RunContentEvent``) to prevent interleaving.
-    Emits all tool events (agent-level and team-level) for progress feedback.
-
-    The caller (``_stream_team_completion``) validates the first event via
-    ``_extract_team_stream_failure`` before entering this generator, so
-    ``first_event`` is guaranteed to be non-error.
-    """
-    tool_state = state.tool_state
-
-    def _chunk(content: str) -> str:
-        return sse_chunk(state, {"content": content})
-
-    # 1. Role announcement
-    yield sse_chunk(state, {"role": "assistant"})
-
-    # 2. First event (guaranteed non-error by preflight)
-    text = _classify_team_event(first_event, tool_state)
-    if text:
-        yield _chunk(text)
-
-    # 3. Remaining events
-    try:
-        async for event in stream:
-            if _extract_team_stream_failure(event) is not None:
-                logger.warning("Team stream emitted terminal failure", team=team_name)
-                mark_stream_failed()
-                pending = finalize_pending_tools(tool_state)
-                if pending:
-                    yield _chunk(pending)
-                yield _chunk("Team execution failed.")
-                break
-
-            text = _classify_team_event(event, tool_state)
+        A run that fails mid-stream closes its started tool calls as interrupted and ends with a failure chunk,
+        since the HTTP status is already sent.
+        """
+        nonlocal stream_completed
+        tool_state = state.tool_state
+        try:
+            yield sse_chunk(state, {"role": "assistant"})
+            text = _team_stream_text(first_event, tool_state)
             if text:
-                yield _chunk(text)
-    except Exception:
-        logger.exception("Team stream failed during iteration", team=team_name)
-        mark_stream_failed()
-        pending = finalize_pending_tools(tool_state)
-        if pending:
-            yield _chunk(pending)
-        yield _chunk("Team execution failed.")
+                yield sse_chunk(state, {"content": text})
+            failed = False
+            try:
+                async for event in stream:
+                    text = _team_stream_text(event, tool_state)
+                    if text:
+                        yield sse_chunk(state, {"content": text})
+            except Exception:
+                logger.exception("Team stream failed during iteration", team=team_name)
+                failed = True
+            # Tool calls that started but never completed, such as those a pause left waiting.
+            pending = finalize_pending_tools(tool_state)
+            if pending:
+                yield sse_chunk(state, {"content": pending})
+            if failed:
+                yield sse_chunk(state, {"content": "Team execution failed."})
+            logger.info("Team completion sent", team=team_name, stream=True)
+            yield sse_chunk(state, {}, finish_reason="stop")
+            yield SSE_DONE
+            stream_completed = not failed
+        finally:
+            await _cleanup()
 
-    # 4. Finalize any tool calls that started but never completed
-    pending = finalize_pending_tools(tool_state)
-    if pending:
-        yield _chunk(pending)
+    response = OpenAIStreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+    )
+    response.completion_predicate = lambda: stream_completed
+    return response
 
-    # 5. Finish
-    logger.info("Team completion sent", team=team_name, stream=True)
-    yield sse_chunk(state, {}, finish_reason="stop")
-    yield SSE_DONE
+
+def _team_stream_text(event: TeamRunEvent, tool_state: ToolStreamState) -> str | None:
+    """Return the SSE text of one team event: the leader's reply text and every tool call, the leader's or a member's.
+
+    Member text is left out: parallel members would interleave, and the leader's answer carries their results.
+    """
+    inner = event.event if isinstance(event, MemberEvent) else event
+    if isinstance(inner, ToolStarted | ToolCompleted):
+        return format_stream_tool_event(inner, tool_state)
+    return event.text if isinstance(event, TextDelta) else None

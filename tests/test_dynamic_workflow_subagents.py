@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import yaml
-from agno.models.response import ModelResponse
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -19,18 +18,19 @@ from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.personas import inline_persona
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
+from mindroom.llm.errors import ProviderError
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.delegation_helpers import _call, _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_envelopes import _InstructionRecordingModel
-from tests.test_delegation_execution import _call
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from tests.fakes.scripted_model import ScriptStep
 
 
 def _config(
@@ -48,7 +48,7 @@ def _config(
                 memory_backend="file",
             ),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         models={
             "default": ModelConfig(provider="test", id="default-model"),
             "haiku": ModelConfig(provider="test", id="haiku-model"),
@@ -75,6 +75,33 @@ def _spec(participants: list[dict[str, object]], steps: int = 1, **permissions: 
     }
 
 
+class _ChildModel(ScriptedModel):
+    """Scripted child model that keeps each request's system prompt and offered function names."""
+
+    @property
+    def system_prompts(self) -> list[str]:
+        """Each request's system message."""
+        return [
+            "\n".join(message.get_content_string() for message in request.messages if message.role == "system")
+            for request in self.requests
+        ]
+
+    @property
+    def authored_prompts(self) -> list[str]:
+        """Each request's system message before the runtime sections that follow an authored subagent's prompt."""
+        return [prompt.split("\n\n<your_role>", 1)[0] for prompt in self.system_prompts]
+
+    @property
+    def offered(self) -> list[list[str]]:
+        """The names of the functions each request offered."""
+        return [sorted(tool.name for tool in request.tools) for request in self.requests]
+
+
+async def _unavailable() -> None:
+    msg = "Child provider unavailable."
+    raise ProviderError(msg, provider="Synthetic")
+
+
 class _Workflow:
     """One leader with dynamic_workflow and a scripted child model."""
 
@@ -83,22 +110,19 @@ class _Workflow:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         config: Config,
-        responses: list[ModelResponse] | None = None,
+        turns: list[list[ScriptStep]] | None = None,
     ) -> None:
         self.paths: RuntimePaths = _runtime_paths(tmp_path)
         self.config = config
         entity_ids(config, self.paths)
-        self.model = _InstructionRecordingModel(
-            id="test",
-            responses=responses if responses is not None else [ModelResponse(content=f"Answer {i}.") for i in range(4)],
-        )
+        self.model = _ChildModel(turns if turns is not None else [answer(f"Answer {i}.") for i in range(4)])
         self.models_loaded: list[str] = []
 
-        def load_model(*args: object) -> _InstructionRecordingModel:
+        def load_model(*args: object) -> _ChildModel:
             self.models_loaded.append(str(args[2]))
             return self.model
 
-        monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
+        monkeypatch.setattr("mindroom.agents._build_agent_model_provider", load_model)
         self.tools = DynamicWorkflowTools()
 
     def context(self) -> AbstractContextManager[object]:
@@ -231,13 +255,13 @@ async def test_preapproved_participant_tool_runs(tmp_path: Path, monkeypatch: py
         tmp_path,
         monkeypatch,
         config,
-        responses=[ModelResponse(tool_calls=[_call("add", "add-1", a=1, b=2)]), ModelResponse(content="3")],
+        turns=[calls(_call("add", "add-1", a=1, b=2)), answer("3")],
     )
 
     run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator"]}]))
 
     assert run["status"] == "completed", run
-    assert workflow.model.responses == []
+    assert workflow.model.turns == []
     assert "add" in workflow.model.offered[0]
 
 
@@ -373,12 +397,10 @@ async def test_participant_runs_the_profile_validated_at_run_start(
         tmp_path,
         monkeypatch,
         config,
-        responses=[
-            ModelResponse(
-                tool_calls=[_call("save_file", "save-1", contents=rewritten, file_name="subagents/second.md")],
-            ),
-            ModelResponse(content="Rewrote it."),
-            ModelResponse(content="Second answer."),
+        turns=[
+            calls(_call("save_file", "save-1", contents=rewritten, file_name="subagents/second.md")),
+            answer("Rewrote it."),
+            answer("Second answer."),
         ],
     )
     profile = workflow.profile("second", "---\ndescription: B.\ntools: []\n---\nOriginal prompt.\n")
@@ -452,11 +474,11 @@ async def test_later_step_fails_when_its_named_function_becomes_gated(
     live = [auto]
     record = workflow.model
 
-    def load_model(*_args: object) -> _InstructionRecordingModel:
+    def load_model(*_args: object) -> _ChildModel:
         live[0] = gated
         return record
 
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
+    monkeypatch.setattr("mindroom.agents._build_agent_model_provider", load_model)
     context = _delegate_runtime_context(auto, workflow.paths, execution_identity=_identity())
     monkeypatch.setattr(
         workflow,
@@ -521,7 +543,7 @@ def test_sync_run_executes_a_subagent_participant(tmp_path: Path, monkeypatch: p
 @pytest.mark.asyncio
 async def test_failed_step_keeps_its_delegation_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A participant turn that fails still links its step to the delegation record it wrote."""
-    workflow = _Workflow(tmp_path, monkeypatch, _config(), responses=[])
+    workflow = _Workflow(tmp_path, monkeypatch, _config(), turns=[[Await(_unavailable)]])
 
     run = await workflow.run(_spec([{"id": "critic", "system_prompt": "Critic prompt", "tools": []}]))
 

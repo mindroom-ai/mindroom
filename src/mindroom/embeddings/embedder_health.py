@@ -19,10 +19,9 @@ from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, describe_em
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from agno.knowledge.embedder.base import Embedder
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.embeddings.base import Embedder
 
 logger = get_logger(__name__)
 
@@ -136,14 +135,11 @@ def _bound_probe_client_timeout(embedder: Embedder) -> None:
     retries, which would hang `mindroom doctor` and pin probe threads for
     minutes; normal runtime embedding traffic keeps the SDK defaults.
     """
-    from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder  # noqa: PLC0415
+    from mindroom.embeddings.openai_embedder import OpenAIEmbedder  # noqa: PLC0415
 
-    if isinstance(embedder, MindRoomOpenAIEmbedder):
-        embedder.client_params = {
-            **(embedder.client_params or {}),
-            "timeout": _PROBE_TIMEOUT_SECONDS,
-            "max_retries": 0,
-        }
+    if isinstance(embedder, OpenAIEmbedder):
+        embedder.timeout = _PROBE_TIMEOUT_SECONDS
+        embedder.max_retries = 0
 
 
 def probe_embedder(
@@ -162,7 +158,7 @@ def probe_embedder(
         else:
             embedder = create_configured_embedder(config, runtime_paths, health_recorder=health_recorder)
         _bound_probe_client_timeout(embedder)
-        vector = embedder.get_embedding(_PROBE_TEXT)
+        vector = embedder.embed([_PROBE_TEXT], purpose="query")[0]
     except Exception as exc:
         return describe_embedder_error(exc)
     if not vector:

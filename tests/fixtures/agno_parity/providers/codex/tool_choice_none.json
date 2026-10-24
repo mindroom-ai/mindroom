@@ -1,0 +1,355 @@
+{
+  "family": "codex",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "codex_home": "<codex_home>"
+      },
+      "id": "gpt-6.1-sol",
+      "provider": "codex"
+    },
+    "portable_replay": null,
+    "provider_tools_disabled": true,
+    "response_format": null,
+    "stream": false,
+    "tool_choice": "none",
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Search the user's travel notes.",
+        "external_execution": false,
+        "name": "search_notes",
+        "parameters": {
+          "properties": {
+            "limit": {
+              "description": "Maximum results.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gpt-6.1-sol",
+          "provider": "OpenAI Codex Responses"
+        },
+        "mindroom_native_compaction": null,
+        "mindroom_portable_replay": false,
+        "mindroom_response_stored": false,
+        "response_id": "resp_parity"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
+        }
+      ],
+      "instructions": "You are a helpful assistant.",
+      "model": "gpt-6.1-sol",
+      "reasoning": {},
+      "store": false,
+      "stream": true,
+      "tool_choice": "none",
+      "tools": [
+        {
+          "name": "get_weather",
+          "description": "Return the forecast for one city.",
+          "parameters": {
+            "properties": {
+              "city": {
+                "description": "City name.",
+                "type": "string"
+              },
+              "unit": {
+                "description": "Temperature unit.",
+                "enum": [
+                  "celsius",
+                  "fahrenheit"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "external_execution": false,
+          "type": "function"
+        },
+        {
+          "name": "search_notes",
+          "description": "Search the user's travel notes.",
+          "parameters": {
+            "properties": {
+              "limit": {
+                "description": "Maximum results.",
+                "type": "integer"
+              },
+              "query": {
+                "description": "Search text.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "external_execution": false,
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "chatgpt-account-id": "parity-account",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://chatgpt.com/backend-api/codex/responses"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6.1-sol",
+            "object": "response",
+            "output": [],
+            "status": "in_progress",
+            "usage": null
+          },
+          "sequence_number": 0,
+          "type": "response.created"
+        },
+        "event": "response.created"
+      },
+      {
+        "data": {
+          "item": {
+            "content": [],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "in_progress",
+            "type": "message"
+          },
+          "output_index": 0,
+          "sequence_number": 1,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "output_index": 0,
+          "part": {
+            "annotations": [],
+            "text": "",
+            "type": "output_text"
+          },
+          "sequence_number": 2,
+          "type": "response.content_part.added"
+        },
+        "event": "response.content_part.added"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "delta": "{\"action\": \"respond\", \"reason\": \"The",
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 3,
+          "type": "response.output_text.delta"
+        },
+        "event": "response.output_text.delta"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "delta": " user asked a direct question.\"}",
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 4,
+          "type": "response.output_text.delta"
+        },
+        "event": "response.output_text.delta"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 5,
+          "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+          "type": "response.output_text.done"
+        },
+        "event": "response.output_text.done"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "output_index": 0,
+          "part": {
+            "annotations": [],
+            "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+            "type": "output_text"
+          },
+          "sequence_number": 6,
+          "type": "response.content_part.done"
+        },
+        "event": "response.content_part.done"
+      },
+      {
+        "data": {
+          "item": {
+            "content": [
+              {
+                "annotations": [],
+                "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          },
+          "output_index": 0,
+          "sequence_number": 7,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6.1-sol",
+            "object": "response",
+            "output": [
+              {
+                "content": [
+                  {
+                    "annotations": [],
+                    "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+                    "type": "output_text"
+                  }
+                ],
+                "id": "msg_parity",
+                "role": "assistant",
+                "status": "completed",
+                "type": "message"
+              }
+            ],
+            "status": "completed",
+            "usage": {
+              "input_tokens": 42,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 12,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 54
+            }
+          },
+          "sequence_number": 8,
+          "type": "response.completed"
+        },
+        "event": "response.completed"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "tool_choice_none"
+}

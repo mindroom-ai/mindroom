@@ -1,0 +1,221 @@
+{
+  "family": "openai_responses",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api": "responses",
+      "api_key": "parity-test-key",
+      "id": "gpt-6-astra",
+      "provider": "openai"
+    },
+    "portable_replay": null,
+    "provider_tools_disabled": true,
+    "response_format": null,
+    "stream": false,
+    "tool_choice": "none",
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Search the user's travel notes.",
+        "external_execution": false,
+        "name": "search_notes",
+        "parameters": {
+          "properties": {
+            "limit": {
+              "description": "Maximum results.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+      "from_history": false,
+      "provider_data": {
+        "incomplete_reason": null,
+        "mindroom_model": {
+          "id": "gpt-6-astra",
+          "provider": "OpenAI Responses"
+        },
+        "mindroom_native_compaction": null,
+        "mindroom_portable_replay": false,
+        "mindroom_response_stored": true,
+        "response_id": "resp_parity",
+        "response_status": "completed"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": "completed"
+  },
+  "request": {
+    "body": {
+      "input": [
+        {
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": "What should I pack for Paris tomorrow?"
+        }
+      ],
+      "model": "gpt-6-astra",
+      "reasoning": {},
+      "store": true,
+      "tool_choice": "none",
+      "tools": [
+        {
+          "name": "get_weather",
+          "description": "Return the forecast for one city.",
+          "parameters": {
+            "properties": {
+              "city": {
+                "description": "City name.",
+                "type": "string"
+              },
+              "unit": {
+                "description": "Temperature unit.",
+                "enum": [
+                  "celsius",
+                  "fahrenheit"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "external_execution": false,
+          "type": "function"
+        },
+        {
+          "name": "search_notes",
+          "description": "Search the user's travel notes.",
+          "parameters": {
+            "properties": {
+              "limit": {
+                "description": "Maximum results.",
+                "type": "integer"
+              },
+              "query": {
+                "description": "Search text.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "external_execution": false,
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.openai.com/v1/responses"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "json": {
+      "created_at": 1792540800,
+      "error": null,
+      "id": "resp_parity",
+      "incomplete_details": null,
+      "model": "gpt-6-astra",
+      "object": "response",
+      "output": [
+        {
+          "content": [
+            {
+              "annotations": [],
+              "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_parity",
+          "role": "assistant",
+          "status": "completed",
+          "type": "message"
+        }
+      ],
+      "status": "completed",
+      "usage": {
+        "input_tokens": 42,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 12,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 54
+      }
+    },
+    "status": 200
+  },
+  "scenario": "tool_choice_none"
+}

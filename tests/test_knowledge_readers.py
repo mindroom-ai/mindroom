@@ -15,8 +15,8 @@ reconfigures a copy. Delete that copy and the existing end-to-end suites still
 pass, because within one refresh every ``_build_reader`` call re-applies that
 manager's own chunking before the reader is used, so a sequential refresh stays
 internally consistent. The damage needs two bases' refreshes to interleave --
-a real possibility, since the source-root lock is per root and prefetch reads
-run on worker threads, but not something a deterministic end-to-end test can
+a real possibility, since the source-root lock is per root and file reads run
+on worker threads, but not something a deterministic end-to-end test can
 stage. Observing the constructed reader is the only way to hold the invariant.
 """
 
@@ -105,9 +105,7 @@ def _assert_carries_base_chunking(reader: Reader) -> None:
     assert strategy.min_chunk_fill_ratio == 0.5
     assert reader.chunk is True
     assert reader.chunk_size == _CHUNK_SIZE
-    # None is how these readers spell UTF-8 (``self.encoding or "utf-8"``), which
-    # is what lets `SafeFixedSizeChunking.max_chunk_text_bytes` bound decoded
-    # text by a size on disk -- the precondition the prefetch budget rests on.
+    # None is how these readers spell UTF-8 (``self.encoding or "utf-8"``).
     assert reader.encoding is None
 
 

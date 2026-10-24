@@ -970,7 +970,7 @@ def config_use_local_model(
 
 def _shared_key_providers(config: Config, runtime_paths: RuntimePaths) -> set[str]:
     """Return the providers with a model that has no credential of its own, so it needs the shared key."""
-    # model_loading pulls in the Agno runtime, which CLI startup must not import.
+    # model_loading opens the credential store, which CLI startup must not import.
     from mindroom.providers.model_loading import model_uses_own_credential  # noqa: PLC0415
 
     try:
@@ -1207,7 +1207,6 @@ agents:
     role: Personal assistant with persistent file-based identity and memory
     model: default
     include_default_tools: false
-    learning: false
     memory_backend: file
     rooms:
       - personal
@@ -1512,6 +1511,8 @@ def _provider_env_template(  # noqa: PLR0911
         # or set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
         """).rstrip()
 
+    # TODO(simplify): the generated .env credits Agno with the default Azure OpenAI API version, which
+    # providers/openai/build.py sets. Say "the default Azure OpenAI API version". Users reading a new .env would notice.
     if provider_preset == "azure":
         return textwrap.dedent(f"""\
         # Azure OpenAI configuration

@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import json
+import random
 import re
+import time
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
+from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.document import Document
-from agno.knowledge.knowledge import Knowledge  # noqa: TC002 - metadata sync resolves runtime type hints.
-from agno.knowledge.reader.website_reader import WebsiteReader
 from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes_sync
-from mindroom.custom_tools.agno_compat_website_reader import crawl_with_callbacks, queue_crawl_url
 from mindroom.server_fetch_url import (
     ServerFetchHTTPTransport,
     ServerFetchUrlError,
@@ -151,22 +152,17 @@ def _normalized_hostname(url: str) -> str:
         return ""
 
 
-def _server_fetch_get(
-    url: str,
-    *,
-    timeout: int,
-    follow_redirects: bool,
-    proxy: str | None = None,
-) -> httpx.Response:
-    """Fetch a URL through the server-fetch transport when no proxy is configured.
+def _server_fetch_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+    """Fetch a URL through the server-fetch transport.
 
     The body is requested uncompressed and read raw up to a limit, so no page is inflated or buffered whole.
     """
-    # With a configured proxy, URL and redirect validation happen before this handoff.
-    # The proxy owns target DNS resolution and egress policy from here.
-    route: dict[str, Any] = {"proxy": proxy} if proxy else {"transport": ServerFetchHTTPTransport()}
     with (
-        httpx.Client(follow_redirects=follow_redirects, headers={"Accept-Encoding": "identity"}, **route) as client,
+        httpx.Client(
+            follow_redirects=follow_redirects,
+            headers={"Accept-Encoding": "identity"},
+            transport=ServerFetchHTTPTransport(),
+        ) as client,
         client.stream("GET", url, timeout=timeout) as response,
     ):
         codings = {value.strip().lower() for value in response.headers.get_list("content-encoding", split_commas=True)}
@@ -189,8 +185,25 @@ def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
     return host == crawl_host
 
 
-class _MindRoomWebsiteReader(WebsiteReader):
-    """WebsiteReader variant that avoids selecting early search/navigation sections."""
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+# The crawl budget, the breadth-first queue, the 1-3 second pause before each fetch, and the 5000-character page
+# documents follow Agno's WebsiteReader, so the tool returns what it always has.
+_MAX_DEPTH = 3
+_MAX_LINKS = 10
+_PAGE_CHUNKING = FixedSizeChunking(chunk_size=5000)
+
+
+@dataclass
+class _MindRoomWebsiteReader:
+    """Crawls one host through the server-fetch transport and extracts each page's main text, skipping page chrome."""
+
+    timeout: int = 10
+    _visited: set[str] = field(default_factory=set, init=False, repr=False)
+    _urls_to_crawl: list[tuple[str, int]] = field(default_factory=list, init=False, repr=False)
+
+    def delay(self) -> None:
+        """Pause a random 1-3 seconds before each fetch so a crawl does not hammer one host."""
+        time.sleep(random.uniform(1, 3))  # noqa: S311 - pacing, not security.
 
     def _queue_links(self, soup: BeautifulSoup, current_url: str, current_depth: int, crawl_host: str) -> None:
         """Queue same-host crawl links from the unmodified page soup."""
@@ -209,7 +222,9 @@ class _MindRoomWebsiteReader(WebsiteReader):
             ):
                 continue
 
-            queue_crawl_url(self, str(full_url), current_depth + 1)
+            queued = (str(full_url), current_depth + 1)
+            if queued[0] not in self._visited and queued not in self._urls_to_crawl:
+                self._urls_to_crawl.append(queued)
 
     def _should_skip_crawl_url(
         self,
@@ -223,8 +238,8 @@ class _MindRoomWebsiteReader(WebsiteReader):
         """Return whether a queued crawl URL is outside the current crawl budget."""
         return (
             not _url_matches_crawl_host(current_url, crawl_host)
-            or (current_depth > self.max_depth and current_url != starting_url)
-            or num_links >= self.max_links
+            or (current_depth > _MAX_DEPTH and current_url != starting_url)
+            or num_links >= _MAX_LINKS
         )
 
     def _log_http_status_error(self, *, safe_current_url: str, error: httpx.HTTPStatusError) -> None:
@@ -238,14 +253,8 @@ class _MindRoomWebsiteReader(WebsiteReader):
     def _get_validated_response(self, current_url: str) -> tuple[httpx.Response, str]:
         """Fetch a URL while validating every redirect hop before following it."""
         request_url = validate_server_fetch_url(current_url)
-        fetch_kwargs = {"proxy": self.proxy} if self.proxy else {}
         for _redirect_count in range(_MAX_REDIRECTS + 1):
-            response = _server_fetch_get(
-                request_url,
-                timeout=self.timeout,
-                follow_redirects=False,
-                **fetch_kwargs,
-            )
+            response = _server_fetch_get(request_url, timeout=self.timeout, follow_redirects=False)
             if not response.is_redirect:
                 return response, request_url
             request_url = validate_server_fetch_redirect_url(request_url, response.headers.get("location"))
@@ -297,26 +306,17 @@ class _MindRoomWebsiteReader(WebsiteReader):
 
         return 0
 
-    def _documents_from_crawl(
-        self,
-        crawler_result: dict[str, str],
-        *,
-        url: str,
-        name: str | None,
-    ) -> list[Document]:
-        """Build Agno documents from crawled page content."""
+    def _documents_from_crawl(self, crawler_result: dict[str, str], *, url: str) -> list[Document]:
+        """Build one document per crawled page, named by the URL the crawl started from."""
         documents: list[Document] = []
         for crawled_url, crawled_content in crawler_result.items():
             document = Document(
-                name=name or url,
+                name=url,
                 id=str(crawled_url),
                 meta_data={"url": str(crawled_url)},
                 content=crawled_content,
             )
-            if self.chunk:
-                documents.extend(self.chunk_document(document))
-            else:
-                documents.append(document)
+            documents.extend(_PAGE_CHUNKING.chunk(document))
         return documents
 
     def _record_response_content(
@@ -337,40 +337,46 @@ class _MindRoomWebsiteReader(WebsiteReader):
         self._queue_links(soup, current_url, current_depth, crawl_host)
         return bool(main_content)
 
-    def crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
+    def crawl(self, url: str) -> dict[str, str]:
         """Crawl a website while logging only sanitized URL forms."""
         starting_url = validate_server_fetch_url(url)
         crawl_host = _normalized_hostname(starting_url)
-        crawler_result = crawl_with_callbacks(
-            self,
-            starting_url,
-            starting_depth,
-            should_skip=lambda current_url, current_depth, num_links: self._should_skip_crawl_url(
+        num_links = 0
+        crawler_result: dict[str, str] = {}
+        self._visited = set()
+        self._urls_to_crawl = [(starting_url, 1)]
+        while self._urls_to_crawl:
+            current_url, current_depth = self._urls_to_crawl.pop(0)
+            if current_url in self._visited or self._should_skip_crawl_url(
                 current_url=current_url,
                 starting_url=starting_url,
                 current_depth=current_depth,
                 num_links=num_links,
                 crawl_host=crawl_host,
-            ),
-            record=lambda current_url, current_depth, crawler_result: self._record_current_url(
+            ):
+                continue
+            self._visited.add(current_url)
+            # TODO(simplify): The pause also precedes the first fetch, so reading one page always waits 1-3 seconds.
+            # Pause only between fetches of one crawl. Users would get single-page reads seconds sooner.
+            self.delay()
+            num_links += self._record_current_url(
                 current_url=current_url,
                 current_depth=current_depth,
                 starting_url=starting_url,
                 crawler_result=crawler_result,
                 crawl_host=crawl_host,
-            ),
-        )
+            )
 
         if not crawler_result:
             raise httpx.RequestError(_FAILED_CRAWL_CONTENT, request=None)
 
         return crawler_result
 
-    def read(self, url: str, name: str | None = None) -> list[Document]:
+    def read(self, url: str) -> list[Document]:
         """Read a website while logging only sanitized URL forms."""
         log_debug(f"Reading: {_safe_url_for_log(url)}")
         try:
-            return self._documents_from_crawl(self.crawl(url), url=url, name=name)
+            return self._documents_from_crawl(self.crawl(url), url=url)
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
             log_error(f"Error reading website {_safe_url_for_log(url)}: {e.__class__.__name__}")
             raise
@@ -398,29 +404,8 @@ class _MindRoomWebsiteReader(WebsiteReader):
 class WebsiteTools(Toolkit):
     """Agno-compatible website toolkit using MindRoom's fixed extractor."""
 
-    def __init__(
-        self,
-        knowledge: Knowledge | None = None,
-        **kwargs: Any,  # noqa: ANN401 - mirrors Agno Toolkit passthrough kwargs.
-    ) -> None:
-        self.knowledge = knowledge
-
-        tools: list[Any] = []
-        if self.knowledge is not None:
-            tools.append(self.add_website_to_knowledge)
-        else:
-            tools.append(self.read_url)
-
-        super().__init__(name="website_tools", tools=tools, **kwargs)
-
-    def add_website_to_knowledge(self, url: str) -> str:
-        """Add a website's content to the configured knowledge base."""
-        if self.knowledge is None:
-            return "Knowledge base not provided"
-
-        log_debug(f"Adding to knowledge base: {_safe_url_for_log(url)}")
-        self.knowledge.insert(url=url, reader=_MindRoomWebsiteReader())
-        return "Success"
+    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401 - mirrors Agno Toolkit passthrough kwargs.
+        super().__init__(name="website_tools", tools=[self.read_url], **kwargs)
 
     def read_url(self, url: str) -> str:
         """Read a URL and return relevant documents from the website."""

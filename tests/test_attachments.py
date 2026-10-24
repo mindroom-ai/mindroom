@@ -41,8 +41,12 @@ from mindroom.attachments.storage import (
     resolve_attachments,
     resolve_thread_attachment_ids,
 )
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import bound_log_context
 from tests.conftest import FakeMediaResponse, make_matrix_client_mock, make_visible_message
+from tests.providers.anthropic_family_support import claude_turn, json_reply, route_provider
+from tests.providers.golden_support import Wire
 
 if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -852,6 +856,48 @@ def test_attachment_records_to_media_includes_images(tmp_path: Path) -> None:
     assert str(images[0].filepath) == str(registered.local_path)
     assert files == []
     assert videos == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record_written_before", [False, True], ids=["registered", "record-with-parameters"])
+async def test_a_text_attachment_whose_mime_type_has_parameters_reaches_claude_as_text(
+    tmp_path: Path,
+    record_written_before: bool,
+) -> None:
+    """A bridge's ``text/plain; charset=utf-8`` upload reaches Claude as a text document, which Claude reads."""
+    record = await _register_media_attachment(
+        storage_path=tmp_path,
+        event_id="$notes",
+        media_bytes=b"Plain notes.",
+        mime_type="text/plain; charset=utf-8",
+        room_id="!room:localhost",
+        thread_id=None,
+        sender="@user:localhost",
+        event_timestamp=None,
+        filename="notes.txt",
+        kind="file",
+    )
+    assert record is not None
+    if record_written_before:
+        # A record stored while records kept the event's raw type.
+        record_path = attachments_module._attachment_record_path(tmp_path, record.attachment_id)
+        payload = json.loads(record_path.read_text(encoding="utf-8"))
+        record_path.write_text(json.dumps({**payload, "mime_type": "text/plain; charset=utf-8"}), encoding="utf-8")
+    resolved = resolve_scoped_attachments(tmp_path, [record.attachment_id])
+    _, _, files, _ = attachment_records_to_media(resolved)
+    wire = Wire(json_reply([{"type": "text", "text": "Read."}]))
+
+    await claude_turn(
+        route_provider("anthropic", tmp_path, wire),
+        ModelRequest(messages=[Message(role="user", content="Summarize.", files=files)], stream=False),
+    )
+
+    (user,) = wire.body()["messages"]
+    documents = [block for block in user["content"] if block["type"] == "document"]
+    assert [document["source"] for document in documents] == [
+        {"type": "text", "media_type": "text/plain", "data": "Plain notes."},
+    ]
+    assert [(item.mime_type, item.local_path.suffix) for item in resolved] == [("text/plain", ".txt")]
 
 
 def test_register_local_attachment_uses_unique_temp_metadata_paths(tmp_path: Path) -> None:

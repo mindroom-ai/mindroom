@@ -8,8 +8,6 @@ from types import SimpleNamespace, UnionType
 from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
-from agno.models.message import Message
-from agno.models.openai import OpenAIChat
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
@@ -20,8 +18,11 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
+from mindroom.tool_system.invocation import parse_tool_arguments
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
+from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 SKIP_CONFIG_FIELD_VALIDATION = {
@@ -53,8 +54,8 @@ IGNORED_AGNO_PARAMS = {
     # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
     "newspaper": {"include_summary"},
 }
-# Words Agno's argument parsing turns into None or a boolean; a string parameter keeps them, except that an optional
-# one still reads the null words as left out.
+# Words tool-call parsing reads as None or a boolean; a string parameter keeps them, except that one with a default
+# reads the null words as left out.
 BOOLEAN_WORDS = ("true", "False")
 NULL_WORDS = ("None", "null", " NULL ")
 IGNORED_EXTRA_CONFIG_FIELDS = {
@@ -374,26 +375,9 @@ def _string_choices(schema: dict[str, Any]) -> list[str] | None:
     return [value for option in strings for value in option.get("enum", ())]
 
 
-def _parsed_arguments(function: Function, arguments: dict[str, str]) -> dict[str, Any] | None:
+def _parsed_arguments(function: ToolFunction, arguments: dict[str, str]) -> object:
     """Parse one model tool call the way an agent's response loop does."""
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {
-                "id": "call-1",
-                "type": "function",
-                "function": {"name": function.name, "arguments": json.dumps(arguments)},
-            },
-        ],
-    )
-    errors: list[Message] = []
-    [call] = OpenAIChat(id="gpt-test", api_key="test-key").get_function_calls_to_run(
-        message,
-        errors,
-        {function.name: function},
-    )
-    assert errors == []
-    return call.arguments
+    return parse_tool_arguments(json.dumps(arguments), function)
 
 
 def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> None:
@@ -403,7 +387,7 @@ def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> 
         if method is None:
             # The toolkit builds this function per instance, for example from an MCP server's tool list.
             continue
-        function = Function.from_callable(method)
+        function = adapt_function(Function.from_callable(method))
         signature = inspect.signature(method).parameters
         choices = {
             name: string_choices

@@ -1,4 +1,4 @@
-"""Adapt durable delegated child state and Agno events into workspace records."""
+"""Adapt durable delegated child state and the owned loop's events into workspace records."""
 
 from __future__ import annotations
 
@@ -9,46 +9,42 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
-from agno.run.agent import (
-    RunCancelledEvent,
-    RunContentEvent,
-    RunErrorEvent,
-    RunOutput,
-    ToolCallCompletedEvent,
-    ToolCallErrorEvent,
-    ToolCallStartedEvent,
-)
-from agno.run.base import RunStatus
-
 from mindroom.delegation.records import (
     DelegationEvent,
     DelegationMetadata,
     DelegationRecordHandle,
     DelegationRecordLocator,
     DelegationRecordOwner,
-    DelegationTerminalStatus,
 )
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
-    from agno.models.response import ToolExecution
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import DelegationChild
+    from mindroom.delegation.state import DelegationChild, DelegationTerminalStatus
+    from mindroom.llm.events import ReportedCall, RunEvent
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @dataclass
 class _ChildAuditBinding:
-    """One live child stream's record owner and buffered visible content."""
+    """One live child stream's record owner, buffered visible content, and its count of numbered events.
+
+    The loop's events carry no index, so the binding numbers them as they arrive; the number identifies an event
+    whose tool call has no id of its own. The count starts past the highest index the record already holds for the
+    run, so a run resumed in a later context never repeats the ids of an earlier leg, which the record would drop.
+    """
 
     child: DelegationChild
     owner: DelegationRecordOwner
     locator: DelegationRecordLocator
-    pending_content: list[tuple[int | None, object]] = field(default_factory=list)
+    observed: int
+    pending_content: list[tuple[int, str]] = field(default_factory=list)
 
 
 _CHILD_AUDIT: ContextVar[_ChildAuditBinding | None] = ContextVar(
@@ -99,10 +95,14 @@ async def child_audit_context(
     runtime_paths: RuntimePaths,
 ) -> AsyncIterator[None]:
     """Bind one child stream so the shared event observer can audit exact events."""
+    owner = DelegationRecordOwner(config, runtime_paths)
+    locator = _record_locator(child)
+    handle = await owner.reopen(locator)
     binding = _ChildAuditBinding(
         child=child,
-        owner=DelegationRecordOwner(config, runtime_paths),
-        locator=_record_locator(child),
+        owner=owner,
+        locator=locator,
+        observed=await owner.highest_event_index(handle, _stream_prefix(child.run_id)),
     )
     token = _CHILD_AUDIT.set(binding)
     try:
@@ -115,81 +115,50 @@ async def child_audit_context(
             _CHILD_AUDIT.reset(token)
 
 
-async def observe_child_event(event: object) -> None:  # noqa: C901, PLR0911
-    """Record one matching child stream event without persisting token-sized deltas."""
+async def observe_child_event(event: RunEvent) -> None:
+    """Record one child stream event without persisting token-sized deltas.
+
+    The events are those of the child turn running in this context; the terminal record names the run it ended,
+    and a record of another run is not this child's.
+    """
     binding = _CHILD_AUDIT.get()
-    if binding is None or not isinstance(
-        event,
-        RunOutput
-        | RunContentEvent
-        | RunCancelledEvent
-        | RunErrorEvent
-        | ToolCallStartedEvent
-        | ToolCallCompletedEvent
-        | ToolCallErrorEvent,
+    if binding is None or not isinstance(event, TextDelta | ToolStarted | ToolCompleted | RunFinished):
+        return
+    binding.observed += 1
+    index = binding.observed
+    if isinstance(event, TextDelta):
+        if event.text:
+            binding.pending_content.append((index, event.text))
+        return
+    if isinstance(event, RunFinished) and (
+        not isinstance(event.record, RunRecord)
+        or event.record.run_id != binding.child.run_id
+        or event.record.session_id != binding.child.session_id
     ):
-        return
-    if event.run_id != binding.child.run_id or event.session_id != binding.child.session_id:
-        return
-    if isinstance(event, RunContentEvent):
-        if event.content is not None:
-            binding.pending_content.append((event.event_index, event.content))
         return
 
     handle = await binding.owner.reopen(binding.locator)
     await _flush_pending_content(binding, handle)
-    if isinstance(event, RunOutput):
-        await _append_response_events(
-            binding.owner,
-            handle,
-            event,
-            run_id=binding.child.run_id,
-        )
-        return
-    if isinstance(event, (RunCancelledEvent, RunErrorEvent)):
-        return
-    if isinstance(event, ToolCallStartedEvent):
-        if event.tool is not None:
-            await _append_tool_call(
-                binding.owner,
-                handle,
-                event.tool,
-                run_id=binding.child.run_id,
-                event_index=event.event_index,
-            )
-        return
-    if isinstance(event, ToolCallCompletedEvent):
-        if event.tool is not None:
-            await _append_tool_result(
-                binding.owner,
-                handle,
-                event.tool,
-                run_id=binding.child.run_id,
-                event_index=event.event_index,
-            )
-        return
-    if event.tool is not None:
-        await _append_tool_result(
-            binding.owner,
-            handle,
-            event.tool,
-            run_id=binding.child.run_id,
-            event_index=event.event_index,
-            error=event.error,
-        )
+    run_id = binding.child.run_id
+    if isinstance(event, RunFinished):
+        assert isinstance(event.record, RunRecord)
+        await _append_response_events(binding.owner, handle, event.record, run_id=run_id)
+    elif isinstance(event, ToolStarted):
+        await _append_tool_call(binding.owner, handle, event.call, run_id=run_id, event_index=index)
+    else:
+        await _append_tool_result(binding.owner, handle, event.call, run_id=run_id, event_index=index)
 
 
 async def record_child_response(
     child: DelegationChild,
-    response: RunOutput,
+    response: RunRecord,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     decisions: Mapping[str, bool] | None = None,
     denial_reasons: Mapping[str, str | None] | None = None,
 ) -> dict[str, object] | None:
-    """Record one retained attempt snapshot and return its usage without finishing the child."""
-    _validate_response_identity(child, response)
+    """Record one snapshot of the child's run, which its lifecycle owner checked, and return its usage."""
     run_id = child.run_id
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
     usage, pending_approval = await _append_response_events(
@@ -217,7 +186,7 @@ async def record_child_response(
 async def _append_response_events(
     owner: DelegationRecordOwner,
     handle: DelegationRecordHandle,
-    response: RunOutput,
+    response: RunRecord,
     *,
     run_id: str,
     decisions: Mapping[str, bool] | None = None,
@@ -241,16 +210,16 @@ async def _append_response_events(
 
     pending_approval = False
     for tool in response.tools or ():
-        await _append_tool_call(owner, handle, tool, run_id=run_id)
-        if _tool_has_result(tool):
-            await _append_tool_result(owner, handle, tool, run_id=run_id)
-        if response.status == RunStatus.paused and _tool_waits_for_approval(tool):
+        await _append_tool_call(owner, handle, tool.call, run_id=run_id)
+        if tool.result is not None or tool.is_error:
+            await _append_tool_result(owner, handle, tool.call, run_id=run_id)
+        if response.status == RunStatus.paused and tool.requires_confirmation:
             pending_approval = True
             await owner.append_event(
                 handle,
                 DelegationEvent(
                     kind="approval_requested",
-                    event_id=_tool_event_id(run_id, tool, "approval"),
+                    event_id=_tool_event_id(run_id, tool.tool_call_id, "approval"),
                     status="paused",
                     data={
                         "tool_call_id": tool.tool_call_id,
@@ -261,13 +230,15 @@ async def _append_response_events(
                 ),
             )
 
-    if response.content is not None:
+    # What the attempt hands over, as its parent reads it: a failed child's reason, not the text it wrote first.
+    content = response.handover_content
+    if content is not None:
         await owner.append_event(
             handle,
             DelegationEvent(
                 kind="output",
-                event_id=f"output:{run_id}:{_value_digest(response.content)}",
-                data={"content": response.content},
+                event_id=f"output:{run_id}:{_value_digest(content)}",
+                data={"content": content},
             ),
         )
     usage = child_response_usage(response)
@@ -283,8 +254,11 @@ async def _append_response_events(
     return usage, pending_approval
 
 
-def child_response_usage(response: RunOutput) -> dict[str, object] | None:
+def child_response_usage(response: RunRecord) -> dict[str, object] | None:
     """Return the usage one child attempt reports."""
+    # TODO(simplify): the usage record is the stored run metrics dict, per-model details and provider metrics included.
+    # Record the usage a reply publishes (``ai_run_metadata._ReplyUsage``) instead. Agents reading events.jsonl and
+    # run.json would notice.
     return response.metrics.to_dict() if response.metrics is not None else None
 
 
@@ -297,7 +271,7 @@ async def finish_child_record(
 ) -> str:
     """Idempotently project lifecycle-owned terminal state and usage."""
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
-    if child.status not in {"completed", "failed", "cancelled", "denied"}:
+    if child.status not in TERMINAL_CHILD_STATUSES:
         msg = f"Cannot finish active delegation record: {child.delegation_id}"
         raise ValueError(msg)
     status = cast("DelegationTerminalStatus", child.status)
@@ -313,6 +287,8 @@ async def finish_child_record(
     return f"{receipt}\nSubagent ID: {child.subagent_id}" if child.subagent_id is not None else receipt
 
 
+# TODO(simplify): This repeats lifecycle.child_execution_identity's check with its own error type and text. Take
+# the identity from that one check. Nobody would notice: only the error for a mismatch no prepared child has changes.
 def _child_identity(child: DelegationChild) -> ToolExecutionIdentity:
     identity = parse_tool_execution_identity_payload(
         child.execution_identity,
@@ -342,37 +318,28 @@ async def _open_record(
     return owner, await owner.reopen(_record_locator(child))
 
 
-def _validate_response_identity(child: DelegationChild, response: RunOutput) -> None:
-    if response.run_id != child.run_id or response.session_id != child.session_id:
-        msg = "Delegation child response does not match its retained run"
-        raise ValueError(msg)
-
-
 def _tool_event_id(
     run_id: str,
-    tool: ToolExecution,
+    tool_call_id: str | None,
     phase: str,
     event_index: int | None = None,
 ) -> str | None:
-    if tool.tool_call_id:
-        return f"run:{run_id}:tool:{tool.tool_call_id}:{phase}"
+    if tool_call_id:
+        return f"run:{run_id}:tool:{tool_call_id}:{phase}"
     if event_index is not None:
-        return f"run:{run_id}:stream:{event_index}"
+        return f"{_stream_prefix(run_id)}{event_index}"
     return None
 
 
-def _tool_has_result(tool: ToolExecution) -> bool:
-    return tool.result is not None or bool(tool.tool_call_error)
-
-
-def _tool_waits_for_approval(tool: ToolExecution) -> bool:
-    return bool(tool.requires_confirmation or tool.requires_user_input)
+def _stream_prefix(run_id: str) -> str:
+    """Return the id prefix of this run's events that are numbered by the binding rather than by a tool call."""
+    return f"run:{run_id}:stream:"
 
 
 async def _append_tool_call(
     owner: DelegationRecordOwner,
     handle: DelegationRecordHandle,
-    tool: ToolExecution,
+    call: ReportedCall,
     *,
     run_id: str,
     event_index: int | None = None,
@@ -381,11 +348,11 @@ async def _append_tool_call(
         handle,
         DelegationEvent(
             kind="tool_call",
-            event_id=_tool_event_id(run_id, tool, "call", event_index),
+            event_id=_tool_event_id(run_id, call.tool_call_id, "call", event_index),
             data={
-                "tool_call_id": tool.tool_call_id,
-                "tool_name": tool.tool_name,
-                "arguments": tool.tool_args or {},
+                "tool_call_id": call.tool_call_id,
+                "tool_name": call.tool_name,
+                "arguments": call.tool_args or {},
             },
         ),
     )
@@ -394,23 +361,21 @@ async def _append_tool_call(
 async def _append_tool_result(
     owner: DelegationRecordOwner,
     handle: DelegationRecordHandle,
-    tool: ToolExecution,
+    call: ReportedCall,
     *,
     run_id: str,
     event_index: int | None = None,
-    error: str | None = None,
 ) -> None:
     await owner.append_event(
         handle,
         DelegationEvent(
             kind="tool_result",
-            event_id=_tool_event_id(run_id, tool, "result", event_index),
+            event_id=_tool_event_id(run_id, call.tool_call_id, "result", event_index),
             data={
-                "tool_call_id": tool.tool_call_id,
-                "tool_name": tool.tool_name,
-                "result": tool.result,
-                "error": error,
-                "tool_call_error": tool.tool_call_error,
+                "tool_call_id": call.tool_call_id,
+                "tool_name": call.tool_name,
+                "result": call.result,
+                "tool_call_error": call.is_error,
             },
         ),
     )
@@ -424,12 +389,8 @@ async def _flush_pending_content(
         return
     chunks = binding.pending_content.copy()
     binding.pending_content.clear()
-    event_indexes = [event_index for event_index, _ in chunks if event_index is not None]
-    run_id = binding.child.run_id
-    event_id = (
-        f"run:{run_id}:stream:{event_indexes[-1]}" if event_indexes else f"run:{run_id}:output:{_value_digest(chunks)}"
-    )
-    content = "".join(str(value) for _, value in chunks)
+    event_id = f"{_stream_prefix(binding.child.run_id)}{chunks[-1][0]}"
+    content = "".join(text for _, text in chunks)
     await binding.owner.append_event(
         handle,
         DelegationEvent(

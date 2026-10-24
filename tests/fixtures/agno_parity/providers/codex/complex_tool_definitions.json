@@ -1,0 +1,698 @@
+{
+  "family": "codex",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional.",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "codex_home": "<codex_home>"
+      },
+      "id": "gpt-6.1-sol",
+      "provider": "codex"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Plan a multi-stop trip.",
+        "external_execution": false,
+        "name": "plan_trip",
+        "parameters": {
+          "properties": {
+            "budget": {
+              "anyOf": [
+                {
+                  "description": "Total budget for the trip.",
+                  "properties": {
+                    "amount": {
+                      "title": "Amount",
+                      "type": "number"
+                    },
+                    "currency": {
+                      "default": "EUR",
+                      "enum": [
+                        "EUR",
+                        "USD"
+                      ],
+                      "title": "Currency",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "amount"
+                  ],
+                  "title": "TripBudget",
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional total budget."
+            },
+            "days": {
+              "description": "Total trip length in days.",
+              "type": "integer"
+            },
+            "destination": {
+              "description": "Country or region to visit.",
+              "type": "string"
+            },
+            "pace": {
+              "description": "How full each day should be.",
+              "enum": [
+                "relaxed",
+                "packed"
+              ],
+              "type": "string"
+            },
+            "stops": {
+              "description": "Ordered stops with nights per stop.",
+              "items": {
+                "description": "One stop on the trip.",
+                "properties": {
+                  "city": {
+                    "description": "City name.",
+                    "title": "City",
+                    "type": "string"
+                  },
+                  "nights": {
+                    "default": 1,
+                    "description": "Nights to stay.",
+                    "minimum": 1,
+                    "title": "Nights",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "title": "TripStop",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "travelers": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Traveler names and roles."
+            }
+          },
+          "required": [
+            "destination",
+            "stops"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Create a calendar event and invite attendees.",
+        "name": "calendar_create_event",
+        "parameters": {
+          "$defs": {
+            "Attendee": {
+              "properties": {
+                "contact": {
+                  "$ref": "#/$defs/Contact"
+                },
+                "optional": {
+                  "default": false,
+                  "title": "Optional",
+                  "type": "boolean"
+                },
+                "role": {
+                  "default": "guest",
+                  "enum": [
+                    "guest",
+                    "organizer"
+                  ],
+                  "title": "Role",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "contact"
+              ],
+              "title": "Attendee",
+              "type": "object"
+            },
+            "Contact": {
+              "properties": {
+                "email": {
+                  "format": "email",
+                  "title": "Email",
+                  "type": "string"
+                },
+                "name": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Name"
+                }
+              },
+              "required": [
+                "email"
+              ],
+              "title": "Contact",
+              "type": "object"
+            },
+            "Location": {
+              "properties": {
+                "address": {
+                  "title": "Address",
+                  "type": "string"
+                },
+                "room": {
+                  "description": "Room inside the venue.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "address"
+              ],
+              "title": "Location",
+              "type": "object"
+            }
+          },
+          "properties": {
+            "attendees": {
+              "description": "People to invite.",
+              "items": {
+                "$ref": "#/$defs/Attendee"
+              },
+              "maxItems": 50,
+              "title": "Attendees",
+              "type": "array"
+            },
+            "labels": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Free-form labels.",
+              "title": "Labels",
+              "type": "object"
+            },
+            "location": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Location"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "reminder_minutes": {
+              "default": 10,
+              "maximum": 1440,
+              "minimum": 0,
+              "title": "Reminder Minutes",
+              "type": "integer"
+            },
+            "starts_at": {
+              "format": "date-time",
+              "title": "Starts At",
+              "type": "string"
+            },
+            "title": {
+              "description": "Event title.",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "starts_at",
+            "attendees"
+          ],
+          "title": "create_eventArguments",
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gpt-6.1-sol",
+          "provider": "OpenAI Codex Responses"
+        },
+        "mindroom_native_compaction": null,
+        "mindroom_portable_replay": false,
+        "mindroom_response_stored": false,
+        "response_id": "resp_parity"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "call_id": "call_parity_event",
+          "function": {
+            "arguments": "{\"attendees\": [{\"contact\": {\"email\": \"ana@example.com\", \"name\": \"Ana\"}, \"role\": \"organizer\"}, {\"contact\": {\"email\": \"ben@example.com\"}, \"optional\": true}], \"labels\": {\"trip\": \"paris\"}, \"location\": {\"address\": \"Gare du Nord, Paris\", \"room\": null}, \"starts_at\": \"2026-10-21T08:30:00+02:00\", \"title\": \"Paris train\"}",
+            "name": "calendar_create_event"
+          },
+          "id": "fc_parity_event",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional."
+        }
+      ],
+      "instructions": "You are a helpful assistant.",
+      "model": "gpt-6.1-sol",
+      "reasoning": {},
+      "store": false,
+      "stream": true,
+      "tools": [
+        {
+          "name": "calendar_create_event",
+          "description": "Create a calendar event and invite attendees.",
+          "parameters": {
+            "$defs": {
+              "Attendee": {
+                "properties": {
+                  "contact": {
+                    "$ref": "#/$defs/Contact"
+                  },
+                  "optional": {
+                    "default": false,
+                    "title": "Optional",
+                    "type": "boolean"
+                  },
+                  "role": {
+                    "default": "guest",
+                    "enum": [
+                      "guest",
+                      "organizer"
+                    ],
+                    "title": "Role",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "contact"
+                ],
+                "title": "Attendee",
+                "type": "object"
+              },
+              "Contact": {
+                "properties": {
+                  "email": {
+                    "format": "email",
+                    "title": "Email",
+                    "type": "string"
+                  },
+                  "name": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Name"
+                  }
+                },
+                "required": [
+                  "email"
+                ],
+                "title": "Contact",
+                "type": "object"
+              },
+              "Location": {
+                "properties": {
+                  "address": {
+                    "title": "Address",
+                    "type": "string"
+                  },
+                  "room": {
+                    "description": "Room inside the venue.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "address"
+                ],
+                "title": "Location",
+                "type": "object"
+              }
+            },
+            "properties": {
+              "attendees": {
+                "description": "People to invite.",
+                "items": {
+                  "$ref": "#/$defs/Attendee"
+                },
+                "maxItems": 50,
+                "title": "Attendees",
+                "type": "array"
+              },
+              "labels": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Free-form labels.",
+                "title": "Labels",
+                "type": "object"
+              },
+              "location": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Location"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "reminder_minutes": {
+                "default": 10,
+                "maximum": 1440,
+                "minimum": 0,
+                "title": "Reminder Minutes",
+                "type": "integer"
+              },
+              "starts_at": {
+                "format": "date-time",
+                "title": "Starts At",
+                "type": "string"
+              },
+              "title": {
+                "description": "Event title.",
+                "title": "Title",
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "starts_at",
+              "attendees"
+            ],
+            "title": "create_eventArguments",
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "external_execution": false,
+          "type": "function"
+        },
+        {
+          "name": "plan_trip",
+          "description": "Plan a multi-stop trip.",
+          "parameters": {
+            "properties": {
+              "budget": {
+                "anyOf": [
+                  {
+                    "description": "Total budget for the trip.",
+                    "properties": {
+                      "amount": {
+                        "title": "Amount",
+                        "type": "number"
+                      },
+                      "currency": {
+                        "default": "EUR",
+                        "enum": [
+                          "EUR",
+                          "USD"
+                        ],
+                        "title": "Currency",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "amount"
+                    ],
+                    "title": "TripBudget",
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Optional total budget."
+              },
+              "days": {
+                "description": "Total trip length in days.",
+                "type": "integer"
+              },
+              "destination": {
+                "description": "Country or region to visit.",
+                "type": "string"
+              },
+              "pace": {
+                "description": "How full each day should be.",
+                "enum": [
+                  "relaxed",
+                  "packed"
+                ],
+                "type": "string"
+              },
+              "stops": {
+                "description": "Ordered stops with nights per stop.",
+                "items": {
+                  "description": "One stop on the trip.",
+                  "properties": {
+                    "city": {
+                      "description": "City name.",
+                      "title": "City",
+                      "type": "string"
+                    },
+                    "nights": {
+                      "default": 1,
+                      "description": "Nights to stay.",
+                      "minimum": 1,
+                      "title": "Nights",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "city"
+                  ],
+                  "title": "TripStop",
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "travelers": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Traveler names and roles."
+              }
+            },
+            "required": [
+              "destination",
+              "stops"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "external_execution": false,
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "chatgpt-account-id": "parity-account",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://chatgpt.com/backend-api/codex/responses"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6.1-sol",
+            "object": "response",
+            "output": [],
+            "status": "in_progress",
+            "usage": null
+          },
+          "sequence_number": 0,
+          "type": "response.created"
+        },
+        "event": "response.created"
+      },
+      {
+        "data": {
+          "item": {
+            "arguments": "",
+            "call_id": "call_parity_event",
+            "id": "fc_parity_event",
+            "name": "calendar_create_event",
+            "status": "in_progress",
+            "type": "function_call"
+          },
+          "output_index": 0,
+          "sequence_number": 1,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "delta": "{\"attendees\": [{\"contact\": {\"email\": \"ana@example.com\", \"name\": \"Ana\"}, \"role\": \"organizer\"}, {\"contact\": {\"email\": \"ben@example.com\"}, \"optional\": true}], \"labels\": {\"trip\": \"paris\"}, \"location\": {\"address\": \"Gare du Nord, Paris\", \"room\": null}, \"starts_at\": \"2026-10-21T08:30:00+02:00\", \"title\": \"Paris train\"}",
+          "item_id": "fc_parity_event",
+          "output_index": 0,
+          "sequence_number": 2,
+          "type": "response.function_call_arguments.delta"
+        },
+        "event": "response.function_call_arguments.delta"
+      },
+      {
+        "data": {
+          "arguments": "{\"attendees\": [{\"contact\": {\"email\": \"ana@example.com\", \"name\": \"Ana\"}, \"role\": \"organizer\"}, {\"contact\": {\"email\": \"ben@example.com\"}, \"optional\": true}], \"labels\": {\"trip\": \"paris\"}, \"location\": {\"address\": \"Gare du Nord, Paris\", \"room\": null}, \"starts_at\": \"2026-10-21T08:30:00+02:00\", \"title\": \"Paris train\"}",
+          "item_id": "fc_parity_event",
+          "output_index": 0,
+          "sequence_number": 3,
+          "type": "response.function_call_arguments.done"
+        },
+        "event": "response.function_call_arguments.done"
+      },
+      {
+        "data": {
+          "item": {
+            "arguments": "{\"attendees\": [{\"contact\": {\"email\": \"ana@example.com\", \"name\": \"Ana\"}, \"role\": \"organizer\"}, {\"contact\": {\"email\": \"ben@example.com\"}, \"optional\": true}], \"labels\": {\"trip\": \"paris\"}, \"location\": {\"address\": \"Gare du Nord, Paris\", \"room\": null}, \"starts_at\": \"2026-10-21T08:30:00+02:00\", \"title\": \"Paris train\"}",
+            "call_id": "call_parity_event",
+            "id": "fc_parity_event",
+            "name": "calendar_create_event",
+            "status": "completed",
+            "type": "function_call"
+          },
+          "output_index": 0,
+          "sequence_number": 4,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6.1-sol",
+            "object": "response",
+            "output": [
+              {
+                "arguments": "{\"attendees\": [{\"contact\": {\"email\": \"ana@example.com\", \"name\": \"Ana\"}, \"role\": \"organizer\"}, {\"contact\": {\"email\": \"ben@example.com\"}, \"optional\": true}], \"labels\": {\"trip\": \"paris\"}, \"location\": {\"address\": \"Gare du Nord, Paris\", \"room\": null}, \"starts_at\": \"2026-10-21T08:30:00+02:00\", \"title\": \"Paris train\"}",
+                "call_id": "call_parity_event",
+                "id": "fc_parity_event",
+                "name": "calendar_create_event",
+                "status": "completed",
+                "type": "function_call"
+              }
+            ],
+            "status": "completed",
+            "usage": {
+              "input_tokens": 42,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 12,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 54
+            }
+          },
+          "sequence_number": 5,
+          "type": "response.completed"
+        },
+        "event": "response.completed"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "complex_tool_definitions"
+}

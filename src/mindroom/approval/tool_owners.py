@@ -1,15 +1,10 @@
-"""Restore recorded approval toolkit origins under current tool permissions."""
+"""Restore recorded approval toolkit origins under current tool permissions, and bind approvals to them."""
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
-from agno.tools.function import Function
-from agno.tools.toolkit import Toolkit
-
-from mindroom.approval.agno_compat_approval import append_denied_tool_result, before_tool_lookup, continuation_executes
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
@@ -20,145 +15,57 @@ from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
-
-    from agno.agent import Agent
-    from agno.run.agent import RunOutput
-    from agno.run.requirement import RunRequirement
-    from agno.run.team import TeamRunOutput
-    from agno.team import Team
+    from collections.abc import Mapping, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
+    from mindroom.llm.runs import RunRequirement
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 
-def toolkit_owners_for_agents(agents: Sequence[Agent]) -> dict[tuple[str, str], str | None]:
-    """Observe final async toolkit functions with Agno's first-wins collision policy."""
-    owners: dict[tuple[str, str], str | None] = {}
-    for agent in agents:
-        if agent.id is None:
-            continue
-        for tool in agent.tools if isinstance(agent.tools, list) else ():
-            if isinstance(tool, Toolkit):
-                for name, function in tool.get_async_functions().items():
-                    owners.setdefault((agent.id, name), function.owning_toolkit)
-            elif isinstance(tool, Function):
-                owners.setdefault((agent.id, tool.name), tool.owning_toolkit)
-            elif callable(tool) and isinstance(name := getattr(tool, "__name__", None), str):
-                owners.setdefault((agent.id, name), None)
-    return owners
-
-
-def record_approval_denials(
-    actor: Agent | Team,
-    run: RunOutput | TeamRunOutput,
-    calls: Sequence[ApprovalCall],
-) -> None:
-    """Consume exact denied IDs using Agno's native rejection result formatting."""
-    denied = {call.tool_call_id: call for call in calls}
-    run.messages = run.messages or []
-    tools = [*(run.tools or ()), *(r.tool_execution for r in run.requirements or () if r.tool_execution)]
-    for tool in tools:
-        call = denied.get(tool.tool_call_id or "")
-        if call is None or tool.confirmed is not False:
-            continue
-        if tool.tool_name != call.tool_name:
-            msg = "Denied approval no longer matches the pending function; retry the request"
-            raise RuntimeError(msg)
-        if not any(message.tool_call_id == tool.tool_call_id for message in run.messages):
-            append_denied_tool_result(actor, run.messages, tool, tool_name=call.tool_name)
-        tool.requires_confirmation = False
-        tool.tool_call_error = True
-
-
-@contextmanager
-def approval_denial_context(actor: Agent, calls_by_run: Mapping[str, Sequence[ApprovalCall]]) -> Iterator[None]:
-    """Apply exact run denials while Agno owns this approval continuation.
-
-    Agno resolves a Function even to reject a removed tool. It calls aget_tools
-    after binding the canonical run and before copying messages. A team may continue
-    several paused runs on one member, and retries may bind a run again, so keep
-    the exact run map until the entire continuation exits. No placeholder enters
-    the model tool surface.
-    """
-    if not any(calls_by_run.values()):
-        yield
-        return
-
-    def apply_denials(run: RunOutput) -> None:
-        if run.run_id is not None and (calls := calls_by_run.get(run.run_id)):
-            record_approval_denials(actor, run, calls)
-
-    with before_tool_lookup(actor, apply_denials):
-        yield
-
-
-def _refuse_unapproved_executions(run: RunOutput, calls: Sequence[ApprovalCall]) -> None:
-    """Reject a continuation that would run anything except each approved call once with its saved arguments."""
-    approved = {call.tool_call_id: call for call in calls}
-    # One entry may appear in both lists, but stored copies within either list would each run.
-    for tools in (run.tools or (), [r.tool_execution for r in run.requirements or () if r.tool_execution]):
-        matched: set[str] = set()
-        for tool in tools:
-            if not continuation_executes(tool):
-                continue
-            call = approved.get(tool.tool_call_id or "")
-            # MindRoom never pauses for user input, and Agno would overwrite the checked arguments with stored input.
-            if (
-                call is None
-                or tool.requires_user_input is True
-                or call.tool_call_id in matched
-                or tool.tool_name != call.tool_name
-                or not call.binds_arguments(tool.tool_args)
-            ):
-                msg = "Paused run would execute a call its saved approval does not cover; retry the request"
-                raise RuntimeError(msg)
-            matched.add(call.tool_call_id)
-
-
-@contextmanager
-def approved_executions_context(actor: Agent, calls_by_run: Mapping[str, Sequence[ApprovalCall]]) -> Iterator[None]:
-    """Check every run Agno continues on this actor before it executes any stored call."""
-
-    def refuse_unapproved(run: RunOutput) -> None:
-        _refuse_unapproved_executions(run, calls_by_run.get(run.run_id or "", ()))
-
-    with before_tool_lookup(actor, refuse_unapproved):
-        yield
-
-
 def validate_approval_tool_owners(
-    agents: Sequence[Agent],
+    owners: Mapping[tuple[str, str], str],
     calls: Sequence[ApprovalCall],
     requirements: Sequence[RunRequirement],
 ) -> None:
-    """Reject an approved call unless its final executable has the recorded owner and arguments."""
-    owners = toolkit_owners_for_agents(agents)
+    """Refuse an approved call unless the waiting call it names still has its recorded function, arguments, member, and toolkit.
+
+    ``owners`` maps ``(agent id, function name)`` to the authored toolkit the rebuilt agent offers the function from,
+    as ``AgentBuild.tool_owners`` records it. The resume itself refuses decisions that do not cover the waiting calls
+    exactly; this check binds each approval to the toolkit it was granted for.
+    """
     pending = {
         requirement.tool_execution.tool_call_id: requirement
         for requirement in requirements
-        if requirement.confirmation is True and requirement.tool_execution is not None
+        if requirement.needs_confirmation
     }
-    if set(pending) != {call.tool_call_id for call in calls}:
-        msg = "Saved approval calls no longer match the pending requirements; retry the request"
-        raise RuntimeError(msg)
     for call in calls:
-        requirement = pending[call.tool_call_id]
+        requirement = pending.get(call.tool_call_id)
+        if requirement is None:
+            msg = "Saved approval calls no longer match the pending requirements; retry the request"
+            raise RuntimeError(msg)
         tool = requirement.tool_execution
         if (
-            tool is None
-            or tool.tool_name != call.tool_name
+            tool.tool_name != call.tool_name
             or not call.binds_arguments(tool.tool_args)
             or (requirement.member_agent_id is not None and requirement.member_agent_id != call.invoking_agent)
         ):
             msg = "Saved approval function, arguments, or member no longer match the pending call; retry the request"
             raise RuntimeError(msg)
-        if call.toolkit_name is None or owners.get((call.invoking_agent, call.tool_name)) != call.toolkit_name:
-            msg = f"Saved approval tool {call.tool_name!r} no longer has its original toolkit; retry the request"
-            raise RuntimeError(msg)
+        require_original_toolkit(owners, call)
+
+
+def require_original_toolkit(owners: Mapping[tuple[str, str], str], call: ApprovalCall) -> None:
+    """Refuse an approved ``call`` unless its agent still offers the function from the toolkit the approval recorded.
+
+    ``owners`` maps ``(agent id, function name)`` to the authored toolkit the rebuilt agent offers the function from,
+    so a removed or replaced tool cannot run under an old approval.
+    """
+    if call.toolkit_name is None or owners.get((call.invoking_agent, call.tool_name)) != call.toolkit_name:
+        msg = f"Saved approval tool {call.tool_name!r} no longer has its original toolkit; retry the request"
+        raise RuntimeError(msg)
 
 
 async def _warm_approval_mcp_catalog(
@@ -257,19 +164,18 @@ async def authorize_prepared_tool_call(
     current config to equal it keeps every config-derived toolkit assignment
     valid, so only live membership, worker routing, and function filters change.
     Recovery restores configured toolkits through ``required_approval_tool_names``
-    before rebuilding the Agent.
+    before rebuilding the agent.
     """
     catalog = binding.catalog
     context = catalog.runtime_context
     config = context.current_config
-    # Reserved namespace is assigned only to functions produced by this Agent's
-    # effective tool preparation. Never accept a binding the catalog does not
-    # own or use the namespace to bypass current config/membership/worker checks.
+    # The reserved namespace is assigned only to functions generated for this agent's
+    # build. Never accept a binding the catalog does not own or use the namespace to
+    # bypass current config/membership/worker checks.
     if binding.key.toolkit == "agent" and (
         not catalog.owns(binding)
-        or catalog.agent.id != context.agent_name
+        or catalog.agent_name != context.agent_name
         or binding.function.name != binding.key.function
-        or binding.function.owning_toolkit is not None
         or context.agent_name not in config.agents
     ):
         msg = "Generated CLI function no longer belongs to its prepared Agent"

@@ -6,16 +6,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.tools.function import Function, FunctionCall
-from agno.tools.toolkit import Toolkit
 
-from mindroom.agent_cli.bash import MinimalBashTools
-from tests.test_agent_tool_calls import _catalog
+from mindroom.agent_cli.bash import minimal_bash_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from tests.test_agent_tool_calls import _catalog, _toolkit
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.tool_system.tool_access import ToolKey
+
+
+def _provider_call(call_id: str | None) -> ToolCallContext:
+    return ToolCallContext(run_id="run", session_id="session", call_id=call_id)
 
 
 @pytest.mark.asyncio
@@ -38,20 +41,19 @@ async def test_facade_passes_effective_canonical_binding(
         del timeout, tail
         return args
 
-    source = Toolkit(name="shell", tools=[run_shell_command])
-    catalog = await _catalog(tmp_path, [source])
+    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
     seen = []
-    fc = FunctionCall(function=Function(name="bash"), call_id="real-provider-call")
 
-    async def execute(key: ToolKey, canonical_arguments: dict[str, object], outer: FunctionCall) -> str:
-        assert outer is fc
+    async def execute(key: ToolKey, canonical_arguments: dict[str, object], call_id: str) -> str:
+        assert call_id == "real-provider-call"
         binding = await catalog.bind(key)
         seen.append((binding, canonical_arguments))
         return "canonical-result"
 
-    facade = MinimalBashTools(execute=execute)
-    assert set(facade.get_async_functions()) == {"bash"}
-    assert await facade.bash(**kwargs, fc=fc) == "canonical-result"
+    [bash] = minimal_bash_toolkit(execute=execute).functions
+    assert bash.name == "bash"
+    outcome = await execute_tool_call(bash, kwargs, _provider_call("real-provider-call"))
+    assert outcome.content == "canonical-result"
     assert seen[0][0].key.toolkit == "shell"
     assert seen[0][0].function.name == name
     assert seen[0][1] == arguments
@@ -61,17 +63,19 @@ async def test_facade_passes_effective_canonical_binding(
 async def test_facade_closed_without_owner_and_filtered_source(tmp_path: Path) -> None:
     """Neither shell authorization nor an operation owner is invented by presentation."""
     catalog = await _catalog(tmp_path, [])
-    facade = MinimalBashTools()
-    with pytest.raises(RuntimeError, match="owner"):
-        await facade.bash(command="echo no")
+    [closed] = minimal_bash_toolkit().functions
+    outcome = await execute_tool_call(closed, {"command": "echo no"}, _provider_call("provider"))
+    assert outcome.is_error
+    assert "owner" in outcome.content
 
-    async def execute(key: ToolKey, _args: dict[str, object], _fc: FunctionCall) -> None:
+    async def execute(key: ToolKey, _args: dict[str, object], _call_id: str) -> None:
         await catalog.bind(key)
         pytest.fail("disabled source reached worker")
 
-    facade = MinimalBashTools(execute=execute)
-    with pytest.raises(ValueError, match=r"^No toolkit 'shell'$"):
-        await facade.bash(command="echo no", fc=FunctionCall(function=Function(name="bash")))
+    [bash] = minimal_bash_toolkit(execute=execute).functions
+    outcome = await execute_tool_call(bash, {"command": "echo no"}, _provider_call("provider"))
+    assert outcome.is_error
+    assert outcome.content == "No toolkit 'shell'"
 
 
 @pytest.mark.asyncio
@@ -87,25 +91,26 @@ async def test_invalid_facade_shapes_fail_before_owner(kwargs: dict[str, Any]) -
     async def execute(*_args: object) -> None:
         pytest.fail("invalid operation reached owner")
 
-    facade = MinimalBashTools(execute=execute)
+    [facade] = minimal_bash_toolkit(execute=execute).functions
     with pytest.raises(ValueError, match=r"^Bash requires a command$"):
-        await facade.bash(**kwargs)
+        await facade.entrypoint(**kwargs)
 
 
 @pytest.mark.asyncio
-async def test_agno_injects_exact_provider_call_without_exposing_fc_schema() -> None:
-    """History checkpoints and stop flags operate on the actual outer FunctionCall."""
+async def test_bash_reads_its_exact_provider_call_without_exposing_it_in_the_schema() -> None:
+    """History checkpoints and stop flags operate on the provider call the loop is running, which the model never sees."""
     calls = []
 
-    async def execute(key: ToolKey, arguments: dict[str, object], fc: FunctionCall) -> str:
-        calls.append((key, arguments, fc))
+    async def execute(key: ToolKey, arguments: dict[str, object], call_id: str) -> str:
+        calls.append((key, arguments, call_id))
         return "executed"
 
-    facade = MinimalBashTools(execute=execute)
-    function = facade.get_async_functions()["bash"]
-    function.process_entrypoint(strict=False)
-    assert "fc" not in function.parameters["properties"]
-    call = FunctionCall(function=function, call_id="actual-provider-id", arguments={"command": "echo hi"})
-    await call.aexecute()
-    assert call.result == "executed"
-    assert calls[0][2] is call
+    [bash] = minimal_bash_toolkit(execute=execute).functions
+    assert set(bash.parameters["properties"]) == {"command", "timeout", "tail"}
+    assert bash.injected_params == frozenset()
+    outcome = await execute_tool_call(bash, {"command": "echo hi"}, _provider_call("actual-provider-id"))
+    assert outcome.content == "executed"
+    assert calls[0][2] == "actual-provider-id"
+    refused = await execute_tool_call(bash, {"command": "echo hi"}, _provider_call(None))
+    assert refused.is_error
+    assert len(calls) == 1

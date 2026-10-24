@@ -9,11 +9,9 @@ from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import Any, ClassVar, Literal, Protocol, cast, runtime_checkable
+from typing import ClassVar, Literal, Protocol, cast, runtime_checkable
 from uuid import uuid4
 
-from agno.metrics import ModelMetrics, RunMetrics
-from agno.run.agent import RunOutput
 from agno.tools import Toolkit
 from claude_agent_sdk import (
     AssistantMessage,
@@ -26,7 +24,10 @@ from claude_agent_sdk import (
 )
 
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
@@ -48,35 +49,8 @@ _SYNTHETIC_MODEL = "<synthetic>"
 
 
 @runtime_checkable
-class _Agent(Protocol):
-    """Minimal agent protocol needed by this tool."""
-
-    name: str | None
-
-
-@runtime_checkable
-class _AgentWithId(Protocol):
-    """Agent protocol that exposes a stable id field."""
-
-    id: str | None
-
-
-@runtime_checkable
-class _AgentWithModel(Protocol):
-    """Agent protocol that exposes a model object."""
-
-    model: Any | None
-
-
-@runtime_checkable
-class _ModelWithId(Protocol):
-    """Model protocol that exposes an id field."""
-
-    id: str | None
-
-
 class _RunContext(Protocol):
-    """Minimal run context protocol needed by this tool."""
+    """Minimal run context protocol needed by this tool; Agno's argument coercion checks the injected one against it."""
 
     session_id: str
 
@@ -309,6 +283,15 @@ async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
         logger.warning("Claude session cleanup failed", error=str(error))
 
 
+def _input_counts(usage: dict[str, typing.Any]) -> TokenCounts:
+    """Return the input and cache counters one Claude Code usage report gives."""
+    return TokenCounts(
+        input_tokens=usage.get("input_tokens") or 0,
+        cache_read_tokens=usage.get("cache_read_input_tokens") or 0,
+        cache_write_tokens=usage.get("cache_creation_input_tokens") or 0,
+    )
+
+
 async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> None:
     """Count one Claude Code turn's main-conversation usage toward the conversation and requester that ran it.
 
@@ -323,42 +306,28 @@ async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> No
     finishing_model = responses[-1].model if responses else session_model
     if owner is None or finishing_model is None:
         return
-    models: dict[str, ModelMetrics] = {}
+    models: dict[str, TokenCounts] = {}
     for response in responses:
-        usage = response.usage or {}
-        model = models.setdefault(response.model, ModelMetrics(id=response.model, provider="Anthropic"))
-        model.input_tokens += usage.get("input_tokens") or 0
-        model.cache_read_tokens += usage.get("cache_read_input_tokens") or 0
-        model.cache_write_tokens += usage.get("cache_creation_input_tokens") or 0
+        models[response.model] = models.get(response.model, TokenCounts()) + _input_counts(response.usage or {})
     result_usage = (turn.result.usage if turn.result is not None else None) or {}
     # A crashed turn's result can report zeroes, so the result only ever adds to what its messages reported.
-    unseen_input = (result_usage.get("input_tokens") or 0) - sum(model.input_tokens for model in models.values())
-    unseen_cache_reads = (result_usage.get("cache_read_input_tokens") or 0) - sum(
-        model.cache_read_tokens for model in models.values()
+    unseen = _input_counts(result_usage) - sum(models.values(), TokenCounts())
+    models[finishing_model] = models.get(finishing_model, TokenCounts()) + TokenCounts(
+        input_tokens=max(unseen.input_tokens, 0),
+        output_tokens=result_usage.get("output_tokens") or 0,
+        cache_read_tokens=max(unseen.cache_read_tokens, 0),
+        cache_write_tokens=max(unseen.cache_write_tokens, 0),
     )
-    unseen_cache_writes = (result_usage.get("cache_creation_input_tokens") or 0) - sum(
-        model.cache_write_tokens for model in models.values()
-    )
-    finishing = models.setdefault(finishing_model, ModelMetrics(id=finishing_model, provider="Anthropic"))
-    finishing.input_tokens += max(unseen_input, 0)
-    finishing.cache_read_tokens += max(unseen_cache_reads, 0)
-    finishing.cache_write_tokens += max(unseen_cache_writes, 0)
-    finishing.output_tokens = result_usage.get("output_tokens") or 0
-    metrics = RunMetrics(details={"model": list(models.values())})
-    for model in models.values():
-        model.total_tokens = model.input_tokens + model.output_tokens
-        metrics.input_tokens += model.input_tokens
-        metrics.output_tokens += model.output_tokens
-        metrics.total_tokens += model.total_tokens
-        metrics.cache_read_tokens += model.cache_read_tokens
-        metrics.cache_write_tokens += model.cache_write_tokens
-    if not (metrics.total_tokens or metrics.cache_read_tokens or metrics.cache_write_tokens):
+    metrics = RunMetrics()
+    for model, counts in models.items():
+        metrics.add(MessageMetrics(tokens=counts.with_totals()), model_id=model, provider="Anthropic")
+    if not (metrics.tokens.total_tokens or metrics.tokens.cache_read_tokens or metrics.tokens.cache_write_tokens):
         return
     # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
     requester_context = get_tool_runtime_context() or get_detached_requester_context()
     invocation_id = uuid4().hex
     await record_helper_usage(
-        RunOutput(run_id=invocation_id, metrics=metrics),
+        RunRecord(run_id=invocation_id, metrics=metrics),
         owner=owner,
         invocation_id=invocation_id,
         kind="claude_agent",
@@ -504,17 +473,10 @@ class ClaudeAgentTools(Toolkit):
             details.extend(f"- {line}" for line in list(stderr_lines)[-5:])
         return "\n".join([message, *details])
 
-    def _namespace(self, agent: _Agent | None) -> str:
-        if isinstance(agent, _AgentWithId):
-            agent_id = agent.id
-            if agent_id and agent_id.strip():
-                return agent_id.strip()
-        if not isinstance(agent, _Agent):
-            return "mindroom"
-        agent_name = agent.name
-        if agent_name and agent_name.strip():
-            return agent_name.strip()
-        return "mindroom"
+    def _namespace(self) -> str:
+        context = get_tool_runtime_context()
+        agent_name = context.agent_name.strip() if context is not None else ""
+        return agent_name or "mindroom"
 
     def _ensure_namespace_config(self, namespace: str) -> None:
         self._session_manager.configure_namespace(
@@ -528,27 +490,24 @@ class ClaudeAgentTools(Toolkit):
         *,
         session_label: str | None,
         run_context: _RunContext | None,
-        agent: _Agent | None,
     ) -> str:
-        agent_name = self._namespace(agent)
-        run_session = run_context.session_id if run_context is not None else "default"
+        agent_name = self._namespace()
+        run_session = run_context.session_id if run_context is not None else DETACHED_SESSION_ID
         if session_label and session_label.strip():
             return f"{agent_name}:{run_session}:{session_label.strip()}"
         return f"{agent_name}:{run_session}"
 
-    def _resolve_model(self, agent: _Agent | None) -> str | None:
+    def _resolve_model(self) -> str | None:
         if self.model and self.model.strip():
             return self.model.strip()
-
-        if not isinstance(agent, _AgentWithModel):
+        # Without a configured model, each turn runs on the reply's own model, such as an over-budget fallback.
+        context = get_tool_runtime_context()
+        if context is None or context.active_model_name is None:
             return None
-        model_obj = agent.model
-        if not isinstance(model_obj, _ModelWithId):
+        model_config = context.current_config.models.get(context.active_model_name)
+        if model_config is None or not model_config.id.strip():
             return None
-        model_id = model_obj.id
-        if model_id and model_id.strip():
-            return model_id.strip()
-        return None
+        return model_config.id.strip()
 
     async def _get_or_create_session(
         self,
@@ -557,7 +516,6 @@ class ClaudeAgentTools(Toolkit):
         resume: str | None,
         fork_session: bool,
         run_context: _RunContext | None,
-        agent: _Agent | None,
     ) -> tuple[_ClaudeSessionState, bool, str, str | None] | str:
         """Shared session acquisition logic.
 
@@ -568,10 +526,10 @@ class ClaudeAgentTools(Toolkit):
         if fork_session and not normalized_resume:
             return "Invalid session options: `fork_session` requires a non-empty `resume` session ID."
 
-        namespace = self._namespace(agent)
-        resolved_model = self._resolve_model(agent)
+        namespace = self._namespace()
+        resolved_model = self._resolve_model()
         self._ensure_namespace_config(namespace)
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label, run_context=run_context)
 
         stderr_lines: collections.deque[str] = collections.deque(maxlen=_MAX_STDERR_LINES)
         stderr_callback = self._build_stderr_callback(stderr_lines)
@@ -611,7 +569,6 @@ class ClaudeAgentTools(Toolkit):
         resume: str | None = None,
         fork_session: bool = False,
         run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Start or reuse a persistent Claude coding session for this conversation."""
         result = await self._get_or_create_session(
@@ -619,7 +576,6 @@ class ClaudeAgentTools(Toolkit):
             resume=resume,
             fork_session=fork_session,
             run_context=run_context,
-            agent=agent,
         )
         if isinstance(result, str):
             return result
@@ -634,7 +590,6 @@ class ClaudeAgentTools(Toolkit):
         resume: str | None = None,
         fork_session: bool = False,
         run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Send a prompt to a persistent Claude session and return Claude's response."""
         trimmed_prompt = prompt.strip()
@@ -646,7 +601,6 @@ class ClaudeAgentTools(Toolkit):
             resume=resume,
             fork_session=fork_session,
             run_context=run_context,
-            agent=agent,
         )
         if isinstance(acquire_result, str):
             return acquire_result
@@ -731,10 +685,9 @@ class ClaudeAgentTools(Toolkit):
         self,
         session_label: str | None = None,
         run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Show status information for the current persistent Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label, run_context=run_context)
         session = await self._session_manager.get(session_key)
         if session is None:
             return f"No active Claude session for `{session_key}`."
@@ -754,10 +707,9 @@ class ClaudeAgentTools(Toolkit):
         self,
         session_label: str | None = None,
         run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Send an interrupt signal to an active Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label, run_context=run_context)
         session = await self._session_manager.get(session_key)
         if session is None:
             return f"No active Claude session for `{session_key}`."
@@ -773,10 +725,9 @@ class ClaudeAgentTools(Toolkit):
         self,
         session_label: str | None = None,
         run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Close and remove an active Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label, run_context=run_context)
         removed = await self._session_manager.close(session_key)
         if not removed:
             return f"No active Claude session for `{session_key}`."

@@ -1,0 +1,385 @@
+{
+  "family": "bedrock_claude",
+  "input": {
+    "deferred_tool_search": {
+      "mode": "portable",
+      "tool_names": [
+        "lookup_order",
+        "send_invoice"
+      ]
+    },
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "Where is order A-1001?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "aws_access_key": "parity-access-key",
+        "aws_region": "us-east-1",
+        "aws_secret_key": "parity-secret-key"
+      },
+      "id": "anthropic.claude-sonnet-5-5",
+      "provider": "bedrock_claude"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
+        "external_execution": false,
+        "name": "tool_search",
+        "parameters": {
+          "properties": {
+            "max_results": {
+              "description": "Maximum number of function definitions to return, at most 20.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+        "external_execution": false,
+        "name": "call_tool",
+        "parameters": {
+          "properties": {
+            "arguments": {
+              "description": "The function's arguments as a JSON object.",
+              "type": "object"
+            },
+            "name": {
+              "description": "Exact function name from tool_search.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Look up one order by id.",
+        "external_execution": false,
+        "name": "lookup_order",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Email the invoice for one order.",
+        "external_execution": false,
+        "name": "send_invoice",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "citations": {
+        "documents": [],
+        "raw": [],
+        "urls": []
+      },
+      "from_history": false,
+      "provider_data": {
+        "content_blocks": [
+          {
+            "id": "toolu_parity_order",
+            "input": {
+              "arguments": {
+                "order_id": "A-1001"
+              },
+              "name": "lookup_order"
+            },
+            "name": "call_tool",
+            "type": "tool_use"
+          }
+        ],
+        "mindroom_model": {
+          "id": "anthropic.claude-sonnet-5-5",
+          "provider": "AwsBedrock"
+        },
+        "mindroom_native_compaction": null,
+        "stop_reason": "tool_use"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"name\": \"lookup_order\", \"arguments\": {\"order_id\": \"A-1001\"}}",
+            "name": "call_tool"
+          },
+          "id": "toolu_parity_order",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "context_usage": {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_tokens": 42
+        }
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": "tool_use"
+  },
+  "request": {
+    "body": {
+      "max_tokens": 8192,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Where is order A-1001?",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
+            }
+          ]
+        }
+      ],
+      "model": "anthropic.claude-sonnet-5-5",
+      "system": [
+        {
+          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
+        }
+      ],
+      "tools": [
+        {
+          "name": "call_tool",
+          "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "arguments": {
+                "description": "The function's arguments as a JSON object.",
+                "type": "object"
+              },
+              "name": {
+                "description": "Exact function name from tool_search.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "name": "get_weather",
+          "description": "Return the forecast for one city.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "description": "City name.",
+                "type": "string"
+              },
+              "unit": {
+                "description": "Temperature unit.",
+                "enum": [
+                  "celsius",
+                  "fahrenheit"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "name": "tool_search",
+          "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "max_results": {
+                "description": "Maximum number of function definitions to return, at most 20.",
+                "type": "integer"
+              },
+              "query": {
+                "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
+                "type": "string"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
+        }
+      ],
+      "stream": true
+    },
+    "headers": {
+      "accept": "application/json",
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_parity",
+            "model": "anthropic.claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 42,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "id": "toolu_parity_order",
+            "input": {},
+            "name": "call_tool",
+            "type": "tool_use"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "partial_json": "{\"name\": \"lookup_order\", \"arguments\": {\"order_id\": \"A-1001\"}}",
+            "type": "input_json_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 12
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "deferred_tool_search"
+}

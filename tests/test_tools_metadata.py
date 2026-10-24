@@ -48,7 +48,6 @@ from mindroom.tool_system.metadata import (
     ToolConfigOverrideError,
     ToolManagedInitArg,
     _execute_validation_plugin_module,
-    _validate_authored_overrides,
     deserialize_tool_validation_snapshot,
     export_tools_metadata,
     get_tool_by_name,
@@ -1351,7 +1350,7 @@ def test_validate_authored_overrides_accepts_declared_field_types_and_nulls() ->
     def _fake_tool_factory() -> type[_FakeToolkit]:
         return _FakeToolkit
 
-    assert _validate_authored_overrides(
+    assert validate_authored_tool_entry_overrides(
         tool_name,
         {
             "enabled": True,
@@ -1389,7 +1388,7 @@ def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_field
     def _fake_tool_factory() -> type[_FakeToolkit]:
         return _FakeToolkit
 
-    assert _validate_authored_overrides(
+    assert validate_authored_tool_entry_overrides(
         tool_name,
         {"workspace_id": _AUTHORED_OVERRIDE_INHERIT},
         config_path_prefix="agents.code.tools[0]",
@@ -1420,7 +1419,7 @@ def test_validate_authored_overrides_accepts_string_lists_for_text_fields_with_a
     def _fake_tool_factory() -> type[_FakeToolkit]:
         return _FakeToolkit
 
-    assert _validate_authored_overrides(
+    assert validate_authored_tool_entry_overrides(
         tool_name,
         {"patterns": ["GITEA_*", "WHISPER_URL"]},
         config_path_prefix="agents.code.tools[0]",
@@ -1454,28 +1453,28 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
         ToolConfigOverrideError,
         match=r"agents.code.tools\[0\].test_authored_override_errors.flag",
     ):
-        _validate_authored_overrides(
+        validate_authored_tool_entry_overrides(
             tool_name,
             {"flag": "yes"},
             config_path_prefix="agents.code.tools[0]",
         )
 
     with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed for this field"):
-        _validate_authored_overrides(
+        validate_authored_tool_entry_overrides(
             tool_name,
             {"base_dir": "/workspace"},
             config_path_prefix="agents.code.tools[0]",
         )
 
     with pytest.raises(ToolConfigOverrideError, match="password fields"):
-        _validate_authored_overrides(
+        validate_authored_tool_entry_overrides(
             tool_name,
             {"api_key": "sk-test"},
             config_path_prefix="agents.code.tools[0]",
         )
 
     with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
-        _validate_authored_overrides(
+        validate_authored_tool_entry_overrides(
             tool_name,
             {"missing": True},
             config_path_prefix="agents.code.tools[0]",
@@ -1639,7 +1638,7 @@ def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path:
 def test_non_toolkit_registration_rejects_universal_filters(tool_name: str) -> None:
     """Universal filters should not validate for non-Toolkit catalog entries."""
     with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
-        _validate_authored_overrides(
+        validate_authored_tool_entry_overrides(
             tool_name,
             {"include_tools": ["GITHUB_CREATE_ISSUE"]},
             config_path_prefix="agents.code.tools[0]",

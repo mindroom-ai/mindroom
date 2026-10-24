@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import pytest
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.conversation_text import utterances
 from mindroom.history.replay import compaction_summary_message
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
 
 
-def _run(*messages: Message, status: RunStatus = RunStatus.completed, **metadata: object) -> RunOutput:
-    return RunOutput(
+def _run(*messages: Message, status: RunStatus = RunStatus.completed, **metadata: object) -> RunRecord:
+    return RunRecord(
         run_id="r1",
         session_id="s1",
         agent_id="mind",
@@ -27,7 +26,7 @@ def _run(*messages: Message, status: RunStatus = RunStatus.completed, **metadata
     )
 
 
-def _turn(**metadata: object) -> RunOutput:
+def _turn(**metadata: object) -> RunRecord:
     """One finished turn: Alice asks, the agent calls a tool and answers."""
     return _run(
         Message(role="user", content=render_msg_tag(sender="@alice:x", body="When does Atlas ship?")),
@@ -38,7 +37,7 @@ def _turn(**metadata: object) -> RunOutput:
     )
 
 
-def _kinds(run: RunOutput, *, agent_work: bool = False) -> list[tuple[str, str | None, str]]:
+def _kinds(run: RunRecord, *, agent_work: bool = False) -> list[tuple[str, str | None, str]]:
     return [(item.kind, item.sender, item.unredacted) for item in utterances(run, agent_work=agent_work)]
 
 
@@ -71,7 +70,7 @@ def test_a_prompt_is_split_by_who_sent_each_message() -> None:
     ]
 
 
-def _history_copy() -> RunOutput:
+def _history_copy() -> RunRecord:
     run = _turn()
     for message in run.messages or []:
         message.from_history = True
@@ -79,7 +78,7 @@ def _history_copy() -> RunOutput:
     return run
 
 
-def _child() -> RunOutput:
+def _child() -> RunRecord:
     run = _turn()
     run.parent_run_id = "parent"
     return run
@@ -95,7 +94,7 @@ def _child() -> RunOutput:
         pytest.param(_run(Message(role="user", content="hi"), status=RunStatus.error), id="errored"),
     ],
 )
-def test_what_the_agent_history_does_not_show_is_not_conversation(run: RunOutput) -> None:
+def test_what_the_agent_history_does_not_show_is_not_conversation(run: RunRecord) -> None:
     """Copies of earlier turns, system messages, and runs left out of the agent's history are never read."""
     assert _kinds(run, agent_work=True) == []
 

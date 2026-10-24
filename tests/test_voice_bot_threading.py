@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.media import Audio
 
 from mindroom import inbound_turn_normalizer
 from mindroom.attachments.storage import _attachment_id_for_event, load_attachment
@@ -29,6 +28,7 @@ from mindroom.constants import (
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.llm.media import Audio
 from mindroom.matrix.thread_membership import ThreadResolution
 from mindroom.matrix.users import AgentMatrixUser
 from tests.access_schema_support import with_current_room_member_access

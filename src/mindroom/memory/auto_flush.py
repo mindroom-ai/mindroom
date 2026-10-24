@@ -17,9 +17,7 @@ from functools import partial
 from typing import TYPE_CHECKING, TypedDict
 from uuid import uuid4
 
-from agno.agent import Agent
-from agno.run.base import RunStatus
-
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
@@ -36,7 +34,7 @@ from mindroom.logging_config import get_logger
 from mindroom.memory._prompting import redact_memory_text
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.memory.legacy_auto_flush import remove_legacy_flush_queue
-from mindroom.providers import model_loading
+from mindroom.providers.registry import build_model_provider
 from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -46,12 +44,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from agno.run.agent import RunOutput
-
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryAutoFlushConfig
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_runs import RedactedEventIds
+    from mindroom.llm.runs import RunRecord
     from mindroom.memory._shared import MemoryResult
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -99,7 +96,7 @@ class _FlushState(TypedDict):
 class _DueConversation:
     session_id: str
     updated_at: int
-    runs: list[RunOutput]
+    runs: list[RunRecord]
 
 
 def auto_flush_enabled(config: Config) -> bool:
@@ -135,16 +132,16 @@ def _new_conversation() -> _ConversationState:
     return {"updated_at": 0, "marker": [], "failures": 0, "failing_since": 0, "retry_at": 0, "recheck_at": 0}
 
 
-def _start(entry: _ConversationState, runs: list[RunOutput], started_at: int) -> tuple[int, str] | None:
+def _start(entry: _ConversationState, runs: list[RunRecord], started_at: int) -> tuple[int, str] | None:
     """Return the run key the conversation's unflushed turns follow, or None when all of them are unflushed."""
     if entry["marker"]:
         return (int(entry["marker"][0]), str(entry["marker"][1]))
     # A conversation first seen now starts with the turns after auto-flush started, so history is never flushed.
-    older = [run for run in runs if (run.created_at or 0) < started_at]
+    older = [run for run in runs if run.created_at < started_at]
     return run_key(older[-1]) if older else None
 
 
-def _run_lines(run: RunOutput) -> list[str]:
+def _run_lines(run: RunRecord) -> list[str]:
     """Return what was said in one turn as the ``speaker: text`` lines auto-flush extracts memories from."""
     lines: list[str] = []
     for said in utterances(run):
@@ -173,13 +170,13 @@ def _newest_lines(lines: list[str], *, max_messages: int, max_chars: int) -> lis
     return selected
 
 
-def _next_batch(runs: list[RunOutput], settings: MemoryAutoFlushConfig) -> tuple[list[RunOutput], list[str]]:
+def _next_batch(runs: list[RunRecord], settings: MemoryAutoFlushConfig) -> tuple[list[RunRecord], list[str]]:
     """Return the oldest turns whose lines fit one extraction, and those lines; a turn too long alone keeps its newest."""
     limits = {
         "max_messages": settings.extractor.max_messages_per_flush,
         "max_chars": settings.extractor.max_chars_per_flush,
     }
-    batch: list[RunOutput] = []
+    batch: list[RunRecord] = []
     lines: list[str] = []
     for run in runs:
         candidate = [*lines, *_run_lines(run)]
@@ -191,11 +188,11 @@ def _next_batch(runs: list[RunOutput], settings: MemoryAutoFlushConfig) -> tuple
     return batch, _newest_lines(lines, **limits)
 
 
-def _flush_tag(session_id: str, run: RunOutput) -> str:
+def _flush_tag(session_id: str, run: RunRecord) -> str:
     return f"{_TAG_PREFIX}{session_id}:{run.run_id}]"
 
 
-def _already_flushed(runs: list[RunOutput], session_id: str, memories: list[MemoryResult]) -> int:
+def _already_flushed(runs: list[RunRecord], session_id: str, memories: list[MemoryResult]) -> int:
     """Return how many of the runs a note written before its progress was saved already covers."""
     tags = {
         text.partition("]")[0] + "]"
@@ -228,7 +225,7 @@ def _record_unreadable(
 
 def _record_progress(
     entry: _ConversationState,
-    pending: list[RunOutput],
+    pending: list[RunRecord],
     covered: int,
     updated_at: int,
     blocked_until: float | None,
@@ -311,21 +308,15 @@ async def _extract_memory_summary(
     )
 
     model_name = extractor.model or config.resolve_entity(agent_name).model_name
-    model = model_loading.get_model_instance(config, runtime_paths, model_name)
-    extractor_agent = Agent(
-        name="MemoryAutoFlushExtractor",
-        role="Extract durable memory statements for long-term memory storage.",
-        model=model,
-        telemetry=False,
-    )
     invocation_id = uuid4().hex
-    response = await extractor_agent.arun(
+    response = await complete_prompt(
+        build_model_provider(config, runtime_paths, model_name),
         prompt,
+        role="Extract durable memory statements for long-term memory storage.",
         run_id=invocation_id,
-        session_id=f"memory_auto_flush_extract:{agent_name}:{session_id}",
     )
     await record_helper_usage(
-        response,
+        response.record,
         owner=HelperUsageOwner(
             storage_factory=partial(
                 create_session_storage,
@@ -340,13 +331,7 @@ async def _extract_memory_summary(
         kind="memory_auto_flush",
         requester_id=execution_identity.requester_id if execution_identity is not None else None,
     )
-    content = response.content
-    if response.status == RunStatus.error:
-        # Agno returns a provider failure as the run's content; raising backs the pass off instead of saving it.
-        msg = f"Memory extraction failed: {content}"
-        raise RuntimeError(msg)
-    raw_output = content if isinstance(content, str) else str(content or "")
-    return _sanitize_extractor_output(raw_output, extractor.no_reply_token)
+    return _sanitize_extractor_output(response.content, extractor.no_reply_token)
 
 
 @dataclass
@@ -425,49 +410,45 @@ class MemoryAutoFlushWorker:
             execution_identity=scope.execution_identity,
         )
         conversations = state["scopes"].setdefault(scope.key, {})
-        try:
-            due: list[_DueConversation] = []
-            changed = False
-            for session_id, updated_at in updated_sessions(
-                storage,
-                scope.agent_name,
-                # Update times are whole seconds, so one in the start's own second is listed too.
-                since=state["agents"][scope.agent_name] - 1,
+        due: list[_DueConversation] = []
+        changed = False
+        for session_id, updated_at in updated_sessions(
+            storage,
+            scope.agent_name,
+            # Update times are whole seconds, so one in the start's own second is listed too.
+            since=state["agents"][scope.agent_name] - 1,
+        ):
+            if len(due) >= limit:
+                break
+            # A delegated task's prompt comes from another agent, so it is not the delegate's conversation.
+            if session_id.startswith(DELEGATION_SESSION_PREFIX) or now - updated_at < idle_seconds:
+                continue
+            entry = conversations.get(session_id)
+            if entry is not None and (
+                entry["retry_at"] > now or (updated_at <= entry["updated_at"] and not 0 < entry["recheck_at"] <= now)
             ):
-                if len(due) >= limit:
-                    break
-                # A delegated task's prompt comes from another agent, so it is not the delegate's conversation.
-                if session_id.startswith(DELEGATION_SESSION_PREFIX) or now - updated_at < idle_seconds:
-                    continue
-                entry = conversations.get(session_id)
-                if entry is not None and (
-                    entry["retry_at"] > now
-                    or (updated_at <= entry["updated_at"] and not 0 < entry["recheck_at"] <= now)
-                ):
-                    continue
-                try:
-                    runs = session_runs(storage, session_id)
-                except Exception:
-                    # One conversation that cannot be read backs off instead of blocking the agent's others.
-                    logger.exception(
-                        "Memory auto-flush could not read a conversation",
-                        agent=scope.agent_name,
-                        session_id=session_id,
-                    )
-                    entry = conversations.setdefault(session_id, _new_conversation())
-                    _record_unreadable(entry, settings, updated_at, self.clock())
-                    changed = True
-                    continue
-                if not runs:
-                    # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
-                    # flush, so it does not take a place in the pass.
-                    conversations.setdefault(session_id, _new_conversation())["updated_at"] = updated_at
-                    changed = True
-                    continue
-                due.append(_DueConversation(session_id, updated_at, runs))
-            return due, changed
-        finally:
-            storage.close()
+                continue
+            try:
+                runs = session_runs(storage, session_id)
+            except Exception:
+                # One conversation that cannot be read backs off instead of blocking the agent's others.
+                logger.exception(
+                    "Memory auto-flush could not read a conversation",
+                    agent=scope.agent_name,
+                    session_id=session_id,
+                )
+                entry = conversations.setdefault(session_id, _new_conversation())
+                _record_unreadable(entry, settings, updated_at, self.clock())
+                changed = True
+                continue
+            if not runs:
+                # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
+                # flush, so it does not take a place in the pass.
+                conversations.setdefault(session_id, _new_conversation())["updated_at"] = updated_at
+                changed = True
+                continue
+            due.append(_DueConversation(session_id, updated_at, runs))
+        return due, changed
 
     async def _flush(
         self,
@@ -506,7 +487,7 @@ class MemoryAutoFlushWorker:
         start = _start(entry, runs, state["agents"][scope.agent_name])
         pending = [run for run in runs if start is None or run_key(run) > start]
         skipped = 0
-        batch: list[RunOutput] = []
+        batch: list[RunRecord] = []
         try:
             if pending:
                 memories = await list_all_agent_memories(
@@ -550,7 +531,7 @@ class MemoryAutoFlushWorker:
         config: Config,
         scope: _FlushScope,
         session_id: str,
-        last_run: RunOutput,
+        last_run: RunRecord,
         lines: list[str],
         memories: list[MemoryResult],
     ) -> None:
