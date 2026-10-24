@@ -183,10 +183,7 @@ def _read_proxy_url(runtime_paths: RuntimePaths) -> str | None:
 
 
 def _read_proxy_token(runtime_paths: RuntimePaths) -> str | None:
-    value = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"], default="") or "").strip()
-    if not value:
-        return None
-    return value
+    return (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"], default="") or "").strip() or None
 
 
 def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
@@ -220,9 +217,7 @@ def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
 
 def _read_execution_mode(runtime_paths: RuntimePaths) -> str | None:
     raw = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["execution_mode"])
-    if raw is None:
-        return None
-    normalized = raw.strip().lower()
+    normalized = (raw or "").strip().lower()
     if not normalized:
         return None
     supported = _SANDBOX_ALL_EXECUTION_MODES | _SANDBOX_SELECTIVE_EXECUTION_MODES | _UNSAFE_LOCAL_EXECUTION_MODES
@@ -283,17 +278,11 @@ def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str,
     if not isinstance(parsed, dict):
         return {}
 
-    policy: dict[str, tuple[str, ...]] = {}
-    for selector, services in parsed.items():
-        if not isinstance(selector, str):
-            continue
-        if not isinstance(services, list):
-            continue
-        cleaned_services = tuple(
-            service.strip() for service in services if isinstance(service, str) and service.strip()
-        )
-        policy[selector.strip()] = cleaned_services
-    return policy
+    return {
+        selector.strip(): tuple(service.strip() for service in services if isinstance(service, str) and service.strip())
+        for selector, services in parsed.items()
+        if isinstance(selector, str) and isinstance(services, list)
+    }
 
 
 def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
