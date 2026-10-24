@@ -1459,14 +1459,8 @@ def authored_tool_overrides_to_runtime(tool_name: str, overrides: dict[str, obje
     normalized = normalize_authored_tool_overrides(tool_name, overrides)
     if not normalized:
         return None
-
-    metadata = TOOL_METADATA[tool_name]
-    field_map = {field.name: field for field in metadata.agent_override_fields or []}
-    runtime_overrides: dict[str, object] = {}
-    for field_name, value in normalized.items():
-        field = field_map[field_name]
-        if field.type == "string[]":
-            runtime_overrides[field_name] = ", ".join(cast("list[str]", value))
-        else:
-            runtime_overrides[field_name] = value
-    return runtime_overrides or None
+    field_types = {field.name: field.type for field in TOOL_METADATA[tool_name].agent_override_fields or []}
+    return {
+        field_name: ", ".join(cast("list[str]", value)) if field_types[field_name] == "string[]" else value
+        for field_name, value in normalized.items()
+    }
