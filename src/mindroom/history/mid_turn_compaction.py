@@ -76,7 +76,8 @@ class _MidTurnCompaction:
     ``storage`` is where the run stores, and ``replay_plan`` is the plan its requests replay the scope's stored history
     under: a fold appends a summary row to the scope when they replay some, and a run that replays none keeps its
     summary as a message of its own. ``prompt_id`` names the turn's prompt, which every fold keeps in place. Whether
-    the provider compacts natively is read from each request, which a fallback changes.
+    the provider compacts natively, which a fallback changes, and which tools tool search defers are read from each
+    request.
     """
 
     config: Config
@@ -89,7 +90,6 @@ class _MidTurnCompaction:
     history_settings: ResolvedHistorySettings
     storage: RunStorage | None
     replay_plan: ResolvedReplayPlan | None
-    deferred_tool_names: frozenset[str]
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None
     turn_recorder: TurnRecorder | None
@@ -138,7 +138,6 @@ def mid_turn_compaction_hook(
     history_settings: ResolvedHistorySettings,
     storage: RunStorage | None,
     replay_plan: ResolvedReplayPlan | None,
-    deferred_tool_names: frozenset[str],
     prompt_id: str | None,
     lifecycle: CompactionLifecycle | None = None,
     turn_recorder: TurnRecorder | None = None,
@@ -160,7 +159,6 @@ def mid_turn_compaction_hook(
         history_settings=history_settings,
         storage=storage,
         replay_plan=replay_plan,
-        deferred_tool_names=deferred_tool_names,
         prompt_id=prompt_id,
         lifecycle=lifecycle,
         turn_recorder=turn_recorder,
@@ -190,6 +188,8 @@ class _Policy:
     fit_limit: int
     # Set while the request asks the provider to compact; the hook then only falls back to text when it cannot fit.
     native_route: str | None
+    # The tools the request keeps off the provider until tool search loads them.
+    deferred_tool_names: frozenset[str]
 
 
 async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> None:
@@ -228,7 +228,7 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
         # The fold replaced the checkpoints the provider's compaction replayed, so the loop's later requests carry no
         # native settings: each route sends them as plain requests, and this hook sizes and compacts them as text.
         state.request_template = replace(state.request_template, native_compaction=None)
-    rewritten_tokens = await asyncio.to_thread(_estimated_request_tokens, binding, messages, state.tools)
+    rewritten_tokens = await asyncio.to_thread(_estimated_request_tokens, binding, policy, messages, state.tools)
     _require_fit(policy, rewritten_tokens, summary_message)
     if rewritten_tokens > policy.limit:
         # What stays (system prompt, tools, summary, prompt) exceeds the replay window on its own; compacting again
@@ -383,6 +383,7 @@ def _policy(binding: _MidTurnCompaction, state: LoopState) -> _Policy | None:
         limit=context_budget_after_reserve(plan.replay_window_tokens, plan.reserve_tokens),
         fit_limit=context_budget_after_reserve(model_window or plan.replay_window_tokens, plan.reserve_tokens),
         native_route=native.route if native is not None else None,
+        deferred_tool_names=state.request_template.deferred_tools.names,
     )
 
 
@@ -421,7 +422,7 @@ def _request_tokens(
             + _thinking_tokens(
                 [message for message in projected if not checkpoint_items(message, policy.native_route)],
             )
-            + _tool_tokens(binding, tools, projected)
+            + _tool_tokens(tools, projected, policy.deferred_tool_names)
         )
     anchor = next(
         (
@@ -445,24 +446,28 @@ def _request_tokens(
                 + estimate_request_messages_tokens(newer, replay_model=binding.model.replay_estimator)
                 + _thinking_tokens(newer)
             )
-    return _estimated_request_tokens(binding, messages, tools)
+    return _estimated_request_tokens(binding, policy, messages, tools)
 
 
-def _estimated_request_tokens(binding: _MidTurnCompaction, messages: list[Message], tools: Sequence[ToolSpec]) -> int:
+def _estimated_request_tokens(
+    binding: _MidTurnCompaction,
+    policy: _Policy,
+    messages: list[Message],
+    tools: Sequence[ToolSpec],
+) -> int:
     return (
         estimate_request_messages_tokens(messages, replay_model=binding.model.replay_estimator)
         + _thinking_tokens(messages)
-        + _tool_tokens(binding, tools, messages)
+        + _tool_tokens(tools, messages, policy.deferred_tool_names)
     )
 
 
-def _tool_tokens(binding: _MidTurnCompaction, tools: Sequence[ToolSpec], messages: Sequence[Message]) -> int:
-    """Estimate the tool definitions a request carries in full; tool search keeps deferred ones out until it loads them.
+def _tool_tokens(tools: Sequence[ToolSpec], messages: Sequence[Message], deferred: frozenset[str]) -> int:
+    """Estimate the tool definitions a request carries in full; tool search keeps ``deferred`` out until it loads them.
 
     Claude expands a search's tool references into definitions; OpenAI replays them inside the search output, and
     portable tool search returns them as an ordinary tool result, both of which the message estimate already counts.
     """
-    deferred = binding.deferred_tool_names
     if deferred:
         deferred -= claude_loaded_tool_names(messages)
     # TODO(simplify): this sizes each definition inside a Chat ``function`` envelope while the static estimate
