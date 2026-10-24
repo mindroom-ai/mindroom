@@ -36,6 +36,8 @@ class MinimalBashTools(Toolkit):
         self.async_functions["bash"] = function
         self.functions["bash"] = function
 
+    # TODO(simplify): `command` is optional in the schema, yet every call without one fails. Make it a required
+    # string. Models would see the changed tool schema.
     async def bash(
         self,
         command: str | None = None,

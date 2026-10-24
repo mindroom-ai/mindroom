@@ -1886,9 +1886,7 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
                 tool_init_overrides={},
                 runtime_paths=runtime_paths,
                 agent_policies=config.get_agent_policies(),
-                private_agent_names=(
-                    frozenset(payload.private_agent_names) if payload.private_agent_names is not None else None
-                ),
+                private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -2272,30 +2270,16 @@ def _prepare_tool_call(  # noqa: C901 - validated dispatch branches
         return _PreparedToolCall(browse, streamed=False)
 
     async def dispatch() -> SandboxRunnerExecuteResponse:
-        if sandbox_exec.runner_uses_subprocess(runtime_paths):
-            return await _execute_request_subprocess(
-                payload,
-                runtime_paths,
-                prepared_worker,
-                config=config,
-                runner_token=runner_token,
+        # Worker-routed calls also take the subprocess path, so the per-worker virtualenv and worker-specific
+        # process environment stay authoritative even when this pod is itself a dedicated worker runtime.
+        if (
+            sandbox_exec.runner_uses_subprocess(runtime_paths)
+            or (
+                payload.tool_name == "python"
+                and sandbox_exec.request_execution_env(payload.tool_name, payload.execution_env, runtime_paths)
             )
-        if payload.tool_name == "python" and sandbox_exec.request_execution_env(
-            payload.tool_name,
-            payload.execution_env,
-            runtime_paths,
+            or payload.worker_key is not None
         ):
-            return await _execute_request_subprocess(
-                payload,
-                runtime_paths,
-                prepared_worker,
-                config=config,
-                runner_token=runner_token,
-            )
-        # Worker-routed execution stays on the subprocess path so the per-worker
-        # virtualenv and worker-specific process environment remain authoritative,
-        # even when this pod is itself a dedicated worker runtime.
-        if payload.worker_key is not None:
             return await _execute_request_subprocess(
                 payload,
                 runtime_paths,

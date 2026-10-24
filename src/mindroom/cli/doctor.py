@@ -46,7 +46,7 @@ from mindroom.startup_errors import PermanentStartupError
 from .config import activate_cli_runtime, console, load_config_quiet
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from google.auth.exceptions import DefaultCredentialsError
 
@@ -63,9 +63,10 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
     """
     console.print("[bold]MindRoom Doctor[/bold]\n")
 
-    passed = 0
-    failed = 0
-    warnings = 0
+    totals = [0, 0, 0]  # passed, failed, warnings
+
+    def add(counts: Sequence[int]) -> None:
+        totals[:] = [total + count for total, count in zip(totals, counts, strict=True)]
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config_path = runtime_paths.config_path
@@ -80,41 +81,23 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
         sync_env_to_credentials(runtime_paths=runtime_paths)
     except (OSError, ValueError) as exc:
         console.print(f"[yellow]![/yellow] Could not sync env credentials into the store ({exc})")
-        warnings += 1
+        add((0, 0, 1))
 
     # 1. Config file exists
-    p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
-    passed += p
-    failed += f
-    warnings += w
+    add(_run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path)))
 
     # 2+. Config validity + provider API key validation (skip if file missing)
     config: Config | None = None
     if config_path.is_file():
-        config, p, f, w = _run_doctor_step(
-            "Validating configuration...",
-            lambda: _check_config_valid(runtime_paths),
-        )
-        passed += p
-        failed += f
-        warnings += w
+        config, *counts = _run_doctor_step("Validating configuration...", lambda: _check_config_valid(runtime_paths))
+        add(counts)
         if config is not None:
-            p, f, w = _run_doctor_step(
-                "Checking providers...",
-                lambda: _check_providers(config, runtime_paths=runtime_paths),
-            )
-            passed += p
-            failed += f
-            warnings += w
-
-            # 4. Memory LLM & embedder
-            p, f, w = _run_doctor_step(
-                "Checking memory config...",
-                lambda: _check_memory_config(config, runtime_paths=runtime_paths),
-            )
-            passed += p
-            failed += f
-            warnings += w
+            # 3-4. Providers, then the memory LLM & embedder
+            for message, check in (
+                ("Checking providers...", lambda: _check_providers(config, runtime_paths=runtime_paths)),
+                ("Checking memory config...", lambda: _check_memory_config(config, runtime_paths=runtime_paths)),
+            ):
+                add(_run_doctor_step(message, check))
 
     # 5+. Matrix homeserver, hosted pairing, storage, and encryption stores
     for message, check in (
@@ -123,12 +106,10 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
         ("Checking storage...", lambda: _check_storage_writable(runtime_paths)),
         ("Checking encryption stores...", lambda: _check_e2ee_stores(runtime_paths)),
     ):
-        p, f, w = _run_doctor_step(message, check)
-        passed += p
-        failed += f
-        warnings += w
+        add(_run_doctor_step(message, check))
 
     # Summary
+    passed, failed, warnings = totals
     console.print(f"\n{passed} passed, {failed} failed, {warnings} warning{'s' if warnings != 1 else ''}")
 
     if failed > 0:
@@ -230,15 +211,10 @@ def _get_custom_base_url(models: list[ModelConfig], provider: str) -> str | None
     return None
 
 
-def _http_check(
-    url: str,
-    headers: dict[str, str] | None = None,
-    *,
-    verify: bool = True,
-) -> tuple[bool | None, str]:
+def _http_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool | None, str]:
     """Make a lightweight GET request and return (True, ""), (False, reason), or (None, reason)."""
     try:
-        resp = httpx.get(url, headers=headers or {}, timeout=5, verify=verify)
+        resp = httpx.get(url, headers=headers or {}, timeout=5)
     except httpx.HTTPError as exc:
         return None, str(exc)
     if resp.is_success:
