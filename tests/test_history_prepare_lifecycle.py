@@ -51,7 +51,7 @@ from mindroom.history.types import (
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, NativeCompactionReplay
+from mindroom.llm.provider import Capabilities, ModelIdentity, NativeCompactionReplay, PortableReplayEstimator
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
@@ -1885,11 +1885,13 @@ async def _prepare_with_reported_usage(
     *,
     history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
     folded_run_ids: tuple[str, ...] = (),
+    replay_estimator: PortableReplayEstimator | None = None,
 ) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
     """Prepare a reply after three runs; return it, the chars / 4 history estimate, and the compaction notices.
 
     ``latest`` configures the newest run, and a summary folding ``folded_run_ids`` is stored as written at
-    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, 400 are the system prompt and tools.
+    ``_SUMMARY_WRITTEN_AT``. Of the plan's 1,000 static prompt tokens, 400 are the system prompt and tools. The
+    answering model sizes replayed history with ``replay_estimator``, canonically when it is None.
     """
     runs = [_reported_run("run-0"), _reported_run("run-1"), _reported_run("run-2", **latest)]
     config, runtime_paths = _make_config(
@@ -1931,7 +1933,11 @@ async def _prepare_with_reported_usage(
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
             # The model that answered the stored runs, so its reported request sizes apply.
-            model=ScriptedModel([], identity=ModelIdentity(id="fake-model", provider="fake", provider_name="fake")),
+            model=ScriptedModel(
+                [],
+                identity=ModelIdentity(id="fake-model", provider="fake", provider_name="fake"),
+                replay_estimator=replay_estimator,
+            ),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=400,
             runtime_paths=runtime_paths,
@@ -1965,6 +1971,33 @@ async def test_the_latest_reported_request_size_decides_compaction_before_a_repl
     assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
     assert prepared.compaction_reply_outcome == "success"
     assert completed_outcome(lifecycle).before_tokens == expected
+
+
+@dataclass(frozen=True)
+class _FixedReplayEstimator:
+    """A route that sizes every explicit replay at ``tokens``."""
+
+    tokens: int
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        return False
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:  # noqa: ARG002
+        return self.tokens
+
+
+@pytest.mark.asyncio
+async def test_the_reported_request_size_counts_its_answer_as_the_answering_route_sizes_it(tmp_path: Path) -> None:
+    """The answer the reported request did not hold is sized as the model that answered replays it."""
+    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 8_000},
+        replay_estimator=_FixedReplayEstimator(1_200),
+    )
+
+    # The route sizes the 500-token answer at 1,200 tokens; the whole history it sizes no higher than chars / 4.
+    assert estimate < 4_000
+    assert prepared.compaction_decision.current_history_tokens == 8_000 + 1_200 - 400
 
 
 @pytest.mark.asyncio

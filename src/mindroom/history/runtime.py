@@ -243,7 +243,6 @@ async def prepare_scope_history(
             resolved_inputs=resolved_inputs,
             config=config,
             model=model,
-            replay_estimator=replay_estimator,
             non_prompt_tokens=non_prompt_tokens,
         )
         if native_route is None and visible_runs
@@ -355,7 +354,6 @@ def _reported_history_tokens(
     resolved_inputs: HistoryPreparationInputs,
     config: Config,
     model: ModelProvider | None,
-    replay_estimator: PortableReplayEstimator | None,
     non_prompt_tokens: int,
 ) -> int | None:
     """Size history from the request the provider reported for the scope's latest answer, or None when stale.
@@ -391,7 +389,7 @@ def _reported_history_tokens(
     reported = reported_context_tokens(answer, model=model, config=config, model_name=resolved_inputs.active_model_name)
     if reported is None:
         return None
-    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=replay_estimator)
+    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=model.replay_estimator)
     return reported + newer_tokens - non_prompt_tokens
 
 
