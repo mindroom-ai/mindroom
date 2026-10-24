@@ -1,21 +1,35 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Token usage and timing metrics, with the dict shapes stored in runs, session rows, usage rows, and ``io.mindroom.ai_run``.
 
-``to_dict`` omits None, zero integers, and empty containers exactly as Agno 3 did, because
-``usage/storage.py``, the budget code, and MindRoom Chat read these keys.
+``to_dict`` omits None, zero integers, and empty containers: the stored shape that ``usage/storage.py``, the budget
+code, and MindRoom Chat read.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
+@dataclass(slots=True)
+class _Stored:
+    """A record stored as its fields without None, zero integers, and empty containers (``_compact``)."""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stored dict shape."""
+        return _compact(asdict(self))
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Self:
+        """Rebuild from a stored dict, ignoring keys this type does not model."""
+        return cls(**known_fields(cls, data))
+
+
 @dataclass(slots=True, kw_only=True)
-class _Counts:
+class _Counts(_Stored):
     """The token counters and cost every usage record carries, first in its stored dict."""
 
     input_tokens: int = 0
@@ -46,14 +60,14 @@ def _add_counts(target: _Counts, source: _Counts, *, sign: int = 1) -> None:
         target.cost = (target.cost or 0) + sign * source.cost
 
 
-def _compact(values: Mapping[str, Any]) -> dict[str, Any]:
-    """Drop None, zero integers, and empty dicts or lists."""
+def _compact(values: Mapping[str, Any], *, keep_empty: bool = False) -> dict[str, Any]:
+    """Drop None and zero integers, and empty dicts or lists unless ``keep_empty``."""
     return {
         key: value
         for key, value in values.items()
         if value is not None
         and (not isinstance(value, int) or value != 0)
-        and (not isinstance(value, (dict, list)) or len(value) > 0)
+        and (keep_empty or not isinstance(value, (dict, list)) or len(value) > 0)
     }
 
 
@@ -90,15 +104,6 @@ class MessageMetrics(_Counts):
     duration: float | None = None
     time_to_first_token: float | None = None
     provider_metrics: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict; empty when nothing was reported."""
-        return _compact(asdict(self))
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> MessageMetrics:
-        """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(**known_fields(cls, data))
 
     def __add__(self, other: MessageMetrics) -> MessageMetrics:
         """Sum counters, cost, and duration; keep the first time to first token."""
@@ -141,29 +146,12 @@ class ModelMetrics(_Counts):
                 self.provider_metrics = {}
             _merge_numeric(self.provider_metrics, other.provider_metrics)
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict shape."""
-        return _compact(asdict(self))
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> ModelMetrics:
-        """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(**known_fields(cls, data))
-
 
 def _details_to_dict(details: Mapping[str, list[ModelMetrics]]) -> dict[str, list[dict[str, Any]]]:
-    # Agno kept empty ``provider_metrics`` dicts inside details, unlike ``ModelMetrics.to_dict``.
     # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
     # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
     return {
-        model_type: [
-            {
-                key: value
-                for key, value in asdict(entry).items()
-                if value is not None and (not isinstance(value, int) or value != 0)
-            }
-            for entry in entries
-        ]
+        model_type: [_compact(asdict(entry), keep_empty=True) for entry in entries]
         for model_type, entries in details.items()
     }
 
@@ -256,10 +244,7 @@ class SessionMetrics(_Counts):
     additional_metrics: dict[str, Any] | None = None
 
     def count_run(self, metrics: RunMetrics, *, replacing: RunMetrics | None = None) -> None:
-        """Add one run's usage, first taking back ``replacing``, what an earlier save of the same run added.
-
-        Without ``replacing`` this is Agno's ``SessionMetrics.accumulate_from_run``.
-        """
+        """Add one run's usage, first taking back ``replacing``, what an earlier save of the same run added."""
         if replacing is not None:
             self._accumulate(replacing, sign=-1)
         self._accumulate(metrics, sign=1)
@@ -309,12 +294,12 @@ def _signed_model(entry: ModelMetrics, sign: int) -> ModelMetrics:
 
 
 def _count_model(totals: list[ModelMetrics], entry: ModelMetrics) -> None:
-    """Add ``entry`` to the total of its ``(provider, id)``, or start one from a copy, as Agno did."""
+    """Add ``entry`` to the total of its ``(provider, id)``, or start one from a copy."""
     for total in totals:
         if (total.provider, total.id) == (entry.provider, entry.id):
             total.accumulate(entry)
             return
-    # The copy drops an empty ``provider_metrics``, as Agno's copy did.
+    # The copy drops an empty ``provider_metrics``.
     totals.append(ModelMetrics.from_dict(entry.to_dict()))
 
 
@@ -327,21 +312,12 @@ def _scaled(values: Mapping[str, Any], sign: int) -> dict[str, Any]:
 
 
 @dataclass(slots=True, kw_only=True)
-class ToolCallMetrics:
+class ToolCallMetrics(_Stored):
     """Wall-clock timing of one tool call."""
 
     start_time: float | None = None
     end_time: float | None = None
     duration: float | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict shape."""
-        return _compact(asdict(self))
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> ToolCallMetrics:
-        """Rebuild from a stored dict, ignoring keys this type does not model."""
-        return cls(**known_fields(cls, data))
 
 
 __all__ = [
