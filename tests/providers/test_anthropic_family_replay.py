@@ -25,6 +25,7 @@ from tests.history_helpers import _completed_run, _session, record_native_checkp
 from tests.providers.anthropic_family_support import (
     claude_turn,
     json_reply,
+    native_settings,
     route_provider,
     sse_reply,
 )
@@ -581,7 +582,7 @@ async def test_a_native_checkpoint_replays_in_place_of_the_prefix_it_summarized(
         _compacted([_TEXT], stream=stream),
     )
     provider = route_provider(route, tmp_path, wire, extra_kwargs={"max_tokens": 4096})
-    replay = provider.native_compaction_settings(threshold=60000)
+    replay = native_settings(provider)
     assert replay is not None
     messages = [Message(role="user", content="Remember the launch port is 4321.")]
     for index, prompt in enumerate(("What port?", "Repeat the port.")):
@@ -611,7 +612,7 @@ async def test_compaction_iterations_are_billed_and_the_last_one_is_the_context(
     """Compaction costs stay in the request's usage, while the active context counts only the final iteration."""
     wire = Wire(_compacted([_CHECKPOINT, _TEXT]))
     provider = route_provider("anthropic", tmp_path, wire)
-    native = provider.native_compaction_settings(threshold=60000)
+    native = native_settings(provider)
 
     turn = await claude_turn(provider, ModelRequest(messages=[_user("Hi")], native_compaction=native, stream=False))
 
@@ -643,7 +644,7 @@ async def _recorded_reply(
 ) -> Message:
     """Return the stored assistant message of one reply with ``blocks``, recorded under ``threshold``'s route."""
     wire.replies[:] = [json_reply(blocks, stop_reason=stop_reason, usage=_COMPACTION_USAGE)]
-    replay = provider.native_compaction_settings(threshold=threshold) if threshold is not None else None
+    replay = native_settings(provider, threshold=threshold) if threshold is not None else None
     request = ModelRequest(messages=[_user("Hi")], native_compaction=replay, stream=False)
     return _assistant(await claude_turn(provider, request))
 
@@ -655,10 +656,10 @@ async def test_an_empty_summary_keeps_the_canonical_history(tmp_path: Path, cont
     wire = Wire(json_reply([_TEXT]))
     provider = route_provider("anthropic", tmp_path, wire)
     reply = await _recorded_reply(provider, wire, [{**_CHECKPOINT, "content": content}, _TEXT])
-    replay = provider.native_compaction_settings(threshold=60000)
+    replay = native_settings(provider)
     assert replay is not None
 
-    projected = native_replay_messages_for_route(
+    projected, _ = native_replay_messages_for_route(
         [_user("Original facts."), reply],
         route=replay.route,
         manual_thinking=False,
@@ -681,7 +682,7 @@ async def test_an_empty_summary_keeps_the_tool_turn_thinking(tmp_path: Path, *, 
     messages = [_user("Look up the status."), reply, Message(role="tool", tool_call_id="toolu_lookup", content="Found")]
     wire.replies[:] = [json_reply([_TEXT])]
 
-    replay = provider.native_compaction_settings(threshold=60000) if native else None
+    replay = native_settings(provider) if native else None
     body = await _sent(provider, wire, messages, native_compaction=replay)
 
     assert body["messages"][1]["content"] == [thinking, tool_use]
@@ -699,7 +700,12 @@ async def test_checkpoint_replay_drops_the_unsigned_thinking_after_the_checkpoin
     messages = [_user("Look it up."), reply, Message(role="tool", tool_call_id="toolu_lookup", content="Found it")]
     wire.replies[:] = [json_reply([_TEXT])]
 
-    body = await _sent(provider, wire, messages, native_compaction=provider.native_compaction_settings(threshold=60000))
+    body = await _sent(
+        provider,
+        wire,
+        messages,
+        native_compaction=native_settings(provider),
+    )
 
     blocks = body["messages"][0]["content"]
     assert unsigned not in blocks
@@ -720,7 +726,7 @@ async def test_native_reactivation_discards_only_mismatched_thinking(tmp_path: P
         json_reply([_TEXT]),
     )
     provider = route_provider("anthropic", tmp_path, wire, id="claude-fable-5-1")
-    native = provider.native_compaction_settings(threshold=60000)
+    native = native_settings(provider)
     messages = [_user("Original facts.")]
     anchor = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=native, stream=False))
     messages = [*messages, _assistant(anchor), _user("Continue.")]
@@ -751,7 +757,7 @@ async def test_switching_the_claude_model_restores_the_canonical_history(tmp_pat
         opus,
         wire,
         [_user("Original facts."), reply, _user("Continue.")],
-        native_compaction=opus.native_compaction_settings(threshold=60000),
+        native_compaction=native_settings(opus),
     )
 
     assert body["messages"][0]["content"][0]["text"] == "Original facts."
@@ -797,7 +803,7 @@ async def test_canonical_fallback_removes_the_thinking_bound_to_the_checkpoint(
     original = [message.to_dict() for message in messages]
     wire.replies[:] = [json_reply([_TEXT])]
 
-    replay = provider.native_compaction_settings(threshold=60000) if native else None
+    replay = native_settings(provider) if native else None
     body = await _sent(provider, wire, messages, native_compaction=replay)
 
     assert [message.to_dict() for message in messages] == original
@@ -851,9 +857,7 @@ def test_a_vertex_checkpoint_route_is_stable_for_its_endpoint(tmp_path: Path, re
     """Two builds of the same Vertex model and region label their checkpoints alike, so a rebuild still replays them."""
     wire = Wire(json_reply([_TEXT]))
     routes = [
-        route_provider("vertexai_claude", tmp_path, wire, extra_kwargs={"region": region}).native_compaction_settings(
-            threshold=60000,
-        )
+        native_settings(route_provider("vertexai_claude", tmp_path, wire, extra_kwargs={"region": region}))
         for _ in range(2)
     ]
     assert routes[0] is not None
@@ -882,7 +886,7 @@ async def test_an_authored_checkpoint_replays_after_a_rebuild_without_a_foreign_
     )
     authored = {"betas": ["compact-2026-01-12"], **policy_kwargs}
     model = route_provider(route, tmp_path, wire, extra_kwargs=authored)
-    replay = model.native_compaction_settings(threshold=None, allow_authored=True)
+    replay = native_settings(model, threshold=None, allow_authored=True)
     assert replay is not None
     assert replay.threshold is None
     messages = [_user("Original facts"), old, _user("Continue")]
@@ -890,7 +894,7 @@ async def test_an_authored_checkpoint_replays_after_a_rebuild_without_a_foreign_
     first = await claude_turn(model, ModelRequest(messages=messages, native_compaction=replay, stream=False))
     first_body = wire.body()
     rebuilt = route_provider(route, tmp_path, wire, extra_kwargs=authored)
-    rebuilt_replay = rebuilt.native_compaction_settings(threshold=None, allow_authored=True)
+    rebuilt_replay = native_settings(rebuilt, threshold=None, allow_authored=True)
     wire.replies[:] = [json_reply([_TEXT])]
 
     second = await _sent(
@@ -914,7 +918,7 @@ def test_an_authored_approval_restore_requires_a_compatible_saved_policy(tmp_pat
     wire = Wire(json_reply([_TEXT]))
     authored = {"context_management": _POLICY}
     paused = route_provider("anthropic", tmp_path, wire, extra_kwargs=authored)
-    saved = paused.native_compaction_settings(threshold=None, allow_authored=True)
+    saved = native_settings(paused, threshold=None, allow_authored=True)
     assert saved is not None
     checkpoint = Message(role="assistant", content="Ready", provider_data={"content_blocks": [_CHECKPOINT, _TEXT]})
     record_native_checkpoint(checkpoint, [_CHECKPOINT, _TEXT], saved)
@@ -984,7 +988,7 @@ async def test_manual_thinking_survives_a_checkpoint_fallback(
     anchor = await _recorded_reply(provider, wire, [_CHECKPOINT, _TEXT])
     messages = [_user("Original launch facts."), anchor, _user("Look up the status.")]
     wire.replies[:] = [json_reply([thinking, tool_use], stop_reason="tool_use")]
-    native = provider.native_compaction_settings(threshold=60000)
+    native = native_settings(provider)
     lookup = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=native, stream=False))
     messages = [
         *messages,
@@ -1038,7 +1042,7 @@ async def test_thinking_overrides_align_the_replay_with_the_effective_mode(
     )
     reply = await _recorded_reply(provider, wire, [_CHECKPOINT, redacted, _TEXT])
 
-    projected = native_replay_messages_for_route(
+    projected, _ = native_replay_messages_for_route(
         [_user("Original facts."), reply, _user("Continue.")],
         route=None,
         manual_thinking=(provider.settings.effective_thinking() or {}).get("type") == "enabled",

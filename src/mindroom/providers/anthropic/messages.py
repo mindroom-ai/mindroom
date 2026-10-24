@@ -61,7 +61,6 @@ from mindroom.providers.anthropic.native_compaction import (
     native_compaction_supported,
     native_replay_messages_for_route,
     record_native_checkpoint_on,
-    request_uses_native_checkpoint,
     uses_compaction_edit,
 )
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
@@ -125,8 +124,8 @@ _VERTEX_ENDPOINTS = {
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
-def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str:
-    """Return the endpoint identity of one Claude route, or "" when it has none.
+def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | None:
+    """Return the endpoint identity of one Claude route, or None on Bedrock, which has none.
 
     Stored native-compaction checkpoints and the media limits learned from provider errors are keyed by it.
 
@@ -147,7 +146,7 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str:
             or _VERTEX_ENDPOINTS.get(region or "", f"https://{region}-aiplatform.googleapis.com/v1")
         )
         return f"{str(base_url).rstrip('/')}|{project}|{region}"
-    return ""
+    return None
 
 
 def _route_client_kwargs(route: ClaudeRouteKind, settings: ClaudeSettings) -> dict[str, Any]:
@@ -220,8 +219,8 @@ class ClaudeProvider:
         self,
         *,
         threshold: int | None,
-        history_generation: str = "",
-        allow_authored: bool = False,
+        history_generation: str,
+        allow_authored: bool,
     ) -> NativeCompactionReplay | None:
         """Return the replay settings of a request that wants compaction at ``threshold`` input tokens.
 
@@ -235,10 +234,12 @@ class ClaudeProvider:
             if not allow_authored or not authored_native_compaction_supported(route=self.route, settings=self.settings):
                 return None
             threshold = None
+        # Only Bedrock has no endpoint identity, and it compacts neither way.
+        assert self.identity.endpoint is not None
         route = native_compaction_route(
             provider=self.identity.provider,
             model_id=self.identity.id,
-            endpoint=self.identity.endpoint or "",
+            endpoint=self.identity.endpoint,
             history_generation=history_generation,
         )
         return NativeCompactionReplay(route=route, threshold=threshold)
@@ -399,7 +400,7 @@ class ClaudeProvider:
         settings, overrides = self.settings, request.overrides
         replay = request.native_compaction
         route = replay.route if replay is not None else None
-        projected = native_replay_messages_for_route(
+        projected, replays_checkpoint = native_replay_messages_for_route(
             request.messages,
             route=route,
             manual_thinking=(settings.effective_thinking() or {}).get("type") == "enabled",
@@ -436,7 +437,7 @@ class ClaudeProvider:
             kwargs=body,
             # A strict tool goes through the beta endpoint even on Bedrock, which gets no beta header for it.
             beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
-            checkpoint_prefix=request_uses_native_checkpoint(projected, route),
+            checkpoint_prefix=replays_checkpoint,
         )
 
     def _client(self, *, caller_retries: bool) -> _AsyncClaudeClient:
@@ -585,7 +586,7 @@ def _claude_capabilities(
     route: ClaudeRouteKind,
     model_id: str,
     settings: ClaudeSettings,
-    endpoint: str,
+    endpoint: str | None,
 ) -> Capabilities:
     """Return what one Claude route offers for this model."""
     return Capabilities(
@@ -710,7 +711,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
         id=model_config.id,
         provider=provider_name,
         provider_name=provider_name,
-        endpoint=endpoint or None,
+        endpoint=endpoint,
     )
     capabilities = _claude_capabilities(route, model_config.id, settings, endpoint)
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)

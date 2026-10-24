@@ -34,7 +34,7 @@ MESSAGE_RUNG_COUNT = 2
 _MARKABLE_BLOCK_TYPES = frozenset({"text", "tool_result", "document", "image"})
 
 
-def prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]:
+def prompt_cache_control(*, extended_cache_time: bool) -> dict[str, str]:
     """Return the cache_control payload for one breakpoint marker."""
     cache_control: dict[str, str] = {"type": "ephemeral"}
     if extended_cache_time:

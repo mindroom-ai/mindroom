@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.provider import ModelRequest, NativeCompactionReplay
     from tests.providers.golden_support import Wire
 
 FAMILIES = ("anthropic", "vertexai_claude", "bedrock_claude")
@@ -194,6 +194,24 @@ def route_provider(route: str, tmp_path: Path, wire: Wire, **config: Any) -> Cla
     if "extra_kwargs" in config:
         model_config["extra_kwargs"] = {**ROUTE_CONFIGS[route].get("extra_kwargs", {}), **config["extra_kwargs"]}
     return provider_for(model_config, tmp_path, wire.client)
+
+
+def native_settings(
+    provider: ClaudeProvider,
+    *,
+    threshold: int | None = 60000,
+    history_generation: str = "",
+    allow_authored: bool = False,
+) -> NativeCompactionReplay | None:
+    """Return the native-compaction settings history planning asks ``provider`` for.
+
+    The defaults are a managed request whose history has no summary, which carries an empty ``history_generation``.
+    """
+    return provider.native_compaction_settings(
+        threshold=threshold,
+        history_generation=history_generation,
+        allow_authored=allow_authored,
+    )
 
 
 async def claude_events(provider: ClaudeProvider, request: ModelRequest) -> list[Any]:

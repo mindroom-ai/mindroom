@@ -37,7 +37,6 @@ from mindroom.providers.claude_wire_blocks import (
     TOOL_SEARCH_TOOL_TYPE,
     as_dict,
 )
-from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -48,18 +47,16 @@ if TYPE_CHECKING:
 
 __all__ = ["claude_loaded_tool_names", "native_tool_search_supported", "prepare_request_body"]
 
-_NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
+_NATIVE_TOOL_SEARCH_ROUTES: frozenset[ClaudeRouteKind] = frozenset({"anthropic", "vertexai_claude"})
 
 
-def native_tool_search_supported(provider: str, model_id: str) -> bool:
-    """Return whether one authored provider/model pair supports server-side tool search.
+def native_tool_search_supported(route: ClaudeRouteKind, model_id: str) -> bool:
+    """Return whether one Claude route and model support server-side tool search.
 
     Every Claude model since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 supports the search tool, so gating denylists
     the closed pre-4.5 set and new model releases take the native path without a code change.
     """
-    if provider_route(provider) not in _NATIVE_TOOL_SEARCH_PROVIDERS:
-        return False
-    return not model_id.startswith(TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES)
+    return route in _NATIVE_TOOL_SEARCH_ROUTES and not model_id.startswith(TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES)
 
 
 def claude_loaded_tool_names(messages: Sequence[Message]) -> frozenset[str]:

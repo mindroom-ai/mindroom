@@ -54,6 +54,7 @@ from tests.providers.anthropic_family_support import (
     claude_turn,
     isolated_provider_environment,
     json_reply,
+    native_settings,
     provider_for,
     route_provider,
     sse_reply,
@@ -825,11 +826,11 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         sse_reply([{"type": "text", "text": "Next."}]),
     )
     provider = route_provider("anthropic", tmp_path, wire)
-    replay = provider.native_compaction_settings(threshold=60000, history_generation="gen-1")
+    replay = native_settings(provider, history_generation="gen-1")
     assert replay is not None
     assert replay.threshold == 60000
-    assert provider.native_compaction_settings(threshold=1000) is None, "Claude needs at least 50,000 input tokens"
-    assert provider.native_compaction_settings(threshold=60000, history_generation="gen-2") != replay
+    assert native_settings(provider, threshold=1000) is None, "Claude needs at least 50,000 input tokens"
+    assert native_settings(provider, history_generation="gen-2") != replay
 
     first = await claude_turn(
         provider,
@@ -883,8 +884,8 @@ async def test_authored_compaction_edits_keep_their_policy_and_cannot_pause(tmp_
     wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": authored})
     assert provider.capabilities.native_compaction is False
-    assert provider.native_compaction_settings(threshold=60000) is None
-    replay = provider.native_compaction_settings(threshold=60000, allow_authored=True)
+    assert native_settings(provider) is None
+    replay = native_settings(provider, allow_authored=True)
     assert replay is not None
     assert replay.threshold is None
     await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
@@ -907,8 +908,8 @@ def test_bedrock_replays_no_native_checkpoints_even_with_an_authored_compaction_
         extra_kwargs={"context_management": authored},
     )
     assert provider.capabilities.native_compaction is False
-    assert provider.native_compaction_settings(threshold=60000, allow_authored=True) is None
-    assert provider.native_compaction_settings(threshold=None, allow_authored=True) is None
+    assert native_settings(provider, allow_authored=True) is None
+    assert native_settings(provider, threshold=None, allow_authored=True) is None
 
 
 @pytest.mark.asyncio

@@ -250,8 +250,8 @@ def _text(text: str) -> dict[str, Any]:
 
 
 def test_prompt_cache_control_selects_the_one_hour_lifetime_only_when_extended() -> None:
-    """``extended_cache_time`` selects the 1h TTL; the default sends no ttl field."""
-    assert prompt_cache_control() == _FIVE_MINUTES
+    """``extended_cache_time`` selects the 1h TTL; without it the marker sends no ttl field."""
+    assert prompt_cache_control(extended_cache_time=False) == _FIVE_MINUTES
     assert prompt_cache_control(extended_cache_time=True) == _ONE_HOUR
 
 
@@ -372,11 +372,11 @@ def test_a_disabled_prompt_cache_sends_no_markers() -> None:
 
 
 @pytest.mark.parametrize(
-    ("provider", "model_id", "expected"),
+    ("route", "model_id", "expected"),
     [
         ("anthropic", "claude-opus-5", True),
         ("anthropic", "claude-sonnet-5", True),
-        ("Anthropic", "claude-sonnet-4-5-20250929", True),
+        ("anthropic", "claude-sonnet-4-5-20250929", True),
         ("vertexai_claude", "claude-haiku-4-5@20251001", True),
         # Unreleased Claude models default to the native path (denylist gating).
         ("anthropic", "claude-opus-4-9", True),
@@ -385,13 +385,12 @@ def test_a_disabled_prompt_cache_sends_no_markers() -> None:
         ("anthropic", "claude-opus-4-20250514", False),
         ("anthropic", "claude-3-5-sonnet-20241022", False),
         ("vertexai_claude", "claude-sonnet-4@20250514", False),
-        ("openai", "gpt-6-astra", False),
         ("bedrock_claude", "anthropic.claude-opus-5", False),
     ],
 )
-def test_native_tool_search_gating(provider: str, model_id: str, *, expected: bool) -> None:
+def test_native_tool_search_gating(route: ClaudeRouteKind, model_id: str, *, expected: bool) -> None:
     """Claude routes with server-side tool search qualify unless the model predates it."""
-    assert native_tool_search_supported(provider, model_id) is expected
+    assert native_tool_search_supported(route, model_id) is expected
 
 
 def test_deferred_tools_ship_tagged_after_the_search_tool_and_the_other_tools() -> None:
