@@ -309,15 +309,6 @@ def materialized_team_label(display_names: Sequence[str]) -> str:
     return f"Team ({', '.join(display_names)})"
 
 
-def configured_team(config: Config, team_name: str | None) -> str | None:
-    """Return the configured team ``team_name`` names, or None for an ad hoc team.
-
-    A saved approval names the team as the entity whose account handles it, which for an ad hoc team is a member;
-    an ad hoc team compacts and stores as no configured entity, under the defaults.
-    """
-    return team_name if team_name in config.teams else None
-
-
 def _team_member(
     build: AgentBuild,
     system_enrichment: str,
@@ -475,7 +466,6 @@ __all__ = [
     "TeamTurnModelSelection",
     "allow_direct_private_team_agents",
     "build_team_spec",
-    "configured_team",
     "materialize_exact_requested_team_members",
     "materialize_exact_team_members",
     "materialize_team_members",

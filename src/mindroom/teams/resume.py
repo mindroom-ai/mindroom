@@ -38,7 +38,6 @@ from mindroom.run_storage import persist_into, scope_run_storage
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.members import (
     build_team_spec,
-    configured_team,
     materialize_exact_team_members,
     materialized_team_label,
 )
@@ -395,7 +394,8 @@ async def continue_paused_team_run(
         # Saved approvals name their members; without them no member could run the approved calls.
         msg = "The paused team approval names no members"
         raise RuntimeError(msg)
-    team_name = configured_team(config, configured_team_name)
+    # None for an ad hoc team, which compacts and stores as no configured entity.
+    team_name = configured_team_name if configured_team_name in config.teams else None
     # The entity the run's logs, notices, and delegations name, as its turn named it: the configured team, or the
     # label of an ad hoc team's members once they are known.
     entity_name = team_name or configured_team_name
