@@ -276,8 +276,8 @@ def _route_base_url(
     configured = _authored_base_url(client_params, base_url) or (
         runtime.runtime_paths.env_value(route.base_url_variable) if route.base_url_variable else None
     )
+    # Groq and Cerebras endpoints are hosts, as configs for their SDKs give them; the route appends its API path.
     if route_key == "groq":
-        # The Groq SDK's base URL was a host; its paths start with /openai/v1.
         return f"{(configured or GROQ_HOST_DEFAULT).rstrip('/')}/openai/v1"
     if route_key == "cerebras":
         return f"{(configured or CEREBRAS_HOST_DEFAULT).rstrip('/')}/v1"
