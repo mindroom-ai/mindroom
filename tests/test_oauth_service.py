@@ -1613,9 +1613,9 @@ def test_sync_refresh_adapter_reentrancy_fails_instead_of_deadlocking(tmp_path: 
 
     process.start()
     # Starting a fresh interpreter and importing MindRoom takes seconds on a busy machine. The deadline only bounds a
-    # hang: it stays above the credential store's 30 s write-lock wait, so a missing reentry guard fails on the result
+    # hang: it stays 15 s above the credential store's write-lock wait, so a missing reentry guard fails on the result
     # check below with the store's lock timeout instead of being killed here.
-    process.join(timeout=45)
+    process.join(timeout=credential_store._LOCK_WAIT_TIMEOUT_SECONDS + 15)
     if process.is_alive():
         process.terminate()
         process.join()
