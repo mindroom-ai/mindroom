@@ -157,14 +157,23 @@ def wait_mode(tool: JobTool, *, depth: int) -> ToolWaitMode:
     return "managed"
 
 
-def _starts_jobs() -> bool:
-    """Whether calls made now can become jobs: the turn runs where the job runtime runs and owns their resources."""
+@dataclass(frozen=True, slots=True)
+class _JobScope:
+    """Where calls made now become jobs: the turn's tool context, the job runtime beside it, and its resources."""
+
+    context: ToolRuntimeContext
+    runtime: ToolJobRuntime
+    resources: ExecutionResources
+
+
+def _job_scope() -> _JobScope | None:
+    """Return where calls made now become jobs, or None when the turn runs without the job runtime or resources."""
     context = get_tool_runtime_context()
-    return (
-        context is not None
-        and get_background_runtime(context.runtime_paths) is not None
-        and current_execution_resources() is not None
-    )
+    runtime = get_background_runtime(context.runtime_paths) if context is not None else None
+    resources = current_execution_resources()
+    if context is None or runtime is None or resources is None:
+        return None
+    return _JobScope(context, runtime, resources)
 
 
 def project_definitions(definitions: Sequence[ToolSpec], managed: Collection[str]) -> tuple[ToolSpec, ...]:
@@ -196,7 +205,7 @@ def job_definitions_hook(actor: JobActor) -> BeforeRequestHook:
     """Return the pre-request hook that offers the wait budget of the actor's managed calls while they can be jobs."""
 
     async def project(state: LoopState) -> SendRequest:
-        if _starts_jobs():
+        if _job_scope() is not None:
             managed = [name for name, tool in actor.tools.items() if wait_mode(tool, depth=actor.depth) == "managed"]
             state.tools = project_definitions(state.tools, managed)
         return SendRequest()
@@ -228,16 +237,14 @@ def agent_tool_middleware(build: AgentBuild) -> tuple[ToolMiddleware, ...]:
 
 async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCall, call_next: ToolNext) -> object:
     """Admit one call: run it here, as a managed job, or not at all when a job-gated call cannot become one."""
-    context = get_tool_runtime_context()
-    runtime = get_background_runtime(context.runtime_paths) if context is not None else None
-    resources = current_execution_resources()
+    scope = _job_scope()
     tool = actor.tools.get(call.function.name)
     job_call = (
         None if tool is None else JobCall(tool=tool, arguments=call.arguments, context=call.context, team=actor.team)
     )
     # A call that asks for its approval as its job never runs without becoming one.
     job_approval = call.function.approval_type == JOB_APPROVAL_TYPE
-    if runtime is None or context is None or resources is None or job_call is None:
+    if scope is None or job_call is None:
         if job_approval:
             raise ValueError(_UNASKABLE)
         job_checkpoint()
@@ -248,7 +255,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
         raise ValueError(_UNASKABLE)
     background_after = _wait_budget(call, mode=mode, depth=actor.depth)
     owner = replace(
-        get_tool_execution_identity() or build_execution_identity_from_runtime_context(context),
+        get_tool_execution_identity() or build_execution_identity_from_runtime_context(scope.context),
         agent_name=actor.name,
     )
     job_checkpoint()
@@ -261,11 +268,9 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
             return await _run_here(job_call, call_next, arguments)
     return await _run_managed_call(
         inner,
-        call,
+        call.function,
         job_call,
-        runtime,
-        context,
-        resources,
+        scope,
         owner,
         depth=actor.depth,
         background_after=background_after,
@@ -332,19 +337,21 @@ type _AskApproval = Callable[[], Awaitable[tuple[bool, str | None]]]
 
 async def _run_managed_call(
     inner: Sequence[ToolMiddleware],
-    call: ToolCall,
+    function: ToolFunction,
     job_call: JobCall,
-    runtime: ToolJobRuntime,
-    context: ToolRuntimeContext,
-    resources: ExecutionResources,
+    scope: _JobScope,
     owner: ToolExecutionIdentity,
     *,
     depth: int,
     background_after: float | None,
     job_approval: bool,
 ) -> object:
-    """Accept one call as a managed job, wait for it within the caller's budget, and return what it returned."""
-    run_id, call_id = call.context.run_id, call.context.call_id
+    """Accept one call as a managed job, wait for it within the caller's budget, and return what it returned.
+
+    ``function`` is the function the loop called, which the job runs; ``job_call`` holds the call's grant.
+    """
+    context, runtime = scope.context, scope.runtime
+    run_id, call_id = job_call.context.run_id, job_call.context.call_id
     if not run_id or not call_id:
         msg = "Managed tool execution requires an exact run and tool-call identity"
         raise ValueError(msg)
@@ -353,8 +360,8 @@ async def _run_managed_call(
     adapter = {
         "run_id": run_id,
         "tool_call_id": call_id,
-        "arguments": encode_tool_result(call.arguments),
-        "origin": function_provenance(job_call.tool, call.arguments),
+        "arguments": encode_tool_result(job_call.arguments),
+        "origin": function_provenance(job_call.tool, job_call.arguments),
         "authority": dict(job_call.tool.authority),
     }
     detached = _detached(job_call)
@@ -362,8 +369,8 @@ async def _run_managed_call(
     # after that copy never reads as deleted by this job.
     baseline = deepcopy(detached.context.session_state)
     # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
-    record_return = await record_call(call.function.name, dict(detached.arguments))
-    reference = resources.acquire()
+    record_return = await record_call(function.name, dict(detached.arguments))
+    reference = scope.resources.acquire()
 
     async def ask_approval() -> tuple[bool, str | None]:
         # The policy and approver current when the job asks decide, as for a paused reply.
@@ -382,14 +389,14 @@ async def _run_managed_call(
     try:
         _, claim = await runtime.start(
             job_id,
-            tool_name=call.function.name,
+            tool_name=function.name,
             depth=depth,
             toolkit_name=job_call.tool.toolkit_name,
             source_event_id=context.membership_turn_id,
             source_kind=context.source_kind,
             adapter=adapter,
             owner=owner,
-            operation=lambda: _run_operation(inner, call.function, detached, owner, baseline, reference, approval),
+            operation=lambda: _run_operation(inner, function, detached, owner, baseline, reference, approval),
             reattach=True,
         )
         waited = await runtime.wait(
