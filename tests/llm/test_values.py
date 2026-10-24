@@ -16,7 +16,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.llm.events import ContentDelta, ReasoningDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -386,7 +386,7 @@ def test_run_events_are_frozen_values() -> None:
     tool = ToolExecution(tool_call_id="c", tool_name="t", tool_args={})
     record = RunRecord(run_id="r", agent_id="a", status=RunStatus.completed)
     events = [
-        ContentDelta("hi"),
+        TextDelta("hi"),
         ReasoningDelta("why"),
         ToolStarted(tool),
         ToolCompleted(tool),
@@ -395,7 +395,7 @@ def test_run_events_are_frozen_values() -> None:
     ]
 
     assert [type(event).__name__ for event in events] == [
-        "ContentDelta",
+        "TextDelta",
         "ReasoningDelta",
         "ToolStarted",
         "ToolCompleted",

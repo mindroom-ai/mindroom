@@ -33,7 +33,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.matrix import message_builder
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -190,7 +190,7 @@ async def test_lifecycle_suspension_captures_last_committed_presentation(config:
     gateway = _FakeGateway()
 
     async def suspended_stream() -> AsyncIterator[object]:
-        yield ContentDelta("I checked the input.")
+        yield TextDelta("I checked the input.")
         await gateway.wait_for_ops(1)
         yield ToolStarted(
             tool=ToolExecution(
@@ -259,7 +259,7 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
     gateway = _FakeGateway()
 
     async def scripted_stream() -> AsyncIterator[object]:
-        yield ContentDelta("")
+        yield TextDelta("")
         await gateway.wait_for_ops(1)
         yield "Hello"
         await gateway.wait_for_ops(2)
@@ -1254,7 +1254,7 @@ async def test_a_resumed_stream_continues_below_the_stopped_text(config: Config)
     gateway = _FakeGateway()
 
     async def continuation() -> AsyncIterator[object]:
-        yield ContentDelta("The second half.")
+        yield TextDelta("The second half.")
         yield ToolStarted(tool=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}))
         yield ToolCompleted(
             tool=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}, result="ok"),
@@ -1301,7 +1301,7 @@ async def test_stopping_a_resumed_stream_keeps_the_stopped_text(config: Config) 
     gateway = _FakeGateway()
 
     async def stopped_continuation() -> AsyncIterator[object]:
-        yield ContentDelta("The second")
+        yield TextDelta("The second")
         await gateway.wait_for_ops(1)
         raise asyncio.CancelledError(USER_STOP_CANCEL_MSG)
 
@@ -1333,7 +1333,7 @@ async def test_a_failed_first_resumed_edit_keeps_the_stopped_text(config: Config
         return await gateway.edit(*args, **kwargs)  # type: ignore[arg-type]
 
     async def failing_continuation() -> AsyncIterator[object]:
-        yield ContentDelta("The second")
+        yield TextDelta("The second")
         message = "Provider failed"
         raise RuntimeError(message)
 

@@ -24,7 +24,7 @@ from mindroom.agent_loop.model_loop import (
 )
 from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, prepare_run_tools
 from mindroom.llm.errors import ProviderError, RateLimited
-from mindroom.llm.events import ContentDelta, ReasoningDelta, RequestCompleted, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RequestCompleted, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
@@ -95,7 +95,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     events, record = await _run(spec(model), messages)
 
     assert events[0] == ReasoningDelta("hmm")
-    assert "".join(event.text for event in events if isinstance(event, ContentDelta)) == "Hello, Alice."
+    assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hello, Alice."
     assert events[-2:] == [
         RequestCompleted(model_id="scripted-model", provider="Synthetic", usage=usage(12, 3, time_to_first_token=0.25)),
         LoopEnded(paused=False),
@@ -183,15 +183,15 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     events, record = await _run(spec(model, toolkit(add, echo)), messages)
 
     assert _names(events) == [
-        "ContentDelta",
+        "TextDelta",
         "RequestCompleted",
         "ToolStarted",
         "ToolStarted",
         "ToolCompleted",
         "ToolCompleted",
-        "ContentDelta",
-        "ContentDelta",
-        "ContentDelta",
+        "TextDelta",
+        "TextDelta",
+        "TextDelta",
         "RequestCompleted",
         "LoopEnded",
     ]

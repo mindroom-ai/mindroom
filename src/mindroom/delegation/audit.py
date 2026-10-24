@@ -17,7 +17,7 @@ from mindroom.delegation.records import (
     DelegationRecordOwner,
 )
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
@@ -123,11 +123,11 @@ async def observe_child_event(event: RunEvent) -> None:
     and a record of another run is not this child's.
     """
     binding = _CHILD_AUDIT.get()
-    if binding is None or not isinstance(event, ContentDelta | ToolStarted | ToolCompleted | RunFinished):
+    if binding is None or not isinstance(event, TextDelta | ToolStarted | ToolCompleted | RunFinished):
         return
     binding.observed += 1
     index = binding.observed
-    if isinstance(event, ContentDelta):
+    if isinstance(event, TextDelta):
         if event.text:
             binding.pending_content.append((index, event.text))
         return

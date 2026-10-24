@@ -10,7 +10,7 @@ import pytest
 from agno.utils.string import url_safe_string
 
 from mindroom.approval.response import require_ordered_pause_presentation
-from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.redaction import redact_sensitive_text
@@ -43,10 +43,10 @@ def test_member_ids_are_agno_s_url_safe_strings(config_name: str) -> None:
 
 def test_member_and_leader_events_land_in_their_slots() -> None:
     presentation = _presentation()
-    apply_team_event(presentation, MemberEvent("ledger_agent", "Ledger", "run-1", ContentDelta("Three ")))
-    apply_team_event(presentation, MemberEvent("ledger_agent", "Ledger", "run-1", ContentDelta("vendors.")))
-    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ContentDelta("Two more.")))
-    apply_team_event(presentation, ContentDelta("Five in all."))
+    apply_team_event(presentation, MemberEvent("ledger_agent", "Ledger", "run-1", TextDelta("Three ")))
+    apply_team_event(presentation, MemberEvent("ledger_agent", "Ledger", "run-1", TextDelta("vendors.")))
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Two more.")))
+    apply_team_event(presentation, TextDelta("Five in all."))
 
     assert presentation.per_member == {"ledger-agent": "Three vendors.", "scout": "Two more."}
     assert presentation.consensus == "Five in all."
@@ -61,7 +61,7 @@ def test_member_and_leader_events_land_in_their_slots() -> None:
 
 def test_an_event_for_an_unknown_member_is_refused() -> None:
     with pytest.raises(RuntimeError, match="no frozen member slot"):
-        apply_team_event(_presentation(), MemberEvent("stranger", "Stranger", "run-9", ContentDelta("hi")))
+        apply_team_event(_presentation(), MemberEvent("stranger", "Stranger", "run-9", TextDelta("hi")))
 
 
 def test_a_member_run_that_names_no_member_has_no_slot() -> None:
@@ -180,7 +180,7 @@ def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_s
     """With tool calls hidden, text after a member's tool call starts a new paragraph; the snapshot restores that."""
     presentation = _presentation(show_tool_calls=False)
     tool = ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={"q": "seats"}, result="4")
-    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ContentDelta("Looking.")))
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Looking.")))
     apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ToolStarted(tool)))
     state = presentation.to_state()
     assert state["separate_next_scopes"] == ["agent:scout"]
@@ -192,7 +192,7 @@ def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_s
         tool_trace=presentation.tool_trace,
     )
     apply_team_event(restored, MemberEvent("scout", "Scout", "run-2", ToolCompleted(tool)))
-    apply_team_event(restored, MemberEvent("scout", "Scout", "run-2", ContentDelta("Four seats.")))
+    apply_team_event(restored, MemberEvent("scout", "Scout", "run-2", TextDelta("Four seats.")))
 
     assert restored.per_member["scout"] == "Looking.\n\nFour seats."
     assert [entry.type for entry in restored.tool_trace] == ["tool_call_completed"]
@@ -204,14 +204,14 @@ def test_an_empty_delta_keeps_the_paragraph_break_a_hidden_call_left_for_the_nex
     presentation = _presentation(show_tool_calls=False)
     member_tool = ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={"q": "seats"})
     leader_tool = ToolExecution(tool_call_id="call-2", tool_name="lookup", tool_args={"q": "total"})
-    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ContentDelta("Looking.")))
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Looking.")))
     apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ToolStarted(member_tool)))
-    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ContentDelta("")))
-    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ContentDelta("Four seats.")))
-    apply_team_event(presentation, ContentDelta("Summing up."))
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("")))
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Four seats.")))
+    apply_team_event(presentation, TextDelta("Summing up."))
     apply_team_event(presentation, ToolStarted(leader_tool))
-    apply_team_event(presentation, ContentDelta(""))
-    apply_team_event(presentation, ContentDelta("Four in all."))
+    apply_team_event(presentation, TextDelta(""))
+    apply_team_event(presentation, TextDelta("Four in all."))
 
     assert presentation.per_member["scout"] == "Looking.\n\nFour seats."
     assert presentation.consensus == "Summing up.\n\nFour in all."
@@ -329,7 +329,7 @@ def test_a_hidden_leader_call_separates_the_consensus_that_follows_it(*, restore
     """The consensus after a hidden leader call starts a new paragraph, also when a resume restored the pause."""
     presentation = TeamStreamPresentation.new([], [], show_tool_calls=False)
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
-    apply_team_event(presentation, ContentDelta("Before approval."))
+    apply_team_event(presentation, TextDelta("Before approval."))
     apply_team_event(presentation, ToolStarted(tool))
     if restored:
         presentation = TeamStreamPresentation.restore(
@@ -342,7 +342,7 @@ def test_a_hidden_leader_call_separates_the_consensus_that_follows_it(*, restore
         presentation,
         ToolCompleted(ToolExecution(tool_call_id="call-1", tool_name="inspect", result="ok")),
     )
-    apply_team_event(presentation, ContentDelta("After approval."))
+    apply_team_event(presentation, TextDelta("After approval."))
 
     assert presentation.consensus == "Before approval.\n\nAfter approval."
 
@@ -383,6 +383,6 @@ def test_a_restored_visible_marker_keeps_one_paragraph_break_before_the_consensu
         presentation,
         ToolCompleted(ToolExecution(tool_call_id="call-1", tool_name="inspect", result="ok")),
     )
-    apply_team_event(presentation, ContentDelta("After approval."))
+    apply_team_event(presentation, TextDelta("After approval."))
 
     assert presentation.consensus == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."

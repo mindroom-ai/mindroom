@@ -16,7 +16,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunStatus
@@ -139,7 +139,7 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
         "RequestCompleted",
         "ToolStarted",
         "ToolCompleted",
-        "ContentDelta",
+        "TextDelta",
         "RequestCompleted",
     ]
     assert all(event.run_id == member.run_id for event in events if isinstance(event, MemberEvent))
@@ -261,7 +261,7 @@ async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_te
         member_id: "".join(
             event.event.text
             for event in events
-            if isinstance(event, MemberEvent) and event.member_id == member_id and isinstance(event.event, ContentDelta)
+            if isinstance(event, MemberEvent) and event.member_id == member_id and isinstance(event.event, TextDelta)
         )
         for member_id in ("writer", "checker")
     }

@@ -23,7 +23,7 @@ from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.provider import ToolCallReady
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.message_target import MessageTarget
@@ -544,10 +544,10 @@ async def test_approval_settlement_uses_typed_status(
         on_completed: Callable[[CompletedAttempt], None],
         run_metadata_collector: dict[str, Any],
         **_kwargs: object,
-    ) -> AsyncIterator[ContentDelta]:
+    ) -> AsyncIterator[TextDelta]:
         if wire_status is not None:
             run_metadata_collector[AI_RUN_METADATA_KEY] = {"status": wire_status}
-        yield ContentDelta("Terminal response")
+        yield TextDelta("Terminal response")
         on_completed(CompletedAttempt(status=status))
 
     monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
@@ -870,7 +870,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
     gated = ToolExecution(tool_call_id="call-2", tool_name="publish_report", tool_args={})
 
     async def stream(_ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[object]:
-        yield ContentDelta(" Next, publishing.")
+        yield TextDelta(" Next, publishing.")
         yield ToolStarted(gated)
         raise ResponsePausedForApproval(
             PausedAttempt(session_id="session", run_id="run-fresh", tools=(gated,), toolkit_owners={}),

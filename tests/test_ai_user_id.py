@@ -63,7 +63,7 @@ from mindroom.hooks import (
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.events import ContentDelta, ToolStarted
+from mindroom.llm.events import ToolStarted
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
@@ -241,7 +241,7 @@ async def _respond(
         )
     ]
     return "".join(
-        chunk if isinstance(chunk, str) else chunk.text for chunk in chunks if isinstance(chunk, str | ContentDelta)
+        chunk if isinstance(chunk, str) else chunk.text for chunk in chunks if isinstance(chunk, str | TextDelta)
     )
 
 
@@ -2157,7 +2157,7 @@ class TestUserIdPassthrough:
         )
 
         async def paused_stream() -> AsyncIterator[object]:
-            yield ContentDelta("Before approval.")
+            yield TextDelta("Before approval.")
             yield ToolStarted(tool=tool)
             raise pause
 

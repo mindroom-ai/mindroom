@@ -5,18 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.llm.provider import ReasoningDelta
+from mindroom.llm.provider import ReasoningDelta, TextDelta
 
 if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import MessageMetrics
-
-
-@dataclass(frozen=True, slots=True)
-class ContentDelta:
-    """A piece of the reply text."""
-
-    text: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,14 +42,14 @@ class RunFinished:
     record: AnyRunRecord
 
 
-type RunEvent = ContentDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | RunFinished
+type RunEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | RunFinished
 
 __all__ = [
-    "ContentDelta",
     "ReasoningDelta",
     "RequestCompleted",
     "RunEvent",
     "RunFinished",
+    "TextDelta",
     "ToolCompleted",
     "ToolStarted",
 ]

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.budgets.pricing import model_prices
-from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import TurnPartialSnapshot
 from mindroom.teams.presentation import apply_team_event, format_team_response, render_team_member_slots
@@ -76,12 +76,12 @@ class TeamReplyText:
     def apply(self, event: TeamRunEvent) -> None:
         """Fold one run event into the text: a member's or the leader's delta."""
         if isinstance(event, MemberEvent):
-            if isinstance(event.event, ContentDelta):
+            if isinstance(event.event, TextDelta):
                 member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
                 self.per_member[member_id] += event.event.text
                 if event.event.text:
                     self.streamed_member_runs.add(event.run_id)
-        elif isinstance(event, ContentDelta):
+        elif isinstance(event, TextDelta):
             self.consensus += event.text
 
     def canonical_text(self) -> str:
@@ -157,7 +157,7 @@ class TeamAttempt:
                 tool_call_id=inner.tool.tool_call_id,
                 show_tool_calls=self.presentation.show_tool_calls,
             )
-        elif not isinstance(inner, ContentDelta):
+        elif not isinstance(inner, TextDelta):
             return False
         apply_team_event(self.presentation, event)
         return True

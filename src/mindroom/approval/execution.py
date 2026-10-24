@@ -32,7 +32,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
@@ -111,7 +111,7 @@ async def _collect_agent_continuation(
             if isinstance(event, RunFinished):
                 assert isinstance(event.record, RunRecord)
                 response = event.record
-            elif isinstance(event, ContentDelta):
+            elif isinstance(event, TextDelta):
                 presentation.append_text(event.text)
                 saw_content_delta = saw_content_delta or bool(event.text)
                 await presentation.publish(progress)

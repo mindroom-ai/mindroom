@@ -19,7 +19,7 @@ from uuid import uuid4
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
@@ -284,7 +284,7 @@ def finalize_pending_tools(tool_state: ToolStreamState) -> str | None:
 
 def extract_stream_text(event: AIStreamChunk, tool_state: ToolStreamState) -> str | None:
     """Return the wire text of one agent stream chunk: reply text, a plain string, or a tool block."""
-    if isinstance(event, ContentDelta):
+    if isinstance(event, TextDelta):
         return event.text
     if isinstance(event, str):
         return event

@@ -66,7 +66,7 @@ from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.search import AgentKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
 from mindroom.llm.request_context import current_llm_request_log_context
@@ -1643,9 +1643,9 @@ class TestStreamingCompletion:
     def test_streaming_sse_format(self, app_client: TestClient) -> None:
         """Streaming returns valid SSE format."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
-            yield ContentDelta("Hello ")
-            yield ContentDelta("world!")
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+            yield TextDelta("Hello ")
+            yield TextDelta("world!")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -1687,8 +1687,8 @@ class TestStreamingCompletion:
     def test_streaming_passes_include_interactive_questions_false(self, app_client: TestClient) -> None:
         """Streaming disables interactive question prompting for OpenAI compatibility."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
-            yield ContentDelta("ok")
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+            yield TextDelta("ok")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn:
             response = app_client.post(
@@ -1708,8 +1708,8 @@ class TestStreamingCompletion:
     def test_streaming_consistent_id(self, app_client: TestClient) -> None:
         """All streaming chunks have the same completion ID."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
-            yield ContentDelta("test")
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+            yield TextDelta("test")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -1737,14 +1737,14 @@ class TestStreamingCompletion:
         """Worker-routing identity must stay active after the first streamed event."""
         observed_session_ids: list[str | None] = []
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
-            yield ContentDelta("Hello ")
+            yield TextDelta("Hello ")
 
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
-            yield ContentDelta("world!")
+            yield TextDelta("world!")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -1829,10 +1829,10 @@ class TestStreamingCompletion:
         )
         observed_final_identities: list[ToolExecutionIdentity | None] = []
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
             try:
                 assert get_tool_execution_identity() == execution_identity
-                yield ContentDelta("Hello")
+                yield TextDelta("Hello")
                 await asyncio.Future()
             finally:
                 observed_final_identities.append(get_tool_execution_identity())
@@ -1913,10 +1913,10 @@ class TestStreamingCompletion:
         )
 
         async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
-            yield ContentDelta("Let me search. ")
+            yield TextDelta("Let me search. ")
             yield ToolStarted(tool_started)
             yield ToolCompleted(tool_completed)
-            yield ContentDelta("Found it!")
+            yield TextDelta("Found it!")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -2023,12 +2023,12 @@ class TestStreamingCompletion:
         )
 
         async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
-            yield ContentDelta("Start ")
+            yield TextDelta("Start ")
             yield ToolStarted(first_started)
             yield ToolCompleted(first_completed)
             yield ToolStarted(second_started)
             yield ToolCompleted(second_completed)
-            yield ContentDelta("End")
+            yield TextDelta("End")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -2973,8 +2973,8 @@ class TestAutoRouting:
     def test_auto_streaming(self, app_client: TestClient) -> None:
         """Auto model works with streaming, chunks carry resolved agent name."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
-            yield ContentDelta("Streamed!")
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+            yield TextDelta("Streamed!")
 
         with (
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
@@ -3324,7 +3324,7 @@ def test_team_run_records_helper_usage_in_its_conversation(team_app_client: Test
     async def run(*_args: object, ctx: RunContext, **_kwargs: object) -> AsyncIterator[object]:
         owners.append(get_helper_usage_owner())
         session_ids.append(ctx.session_id)
-        yield ContentDelta("Team answer")
+        yield TextDelta("Team answer")
         yield _finished("Team answer")
 
     with (
@@ -3718,8 +3718,8 @@ class TestTeamCompletion:
                 execution_identity=execution_identity,
                 runtime_paths=runtime_paths,
             )
-            yield ContentDelta("Hello ")
-            yield ContentDelta("world!")
+            yield TextDelta("Hello ")
+            yield TextDelta("world!")
             yield _finished("Hello world!")
 
         completion = openai_compat._stream_team_completion if stream else openai_compat._non_stream_team_completion
@@ -3823,11 +3823,11 @@ class TestTeamCompletion:
         async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
-            yield ContentDelta("Hello ")
+            yield TextDelta("Hello ")
 
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
-            yield ContentDelta("world!")
+            yield TextDelta("world!")
             yield _finished("Hello world!")
 
         with (
@@ -3869,7 +3869,7 @@ class TestTeamCompletion:
         async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
             try:
                 assert get_tool_execution_identity() == execution_identity
-                yield ContentDelta("Hello")
+                yield TextDelta("Hello")
                 await asyncio.Future()
             finally:
                 observed_final_identities.append(get_tool_execution_identity())
@@ -3933,7 +3933,7 @@ class TestTeamCompletion:
         """A run that fails after streaming started keeps its text, closes its started call, and ends with a failure."""
 
         async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-            yield ContentDelta("Team started. ")
+            yield TextDelta("Team started. ")
             yield ToolStarted(ToolExecution(tool_name="run_shell", tool_args={"cmd": "ls"}, tool_call_id="tc-pending"))
             msg = "Internal Server Error"
             raise RuntimeError(msg)
@@ -4044,7 +4044,7 @@ class TestTeamCompletion:
         team = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
 
         def member(text: str) -> MemberEvent:
-            return MemberEvent("general", "GeneralAgent", "member-run", ContentDelta(text))
+            return MemberEvent("general", "GeneralAgent", "member-run", TextDelta(text))
 
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=team),
@@ -4052,9 +4052,9 @@ class TestTeamCompletion:
                 "mindroom.teams.envelope.run_team",
                 new=_team_events(
                     member("member noise "),
-                    ContentDelta("leader "),
+                    TextDelta("leader "),
                     member("more noise "),
-                    ContentDelta("answer"),
+                    TextDelta("answer"),
                     _finished("leader answer"),
                 ),
             ),
@@ -4086,7 +4086,7 @@ class TestTeamCompletion:
         )
 
         def member(member_id: str, text: str) -> MemberEvent:
-            return MemberEvent(member_id, f"Agent{member_id.upper()}", f"{member_id}-run", ContentDelta(text))
+            return MemberEvent(member_id, f"Agent{member_id.upper()}", f"{member_id}-run", TextDelta(text))
 
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=team),
@@ -4098,7 +4098,7 @@ class TestTeamCompletion:
                     member("b", "From B chunk1 "),
                     member("a", "From A chunk2 "),
                     member("b", "From B chunk2 "),
-                    ContentDelta("Combined answer from leader"),
+                    TextDelta("Combined answer from leader"),
                     _finished("Combined answer from leader"),
                 ),
             ),
@@ -4389,7 +4389,7 @@ class TestTeamCompletion:
                 result=result,
             )
 
-        def member(event: ContentDelta | ToolStarted | ToolCompleted) -> MemberEvent:
+        def member(event: TextDelta | ToolStarted | ToolCompleted) -> MemberEvent:
             return MemberEvent("general", "GeneralAgent", "member-run", event)
 
         with (
@@ -4401,11 +4401,11 @@ class TestTeamCompletion:
                 "mindroom.teams.envelope.run_team",
                 new=_team_events(
                     ToolStarted(delegation()),
-                    member(ContentDelta("member noise")),
+                    member(TextDelta("member noise")),
                     member(ToolStarted(search())),
                     member(ToolCompleted(search("3 results"))),
                     ToolCompleted(delegation("Found 3")),
-                    ContentDelta("Final answer"),
+                    TextDelta("Final answer"),
                     _finished("Final answer"),
                 ),
             ),
@@ -4961,8 +4961,8 @@ class TestKnowledgeIntegration:
         """Knowledge is passed through in streaming mode too."""
         mock_reader = MagicMock()
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
-            yield ContentDelta("Streamed!")
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+            yield TextDelta("Streamed!")
 
         with (
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,

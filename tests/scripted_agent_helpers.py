@@ -11,7 +11,7 @@ from agno.tools import Toolkit
 from mindroom import agents
 from mindroom.cancellation import request_task_cancel
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.llm.events import ContentDelta
+from mindroom.llm.events import TextDelta
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import ToolCategory
@@ -52,7 +52,7 @@ def stored_runs(
 
 def streamed_text(chunks: Iterable[AIStreamChunk]) -> list[str]:
     """Return the text deltas a reply streamed, in order."""
-    return [chunk.text for chunk in chunks if isinstance(chunk, ContentDelta)]
+    return [chunk.text for chunk in chunks if isinstance(chunk, TextDelta)]
 
 
 @contextmanager

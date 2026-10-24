@@ -20,7 +20,7 @@ from mindroom.api.openai_streaming_protocol import (
     new_completion_id,
     sse_chunk,
 )
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, ToolExecution
 
 
@@ -150,7 +150,7 @@ class TestStreamTextExtraction:
 
     def test_content_event_text(self) -> None:
         """A reply text delta streams through as text."""
-        assert extract_stream_text(ContentDelta("Hello"), ToolStreamState()) == "Hello"
+        assert extract_stream_text(TextDelta("Hello"), ToolStreamState()) == "Hello"
 
     def test_plain_string_passthrough(self) -> None:
         """Cached full responses (plain strings) pass through unchanged."""
@@ -177,4 +177,4 @@ class TestAgentStreamFailure:
     def test_normal_chunks_are_not_failures(self) -> None:
         """Ordinary content never reads as a failure."""
         assert extract_agent_stream_failure("All good") is None
-        assert extract_agent_stream_failure(ContentDelta("hi")) is None
+        assert extract_agent_stream_failure(TextDelta("hi")) is None

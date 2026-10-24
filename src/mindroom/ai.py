@@ -55,7 +55,7 @@ from mindroom.hooks import (
     render_transient_context,
 )
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
-from mindroom.llm.events import ContentDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RequestCompleted, RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -155,7 +155,7 @@ __all__ = [
     "run_delegated_child_response",
     "stream_agent_response",
 ]
-AIStreamChunk = str | ContentDelta | ToolStarted | ToolCompleted | RunFinished
+AIStreamChunk = str | TextDelta | ToolStarted | ToolCompleted | RunFinished
 
 
 def _compose_current_turn_prompt(
@@ -461,7 +461,7 @@ async def collect_streamed_response_content(
             async for chunk in response_stream:
                 if isinstance(chunk, str):
                     presentation.append_text(chunk)
-                elif isinstance(chunk, ContentDelta):
+                elif isinstance(chunk, TextDelta):
                     presentation.append_text(chunk.text)
                 elif isinstance(chunk, RunFinished):
                     if chunk.record.content is not None:
@@ -1806,7 +1806,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     try:
         async for event in events:
             await observe_child_event(event)
-            if isinstance(event, ContentDelta):
+            if isinstance(event, TextDelta):
                 if not event.text:
                     continue
                 if not state.first_token_logged:
@@ -2198,7 +2198,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         discard_empty_run=callbacks.discard_empty_run,
         on_scope_opened=callbacks.on_scope_opened,
         finalize_attempt=_finalize_streaming_attempt,
-        make_text_chunk=ContentDelta,
+        make_text_chunk=TextDelta,
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
     response_stream = stream_response_turn(

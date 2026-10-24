@@ -26,7 +26,7 @@ from mindroom.delegation.recovery import interrupt_child
 from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -412,8 +412,8 @@ async def test_live_observer_records_matching_child_events_once(tmp_path: Path) 
     )
     async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
         await observe_child_event(ToolStarted(tool))
-        await observe_child_event(ContentDelta("visible "))
-        await observe_child_event(ContentDelta("chunk"))
+        await observe_child_event(TextDelta("visible "))
+        await observe_child_event(TextDelta("chunk"))
         await observe_child_event(ToolCompleted(tool))
         await observe_child_event(ToolCompleted(tool))
 
@@ -444,7 +444,7 @@ async def test_live_observer_flushes_buffered_partial_output_during_cancellation
 
     async def cancel_during_context() -> None:
         async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
-            await observe_child_event(ContentDelta("partial before cancel"))
+            await observe_child_event(TextDelta("partial before cancel"))
             raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
@@ -516,11 +516,11 @@ async def test_live_observer_numbers_a_resumed_run_past_its_earlier_leg(tmp_path
     )
     gated = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, requires_confirmation=True)
     async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
-        await observe_child_event(ContentDelta("first leg"))
+        await observe_child_event(TextDelta("first leg"))
         await observe_child_event(ToolStarted(gated))
     done = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, result="ok")
     async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
-        await observe_child_event(ContentDelta("final answer"))
+        await observe_child_event(TextDelta("final answer"))
         await observe_child_event(ToolCompleted(done))
 
     events = _events(await _record_dir(child, config, runtime_paths))

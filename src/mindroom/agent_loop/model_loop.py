@@ -22,7 +22,7 @@ from mindroom.agent_loop.tools import (
     tool_result_message,
 )
 from mindroom.llm.errors import incomplete_stream_error
-from mindroom.llm.events import ContentDelta, RequestCompleted, ToolCompleted, ToolStarted
+from mindroom.llm.events import RequestCompleted, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
@@ -137,7 +137,7 @@ class LoopEnded:
     paused: bool
 
 
-type LoopEvent = ContentDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | LoopEnded
+type LoopEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | LoopEnded
 
 
 @dataclass
@@ -411,7 +411,7 @@ async def _stream_turn(
     request: ModelRequest,
     messages: list[Message],
     metrics: RunMetrics,
-) -> AsyncIterator[ContentDelta | ReasoningDelta | TurnCompleted]:
+) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
 
     When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the usage it
@@ -428,9 +428,7 @@ async def _stream_turn(
         stream = model.stream(request)
         async with closing_async_stream(stream):
             async for event in stream:
-                if isinstance(event, TextDelta):
-                    yield ContentDelta(event.text)
-                elif isinstance(event, ReasoningDelta):
+                if isinstance(event, TextDelta | ReasoningDelta):
                     yield event
                 elif isinstance(event, UsageReported):
                     reported.observe(event)

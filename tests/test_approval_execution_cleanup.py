@@ -17,7 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
-from mindroom.llm.events import ContentDelta
+from mindroom.llm.events import TextDelta
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.types import ConversationSession
 from mindroom.teams.resume import continue_paused_team_run
@@ -114,8 +114,8 @@ async def test_an_agent_continuation_whose_publication_fails_closes_its_run_stre
 
     async def events() -> AsyncIterator[RunEvent]:
         try:
-            yield ContentDelta("Working.")
-            yield ContentDelta(" More.")
+            yield TextDelta("Working.")
+            yield TextDelta(" More.")
         finally:
             closed.append(True)
 

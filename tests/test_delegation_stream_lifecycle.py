@@ -19,7 +19,7 @@ from mindroom.delegation import execution
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
-from mindroom.llm.events import ContentDelta, RunFinished
+from mindroom.llm.events import RunFinished, TextDelta
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -85,7 +85,7 @@ async def test_closed_stream_observes_driver_failure(
 
     async def drive(_response: RunRecord, *, on_event: Callable[[object], None], **_kwargs: object) -> RunRecord:
         try:
-            on_event(ContentDelta("partial output"))
+            on_event(TextDelta("partial output"))
             if not already_failed:
                 await asyncio.Future()
         finally:
@@ -95,7 +95,7 @@ async def test_closed_stream_observes_driver_failure(
     async def consume() -> None:
         stream = _stream()
         try:
-            assert await anext(stream) == ContentDelta("partial output")
+            assert await anext(stream) == TextDelta("partial output")
             if consumer_failure is not None:
                 message = "Consumer stopped"
                 raise consumer_failure(message)
@@ -121,13 +121,13 @@ async def test_exhausted_stream_propagates_driver_failure(monkeypatch: pytest.Mo
     """Retrieving a task during cleanup must not hide failures from active consumers."""
 
     async def drive(_response: RunRecord, *, on_event: Callable[[object], None], **_kwargs: object) -> RunRecord:
-        on_event(ContentDelta("partial output"))
+        on_event(TextDelta("partial output"))
         message = "Driver failed"
         raise RuntimeError(message)
 
     monkeypatch.setattr(execution, "_drive_delegations", drive)
     stream = _stream()
-    assert await anext(stream) == ContentDelta("partial output")
+    assert await anext(stream) == TextDelta("partial output")
     with pytest.raises(RuntimeError, match="Driver failed"):
         await anext(stream)
 
@@ -150,7 +150,7 @@ async def test_cancelled_stream_drains_its_continuation_task(  # noqa: PLR0915
     async def drive(response: RunRecord, *, on_event: Callable[[object], None], **_kwargs: object) -> RunRecord:
         tasks.append(cast("asyncio.Task[RunRecord]", asyncio.current_task()))
         try:
-            on_event(ContentDelta("continued chunk"))
+            on_event(TextDelta("continued chunk"))
             await asyncio.Future()
         finally:
             cleanup_started.set()
@@ -163,7 +163,7 @@ async def test_cancelled_stream_drains_its_continuation_task(  # noqa: PLR0915
 
     async def consume() -> None:
         try:
-            assert await anext(stream) == ContentDelta("continued chunk")
+            assert await anext(stream) == TextDelta("continued chunk")
             chunk_seen.set()
             if not close_only:
                 await asyncio.Future()
@@ -245,7 +245,7 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
         pytest.fail("Rejected delegation must not execute a child")
 
     def deliver(event: object) -> None:
-        if isinstance(event, ContentDelta) and event.text:
+        if isinstance(event, TextDelta) and event.text:
             message = "Consumer stopped"
             raise failure(message)
 

@@ -9,7 +9,7 @@ import pytest
 
 from mindroom.approval.execution import _collect_agent_continuation
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
@@ -330,7 +330,7 @@ async def test_streamed_text_is_the_continuation_delta_and_the_record_adds_nothi
     presentation = CollectedStreamPresentation(show_tool_calls=True, response_text="Before approval. ")
 
     response = await _collect_agent_continuation(
-        _events(ContentDelta("After "), ContentDelta("approval."), _finished(content="After approval.")),
+        _events(TextDelta("After "), TextDelta("approval."), _finished(content="After approval.")),
         presentation,
         progress=None,
     )

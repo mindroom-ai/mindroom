@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_loop.run import own_answers
 from mindroom.delegation.state import member_slot_id
-from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
@@ -376,13 +376,13 @@ def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) 
     if isinstance(event, MemberEvent):
         member_id = presentation.resolve_member_id(event.member_id, event.member_name)
         inner = event.event
-        if isinstance(inner, ContentDelta):
+        if isinstance(inner, TextDelta):
             presentation.append_member(member_id, inner.text)
         elif isinstance(inner, ToolStarted):
             presentation.start_member_tool(member_id, inner.tool)
         elif isinstance(inner, ToolCompleted):
             presentation.complete_member_tool(member_id, inner.tool)
-    elif isinstance(event, ContentDelta):
+    elif isinstance(event, TextDelta):
         presentation.append_consensus(event.text)
     elif isinstance(event, ToolStarted):
         presentation.start_tool("team", event.tool)
