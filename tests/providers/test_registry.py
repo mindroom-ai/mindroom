@@ -8,9 +8,11 @@ the client their config injects.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from copy import deepcopy
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -53,8 +55,6 @@ from tests.providers.golden_support import (
 from tests.providers.openai_family_support import write_cli_logins
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider, StreamEvent
 
@@ -845,3 +845,16 @@ async def test_a_second_malformed_tool_call_fails_the_request(runtime_paths: Run
     assert raised.value.code == MALFORMED_TOOL_CALL
     assert [_texts(wire.body(index)).count(MALFORMED_FUNCTION_CALL_GUIDANCE) for index in range(2)] == [0, 1]
     assert len(wire.requests) == 2
+
+
+def test_source_modules_build_models_through_the_registry_module() -> None:
+    """``src`` calls ``build_model_provider`` on its module, the one attribute tests install their models at."""
+    source_root = Path(__file__).resolve().parents[2] / "src" / "mindroom"
+    bindings = [
+        f"{path.relative_to(source_root)}:{node.lineno}"
+        for path in sorted(source_root.rglob("*.py"))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "build_model_provider" for alias in node.names)
+    ]
+
+    assert bindings == []
