@@ -44,7 +44,7 @@ from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.cold_cache import ColdCacheConfig
 from mindroom.config.main import ResolvedRuntimeModel
@@ -8868,7 +8868,10 @@ async def test_a_finished_approval_continuation_links_its_reply_event_onto_the_r
         session_id="session-1",
     )
     is_team = entity_kind == "team"
-    scope = HistoryScope(kind=entity_kind, scope_id="crew" if is_team else "general")
+    # Neither scope is the bot's own, so only the continuation's scope reaches the session that holds the run.
+    scope = HistoryScope(kind=entity_kind, scope_id="crew" if is_team else "helper")
+    if not is_team:
+        coordinator.deps.runtime.config.agents["helper"] = AgentConfig(display_name="Helper")
     continuation = approval_continuation(
         entity_kind=entity_kind,
         history_scope=scope,
@@ -8879,7 +8882,7 @@ async def test_a_finished_approval_continuation_links_its_reply_event_onto_the_r
     session.runs = [
         TeamRunRecord(run_id="run-1", team_id="crew", session_id="session-1", status=RunStatus.completed)
         if is_team
-        else RunRecord(run_id="run-1", agent_id="general", session_id="session-1", status=RunStatus.completed),
+        else RunRecord(run_id="run-1", agent_id="helper", session_id="session-1", status=RunStatus.completed),
     ]
     seed_session(storage, session)
 
