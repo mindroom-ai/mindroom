@@ -543,8 +543,7 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
                 toolkit_name=paused.toolkit_owners.get((child.child_agent_name, str(tool.tool_name))),
             ),
         )
-        requirement = RunRequirement(projected)
-        state.pending_requirements.append(requirement.to_dict())
+        state.pending_requirements.append(RunRequirement(projected).to_dict())
 
 
 async def _complete_approved_child_tools(
@@ -1028,9 +1027,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         msg = "Native delegation requires a Matrix execution owner"
         raise RuntimeError(msg)
     # Bind this exact parent call and its presentation before resolving the target.
-    pending_id = previous_state.pending_child_id
-    prior_pending_tools = previous_state.pending_tools
-    prior_tool_sources = previous_state.pending_tool_sources
     tool = requirement.tool_execution
     if not tool.tool_call_id:
         msg = "Delegation requirement has no exact tool-call identity"
@@ -1048,7 +1044,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     resolve_result = partial(_resolve_delegation_requirement, requirement, emit_call=emit_call)
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
     # The retained child whose own approval this call waits on, the pause the presented decisions are about.
-    waited_child = retained if retained is not None and retained.delegation_id == pending_id else None
+    waited_child = retained if retained and retained.delegation_id == previous_state.pending_child_id else None
     # What the decisions answer for this call: its own card, or the calls of the child it waits on, which go to that
     # child under its own call ids.
     card_decision = None if decisions is None else decisions.get(requirement_key)
@@ -1133,7 +1129,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     reason=authorization,
                 )
             if waited_child is not None and on_event is not None:
-                _settle_pending_child_tools(prior_pending_tools, on_event, reason=authorization)
+                _settle_pending_child_tools(previous_state.pending_tools, on_event, reason=authorization)
         result = resolve_result(authorization)
         if requirement.id in state.hooks:
             await after_delegation(
@@ -1292,8 +1288,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 )
                 if child_decisions is not None and on_event is not None:
                     await _complete_approved_child_tools(
-                        prior_pending_tools,
-                        prior_tool_sources,
+                        previous_state.pending_tools,
+                        previous_state.pending_tool_sources,
                         on_event,
                         config=config,
                         runtime_paths=runtime_paths,
@@ -1335,7 +1331,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     status="failed",
                 )
                 if child_decisions is not None and on_event is not None:
-                    _settle_pending_child_tools(prior_pending_tools, on_event, reason=reason)
+                    _settle_pending_child_tools(previous_state.pending_tools, on_event, reason=reason)
             await persist(state)
 
         # Completed and failed children both close the parent call and its after hook.
