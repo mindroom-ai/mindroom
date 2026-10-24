@@ -160,7 +160,6 @@ async def prepare_minimal_catalog(
 ) -> PreparedAgentToolCatalog:
     """Prepare the build's tools behind Bash, without starting a shell worker.
 
-    ``record`` is the stored run a recovery continues; a live turn's catalog learns its run from the checkpoint.
     The effective surface is checked before a catalog is published or gains authority: every handler must be
     supported and the agent's own shell must be offered.
     """

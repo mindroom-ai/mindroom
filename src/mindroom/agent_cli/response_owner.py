@@ -41,7 +41,8 @@ def tool_catalog(
 ) -> PreparedAgentToolCatalog:
     """Return an empty catalog for ``build``'s tools in run ``run``, under the build's tool-call policy and call limit.
 
-    ``record`` is the stored run an approval recovery continues; a live turn's catalog learns its run later.
+    ``record`` is the stored run an approval recovery continues.
+    In minimal mode the batch checkpoint sets it for a live turn.
     """
     return PreparedAgentToolCatalog(
         agent_name=build.spec.id,
