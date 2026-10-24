@@ -1394,7 +1394,7 @@ def test_ollama_host_and_key_resolution(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setenv("OLLAMA_API_KEY", "env-key")
     provider = build_ollama_provider(ModelConfig(provider="ollama", id="qwen3.8:27b"), runtime_paths_for(tmp_path))
 
-    assert provider.host == "http://localhost:11434"
+    assert provider.identity.endpoint == "http://localhost:11434"
     assert provider.settings.api_key == "env-key"
 
 

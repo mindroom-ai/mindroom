@@ -87,7 +87,6 @@ class OllamaProvider:
     identity: ModelIdentity
     capabilities: Capabilities
     settings: OllamaSettings
-    host: str
     _client: AsyncClient | None = field(default=None, init=False, repr=False)
     # Ollama keeps no history of its own, and its replayed history is sized canonically.
     native_history_route: ClassVar[None] = None
@@ -168,7 +167,7 @@ class OllamaProvider:
 
     def _client_params(self) -> dict[str, Any]:
         settings = self.settings
-        params: dict[str, Any] = {"host": self.host}
+        params: dict[str, Any] = {"host": self.identity.endpoint}
         if settings.timeout is not None:
             params["timeout"] = settings.timeout
         if settings.api_key:
@@ -318,7 +317,6 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ol
         ),
         capabilities=Capabilities(structured_output="native", omitted_media=frozenset({"audio", "file", "video"})),
         settings=settings,
-        host=host,
     )
 
 
