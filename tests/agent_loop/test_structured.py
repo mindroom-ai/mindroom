@@ -72,7 +72,8 @@ class _Palette(BaseModel):
     notes: str | None = None
 
 
-# The JSON prompts main sent for these schemas; the helper schemas' prompts are pinned by their goldens above.
+# The JSON prompts main's renderer produced for these schemas.
+# The helper schemas' prompts are pinned by their goldens above.
 _SWATCH_PROMPT = """\
 Provide your output as a JSON containing the following fields:
 <json_fields>

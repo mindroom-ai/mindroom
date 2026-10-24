@@ -32,8 +32,6 @@ if TYPE_CHECKING:
     from e2b.sandbox.commands.command_handle import CommandResult
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nfake"
-# The calling agent the loop injects; no E2B tool reads it.
-_ACTOR = ToolCallActor(session_state={})
 _CHART = {
     "type": "line",
     "title": "Growth",
@@ -53,6 +51,11 @@ _ENVD_URL = "https://49983-sandbox.e2b.test"
 _JUPYTER_URL = "https://49999-sandbox.e2b.test"
 _ENVD_TOKEN = "envd-token"  # noqa: S105
 _CHUNK = 1 << 20
+
+
+def _actor() -> ToolCallActor:
+    """Return a fresh stand-in for the calling agent the loop injects; no E2B tool reads it."""
+    return ToolCallActor(session_state={})
 
 
 @dataclass
@@ -596,8 +599,8 @@ def test_png_output_path_saves_inside_workspace(
 
     _plant_escape_links(workspace, outside)
 
-    saved = tool.download_png_result(_ACTOR, 0, "charts/plot.png")
-    rejected = tool.download_png_result(_ACTOR, 0, "linked/plot.png")
+    saved = tool.download_png_result(_actor(), 0, "charts/plot.png")
+    rejected = tool.download_png_result(_actor(), 0, "linked/plot.png")
 
     assert saved.content.endswith("and saved to charts/plot.png")
     assert saved.images
@@ -618,7 +621,7 @@ def test_chart_data_saves_inside_workspace(
     tool = make_tool(workspace)
     tool.last_execution = Execution(results=[Result(chart=_CHART, png=base64.b64encode(_PNG_BYTES).decode())])
 
-    result = tool.download_chart_data(_ACTOR)
+    result = tool.download_chart_data(_actor())
 
     assert result.content.splitlines()[:4] == [
         "Interactive line chart data saved to chart-data-0.json",
@@ -643,7 +646,7 @@ def test_chart_data_rejects_paths_outside_workspace(
     tool = make_tool(workspace)
     tool.last_execution = Execution(results=[Result(chart=_CHART)])
 
-    result = tool.download_chart_data(_ACTOR, 0, _local_path(requested, outside), add_as_artifact=False)
+    result = tool.download_chart_data(_actor(), 0, _local_path(requested, outside), add_as_artifact=False)
 
     assert result.content.startswith("Error extracting chart data")
     assert (outside / "secret.env").read_text(encoding="utf-8") == "TOKEN=secret"
@@ -658,5 +661,5 @@ def test_chart_data_reports_invalid_index(
     tool = make_tool(workspace)
     tool.last_execution = Execution(results=[Result(chart=_CHART)])
 
-    assert tool.download_chart_data(_ACTOR, -5).content.startswith("Error extracting chart data")
+    assert tool.download_chart_data(_actor(), -5).content.startswith("Error extracting chart data")
     assert list(workspace.iterdir()) == []
