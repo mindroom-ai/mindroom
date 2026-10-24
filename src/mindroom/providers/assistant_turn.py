@@ -19,12 +19,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelIdentity, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = [
-    "finished_assistant_message",
-    "output_started",
-    "stamp_finished_turn",
-    "stamp_model",
-]
+__all__ = ["finished_assistant_message", "output_started", "stamp_finished_turn", "stamp_model"]
 
 
 def stamp_model(message: Message, identity: ModelIdentity) -> None:
