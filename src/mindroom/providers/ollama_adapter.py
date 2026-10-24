@@ -279,20 +279,16 @@ def _usage(chunk: ChatResponse) -> MessageMetrics:
     input_tokens = chunk.prompt_eval_count or 0
     output_tokens = chunk.eval_count or 0
     timings = {
-        name: value
-        for name, value in (
-            ("total_duration", chunk.total_duration),
-            ("load_duration", chunk.load_duration),
-            ("prompt_eval_duration", chunk.prompt_eval_duration),
-            ("eval_duration", chunk.eval_duration),
-        )
-        if value is not None
+        "total_duration": chunk.total_duration,
+        "load_duration": chunk.load_duration,
+        "prompt_eval_duration": chunk.prompt_eval_duration,
+        "eval_duration": chunk.eval_duration,
     }
     return MessageMetrics(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
-        provider_metrics=timings or None,
+        provider_metrics={name: value for name, value in timings.items() if value is not None} or None,
     )
 
 
