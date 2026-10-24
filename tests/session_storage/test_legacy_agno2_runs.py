@@ -1,4 +1,4 @@
-"""Runs Agno 2 kept in a JSON blob on the session row move into run rows once, when the store opens."""
+"""Runs Agno 2 kept in a JSON blob on the session row move into run rows once, when storage opens."""
 
 from __future__ import annotations
 
@@ -11,11 +11,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.history import legacy_compaction_state
+from mindroom.history.legacy_compaction_state import migrate_to_summary_rows
 from mindroom.llm.runs import RunRecord
-from mindroom.session_storage import store as store_module
 from mindroom.session_storage.legacy_agno2_runs import move_blob_runs_to_rows, number_unindexed_runs
 from mindroom.session_storage.schema import TableNames, run_log_sql
-from mindroom.session_storage.store import open_conversation_store
+from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import create_agno_2_sessions_db
 from tests.session_storage.goldens import golden_stores, stored_rows
@@ -71,12 +72,12 @@ def test_blob_runs_become_rows_when_the_store_opens(tmp_path: Path) -> None:
     [golden] = [store for store in golden_stores() if store.label == "agno2_migrated"]
     expected = stored_rows(golden.restore(tmp_path / "golden"), golden.names.runs, "session-1")
 
-    store = open_conversation_store(db_file, _NAMES)
+    migrate_to_summary_rows(db_file, _NAMES)
 
     rows = stored_rows(db_file, _NAMES.runs, "session-1")
     assert [_comparable(row) for row in rows] == [_comparable(row) for row in expected]
     assert _blob(db_file) is None
-    session = store.load_session("session-1", "agent")
+    session = ConversationStore(db_file, _NAMES).load_session("session-1", "agent")
     assert session is not None
     assert session.session_state == {}
     assert [(run.run_id, run.status.value) for run in session.runs] == [
@@ -92,7 +93,7 @@ def test_blob_runs_keep_the_order_agno_read_them_in(tmp_path: Path) -> None:
     _set_blob(db_file, [_entry("run-b", 2), _entry("run-a", 1)])
     _add_rows(db_file, ("run-c", 0, _entry("run-c", 3, "table")), ("run-a", 1, _entry("run-a", 1, "table")))
 
-    open_conversation_store(db_file, _NAMES)
+    migrate_to_summary_rows(db_file, _NAMES)
 
     assert _log(db_file) == [("run-b", 0, "blob"), ("run-a", 1, "table"), ("run-c", 2, "table")]
 
@@ -105,7 +106,7 @@ def test_blob_entries_a_read_could_not_address_are_dropped(tmp_path: Path) -> No
         [{"run_id": 5, "agent_id": "code"}, {"agent_id": "code"}, "junk", _entry("ok", 1), _entry("ok", 2, "dup")],
     )
 
-    open_conversation_store(db_file, _NAMES)
+    migrate_to_summary_rows(db_file, _NAMES)
 
     assert _log(db_file) == [("ok", 0, "blob")]
     assert _blob(db_file) is None
@@ -117,7 +118,7 @@ def test_an_unreadable_blob_is_cleared_without_rows(tmp_path: Path) -> None:
     with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute("UPDATE code_sessions SET runs = 'not json'")
 
-    open_conversation_store(db_file, _NAMES)
+    migrate_to_summary_rows(db_file, _NAMES)
 
     assert _log(db_file) == []
     assert _blob(db_file) is None
@@ -126,12 +127,13 @@ def test_an_unreadable_blob_is_cleared_without_rows(tmp_path: Path) -> None:
 def test_a_database_with_summary_rows_is_never_migrated_again(tmp_path: Path) -> None:
     """Once the conversation log has summary rows, a blob is no longer Agno 2 history and stays untouched."""
     db_file = create_agno_2_sessions_db(tmp_path / "code.db")
-    store = open_conversation_store(db_file, _NAMES)
+    migrate_to_summary_rows(db_file, _NAMES)
+    store = ConversationStore(db_file, _NAMES)
     session = ConversationSession(session_id="session-1", kind="agent", owner_id="code")
     store.save_run(session, RunRecord(run_id="run-4", agent_id="code", created_at=4), record_usage=False)
     _set_blob(db_file, [_entry("late", 5)])
 
-    open_conversation_store(db_file, _NAMES)
+    migrate_to_summary_rows(db_file, _NAMES)
 
     assert [run_id for run_id, _, _ in _log(db_file)] == ["run-1", "run-2", "run-3", "run-4"]
     assert _blob(db_file) is not None
@@ -143,7 +145,7 @@ def test_databases_agno_3_created_open_untouched(tmp_path: Path) -> None:
     db_file = golden.restore(tmp_path)
     before = db_file.read_bytes()
 
-    open_conversation_store(db_file, golden.names)
+    migrate_to_summary_rows(db_file, golden.names)
 
     assert db_file.read_bytes() == before
 
@@ -155,7 +157,7 @@ def test_owners_opening_at_once_move_the_blob_runs_once(tmp_path: Path) -> None:
 
     def open_store(_index: int) -> None:
         start.wait()
-        open_conversation_store(db_file, _NAMES)
+        migrate_to_summary_rows(db_file, _NAMES)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(open_store, range(4)))
@@ -178,13 +180,13 @@ def test_a_move_that_fails_part_way_leaves_the_database_as_agno_2_left_it(
         raise sqlite3.OperationalError(msg)
 
     with monkeypatch.context() as patch:
-        patch.setattr(store_module, "move_blob_runs_to_rows", move_then_fail)
+        patch.setattr(legacy_compaction_state, "move_blob_runs_to_rows", move_then_fail)
         with pytest.raises(sqlite3.OperationalError, match="disk is full"):
-            open_conversation_store(db_file, _NAMES)
+            migrate_to_summary_rows(db_file, _NAMES)
 
     with closing(sqlite3.connect(db_file)) as connection:
         assert list(connection.iterdump()) == before
-    open_conversation_store(db_file, _NAMES)
+    migrate_to_summary_rows(db_file, _NAMES)
     assert [(run_id, index) for run_id, index, _ in _log(db_file)] == [("run-1", 0), ("run-2", 1), ("run-3", 2)]
     assert _blob(db_file) is None
 

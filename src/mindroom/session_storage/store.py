@@ -27,8 +27,8 @@ from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics
 from mindroom.session_storage.codec import run_from_row, run_type
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_runs, move_blob_runs_to_rows
-from mindroom.session_storage.schema import run_log_sql, schema_sql, table_names
+from mindroom.session_storage.legacy_agno2_runs import decode_session_json
+from mindroom.session_storage.schema import schema_sql, table_names
 from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
 from mindroom.usage.storage import TOKEN_FIELDS, project_usage, quote_identifier, usage_upsert_sql
 
@@ -95,35 +95,14 @@ def migrate_database(
                     apply(connection)
 
 
-def open_conversation_store(
-    path: Path,
-    names: TableNames,
-    *,
-    prompt_roles: frozenset[str] = frozenset(),
-) -> ConversationStore:
-    """Open the conversation database at ``path``, moving runs Agno 2 kept in session blobs into run rows once.
+@dataclass(frozen=True, slots=True)
+class ConversationStore:
+    """One conversation database; it holds no connection, so there is nothing to close.
 
     ``prompt_roles`` are message roles, such as ``system``, that stored runs leave out unless they are paused.
     Tables are created by the first write. Migrations that recognize an older database by a missing summary-row
     or usage table must run before that write.
     """
-    migrate_database(
-        path,
-        needed=lambda connection: has_blob_runs(connection, names),
-        apply=lambda connection: _move_blob_runs(connection, names),
-    )
-    return ConversationStore(path=path, names=names, prompt_roles=prompt_roles)
-
-
-def _move_blob_runs(connection: sqlite3.Connection, names: TableNames) -> None:
-    for statement in run_log_sql(names):
-        connection.execute(statement)
-    move_blob_runs_to_rows(connection, names)
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationStore:
-    """One conversation database; it holds no connection, so there is nothing to close."""
 
     path: Path
     names: TableNames
@@ -958,7 +937,6 @@ __all__ = [
     "connect_conversation_database",
     "delete_run_subtrees_in_transaction",
     "migrate_database",
-    "open_conversation_store",
     "persist_to",
     "runs_without",
     "write_with_session_state",

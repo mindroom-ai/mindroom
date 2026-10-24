@@ -39,11 +39,10 @@ def decode_session_json(raw_value: object) -> object:
 # Legacy format: Agno 2 sessions stored run history in a single- or double-encoded JSON `runs` blob on the session
 # row, which Agno 3 merged into every read ahead of the run rows; the column exists only on files Agno 2 created.
 # Last legacy release: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) wrote first-class run rows.
-# Handling: When the summary-row migration or a store opens a database whose sessions table still has the column and
-# that has no summary-row table yet, every blob entry with a string run id that has no row yet becomes a run row, the
-# session's rows are renumbered in the order Agno's merge read them, and the blob is cleared, all in one write
-# transaction, so no read has to merge a blob. Entries without a string run id are dropped, as no read could address
-# them.
+# Handling: When the open-time summary-row migration finds a sessions table that still has the column, every blob
+# entry with a string run id that has no row yet becomes a run row, the session's rows are renumbered in the order
+# Agno's merge read them, and the blob is cleared, all in one write transaction, so no read has to merge a blob.
+# Entries without a string run id are dropped, as no read could address them.
 # Coverage: tests/session_storage/test_legacy_agno2_runs.py and
 # tests/session_storage/test_factories.py::test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order.
 def has_blob_runs(connection: sqlite3.Connection, names: TableNames) -> bool:

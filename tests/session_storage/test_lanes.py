@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import ConversationStore, open_conversation_store
+from mindroom.session_storage.store import ConversationStore
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -21,7 +21,7 @@ _REQUEST = contextvars.ContextVar[str]("request", default="none")
 
 
 def _store(tmp_path: Path, name: str = "code") -> ConversationStore:
-    return open_conversation_store(tmp_path / f"{name}.db", TableNames(name))
+    return ConversationStore(tmp_path / f"{name}.db", TableNames(name))
 
 
 def _blocking(log: list[str], started: threading.Event, release: threading.Event) -> Callable[[ConversationStore], str]:

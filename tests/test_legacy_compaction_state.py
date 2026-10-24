@@ -19,7 +19,7 @@ from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import ConversationStore, open_conversation_store
+from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import create_agno_2_sessions_db, seed_session
 from tests.history_helpers import StoredSummaryRow, stored_run_ids, summary_rows_of
@@ -370,7 +370,7 @@ def test_an_agno_2_database_migrates_before_the_owned_store_opens_it(tmp_path: P
     migrate_to_summary_rows(db_file, _NAMES)
 
     assert _migrated_log(db_file) == _MIGRATED_LOG
-    session = open_conversation_store(db_file, _NAMES).load_session("session-1", "agent")
+    session = ConversationStore(db_file, _NAMES).load_session("session-1", "agent")
     assert session is not None
     assert [run.run_id for run in session.runs] == ["run-1", "run-2", "run-3"]
     assert session.summary is not None
