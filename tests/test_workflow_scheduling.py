@@ -283,19 +283,15 @@ class TestParseWorkflowSchedule:
         mock_config: MagicMock,
     ) -> None:
         """Test parsing research + email workflow."""
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _parser_model(
-                    ScheduledWorkflow(
-                        schedule_type="cron",
-                        cron_schedule=CronSchedule(minute="0", hour="9", weekday="1"),
-                        message="@research @email_assistant Please research the latest AI news and email me a summary",
-                        description="Weekly AI news research and email",
-                    ),
-                ),
-            },
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                cron_schedule=CronSchedule(minute="0", hour="9", weekday="1"),
+                message="@research @email_assistant Please research the latest AI news and email me a summary",
+                description="Weekly AI news research and email",
+            ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         # Parse the request
         result = await _parse_workflow_schedule(
@@ -317,19 +313,15 @@ class TestParseWorkflowSchedule:
         mock_config: MagicMock,
     ) -> None:
         """Test parsing simple reminder without agents."""
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _parser_model(
-                    ScheduledWorkflow(
-                        schedule_type="once",
-                        execute_at=datetime.now(UTC) + timedelta(minutes=5),
-                        message="Check the deployment status",
-                        description="Deployment check reminder",
-                    ),
-                ),
-            },
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime.now(UTC) + timedelta(minutes=5),
+                message="Check the deployment status",
+                description="Deployment check reminder",
+            ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         result = await _parse_workflow_schedule(
             "ping me in 5 minutes to check the deployment",
@@ -344,19 +336,15 @@ class TestParseWorkflowSchedule:
 
     async def test_parse_daily_task(self, monkeypatch: pytest.MonkeyPatch, mock_config: MagicMock) -> None:
         """Test parsing daily recurring task."""
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _parser_model(
-                    ScheduledWorkflow(
-                        schedule_type="cron",
-                        cron_schedule=CronSchedule(minute="0", hour="9"),
-                        message="@finance Please provide a market analysis for today",
-                        description="Daily market analysis",
-                    ),
-                ),
-            },
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                cron_schedule=CronSchedule(minute="0", hour="9"),
+                message="@finance Please provide a market analysis for today",
+                description="Daily market analysis",
+            ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         result = await _parse_workflow_schedule(
             "Daily at 9am, give me a market analysis",
@@ -439,18 +427,14 @@ class TestParseWorkflowSchedule:
         mock_config: MagicMock,
     ) -> None:
         """A one-time parse without execute_at must fail instead of silently defaulting."""
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _parser_model(
-                    ScheduledWorkflow(
-                        schedule_type="once",
-                        message="Check deployment",
-                        description="Deployment check",
-                    ),
-                ),
-            },
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                message="Check deployment",
+                description="Deployment check",
+            ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         result = await _parse_workflow_schedule(
             "in 10 minutes check the deployment",
@@ -468,18 +452,14 @@ class TestParseWorkflowSchedule:
         mock_config: MagicMock,
     ) -> None:
         """A recurring parse without cron_schedule must fail instead of silently defaulting."""
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _parser_model(
-                    ScheduledWorkflow(
-                        schedule_type="cron",
-                        message="Market analysis",
-                        description="Daily market analysis",
-                    ),
-                ),
-            },
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                message="Market analysis",
+                description="Daily market analysis",
+            ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         result = await _parse_workflow_schedule(
             "give me a market analysis regularly",
@@ -586,20 +566,16 @@ class TestParseWorkflowSchedule:
         mock_config: MagicMock,
     ) -> None:
         """Conditional schedules should accept numeric five-field crons because they recur."""
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _parser_model(
-                    ScheduledWorkflow(
-                        schedule_type="cron",
-                        is_conditional=True,
-                        cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
-                        message="@general Check for messages containing urgent. If found, notify the team.",
-                        description="Monitor urgent mentions",
-                    ),
-                ),
-            },
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                is_conditional=True,
+                cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
+                message="@general Check for messages containing urgent. If found, notify the team.",
+                description="Monitor urgent mentions",
+            ),
         )
+        install_model_providers(monkeypatch, {"default": model})
 
         result = await _parse_workflow_schedule(
             "If someone mentions urgent then notify the team immediately",

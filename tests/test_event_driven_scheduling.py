@@ -113,10 +113,8 @@ class TestEventDrivenScheduling:
             description="Monitor Bitcoin price threshold",
         )
 
-        install_model_providers(
-            monkeypatch,
-            {"default": ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])},
-        )
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -145,10 +143,8 @@ class TestEventDrivenScheduling:
             description="Monitor CPU and auto-scale",
         )
 
-        install_model_providers(
-            monkeypatch,
-            {"default": ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])},
-        )
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -177,10 +173,8 @@ class TestEventDrivenScheduling:
             description="Monitor builds and create failure tickets",
         )
 
-        install_model_providers(
-            monkeypatch,
-            {"default": ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])},
-        )
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -209,10 +203,8 @@ class TestEventDrivenScheduling:
             description="Monitor Reddit mentions and analyze",
         )
 
-        install_model_providers(
-            monkeypatch,
-            {"default": ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])},
-        )
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(
@@ -241,10 +233,8 @@ class TestEventDrivenScheduling:
             description="Monitor for boss emails",
         )
 
-        install_model_providers(
-            monkeypatch,
-            {"default": ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])},
-        )
+        model = ScriptedModel([answer(expected_workflow.model_dump_json(exclude_unset=True))])
+        install_model_providers(monkeypatch, {"default": model})
 
         # Execute
         result = await _parse_workflow_schedule(

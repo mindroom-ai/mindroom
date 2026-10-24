@@ -336,10 +336,8 @@ class TestAIErrorDisplay:
         bot = _mock_bot(tmp_path)
         unique_room_send_responses(bot.client)
         bot.config.agents["test_agent"].show_tool_calls = show_tool_calls
-        install_model_providers(
-            monkeypatch,
-            {"default": ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]])},
-        )
+        model = ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]])
+        install_model_providers(monkeypatch, {"default": model})
         _build_response_runner(bot)
 
         runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -358,10 +356,8 @@ class TestAIErrorDisplay:
         """A stop the user asks for mid-stream keeps the text streamed so far and ends as stopped by the user."""
         bot = _mock_bot(tmp_path)
         unique_room_send_responses(bot.client)
-        install_model_providers(
-            monkeypatch,
-            {"default": ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]])},
-        )
+        model = ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]])
+        install_model_providers(monkeypatch, {"default": model})
         _build_response_runner(bot)
 
         runner = unwrap_extracted_collaborator(bot._response_runner)

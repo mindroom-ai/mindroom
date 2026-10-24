@@ -864,21 +864,17 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     storage = _history_store(tmp_path)
     config.agents["general"].tools = [PROBE_TOOL]
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": ScriptedModel(
-                [
-                    calls(tool_call("run_shell_command", "call-1", cmd="pwd"), content="Partial answer"),
-                    [
-                        raising(
-                            ProviderError("Error code: 500 - provider exploded", provider="Synthetic", status_code=500),
-                        ),
-                    ],
-                ],
-            ),
-        },
+    model = ScriptedModel(
+        [
+            calls(tool_call("run_shell_command", "call-1", cmd="pwd"), content="Partial answer"),
+            [
+                raising(
+                    ProviderError("Error code: 500 - provider exploded", provider="Synthetic", status_code=500),
+                ),
+            ],
+        ],
     )
+    install_model_providers(monkeypatch, {"default": model})
 
     with registered_probe_tools():
         coordinator = _build_response_runner(
@@ -1507,10 +1503,8 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
     config.agents["general"].show_tool_calls = True
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     history_storage = _history_store(tmp_path)
-    install_model_providers(
-        monkeypatch,
-        {"default": ScriptedModel([calls(tool_call("run_shell_command", "call-1", cmd="pwd")), answer("Half done")])},
-    )
+    model = ScriptedModel([calls(tool_call("run_shell_command", "call-1", cmd="pwd")), answer("Half done")])
+    install_model_providers(monkeypatch, {"default": model})
 
     with (
         registered_probe_tools(),

@@ -1875,10 +1875,8 @@ class TestUserIdPassthrough:
             ),
         )
         metrics = usage(800, 120, cache_read_tokens=640, cache_write_tokens=32, reasoning_tokens=24)
-        install_model_providers(
-            monkeypatch,
-            {"default": _scripted_like(config, runtime_paths, [answer("Response", metrics)])},
-        )
+        model = _scripted_like(config, runtime_paths, [answer("Response", metrics)])
+        install_model_providers(monkeypatch, {"default": model})
         run_metadata: dict[str, Any] = {}
 
         await _respond(
@@ -1958,10 +1956,8 @@ class TestUserIdPassthrough:
             ),
         )
         metrics = usage(3000, 120, cache_read_tokens=20_000, cache_write_tokens=500)
-        install_model_providers(
-            monkeypatch,
-            {"default": _scripted_like(config, runtime_paths, [answer("Response", metrics)])},
-        )
+        model = _scripted_like(config, runtime_paths, [answer("Response", metrics)])
+        install_model_providers(monkeypatch, {"default": model})
         run_metadata: dict[str, Any] = {}
 
         await _respond(
@@ -2383,19 +2379,15 @@ class TestUserIdPassthrough:
         )
         first = usage(700, 50, cache_read_tokens=512, reasoning_tokens=40)
         latest = usage(120, 20, cache_read_tokens=64, reasoning_tokens=8)
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _scripted_like(
-                    config,
-                    runtime_paths,
-                    [
-                        calls(tool_call("read_file", "call-1", path="README.md"), content="step one", metrics=first),
-                        answer("step two", latest),
-                    ],
-                ),
-            },
+        model = _scripted_like(
+            config,
+            runtime_paths,
+            [
+                calls(tool_call("read_file", "call-1", path="README.md"), content="step one", metrics=first),
+                answer("step two", latest),
+            ],
         )
+        install_model_providers(monkeypatch, {"default": model})
         run_metadata: dict[str, Any] = {}
 
         async for _chunk in stream_agent_response(
@@ -2438,19 +2430,15 @@ class TestUserIdPassthrough:
         )
         first = usage(700, 50, cache_read_tokens=512, cache_write_tokens=32)
         latest = usage(120, 20)
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": _scripted_like(
-                    config,
-                    runtime_paths,
-                    [
-                        calls(tool_call("read_file", "call-1", path="README.md"), content="step one", metrics=first),
-                        answer("step two", latest),
-                    ],
-                ),
-            },
+        model = _scripted_like(
+            config,
+            runtime_paths,
+            [
+                calls(tool_call("read_file", "call-1", path="README.md"), content="step one", metrics=first),
+                answer("step two", latest),
+            ],
         )
+        install_model_providers(monkeypatch, {"default": model})
         run_metadata: dict[str, Any] = {}
 
         async for _chunk in stream_agent_response(

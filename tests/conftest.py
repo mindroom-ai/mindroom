@@ -2879,7 +2879,7 @@ def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
 
 
 def install_model_providers(monkeypatch: pytest.MonkeyPatch, providers: Mapping[str, "ModelProvider"]) -> None:
-    """Build each configured model ``providers`` names as its provider there; every other model builds as before.
+    """Build the models ``providers`` names as the providers it maps them to; every other model builds as before.
 
     ``providers`` is read at every build, so a test may replace a provider between two turns.
     """
