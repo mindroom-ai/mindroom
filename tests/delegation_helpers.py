@@ -417,7 +417,6 @@ async def pause_parent(
         build=build,
         config=config,
         runtime_paths=runtime_paths,
-        agent_name=agent_name,
         model_name=config.get_agent(agent_name).model,
         storage=RunStorage(store, session, HistoryScope(kind="agent", scope_id=agent_name)),
         user_id=identity.requester_id,

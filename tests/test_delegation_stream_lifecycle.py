@@ -257,7 +257,6 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
             build=build,
             config=config,
             runtime_paths=paths,
-            agent_name="leader",
             model_name="test-model",
             storage=RunStorage(store, session, HistoryScope(kind="agent", scope_id="leader")),
             user_id=identity.requester_id,

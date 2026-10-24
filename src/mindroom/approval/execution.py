@@ -192,7 +192,6 @@ async def _continue_persisted_agent(
         build=build,
         config=config,
         runtime_paths=runtime_paths,
-        agent_name=continuation.entity_name,
         model_name=model_name,
         storage=storage,
         user_id=continuation.requester_id,

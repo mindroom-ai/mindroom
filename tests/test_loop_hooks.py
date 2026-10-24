@@ -74,7 +74,6 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
     agent = agent_loop_hooks(
         build,
         turn,
-        agent_name="general",
         participation=ParticipationGate(),
         skill_review_capture=SkillReviewCapture(),
         run_id="run",

@@ -127,6 +127,8 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -225,18 +227,18 @@ def _awaiting_answers[R: AnyRunRecord](response: R) -> R:
 
 
 async def persist_delegation_state(
-    storage: RunStorage,
+    store: ConversationStore | None,
+    session: ConversationSession,
     response: AnyRunRecord,
     state: DelegationState,
 ) -> None:
-    """Save native child ownership on its real parent run, including hidden calls, where ``storage`` stores the run.
+    """Save native child ownership on its real parent run, including hidden calls, in ``store`` and ``session``.
 
     The run's row is rewritten in place without touching the usage ledger: the loop recorded the run's usage when
-    it stored the pause, and records the continuation's when that ends. The storage's session then holds the run as
+    it stored the pause, and records the continuation's when that ends. ``session`` then holds the run as
     stored.
     """
     response.metadata = {**(response.metadata or {}), DELEGATION_STATE_KEY: state.to_dict()}
-    store, session = storage.store, storage.session
     if store is None:
         msg = "Durable delegation requires persisted session storage"
         raise RuntimeError(msg)
@@ -381,7 +383,6 @@ async def _execute_child(
         build=build,
         config=config,
         runtime_paths=runtime_paths,
-        agent_name=child.child_agent_name,
         model_name=child.model_name,
         storage=RunStorage(store, session, HistoryScope(kind="agent", scope_id=child.child_agent_name)),
         user_id=identity.requester_id,
@@ -1430,7 +1431,7 @@ async def _drive_delegations[R: AnyRunRecord](
             )
         ):
             return response
-        persist = partial(persist_delegation_state, storage, response)
+        persist = partial(persist_delegation_state, storage.store, storage.session, response)
         # Calls answered on an earlier entry keep their answers; only the calls still waiting advance.
         for requirement in external:
             result = await advance_delegation_call(
@@ -1469,7 +1470,7 @@ async def _drive_delegations[R: AnyRunRecord](
         )
         own = ResumeDecisions()
         state.clear_pending()
-        await persist_delegation_state(storage, response, state)
+        await persist_delegation_state(storage.store, storage.session, response, state)
     return response
 
 

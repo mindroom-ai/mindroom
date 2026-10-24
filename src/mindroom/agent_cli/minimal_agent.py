@@ -174,7 +174,7 @@ async def prepare_minimal_catalog(
         agent_name=build.spec.id,
         run=run,
         runtime_context=runtime,
-        storage=storage,
+        store=storage.store,
         middleware=agent_tool_middleware(build),
         max_tool_calls_per_turn=build.spec.max_tool_calls_per_turn,
         record=record,

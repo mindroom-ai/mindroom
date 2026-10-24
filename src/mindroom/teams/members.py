@@ -355,7 +355,7 @@ def _team_member(
     )
 
     def new_hooks() -> LoopHooks:
-        return agent_loop_hooks(as_member, turn, agent_name=build.spec.id, queued_notices=False)
+        return agent_loop_hooks(as_member, turn, queued_notices=False)
 
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),

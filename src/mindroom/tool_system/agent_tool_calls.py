@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.spec import RunContext
     from mindroom.llm.runs import RunRecord
-    from mindroom.run_storage import RunStorage
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -107,7 +107,7 @@ class PreparedAgentToolCatalog:
     agent_name: str
     run: RunContext
     runtime_context: ToolRuntimeContext
-    storage: RunStorage
+    store: ConversationStore | None
     middleware: Sequence[ToolMiddleware] = ()
     max_tool_calls_per_turn: int | None = None
     record: RunRecord | None = None
@@ -119,15 +119,17 @@ class PreparedAgentToolCatalog:
     _closes: list[ToolkitClose] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
-        """Refuse a run whose calls share another session's state than the one its checkpoints and delegations write."""
-        if self.run.session is not self.storage.session:
-            msg = "A tool catalog needs a run that belongs to a session, the one its storage stores"
+        """Refuse a run outside a session, since the catalog's checkpoints and delegations write its session."""
+        if self.run.session is None:
+            msg = "A tool catalog needs a run that belongs to a session"
             raise ValueError(msg)
 
     @property
     def session(self) -> ConversationSession:
-        """Return the session the turn's run is stored to, which the catalog's checkpoints and delegations write."""
-        return self.storage.session
+        """Return the session the turn's run belongs to, which the catalog's checkpoints and delegations write."""
+        session = self.run.session
+        assert session is not None
+        return session
 
     @contextmanager
     def execution_context(self) -> Iterator[None]:

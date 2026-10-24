@@ -807,7 +807,7 @@ async def _checkpointed_batch(
             session=session,
         ),
         runtime_context=runtime,
-        storage=RunStorage(store, session, None),
+        store=store,
     )
     checkpoint = BatchCheckpoint(catalog)
     batch = [("call_completed", "completed sibling"), ("old-bash", "never replay outer")]

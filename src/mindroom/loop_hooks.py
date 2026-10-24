@@ -71,7 +71,6 @@ def agent_loop_hooks(
     build: AgentBuild,
     turn: HookTurn,
     *,
-    agent_name: str,
     participation: ParticipationGate | None = None,
     skill_review_capture: SkillReviewCapture | None = None,
     run_id: str | None = None,
@@ -79,11 +78,12 @@ def agent_loop_hooks(
 ) -> LoopHooks:
     """Return the hooks of one agent run or resume, from the build's model, history settings, tools, and jobs.
 
-    The run compacts as ``agent_name``, in the turn's scope when one is given and under its own name otherwise, and
+    The run compacts as its build's agent, in the turn's scope when one is given and under its own name otherwise, and
     a top-level agent hears of its ended jobs. ``queued_notices`` is off for a team member, whose leader owns the
     turn's notices; ``skill_review_capture`` records the final request of run ``run_id``.
     """
     jobs = build.tool_jobs
+    agent_name = build.spec.id
     scope = turn.storage.scope if turn.storage is not None else None
     return _loop_hooks(
         turn,

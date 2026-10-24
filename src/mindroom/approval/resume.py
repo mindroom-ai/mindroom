@@ -178,7 +178,6 @@ class ResumeRunner:
     build: AgentBuild
     config: Config
     runtime_paths: RuntimePaths
-    agent_name: str
     model_name: str
     storage: RunStorage
     user_id: str | None
@@ -199,7 +198,6 @@ class ResumeRunner:
                 replay_plan=self._replay_plan,
                 prompt_id=None,
             ),
-            agent_name=self.agent_name,
         )
 
     def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:

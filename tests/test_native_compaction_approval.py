@@ -181,7 +181,6 @@ async def _resume(
         build=build,
         config=config,
         runtime_paths=paths,
-        agent_name="general",
         model_name="default",
         storage=RunStorage(store, session, HistoryScope(kind="agent", scope_id="general")),
         user_id=identity.requester_id,

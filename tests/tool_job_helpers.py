@@ -477,7 +477,6 @@ async def run_built_turn(
             replay_plan=None,
             prompt_id=None,
         ),
-        agent_name=name,
     )
     finished = [
         event.record
@@ -759,7 +758,6 @@ class DelegatingLeader:
                 replay_plan=None,
                 prompt_id=None,
             ),
-            agent_name="leader",
         )
         events = run_agent(
             replace(build.spec, system_message=prompt_for_turn(build)),
@@ -786,7 +784,6 @@ class DelegatingLeader:
             build=self.build,
             config=self.config,
             runtime_paths=self.paths,
-            agent_name="leader",
             model_name="default",
             storage=RunStorage(self.store, self.session, _LEADER_SCOPE),
             user_id=self.identity.requester_id,

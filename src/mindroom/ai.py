@@ -756,7 +756,6 @@ def _agent_loop_hooks(
             lifecycle=run_context.compaction_lifecycle,
             turn_recorder=run_context.turn_recorder,
         ),
-        agent_name=run_context.agent_name,
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
         run_id=attempt.run_id,
@@ -896,11 +895,10 @@ async def _run_cached_agent_attempt(
     if pipeline_timing is not None:
         pipeline_timing.mark_model_request()
     events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal, stream=False)
-    finished = TerminalRecord(RunRecord)
     async with closing_async_stream(events):
         async for event in events:
-            finished.collect(event)
-    return finished.terminal(attempt.run_id)
+            terminal.collect(event)
+    return terminal.terminal(attempt.run_id)
 
 
 async def _run_non_streaming_agent_attempts(
