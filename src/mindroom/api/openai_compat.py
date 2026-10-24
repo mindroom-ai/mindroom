@@ -774,16 +774,16 @@ async def _chat_completions(  # noqa: C901, PLR0912
 # ---------------------------------------------------------------------------
 
 
-def _openai_agent_turn_context(
-    agent_name: str,
+def _openai_turn_context(
+    entity_label: str,
     *,
-    session_id: str,
-    model_name: str,
-    execution_identity: ToolExecutionIdentity | None = None,
+    session_id: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    model_name: str | None = None,
 ) -> ResponseTurnContext:
-    """Build the turn context for one OpenAI-compatible agent completion."""
+    """Build the turn context for one OpenAI-compatible completion, which has no Matrix conversation."""
     return ResponseTurnContext(
-        entity_label=agent_name,
+        entity_label=entity_label,
         session_id=session_id,
         run_id=None,
         correlation_id=uuid4().hex,
@@ -812,7 +812,7 @@ async def _non_stream_completion(
     """Handle non-streaming chat completion."""
     run_metadata: dict[str, Any] = {}
     response_text = await ai_response(
-        _openai_agent_turn_context(
+        _openai_turn_context(
             agent_name,
             session_id=session_id,
             model_name=model_name,
@@ -875,7 +875,7 @@ async def _stream_completion(
         stream_with_tool_execution_identity(
             execution_identity,
             stream_factory=lambda: stream_agent_response(
-                _openai_agent_turn_context(
+                _openai_turn_context(
                     agent_name,
                     session_id=session_id,
                     model_name=model_name,
@@ -1034,17 +1034,7 @@ async def _prepare_openai_team_execution(
 ) -> PreparedTeamExecution:
     """Prepare one OpenAI-compatible team turn: the scope summary, the replayed history, then the turn."""
     return await prepare_materialized_team_execution(
-        ResponseTurnContext(
-            entity_label=team_name,
-            session_id=None,
-            run_id=None,
-            correlation_id=uuid4().hex,
-            reply_to_event_id=None,
-            room_id=None,
-            thread_id=None,
-            requester_id=execution_identity.requester_id if execution_identity is not None else None,
-            matrix_run_metadata=None,
-        ),
+        _openai_turn_context(team_name, session_id=None, execution_identity=execution_identity),
         scope_context=scope_context,
         spec=built.spec,
         message=prompt,
