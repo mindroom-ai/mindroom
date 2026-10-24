@@ -226,15 +226,15 @@ async def prepare_scope_history(
         native_history = native_history.without_native_compaction()
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     native_route = native_history_route(native_history)
-    # Large provider projections spend seconds in tokenizers that release the GIL.
-    estimated_history_tokens = await asyncio.to_thread(
+    estimate_history_tokens = partial(
         estimate_prompt_visible_history_tokens,
         session=session,
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
-        native_route=native_route,
         replay_model=replay_estimator,
     )
+    # Large provider projections spend seconds in tokenizers that release the GIL.
+    estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
     # A native checkpoint response is billed for the transcript it replaced, so native routes keep the estimate.
     reported_history_tokens = (
         _reported_history_tokens(
@@ -291,13 +291,7 @@ async def prepare_scope_history(
         if native_route is not None:
             assert native_history is not None
             native_history = native_history.without_native_compaction()
-            current_history_tokens = await asyncio.to_thread(
-                estimate_prompt_visible_history_tokens,
-                session=session,
-                scope=scope_context.scope,
-                history_settings=resolved_inputs.history_settings,
-                replay_model=replay_estimator,
-            )
+            current_history_tokens = await asyncio.to_thread(estimate_history_tokens)
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
         # Compaction skips history that already fits its budget, so a trigger-level pass targets the trigger.
@@ -712,24 +706,20 @@ def finalize_history_preparation(
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
         replays_persisted_history = False
     else:
-        current_history_tokens = estimate_prompt_visible_history_tokens(
+        estimate_history_tokens = partial(
+            estimate_prompt_visible_history_tokens,
             session=session,
             scope=scope,
             history_settings=history_settings,
-            native_route=native_history_route(native_history),
             replay_model=replay_estimator,
         )
+        current_history_tokens = estimate_history_tokens(native_route=native_history_route(native_history))
         if history_budget is not None and current_history_tokens > history_budget:
             # Never trim a native checkpoint by run/message count. Fall back to the
             # existing canonical guard if the final dynamic prompt exhausts its room.
             if native_history is not None:
                 native_history = native_history.without_native_compaction()
-            current_history_tokens = estimate_prompt_visible_history_tokens(
-                session=session,
-                scope=scope,
-                history_settings=history_settings,
-                replay_model=replay_estimator,
-            )
+            current_history_tokens = estimate_history_tokens()
         if history_budget is not None:
             replay_plan = plan_replay_that_fits(
                 session=session,
