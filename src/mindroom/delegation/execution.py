@@ -54,7 +54,6 @@ from mindroom.delegation.state import (
     CONTINUE_SUBAGENT,
     DELEGATION_FUNCTIONS,
     DELEGATION_STATE_KEY,
-    RUN_SUBAGENT,
     DelegationChild,
     DelegationPendingTool,
     DelegationState,
@@ -573,7 +572,7 @@ def _prepare_delegation_output(
     runtime_paths: RuntimePaths,
     identity: ToolExecutionIdentity,
     raw_path: object,
-    tool_name: str = RUN_SUBAGENT,
+    tool_name: str,
 ) -> ToolOutputFileRequest | dict[str, object] | None:
     """Resolve the caller's output policy without scaffolding or reconciling its workspace."""
     storage = resolve_agent_storage(caller, config, runtime_paths, execution_identity=identity)
@@ -1012,7 +1011,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         raise RuntimeError(msg)
     # Bind this exact parent call and its presentation before resolving the target.
     tool = requirement.tool_execution
-    if not tool.tool_call_id:
+    tool_name = tool.tool_name
+    if not tool.tool_call_id or not tool_name:
         msg = "Delegation requirement has no exact tool-call identity"
         raise RuntimeError(msg)
     requirement_key = delegation_card_id(requirement.member_agent_id, tool.tool_call_id)
@@ -1094,7 +1094,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             runtime_paths,
             caller_identity,
             args.get(OUTPUT_PATH_ARGUMENT),
-            tool_name=tool.tool_name or RUN_SUBAGENT,
+            tool_name=tool_name,
         )
         if isinstance(prepared_output, dict):
             authorization = json.dumps(prepared_output)
@@ -1127,7 +1127,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         resolve_result = partial(resolve_result, output_request=output_request)
 
     # Approval and the before hook must settle before a child can start.
-    gated = tool_may_require_approval(config, tool.tool_name or RUN_SUBAGENT)
+    gated = tool_may_require_approval(config, tool_name)
     if gated and retained is None and card_decision is not True and state.gates.get(requirement_key) is not False:
         # Saved gates live in session storage that worker code can write, so only an approval
         # consumed by this continuation can start a fresh child; otherwise ask again.
@@ -1156,7 +1156,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         state.hooks[requirement.id] = await before_delegation(
             execution_identity=caller_identity,
             arguments=args,
-            tool_name=tool.tool_name or RUN_SUBAGENT,
+            tool_name=tool_name,
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -1213,9 +1213,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             try:
                 # The reply records a background child's call before its job starts, as for any managed call: the
                 # child's own tools run unrecorded in its job, so a restart's account names the delegation.
-                record_return = (
-                    await record_call(tool.tool_name or RUN_SUBAGENT, args) if background is not None else None
-                )
+                record_return = await record_call(tool_name, args) if background is not None else None
                 if fresh:
                     await start_child_turn(
                         child,

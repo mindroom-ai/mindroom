@@ -14,7 +14,7 @@ from mindroom.config.models import DefaultsConfig
 from mindroom.delegation.execution import _ChildOutcome
 from mindroom.delegation.hooks import before_delegation
 from mindroom.delegation.recovery import _cancel_delegations
-from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationHookState, DelegationState
+from mindroom.delegation.state import DELEGATION_STATE_KEY, RUN_SUBAGENT, DelegationHookState, DelegationState
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -79,7 +79,13 @@ async def test_member_subagent_hooks_keep_live_room_capabilities(tmp_path: Path)
         hook_registry=HookRegistry.from_plugins([_plugin("member-policy", [before])]),
     )
     with tool_runtime_context(context):
-        await before_delegation(execution_identity=identity, arguments={}, config=config, runtime_paths=paths)
+        await before_delegation(
+            execution_identity=identity,
+            arguments={},
+            tool_name=RUN_SUBAGENT,
+            config=config,
+            runtime_paths=paths,
+        )
     assert observed == [("leader", identity.session_id, True)]
 
 
