@@ -245,7 +245,7 @@ class ClaudeProvider:
                 )
                 # TODO(simplify): A non-streaming reply leaves time_to_first_token unset. Stamp it when the whole
                 # reply arrives, as the other adapters do. Stored run metrics and operators would notice (#3075).
-                usage, completed = self._finished_turn(response, request, prepared, started, None, streamed=False)
+                usage, completed = self._finished_turn(response, request, prepared, started, None)
                 yield usage
                 yield completed
                 return
@@ -262,7 +262,6 @@ class ClaudeProvider:
                             prepared,
                             started,
                             first_output_at,
-                            streamed=True,
                         )
                         yield usage
                         yield completed
@@ -283,14 +282,12 @@ class ClaudeProvider:
         prepared: _PreparedRequest,
         started: float,
         first_output_at: float | None,
-        *,
-        streamed: bool,
     ) -> tuple[UsageReported, TurnCompleted]:
         """Return the usage and completion of a finished response, its message stamped with provenance and timings."""
         message = assistant_message_from_response(
             response,
             record_context_management=self.settings.context_management is not None,
-            streamed=streamed,
+            streamed=request.stream,
         )
         stamp_finished_turn(message, self.identity, started=started, first_output_at=first_output_at)
         record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=prepared.checkpoint_prefix)
