@@ -138,6 +138,7 @@ def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> 
     ``instructions`` cannot hold the explicit prompt-cache breakpoint of the shared system prefix, so a changed system
     text replays the history instead.
     """
+    request_digest = system_text_digest(messages)
     # LEGACY_COMPAT: Stored Responses replies without the digest of their system text.
     # Legacy format: an assistant message whose ``provider_data`` records a ``response_id`` but no
     # ``mindroom_system_sha256``.
@@ -145,9 +146,7 @@ def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> 
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
     # once, with the current system text, and continues the response it stores from then on.
     # Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_stored_without_a_system_digest_replays_once
-    return provider_data.get(_STORED_KEY) is not False and provider_data.get(_SYSTEM_DIGEST_KEY) == system_text_digest(
-        messages,
-    )
+    return provider_data.get(_STORED_KEY) is not False and provider_data.get(_SYSTEM_DIGEST_KEY) == request_digest
 
 
 def responses_replay(
