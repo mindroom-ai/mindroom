@@ -7,7 +7,6 @@ pipeline for the behavior every family must share, and ``tests/test_agent_mode_h
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -24,8 +23,6 @@ from tests.providers.openai_family_support import provider_runtime
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-    import pytest
 
     from mindroom.llm.provider import ModelProvider
 
@@ -51,26 +48,8 @@ _OPENAI_RESPONSES = {
 }
 _CEREBRAS = {"provider": "cerebras", "id": "gpt-oss-120b", "api_key": "test-key"}
 _GROQ = {"provider": "groq", "id": "openai/gpt-oss-120b", "api_key": "test-key"}
-PROVIDER_ENV_PREFIXES = (
-    "ANTHROPIC_",
-    "AWS_",
-    "CLOUD_ML_",
-    "GEMINI_",
-    "GOOGLE_",
-    "OLLAMA_",
-    "OPENAI_",
-    "CEREBRAS_",
-    "GROQ_",
-)
 # The SDK warns on every request that names the Claude id above; a module that drives that family filters it.
 CLAUDE_DEPRECATION_FILTER = f"ignore:The model '{_ANTHROPIC['id']}' is deprecated:DeprecationWarning"
-
-
-def scrub_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove the host's provider credentials and endpoints, so no SDK falls back to them."""
-    for name in list(os.environ):
-        if name.startswith(PROVIDER_ENV_PREFIXES):
-            monkeypatch.delenv(name)
 
 
 # --- Per-family wire shapes -------------------------------------------------------------------------------------

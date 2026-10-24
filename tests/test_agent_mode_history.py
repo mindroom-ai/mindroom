@@ -11,8 +11,8 @@ import pytest
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, complete
-from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES, scrub_provider_env
-from tests.providers.golden_support import Wire
+from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES
+from tests.providers.golden_support import Wire, hide_provider_environment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -95,7 +95,7 @@ async def test_standard_minimal_standard_requests_keep_paired_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each mode offers one tool, yet every request carries both stored pairs and the image, and history is untouched."""
-    scrub_provider_env(monkeypatch)
+    hide_provider_environment(monkeypatch)
     spec = FAMILIES[family]
     wire = Wire(lambda _request: spec.reply())
     provider = spec.adapter(tmp_path, wire)

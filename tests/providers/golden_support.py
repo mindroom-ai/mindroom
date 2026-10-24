@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from contextlib import nullcontext
 from copy import deepcopy
@@ -36,9 +37,31 @@ from mindroom.tool_jobs.execution import project_definitions
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
+    import pytest
+
     from mindroom.llm.provider import ModelProvider, NativeHistoryRoute, StopReason, StreamEvent
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "providers"
+
+# Provider SDKs read credentials and endpoints from these environment variables when a config leaves them unset.
+_PROVIDER_ENV_PREFIXES = (
+    "ANTHROPIC_",
+    "AWS_",
+    "AZURE_",
+    "CEREBRAS_",
+    "CLOUD_ML_",
+    "DEEPSEEK_",
+    "GEMINI_",
+    "GOOGLE_",
+    "GROQ_",
+    "OLLAMA_",
+    "OPENAI_",
+    "OPENROUTER_",
+)
+# google-auth falls back to gcloud's well-known credentials file when GOOGLE_APPLICATION_CREDENTIALS is unset, and
+# refreshes what it finds through ``requests``, which the network guard does not cover. A path that cannot exist
+# makes every Application Default Credentials lookup raise ``DefaultCredentialsError`` instead.
+_MISSING_GOOGLE_CREDENTIALS = str(Path(os.devnull) / "application_default_credentials.json")
 
 # Headers the SDK or transport derives from the environment, the credentials, or the body length.
 _VOLATILE_HEADER_PREFIXES = ("x-stainless-", "x-amz-", "amz-sdk-")
@@ -81,6 +104,14 @@ _HANDLED_INPUT_KEYS = frozenset(
         "tools",
     },
 )
+
+
+def hide_provider_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide the host's provider credentials and endpoints from SDK fallbacks, and fail Google ADC lookups closed."""
+    for name in list(os.environ):
+        if name.startswith(_PROVIDER_ENV_PREFIXES):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", _MISSING_GOOGLE_CREDENTIALS)
 
 
 class PacedBytes(httpx.AsyncByteStream):

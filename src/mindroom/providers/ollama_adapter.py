@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 from contextlib import aclosing
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from uuid import uuid4
@@ -87,7 +86,6 @@ class OllamaProvider:
     identity: ModelIdentity
     capabilities: Capabilities
     settings: OllamaSettings
-    host: str
     _client: AsyncClient | None = field(default=None, init=False, repr=False)
     # Ollama keeps no history of its own, and its replayed history is sized canonically.
     native_history_route: ClassVar[None] = None
@@ -168,7 +166,7 @@ class OllamaProvider:
 
     def _client_params(self) -> dict[str, Any]:
         settings = self.settings
-        params: dict[str, Any] = {"host": self.host}
+        params: dict[str, Any] = {"host": self.identity.endpoint}
         if settings.timeout is not None:
             params["timeout"] = settings.timeout
         if settings.api_key:
@@ -299,12 +297,8 @@ def _stop_reason(reply: _OllamaReply) -> StopReason | None:
 
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> OllamaProvider:
     """Build the adapter for an ``ollama`` model config."""
-    extra_kwargs = dict(model_config.extra_kwargs or {})
-    if model_config.api_key is not None:
-        extra_kwargs["api_key"] = model_config.api_key
+    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": model_config.configured_api_key()}
     settings = settings_from_extra_kwargs(OllamaSettings, extra_kwargs, provider=model_config.provider)
-    if settings.api_key is None and (env_api_key := os.getenv("OLLAMA_API_KEY")):
-        settings = replace(settings, api_key=env_api_key)
     # ``client_params`` wins over every client option, so its ``host`` is the server requests reach.
     host = str(
         (settings.client_params or {}).get("host")
@@ -321,7 +315,6 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ol
         ),
         capabilities=Capabilities(structured_output="native", omitted_media=frozenset({"audio", "file", "video"})),
         settings=settings,
-        host=host,
     )
 
 

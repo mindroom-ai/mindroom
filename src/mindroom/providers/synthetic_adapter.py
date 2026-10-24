@@ -119,10 +119,9 @@ class SyntheticProvider:
         shell_available = request.tool_choice != "none" and any(tool.name == SHELL_TOOL for tool in request.tools)
         user_history = [message.get_content_string() for message in request.messages if message.role == "user"]
         plan = _plan_response(settings, user_history, shell_available=shell_available)
-        last_message = request.messages[-1] if request.messages else None
+        last_message = request.messages[-1]
         continuation = (
             plan.tool_call_id is not None
-            and last_message is not None
             and last_message.role == "tool"
             and last_message.tool_call_id == plan.tool_call_id
         )

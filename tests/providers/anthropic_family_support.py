@@ -8,20 +8,25 @@ documents the format. Request building, the pipeline stages, and normalization a
 from __future__ import annotations
 
 import json
-import os
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import pytest
 from google.oauth2.credentials import Credentials
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.provider import TurnCompleted
 from mindroom.providers.anthropic.messages import ClaudeProvider, build_provider
-from tests.providers.golden_support import Replay, encoded_response, replay_through_pipeline
+from tests.providers.golden_support import (
+    Replay,
+    encoded_response,
+    hide_provider_environment,
+    replay_through_pipeline,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -31,20 +36,14 @@ if TYPE_CHECKING:
     from tests.providers.golden_support import Wire
 
 FAMILIES = ("anthropic", "vertexai_claude", "bedrock_claude")
-# Provider SDKs read these environment variables directly; the harness hides them from the run.
-_PROVIDER_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLOUD_ML_", "GOOGLE_")
 
 
 @contextmanager
 def isolated_provider_environment() -> Iterator[None]:
-    """Hide provider credentials and endpoints in the process environment from SDK fallbacks."""
-    saved = {name: value for name, value in os.environ.items() if name.startswith(_PROVIDER_ENV_PREFIXES)}
-    for name in saved:
-        del os.environ[name]
-    try:
+    """Apply ``hide_provider_environment`` for the block, for callers without the ``monkeypatch`` fixture."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        hide_provider_environment(monkeypatch)
         yield
-    finally:
-        os.environ.update(saved)
 
 
 def provider_for(model_config: dict[str, Any], root: Path, http_client: httpx.AsyncClient) -> ClaudeProvider:

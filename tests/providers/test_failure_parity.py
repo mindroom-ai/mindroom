@@ -35,9 +35,14 @@ from mindroom.llm.provider import ModelRequest, ReportedUsage, TextDelta, comple
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.retry import STREAM_STALLED
 from tests.providers.anthropic_family_support import ROUTE_CONFIGS, claude_message, provider_for
-from tests.providers.family_support import scrub_provider_env
 from tests.providers.gemini_ollama_support import build_adapter
-from tests.providers.golden_support import PacedBytes, ndjson_response, pipeline_provider, sse_response
+from tests.providers.golden_support import (
+    PacedBytes,
+    hide_provider_environment,
+    ndjson_response,
+    pipeline_provider,
+    sse_response,
+)
 from tests.providers.openai_family_support import openai_family_adapter, unsigned_jwt
 
 if TYPE_CHECKING:
@@ -64,7 +69,7 @@ CONTEXT_WINDOW = "⚠️ The conversation no longer fits the model's context win
 @pytest.fixture(autouse=True)
 def _instant_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     """Skip every retry's backoff; the SDKs still retry as often as they do in production."""
-    scrub_provider_env(monkeypatch)
+    hide_provider_environment(monkeypatch)
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     for sdk in ("openai", "anthropic"):
         monkeypatch.setattr(f"{sdk}._base_client.BaseClient._calculate_retry_timeout", lambda *_args: 0.0)

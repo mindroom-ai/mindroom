@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import time
 from contextlib import aclosing
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -242,6 +242,8 @@ class GeminiProvider:
 
     def _client_params(self) -> dict[str, Any]:
         settings = self.settings
+        # The environment variables are read here as well as by google-genai, which ranks an explicit argument above
+        # an environment value; Agno passed them explicitly too, so a ``client_params`` key and a set project conflict.
         if self.vertexai:
             params: dict[str, Any] = {
                 "vertexai": True,
@@ -276,13 +278,12 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> GeminiProvider:
     """Build the adapter for a ``google`` or ``gemini`` model config."""
-    extra_kwargs = dict(model_config.extra_kwargs or {})
-    if model_config.api_key is not None:
-        extra_kwargs["api_key"] = model_config.api_key
-    settings = settings_from_extra_kwargs(GeminiSettings, extra_kwargs, provider=model_config.provider)
+    api_key = model_config.configured_api_key()
     # Vertex AI authenticates with Google Cloud credentials, so it never takes the shared key.
-    if settings.api_key is None and not uses_alternative_auth(model_config):
-        settings = replace(settings, api_key=get_api_key_for_provider("google", runtime_paths=runtime_paths))
+    if api_key is None and not uses_alternative_auth(model_config):
+        api_key = get_api_key_for_provider("google", runtime_paths=runtime_paths)
+    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": api_key}
+    settings = settings_from_extra_kwargs(GeminiSettings, extra_kwargs, provider=model_config.provider)
     return GeminiProvider(
         identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
         capabilities=Capabilities(

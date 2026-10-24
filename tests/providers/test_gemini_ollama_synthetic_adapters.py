@@ -13,6 +13,7 @@ import aiohttp
 import google.auth.exceptions
 import httpx
 import pytest
+from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 
 from mindroom.config.models import ModelConfig
@@ -37,12 +38,12 @@ from mindroom.providers.tool_policy import without_provider_tools
 from tests.providers.gemini_ollama_support import (
     build_adapter,
     gemini_sse,
-    hide_provider_environment,
     normalized_request,
     ollama_ndjson,
     run_adapter,
     runtime_paths_for,
 )
+from tests.providers.golden_support import hide_provider_environment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -150,6 +151,48 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
     assert vertex.vertexai
     assert own.settings.api_key == "test-key"
     assert requested == ["google"]
+
+
+def test_gemini_passes_the_environment_key_project_and_location_as_explicit_client_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK ranks an explicit argument above its own environment reads, so these variables stay explicit, as in Agno."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-project")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "europe-west4")
+    runtime_paths = runtime_paths_for(tmp_path)
+
+    api = gemini_adapter.build_provider(ModelConfig(provider="google", id="gemini-3.8-flash"), runtime_paths)
+    vertex = gemini_adapter.build_provider(
+        ModelConfig(**_config({"provider": "gemini", "id": "gemini-3.8-flash"}, vertexai=True)),
+        runtime_paths,
+    )
+
+    assert api._client_params() == {"api_key": "env-key"}
+    assert vertex._client_params() == {"vertexai": True, "project": "env-project", "location": "europe-west4"}
+
+
+@pytest.mark.asyncio
+async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GOOGLE_GENAI_USE_VERTEXAI=true sends a model without ``vertexai`` to Vertex AI, as Agno's Gemini did."""
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    config = _config(
+        {"provider": "google", "id": "gemini-3.8-flash"},
+        project_id="test-project",
+        location="us-central1",
+        credentials=Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+    )
+    adapter = build_adapter(config, tmp_path, respond)
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert "/projects/test-project/locations/us-central1/" in str(seen[0].url)
 
 
 def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -> None:
@@ -1393,13 +1436,32 @@ def test_ollama_rejects_unknown_extra_kwargs(tmp_path: Path) -> None:
         build_ollama_provider(config, runtime_paths_for(tmp_path))
 
 
-def test_ollama_host_and_key_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The host falls back to the local default, and OLLAMA_API_KEY supplies a missing key."""
-    monkeypatch.setenv("OLLAMA_API_KEY", "env-key")
+def test_ollama_host_falls_back_to_the_local_default(tmp_path: Path) -> None:
+    """Without a configured or runtime host, requests go to the local Ollama server."""
     provider = build_ollama_provider(ModelConfig(provider="ollama", id="qwen3.8:27b"), runtime_paths_for(tmp_path))
 
-    assert provider.host == "http://localhost:11434"
-    assert provider.settings.api_key == "env-key"
+    assert provider.identity.endpoint == "http://localhost:11434"
+
+
+@pytest.mark.asyncio
+async def test_ollama_api_key_variable_supplies_a_missing_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """OLLAMA_API_KEY authenticates a model without its own key, and a configured key beats it."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "env-key")
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return ollama_ndjson(_ollama_done())
+
+    for api_key in (None, "ollama-key"):
+        config = ModelConfig(
+            **_config(OLLAMA, client_params={"transport": httpx.MockTransport(respond)}),
+            api_key=api_key,
+        )
+        provider = build_ollama_provider(config, runtime_paths_for(tmp_path))
+        _completed([event async for event in provider.stream(_request())])
+
+    assert [request.headers["authorization"] for request in seen] == ["Bearer env-key", "Bearer ollama-key"]
 
 
 @pytest.mark.asyncio
