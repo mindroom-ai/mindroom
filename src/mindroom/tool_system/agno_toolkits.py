@@ -412,6 +412,7 @@ def _owned_file(file: AgnoFile) -> File:
 
 __all__ = [
     "AGNO_EMPTY_PARAMETERS",
+    "MEDIA_INJECTED_PARAMS",
     "AgnoAudio",
     "AgnoFile",
     "AgnoImage",

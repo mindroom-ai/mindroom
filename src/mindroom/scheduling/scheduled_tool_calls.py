@@ -27,6 +27,7 @@ from mindroom.approval.tool_approval import (
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
+from mindroom.tool_system.agno_toolkits import MEDIA_INJECTED_PARAMS
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
@@ -50,12 +51,6 @@ __all__ = [
 _SCHEDULER_TOOLKIT = "scheduler"
 # The scheduler's functions that read the run's live functions: one stores a call to one, one runs it.
 _LIVE_FUNCTION_READERS = frozenset({"schedule_tool_call", "run_scheduled_call"})
-# Parameters through which an entrypoint takes the run's media, as Agno's MEDIA_INJECTED_PARAMS names them. A live
-# call gets None for them too, since no run passes a tool media, but scheduling such a call stays refused, as it
-# was when live runs carried media that a stored call lacked.
-# TODO(simplify): Scheduling refuses a tool that takes media although its live calls get none either. Drop the media
-# check. Models could schedule calls of those tools.
-_MEDIA_PARAMETERS = frozenset({"images", "videos", "audios", "files"})
 
 _REFUSALS: dict[ScheduledCallRefusal, str] = {
     "missing": "this task has no stored call",
@@ -157,7 +152,12 @@ def _resolve_live_function(
         return f"`{tool_name}` is not one of this agent's tools in this conversation"
     if toolkit_name is not None and owner != toolkit_name:
         return f"`{tool_name}` now comes from another toolkit than the one the call was stored for"
-    if function.external_execution or function.stop_after_tool_call or function.injected_params & _MEDIA_PARAMETERS:
+    # A tool that takes the run's media gets None for it in a live call too, but scheduling it stays refused, as it
+    # was when live runs carried media that a stored call lacked.
+    # TODO(simplify): Scheduling refuses a tool that takes media although its live calls get none either. Drop the
+    # media check. Models could schedule calls of those tools.
+    takes_media = not function.injected_params.isdisjoint(MEDIA_INJECTED_PARAMS)
+    if function.external_execution or function.stop_after_tool_call or takes_media:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(
         toolkit_name=owner,
