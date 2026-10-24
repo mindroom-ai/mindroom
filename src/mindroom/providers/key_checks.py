@@ -54,6 +54,8 @@ PROVIDER_KEY_CHECKS: dict[str, ProviderKeyCheck] = {
         extra_headers=(("anthropic-version", "2023-06-01"),),
     ),
     "openai": _bearer(f"{OPENAI_BASE_URL_DEFAULT}/models"),
+    # TODO(simplify): The Gemini check sends the key in the URL query, where anything that records URLs sees it.
+    # Send it in the `x-goog-api-key` header, as the Gemini SDK does, and drop the query branch. Operators would notice.
     "google": ProviderKeyCheck(
         url="https://generativelanguage.googleapis.com/v1beta/models",
         header_name=None,
