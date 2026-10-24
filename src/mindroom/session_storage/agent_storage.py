@@ -11,7 +11,7 @@ from mindroom.history.legacy_compaction_state import migrate_to_summary_rows
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, ConversationStore, open_conversation_store
+from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, ConversationStore
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ def create_state_storage(storage_name: str, state_root: Path) -> ConversationSto
         db_path.parent.mkdir(parents=True, exist_ok=True)
         migrate_usage_database(db_path, names)
         migrate_to_summary_rows(db_path, names)
-        return open_conversation_store(db_path, names, prompt_roles=PROMPT_MESSAGE_ROLES)
+        return ConversationStore(db_path, names, prompt_roles=PROMPT_MESSAGE_ROLES)
 
 
 def create_session_storage(

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import ConversationStore, open_conversation_store
+from mindroom.session_storage.store import ConversationStore
 
 if TYPE_CHECKING:
     from mindroom.session_storage.types import SessionKind
@@ -41,7 +41,7 @@ class GoldenStore:
 
     def open(self, root: Path) -> ConversationStore:
         """Restore this database under ``root`` and open it with the owned store."""
-        return open_conversation_store(self.restore(root), self.names)
+        return ConversationStore(self.restore(root), self.names)
 
 
 def golden_stores() -> list[GoldenStore]:

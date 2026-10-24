@@ -27,8 +27,8 @@ from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics
 from mindroom.session_storage.codec import run_from_row, run_type
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_runs, move_blob_runs_to_rows
-from mindroom.session_storage.schema import run_log_sql, schema_sql, table_names
+from mindroom.session_storage.legacy_agno2_runs import decode_session_json
+from mindroom.session_storage.schema import schema_sql, table_names
 from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
 from mindroom.usage.storage import TOKEN_FIELDS, project_usage, quote_identifier, usage_upsert_sql
 
@@ -95,35 +95,14 @@ def migrate_database(
                     apply(connection)
 
 
-def open_conversation_store(
-    path: Path,
-    names: TableNames,
-    *,
-    prompt_roles: frozenset[str] = frozenset(),
-) -> ConversationStore:
-    """Open the conversation database at ``path``, moving runs Agno 2 kept in session blobs into run rows once.
+@dataclass(frozen=True, slots=True)
+class ConversationStore:
+    """One conversation database; it holds no connection, so there is nothing to close.
 
     ``prompt_roles`` are message roles, such as ``system``, that stored runs leave out unless they are paused.
     Tables are created by the first write. Migrations that recognize an older database by a missing summary-row
     or usage table must run before that write.
     """
-    migrate_database(
-        path,
-        needed=lambda connection: has_blob_runs(connection, names),
-        apply=lambda connection: _move_blob_runs(connection, names),
-    )
-    return ConversationStore(path=path, names=names, prompt_roles=prompt_roles)
-
-
-def _move_blob_runs(connection: sqlite3.Connection, names: TableNames) -> None:
-    for statement in run_log_sql(names):
-        connection.execute(statement)
-    move_blob_runs_to_rows(connection, names)
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationStore:
-    """One conversation database; it holds no connection, so there is nothing to close."""
 
     path: Path
     names: TableNames
@@ -148,7 +127,7 @@ class ConversationStore:
             row = self._session_row(connection, session_id)
         if row is None:
             return None
-        return SessionFields(metadata=_decoded_mapping(row[5]), session_state=_session_state(row[4]))
+        return SessionFields(metadata=_decoded_mapping(row[4]), session_state=_session_state(row[3]))
 
     def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
         """Load one session with the runs a reply reasons over, or None when it is missing or of another kind.
@@ -160,7 +139,7 @@ class ConversationStore:
             loaded = self._read_load(connection, session_id, kind)
         if loaded is None:
             return None
-        _, agent_id, team_id, _, session_data, metadata, created_at, updated_at = loaded.row
+        _, agent_id, team_id, session_data, metadata, created_at, updated_at = loaded.row
         state = _session_state(session_data)
         return ConversationSession(
             session_id=session_id,
@@ -220,7 +199,7 @@ class ConversationStore:
         if self.names.sessions not in table_names(connection):
             return None
         return connection.execute(
-            "SELECT session_type, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at "  # noqa: S608
+            "SELECT session_type, agent_id, team_id, session_data, metadata, created_at, updated_at "  # noqa: S608
             f"FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",
             (session_id,),
         ).fetchone()
@@ -603,12 +582,17 @@ async def write_with_session_state[Result](
     return await run_session_storage_operation(lambda: store, lambda opened: write(opened, state))
 
 
-def _decoded_mapping(raw_value: object) -> dict[str, Any] | None:
-    """Return a stored JSON object column, or None when it is empty or unreadable, so one odd row never fails a load."""
+def _decoded_mapping(raw_value: object, *, null: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Return a stored JSON object column, ``null`` for SQL or JSON null, or None when unreadable or not an object.
+
+    An odd row therefore never fails a load.
+    """
     try:
         value = decode_session_json(raw_value)
     except (TypeError, ValueError):
         return None
+    if value is None:
+        return null
     return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
 
@@ -640,7 +624,7 @@ def _ensure_session_row(
             session.kind,
             session.owner_id,
             session_data,
-            # Agno's JSON column stored no metadata as the text ``null``, never as SQL NULL.
+            # No metadata is stored as the JSON text ``null``, never SQL NULL, kept as main behaves.
             json.dumps(session.metadata),
             session.created_at,
             session.created_at,
@@ -794,7 +778,7 @@ def _record_run_usage(
         f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
         (session_id,),
     ).fetchone()
-    session_data = _rewritable_session_data(raw_session_data)
+    session_data = _decoded_mapping(raw_session_data, null={})
     if session_data is not None:
         stored_totals = session_data.get("session_metrics")
         totals = SessionMetrics.from_dict(stored_totals) if isinstance(stored_totals, dict) else SessionMetrics()
@@ -808,17 +792,6 @@ def _record_run_usage(
         f"UPDATE {sessions} SET session_data = COALESCE(?, session_data), updated_at = ? WHERE session_id = ?",  # noqa: S608
         (None if session_data is None else json.dumps(session_data), int(time()), session_id),
     )
-
-
-def _rewritable_session_data(raw_value: object) -> dict[str, Any] | None:
-    """Return a row's ``session_data`` object, empty for SQL or JSON null, or None when unreadable or not an object."""
-    try:
-        value = decode_session_json(raw_value)
-    except (TypeError, ValueError):
-        return None
-    if value is None:
-        return {}
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
 
 def _counted_usage(snapshot: Mapping[str, object]) -> RunMetrics:
@@ -958,7 +931,6 @@ __all__ = [
     "connect_conversation_database",
     "delete_run_subtrees_in_transaction",
     "migrate_database",
-    "open_conversation_store",
     "persist_to",
     "runs_without",
     "write_with_session_state",

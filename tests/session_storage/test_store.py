@@ -22,7 +22,6 @@ from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.store import (
     ConversationStore,
     migrate_database,
-    open_conversation_store,
     persist_to,
     runs_without,
 )
@@ -39,7 +38,7 @@ _NAMES = TableNames("code")
 
 
 def _store(tmp_path: Path, *, prompt_roles: frozenset[str] = frozenset({"system"})) -> ConversationStore:
-    return open_conversation_store(tmp_path / "code.db", _NAMES, prompt_roles=prompt_roles)
+    return ConversationStore(tmp_path / "code.db", _NAMES, prompt_roles=prompt_roles)
 
 
 @pytest.fixture

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.legacy_agno2_runs import decode_session_json
+from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_runs
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, migrate_database
 from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
@@ -63,17 +63,15 @@ def _needs_migration(connection: sqlite3.Connection, names: TableNames) -> bool:
 
 def _seed_usage(connection: sqlite3.Connection, names: TableNames) -> None:
     connection.execute(usage_table_sql(names.sessions))
-    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(names.sessions)})")}
-    legacy_column = "runs" if "runs" in columns else "NULL"
-    runs_table = names.runs
-    has_runs = runs_table in table_names(connection)
+    legacy_column = "runs" if has_blob_runs(connection, names) else "NULL"
+    has_runs = names.runs in table_names(connection)
     for session_id, blob in connection.execute(
         f"SELECT session_id, {legacy_column} FROM {quote_identifier(names.sessions)}",  # noqa: S608
     ):
         known_ids: set[str] = set()
         if has_runs:
             for run_id, raw, created_at in connection.execute(
-                f"SELECT run_id, run_data, created_at FROM {quote_identifier(runs_table)} WHERE session_id = ?",  # noqa: S608
+                f"SELECT run_id, run_data, created_at FROM {quote_identifier(names.runs)} WHERE session_id = ?",  # noqa: S608
                 (session_id,),
             ):
                 known_ids.add(run_id)

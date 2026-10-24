@@ -1076,7 +1076,7 @@ depends_on = ["mindroom.llm", "mindroom.session_storage.legacy_tool_results"]
 
 [[modules]]
 path = "mindroom.session_storage.legacy_agno2_runs"
-depends_on = ["mindroom.session_storage.schema", "mindroom.usage.storage"]
+depends_on = ["mindroom.usage.storage"]
 visibility = [
     "mindroom.session_storage.store",
     "mindroom.history.legacy_compaction_state",

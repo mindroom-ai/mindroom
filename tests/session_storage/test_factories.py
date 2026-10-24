@@ -58,16 +58,16 @@ def test_migrations_run_in_order_under_the_preflight_lock_before_the_store_opens
         yield
         order.append("preflight released")
 
-    real_open = agent_storage.open_conversation_store
+    real_store = agent_storage.ConversationStore
 
     def open_store(*args: object, **kwargs: object) -> ConversationStore:
         order.append("open")
-        return real_open(*args, **kwargs)  # type: ignore[arg-type]
+        return real_store(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(agent_storage, "session_storage_preflight", preflight)
     monkeypatch.setattr(agent_storage, "migrate_usage_database", lambda *_a, **_k: order.append("usage"))
     monkeypatch.setattr(agent_storage, "migrate_to_summary_rows", lambda *_a, **_k: order.append("summary rows"))
-    monkeypatch.setattr(agent_storage, "open_conversation_store", open_store)
+    monkeypatch.setattr(agent_storage, "ConversationStore", open_store)
 
     _open(tmp_path)
 

@@ -14,7 +14,7 @@ from mindroom.history.storage import new_scope_session
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage.codec import run_from_row
 from mindroom.session_storage.schema import SESSION_COLUMNS
-from mindroom.session_storage.store import open_conversation_store
+from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.llm.agno_dict_helpers import expected_run_dict
 from tests.session_storage.goldens import GoldenStore, agno_loaded_session, golden_sessions, golden_stores, stored_rows
@@ -65,7 +65,7 @@ def _summary_dict(summary: ScopeSummary | None) -> dict[str, str] | None:
 
 
 def _load(store: GoldenStore, db_file: Path, session_id: str) -> ConversationSession:
-    session = open_conversation_store(db_file, store.names).load_session(session_id, store.sessions[session_id])
+    session = ConversationStore(db_file, store.names).load_session(session_id, store.sessions[session_id])
     assert session is not None
     return session
 
@@ -203,7 +203,7 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
             "WHERE session_id = ?",
             (session_id,),
         ).fetchone()
-    fresh = open_conversation_store(tmp_path / "fresh.db", store.names)
+    fresh = ConversationStore(tmp_path / "fresh.db", store.names)
     # As the runtime builds the session of a conversation's first turn: it does not know the requester.
     session = ConversationSession(session_id=session_id, kind=kind, owner_id=owner, created_at=created_at)
 
@@ -248,7 +248,7 @@ def test_a_first_turns_session_row_stores_no_metadata_as_agno_stored_it(
         golden_row[SESSION_COLUMNS.index(column)] for column in ("session_type", "agent_id", "team_id")
     )
     session = new_scope_session(session_id=session_id, scope_id=team_id or agent_id, is_team=kind == "team")
-    fresh = open_conversation_store(tmp_path / "fresh.db", store.names)
+    fresh = ConversationStore(tmp_path / "fresh.db", store.names)
 
     for run in _replayed(rows):
         fresh.save_run(session, run, record_usage=True)
@@ -334,7 +334,7 @@ def test_new_databases_get_the_layout_agno_created(tmp_path: Path) -> None:
     )
 
     for db_file in (tmp_path / "fresh.db", golden):
-        open_conversation_store(db_file, store.names).save_run(
+        ConversationStore(db_file, store.names).save_run(
             session,
             RunRecord(run_id="r1", agent_id="code"),
             record_usage=True,
