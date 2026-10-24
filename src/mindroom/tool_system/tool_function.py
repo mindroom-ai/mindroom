@@ -6,6 +6,7 @@ They import no Agno module; ``agno_toolkits`` builds them from Agno's tool objec
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.provider import ToolSpec
@@ -21,6 +22,15 @@ type ToolkitClose = Callable[[], Awaitable[None]]
 type ToolkitConnect = Callable[[], Awaitable[ToolkitClose | None]]
 
 
+class InjectedValue(StrEnum):
+    """What a framework-injected parameter receives at call time."""
+
+    ACTOR = "actor"  # The adapted toolkit's agent or team stand-in, ``ToolCallActor``.
+    RUN_CONTEXT = "run_context"
+    MEDIA = "media"  # The run's media, which the owned loop never has, so None.
+    DEFAULT = "default"  # Nothing, so the parameter keeps its default.
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolFunction:
     """One callable tool with its model-facing definition and the flags the loop reads.
@@ -29,8 +39,8 @@ class ToolFunction:
     ``description``, ``strict``, ``requires_confirmation``, and ``external_execution`` are None when the tool never
     set them, which the loop reads as False and the wire omits.
     ``external_execution_silent`` marks an externally executed call whose pause the run reports without text.
-    ``injected_params`` names the entrypoint parameters the framework supplies at call time, which the model never
-    sees and whose model-sent values are dropped.
+    ``injected_params`` maps each entrypoint parameter the framework supplies at call time to what it receives; the
+    model never sees one, and its model-sent values are dropped unless it is a media name the schema declares.
     ``entrypoint_processed`` marks a function that does not set ``skip_entrypoint_processing`` (MCP tools and a
     toolkit's ``@tool`` methods set it); realtime calls run Agno's entrypoint processing on such a function a second
     time, which closes its object schemas (see the TODO in ``matrix_rtc/call_tools.py``).
@@ -50,7 +60,7 @@ class ToolFunction:
     external_execution_silent: bool | None = None
     stop_after_call: bool = False
     entrypoint: Callable[..., Any]
-    injected_params: frozenset[str] = frozenset()
+    injected_params: Mapping[str, InjectedValue] = field(default_factory=dict)
     entrypoint_processed: bool = False
     actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
     middleware: tuple[ToolMiddleware, ...] = ()

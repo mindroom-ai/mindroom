@@ -10,6 +10,7 @@ MindRoom modules outside the tool and toolkit packages import Agno's tool types 
 from __future__ import annotations
 
 import inspect
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, get_type_hints
@@ -23,8 +24,6 @@ from agno.tools import Toolkit
 from agno.tools.function import Function, ToolResult
 from agno.utils.schema import (
     AGNO_INJECTED_PARAMS,
-    FRAMEWORK_INJECTED_PARAMS,
-    IDENTITY_INJECTED_PARAMS,
     MEDIA_INJECTED_PARAMS,
     annotation_binds,
     is_framework_typed,
@@ -34,7 +33,7 @@ from agno.utils.schema import (
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.declarations import finished_tool_schema
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
+from mindroom.tool_system.tool_function import AdaptedToolkit, InjectedValue, ToolFunction, ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -47,9 +46,14 @@ logger = get_logger(__name__)
 # keeps any other schema the tool authored.
 AGNO_EMPTY_PARAMETERS: Mapping[str, Any] = {"type": "object", "properties": {}, "required": []}
 
-# Agno injects ``fc`` (its FunctionCall) by name beside the reserved framework names; the owned executor has no such
-# object, so the parameter keeps its default, but the model never fills it either way.
-_RESERVED_NAMES = frozenset((*FRAMEWORK_INJECTED_PARAMS, *AGNO_INJECTED_PARAMS, "fc"))
+# What Agno supplies to each parameter it fills by name. It injects ``fc`` (its FunctionCall) too; the owned executor
+# has no such object, so that parameter keeps its default, but the model never fills it either way.
+_RESERVED_NAMES: Mapping[str, InjectedValue] = {
+    **dict.fromkeys(("agent", "team", "_agno_agent", "_agno_team"), InjectedValue.ACTOR),
+    **dict.fromkeys(("run_context", "_agno_run_context"), InjectedValue.RUN_CONTEXT),
+    **dict.fromkeys(MEDIA_INJECTED_PARAMS, InjectedValue.MEDIA),
+    "fc": InjectedValue.DEFAULT,
+}
 _UNBINDABLE_KINDS = frozenset(
     (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY),
 )
@@ -158,31 +162,46 @@ def adapt_function(function: Function) -> ToolFunction:
         external_execution_silent=prepared.external_execution_silent,
         stop_after_call=prepared.stop_after_tool_call,
         entrypoint=prepared.entrypoint,
-        injected_params=injected_parameter_names(function.entrypoint),
+        injected_params=injected_parameters(function.entrypoint),
         entrypoint_processed=not function.skip_entrypoint_processing,
     )
 
 
-def injected_parameter_names(entrypoint: Callable[..., Any]) -> frozenset[str]:
-    """Return the entrypoint parameters Agno supplies instead of the model: reserved names and identity-typed ones."""
+def injected_parameters(entrypoint: Callable[..., Any]) -> dict[str, InjectedValue]:
+    """Return what Agno supplies to each parameter of ``entrypoint`` the model does not fill, by name or by type."""
     parameters = inspect.signature(entrypoint).parameters
-    names = {name for name in parameters if name in _RESERVED_NAMES}
+    injected = {name: _RESERVED_NAMES[name] for name in parameters if name in _RESERVED_NAMES}
     try:
         hints = get_type_hints(entrypoint)
     except Exception:
         # Agno falls back to the reserved names when a hint does not resolve, such as an unimportable Agent.
-        return frozenset(names)
+        return injected
     for name, hint in hints.items():
         parameter = parameters.get(name)
-        if parameter is None or parameter.kind in _UNBINDABLE_KINDS or name in names:
+        if parameter is None or parameter.kind in _UNBINDABLE_KINDS or name in injected:
             continue
         try:
             owned = is_framework_typed(hint)
         except Exception:
             owned = True  # Agno treats an unclassifiable annotation as framework-owned.
         if owned:
-            names.add(name)
-    return frozenset(names)
+            injected[name] = _bound_by_annotation(hint)
+    return injected
+
+
+def _bound_by_annotation(hint: object) -> InjectedValue:
+    """Return what Agno binds to an identity-typed parameter (``ctx: RunContext``, ``owner: Agent``), unions included."""
+    from agno.agent import Agent  # noqa: PLC0415 - Only identity-typed parameters need Agno's agent types.
+    from agno.team import Team  # noqa: PLC0415
+
+    # Agno binds no parameter by annotation when classifying one fails.
+    with suppress(Exception):
+        hint = unwrap_annotation(hint)
+        if annotation_binds(hint, (Agent, Team)):
+            return InjectedValue.ACTOR
+        if annotation_binds(hint, (RunContext,)):
+            return InjectedValue.RUN_CONTEXT
+    return InjectedValue.DEFAULT
 
 
 # AGNO_COMPAT: Agno toolkits take the calling agent as a parameter.
@@ -210,40 +229,19 @@ def framework_arguments(function: ToolFunction, context: ToolCallContext) -> dic
     """Return the framework-supplied arguments of one call, keyed by the entrypoint parameters that take them."""
     if not function.injected_params:
         return {}
-    run_context = RunContext(
-        run_id=context.run_id,
-        session_id=context.session_id,
-        user_id=context.user_id,
-        metadata=context.metadata,
-        session_state=context.session_state,
-    )
-    actor = ToolCallActor(session_state=function.actor_state)
-    by_name: dict[str, Any] = {
-        "agent": actor,
-        "team": actor,
-        "run_context": run_context,
-        "_agno_agent": actor,
-        "_agno_team": actor,
-        "_agno_run_context": run_context,
+    supplied: dict[InjectedValue, object] = {
+        InjectedValue.ACTOR: ToolCallActor(session_state=function.actor_state),
+        InjectedValue.RUN_CONTEXT: RunContext(
+            run_id=context.run_id,
+            session_id=context.session_id,
+            user_id=context.user_id,
+            metadata=context.metadata,
+            session_state=context.session_state,
+        ),
         # The owned loop gives a tool no run media, so each media name receives None.
-        **dict.fromkeys(MEDIA_INJECTED_PARAMS),
+        InjectedValue.MEDIA: None,
     }
-    arguments = {name: by_name[name] for name in function.injected_params if name in by_name}
-    typed = function.injected_params - set(by_name) - {"fc"}
-    if not typed:
-        return arguments
-    # Agno binds identity objects by annotation too (``ctx: RunContext``, ``owner: Agent``), unions included.
-    from agno.agent import Agent  # noqa: PLC0415 - Only identity-typed parameters need Agno's agent types.
-    from agno.team import Team  # noqa: PLC0415
-
-    hints = get_type_hints(function.entrypoint)
-    for name in typed:
-        hint = unwrap_annotation(hints[name])
-        if annotation_binds(hint, (Agent, Team)):
-            arguments[name] = actor
-        elif annotation_binds(hint, (RunContext,)):
-            arguments[name] = run_context
-    return arguments
+    return {name: supplied[value] for name, value in function.injected_params.items() if value in supplied}
 
 
 def warm_agno_tool_imports() -> None:
@@ -260,12 +258,12 @@ def model_arguments(arguments: Mapping[str, Any], function: ToolFunction) -> dic
     """
     properties = function.parameters.get("properties")
     declared = set(properties) if isinstance(properties, dict) else set()
-    identity = set(IDENTITY_INJECTED_PARAMS) | (function.injected_params - set(FRAMEWORK_INJECTED_PARAMS))
+    injected = function.injected_params
     dropped = {
         name
         for name in arguments
         if name in AGNO_INJECTED_PARAMS
-        or (name in function.injected_params and (name not in declared or name in identity))
+        or (name in injected and (name not in declared or injected[name] != InjectedValue.MEDIA))
     }
     if not dropped:
         return dict(arguments)
@@ -405,7 +403,6 @@ def _owned_file(file: AgnoFile) -> File:
 
 __all__ = [
     "AGNO_EMPTY_PARAMETERS",
-    "MEDIA_INJECTED_PARAMS",
     "AgnoAudio",
     "AgnoFile",
     "AgnoImage",
@@ -418,7 +415,7 @@ __all__ = [
     "adapt_function",
     "adapt_toolkit",
     "framework_arguments",
-    "injected_parameter_names",
+    "injected_parameters",
     "model_arguments",
     "tool_value",
     "warm_agno_tool_imports",

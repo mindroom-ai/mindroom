@@ -107,7 +107,7 @@ async def test_bash_reads_its_exact_provider_call_without_exposing_it_in_the_sch
 
     [bash] = minimal_bash_toolkit(execute=execute).functions
     assert set(bash.parameters["properties"]) == {"command", "timeout", "tail"}
-    assert bash.injected_params == frozenset()
+    assert bash.injected_params == {}
     outcome = await execute_tool_call(bash, {"command": "echo hi"}, _provider_call("actual-provider-id"), middleware=())
     assert outcome.content == "executed"
     assert calls[0][2] == "actual-provider-id"

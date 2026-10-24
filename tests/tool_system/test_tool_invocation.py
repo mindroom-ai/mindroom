@@ -17,10 +17,10 @@ from agno.media import Image as AgnoImage
 from agno.media import Video as AgnoVideo
 from agno.run import RunContext
 from agno.tools import Toolkit
-from agno.tools.function import ToolResult
+from agno.tools.function import Function, ToolResult
 
 from mindroom.llm.media import Image, Video
-from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import (
     ToolArgumentError,
     ToolCall,
@@ -176,6 +176,31 @@ async def test_arguments_that_skip_parsing_cannot_replace_injected_objects() -> 
     assert (run_context.run_id, run_context.user_id) == ("run-1", "@user:localhost")
     assert (ctx.run_id, ctx.user_id) == ("run-1", "@user:localhost")
     assert isinstance(seen["owner"], ToolCallActor)
+
+
+@pytest.mark.asyncio
+async def test_a_schema_may_give_the_model_a_media_name_but_never_an_identity_name() -> None:
+    """A wrapper's schema may expose its wrapped tool's own ``files``; a declared ``agent`` still gets the stand-in."""
+    seen: dict[str, object] = {}
+
+    def tool(query: str, agent: object = None, files: list[str] | None = None) -> str:
+        seen.update(agent=agent, files=files)
+        return query
+
+    schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "agent": {"type": "string"}, "files": {"type": "array"}},
+        "required": ["query"],
+    }
+    function = adapt_function(
+        Function(name="tool", entrypoint=tool, parameters=schema, skip_entrypoint_processing=True),
+    )
+
+    outcome = await _run(function, '{"query": "q", "agent": "spoof", "files": ["notes.txt"]}')
+
+    assert outcome == ToolOutcome(content="q")
+    assert isinstance(seen["agent"], ToolCallActor)
+    assert seen["files"] == ["notes.txt"]
 
 
 @pytest.mark.asyncio

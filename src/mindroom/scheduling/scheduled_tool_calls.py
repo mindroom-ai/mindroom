@@ -27,9 +27,9 @@ from mindroom.approval.tool_approval import (
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
-from mindroom.tool_system.agno_toolkits import MEDIA_INJECTED_PARAMS
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.tool_access import validate_tool_arguments
+from mindroom.tool_system.tool_function import InjectedValue
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 
 if TYPE_CHECKING:
@@ -156,7 +156,7 @@ def _resolve_live_function(
     # was when live runs carried media that a stored call lacked.
     # TODO(simplify): Scheduling refuses a tool that takes media although its live calls get none either. Drop the
     # media check. Models could schedule calls of those tools.
-    takes_media = not function.injected_params.isdisjoint(MEDIA_INJECTED_PARAMS)
+    takes_media = InjectedValue.MEDIA in function.injected_params.values()
     if function.external_execution or function.stop_after_call or takes_media:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(

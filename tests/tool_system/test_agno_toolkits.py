@@ -12,7 +12,7 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system import agno_toolkits
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameter_names
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameters
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from tests.agno_parity import regenerate_tool_goldens
 from tests.agno_parity import tool_argument_probes as probes
@@ -319,7 +319,7 @@ def test_injected_parameters_are_the_names_the_framework_supplies() -> None:
 
     [function] = adapt_toolkit(Toolkit(name="probes", tools=[tool])).functions
 
-    assert function.injected_params == {"agent", "ctx", "fc"}
+    assert function.injected_params == {"agent": "actor", "ctx": "run_context", "fc": "default"}
     assert list(function.parameters["properties"]) == ["query"]
 
 
@@ -336,4 +336,4 @@ def test_unresolvable_annotations_leave_only_the_reserved_names_injected() -> No
         return "ok"
 
     # ``Config`` is imported only for type checking here, so no annotation resolves and ``ctx`` is not recognized.
-    assert injected_parameter_names(tool) == {"run_context", "fc"}
+    assert injected_parameters(tool) == {"run_context": "run_context", "fc": "default"}
