@@ -133,21 +133,13 @@ class _SkillsLoader:
     roots: Sequence[Path]
     config: Config
     runtime_paths: RuntimePaths
+    credential_keys: set[str]
     allowlist: Sequence[str] | None = None
     env_vars: Mapping[str, str] | None = None
-    credential_keys: set[str] | None = None
 
     def load(self) -> list[Skill]:
         """Return the eligible skills for the configured roots and allowlist."""
         env_vars = runtime_env_values(self.runtime_paths) if self.env_vars is None else self.env_vars
-        credential_keys = (
-            self.credential_keys
-            if self.credential_keys is not None
-            else _collect_credential_keys(
-                self.config,
-                self.runtime_paths,
-            )
-        )
         config_data = self.config.model_dump()
         allowlist_set = set(self.allowlist or [])
 
@@ -162,7 +154,7 @@ class _SkillsLoader:
                 normalized,
                 config_data,
                 env_vars=env_vars,
-                credential_keys=credential_keys,
+                credential_keys=self.credential_keys,
             ):
                 continue
             skills_by_name[normalized.name] = normalized
@@ -493,13 +485,13 @@ def build_skills_toolkit(
         return None
     agent_config = config.get_agent(agent_name)
     resolved_credential_keys = (
-        credential_keys if credential_keys is not None else _collect_credential_keys(config, runtime_paths)
+        credential_keys if credential_keys is not None else _collect_credential_keys(runtime_paths)
     )
 
     configured_loader = None
     if agent_config.skills:
         configured_loader = _SkillsLoader(
-            roots=_resolve_configured_skill_roots(skill_roots),
+            roots=_unique_paths(skill_roots if skill_roots is not None else _get_default_skill_roots()),
             config=config,
             runtime_paths=runtime_paths,
             allowlist=agent_config.skills,
@@ -573,15 +565,6 @@ class _SkillListing:
     origin: str
 
 
-@dataclass(frozen=True)
-class _ResolvedSkillFrontmatter:
-    """Normalized skill metadata parsed from SKILL.md."""
-
-    name: str
-    description: str
-    frontmatter: Mapping[str, Any]
-
-
 def set_plugin_skill_roots(roots: Sequence[Path]) -> None:
     """Replace the plugin-provided skill roots, invalidating cached skills only on change.
 
@@ -599,11 +582,6 @@ def set_plugin_skill_roots(roots: Sequence[Path]) -> None:
 def get_plugin_skill_roots() -> list[Path]:
     """Return the current plugin-provided skill roots."""
     return list(_PLUGIN_SKILL_ROOTS)
-
-
-def _get_plugin_skill_roots() -> list[Path]:
-    """Return the current plugin-provided skill roots."""
-    return get_plugin_skill_roots()
 
 
 def get_user_skills_dir() -> Path:
@@ -635,36 +613,21 @@ def agent_workspace_skills_root(runtime_paths: RuntimePaths, agent_name: str, *,
     return root / _WORKSPACE_SKILLS_DIRNAME
 
 
-def _resolve_configured_skill_roots(skill_roots: Sequence[Path] | None = None) -> list[Path]:
-    """Return configured global skill roots without the agent workspace root."""
-    return _unique_paths(list(skill_roots) if skill_roots is not None else _get_default_skill_roots())
-
-
 def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListing]:
     """Return skill listings with precedence rules applied."""
     roots = list(roots or _get_default_skill_roots())
     bundled_root = _get_bundled_skills_dir().expanduser().resolve()
     user_root = get_user_skills_dir().expanduser().resolve()
-    plugin_roots = {root.expanduser().resolve() for root in _get_plugin_skill_roots()}
+    plugin_roots = {root.expanduser().resolve() for root in _PLUGIN_SKILL_ROOTS}
 
     skills_by_name: dict[str, _SkillListing] = {}
     for root in _unique_paths(roots):
         origin = _root_origin(root, bundled_root, user_root, plugin_roots)
         for skill_dir in _iter_skill_dirs(root):
-            resolved_frontmatter = _resolve_skill_frontmatter(
-                skill_dir,
-                allow_missing_frontmatter=True,
-            )
-            if resolved_frontmatter is None:
-                continue
-
-            listing = _SkillListing(
-                name=resolved_frontmatter.name,
-                description=resolved_frontmatter.description,
-                path=skill_dir / SKILL_FILENAME,
-                origin=origin,
-            )
-            skills_by_name[listing.name] = listing
+            identity = _listed_skill_identity(skill_dir)
+            if identity is not None:
+                name, description = identity
+                skills_by_name[name] = _SkillListing(name, description, skill_dir / SKILL_FILENAME, origin)
 
     return sorted(skills_by_name.values(), key=lambda item: item.name.lower())
 
@@ -725,16 +688,18 @@ def _snapshot_skill_files(root: Path) -> list[tuple[str, int, int]]:
 def _iter_skill_dirs(root: Path) -> list[Path]:
     if not root.exists() or not root.is_dir():
         return []
+    return sorted(_skill_folders(root))
 
+
+def _skill_folders(root: Path) -> list[Path]:
+    """Return ``root`` when it is one skill folder, otherwise each visible skill folder below it, in directory order."""
     if (root / SKILL_FILENAME).exists():
         return [root]
-
-    skill_dirs = [
+    return [
         path
         for path in root.iterdir()
         if path.is_dir() and not path.name.startswith(".") and (path / SKILL_FILENAME).exists()
     ]
-    return sorted(skill_dirs)
 
 
 class SkillMarkdownError(ValueError):
@@ -774,20 +739,15 @@ def parse_skill_markdown(
 def _parse_skill_frontmatter(
     content: str,
     *,
-    allow_missing: bool,
     load_yaml: Callable[[str], Any] = yaml_io.safe_load_without_aliases,
 ) -> tuple[dict[str, Any], str]:
     """Split one ``SKILL.md`` like ``parse_skill_markdown``, reading one without frontmatter as all instructions."""
-    if allow_missing and not _match_skill_frontmatter(content):
+    if not _match_skill_frontmatter(content):
         return {}, content
     return parse_skill_markdown(content, load_yaml=load_yaml)
 
 
-def _read_skill_frontmatter(
-    skill_path: Path,
-    *,
-    allow_missing: bool = False,
-) -> dict[str, Any] | None:
+def _read_skill_frontmatter(skill_path: Path) -> dict[str, Any] | None:
     try:
         content = skill_path.read_text(encoding="utf-8")
     except Exception as exc:
@@ -795,7 +755,7 @@ def _read_skill_frontmatter(
         return None
     # Only operator skill roots are listed here, and agents load them with Agno's plain YAML loader, so parse alike.
     try:
-        return _parse_skill_frontmatter(content, allow_missing=allow_missing, load_yaml=yaml_io.safe_load)[0]
+        return _parse_skill_frontmatter(content, load_yaml=yaml_io.safe_load)[0]
     except SkillMarkdownError as exc:
         logger.warning("Refused skill frontmatter", path=str(skill_path), error=str(exc))
         return None
@@ -817,31 +777,15 @@ def _normalize_skill_identity(
     return normalized_name, description.strip()
 
 
-def _resolve_skill_frontmatter(
-    skill_dir: Path,
-    *,
-    allow_missing_frontmatter: bool = False,
-) -> _ResolvedSkillFrontmatter | None:
-    frontmatter = _read_skill_frontmatter(
-        skill_dir / SKILL_FILENAME,
-        allow_missing=allow_missing_frontmatter,
-    )
+def _listed_skill_identity(skill_dir: Path) -> tuple[str, str] | None:
+    """Return the name and description a skill listing shows for one skill folder."""
+    frontmatter = _read_skill_frontmatter(skill_dir / SKILL_FILENAME)
     if frontmatter is None:
         return None
-
-    normalized = _normalize_skill_identity(
+    return _normalize_skill_identity(
         frontmatter.get("name", skill_dir.name),
         frontmatter.get("description", ""),
         path=str(skill_dir),
-    )
-    if normalized is None:
-        return None
-
-    name, description = normalized
-    return _ResolvedSkillFrontmatter(
-        name=name,
-        description=description,
-        frontmatter=frontmatter,
     )
 
 
@@ -870,16 +814,7 @@ def _load_root_skills(root: Path) -> list[Skill]:
 # Operator skill roots load as Agno's LocalSkills(validate=False) loaded them, so their skills keep loading the same.
 def _read_skill_root(root: Path) -> list[Skill]:
     """Read one skill folder, or every skill folder directly below ``root``, in directory order."""
-    if (root / SKILL_FILENAME).exists():
-        skill = _read_skill_folder(root)
-        return [] if skill is None else [skill]
-    skills: list[Skill] = []
-    for item in root.iterdir():
-        if item.is_dir() and not item.name.startswith(".") and (item / SKILL_FILENAME).exists():
-            skill = _read_skill_folder(item)
-            if skill is not None:
-                skills.append(skill)
-    return skills
+    return [skill for folder in _skill_folders(root) if (skill := _read_skill_folder(folder)) is not None]
 
 
 def _read_skill_folder(folder: Path) -> Skill | None:
@@ -988,7 +923,7 @@ def _load_workspace_skill(skill_fd: int, source_path: Path, content: str) -> Ski
     Returns why the skill does not load instead when its frontmatter is unreadable or its name too long.
     """
     try:
-        frontmatter, instructions = _parse_skill_frontmatter(content, allow_missing=True)
+        frontmatter, instructions = _parse_skill_frontmatter(content)
     except SkillMarkdownError as exc:
         logger.warning("Refused skill frontmatter", path=str(source_path), error=str(exc))
         # The reason reaches the agent's prompt, and a parse error can quote planted frontmatter.
@@ -1159,32 +1094,6 @@ def _matches_current_os(requirements: Sequence[str]) -> bool:
     return any(requirement.lower() in aliases for requirement in requirements)
 
 
-def _env_requirements_met(
-    requirements: Sequence[str],
-    env_vars: Mapping[str, str],
-    credential_keys: set[str],
-) -> bool:
-    for requirement in requirements:
-        if env_vars.get(requirement):
-            continue
-        if requirement in credential_keys:
-            continue
-        return False
-    return True
-
-
-def _missing_bins(requirements: Sequence[str]) -> list[str]:
-    return [requirement for requirement in requirements if shutil.which(requirement) is None]
-
-
-def _any_bins_requirements_met(requirements: Sequence[str]) -> bool:
-    return any(shutil.which(requirement) for requirement in requirements)
-
-
-def _config_requirements_met(requirements: Sequence[str], config_data: Mapping[str, Any]) -> bool:
-    return all(_config_path_truthy(config_data, requirement) for requirement in requirements)
-
-
 def _requirements_met(
     requires: object,
     config_data: Mapping[str, Any],
@@ -1196,23 +1105,19 @@ def _requirements_met(
         return True
     reqs = cast("dict[str, Any]", requires)
 
-    env_requirements = _normalize_str_list(reqs.get("env"))
-    if env_requirements and not _env_requirements_met(env_requirements, env_vars, credential_keys):
+    if not all(env_vars.get(name) or name in credential_keys for name in _normalize_str_list(reqs.get("env"))):
         return False
 
-    config_requirements = _normalize_str_list(reqs.get("config"))
-    if config_requirements and not _config_requirements_met(config_requirements, config_data):
+    if not all(_config_path_truthy(config_data, path) for path in _normalize_str_list(reqs.get("config"))):
         return False
 
-    bin_requirements = _normalize_str_list(reqs.get("bins"))
-    if bin_requirements:
-        missing_bins = _missing_bins(bin_requirements)
-        if missing_bins:
-            logger.debug("Skill missing required binaries", skill=skill_name, bins=missing_bins)
-            return False
+    missing_bins = [name for name in _normalize_str_list(reqs.get("bins")) if shutil.which(name) is None]
+    if missing_bins:
+        logger.debug("Skill missing required binaries", skill=skill_name, bins=missing_bins)
+        return False
 
     any_bins_requirements = _normalize_str_list(reqs.get("anyBins"))
-    if any_bins_requirements and not _any_bins_requirements_met(any_bins_requirements):
+    if any_bins_requirements and not any(shutil.which(name) for name in any_bins_requirements):
         logger.debug("Skill missing any required binaries", skill=skill_name, bins=any_bins_requirements)
         return False
 
@@ -1229,15 +1134,14 @@ def _config_path_truthy(config_data: Mapping[str, Any], path: str) -> bool:
     return bool(current)
 
 
-def _collect_credential_keys(_config: Config, runtime_paths: RuntimePaths) -> set[str]:
+def _collect_credential_keys(runtime_paths: RuntimePaths) -> set[str]:
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    keys: set[str] = set()
-    for service in credentials_manager.list_services():
-        credentials = credentials_manager.load_credentials(service) or {}
-        for key, value in credentials.items():
-            if value:
-                keys.add(key)
-    return keys
+    return {
+        key
+        for service in credentials_manager.list_services()
+        for key, value in (credentials_manager.load_credentials(service) or {}).items()
+        if value
+    }
 
 
 def _unique_paths(paths: Sequence[Path]) -> list[Path]:

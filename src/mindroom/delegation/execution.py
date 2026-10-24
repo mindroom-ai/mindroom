@@ -1107,7 +1107,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     except ValueError as error:
         tool.tool_call_error = True
         return resolve_result(str(error))
-    args = application_arguments(tool.tool_args) or {}
+    args = application_arguments(tool.tool_args)
     target = await _resolve_delegation_target(
         tool,
         retained,

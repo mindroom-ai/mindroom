@@ -10,20 +10,14 @@ if TYPE_CHECKING:
     from mindroom.tool_system.agno_toolkits import Function, Toolkit
 
 
-def apply_toolkit_function_aliases(
-    toolkit: Toolkit,
-    aliases: Mapping[str, str],
-    *,
-    expose_attributes: bool = True,
-) -> Toolkit:
+def apply_toolkit_function_aliases(toolkit: Toolkit, aliases: Mapping[str, str]) -> Toolkit:
     """Rename model-visible toolkit functions while preserving original methods."""
     toolkit.functions = _aliased_functions(toolkit.functions, aliases)
     toolkit.async_functions = _aliased_functions(toolkit.async_functions, aliases)
-    if expose_attributes:
-        for aliased_name in aliases.values():
-            function = toolkit.functions.get(aliased_name)
-            if function is not None and function.entrypoint is not None:
-                setattr(toolkit, aliased_name, function.entrypoint)
+    for aliased_name in aliases.values():
+        function = toolkit.functions.get(aliased_name)
+        if function is not None and function.entrypoint is not None:
+            setattr(toolkit, aliased_name, function.entrypoint)
     return toolkit
 
 

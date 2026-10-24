@@ -24,7 +24,7 @@ from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
-from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -241,7 +241,7 @@ def _write_working_tool_plugin(plugin_root: Path, *, plugin_name: str, tool_name
 def _preserved_plugin_loader_state(*, module_prefixes: tuple[str, ...] = ()) -> Iterator[None]:
     original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
@@ -359,7 +359,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
 
     original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
@@ -369,7 +369,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
         assert "demo_plugin" in TOOL_REGISTRY
         tool = get_tool_by_name("demo_plugin", runtime_paths_for(config), worker_target=None)
         assert tool.name == "demo"
-        assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
+        assert (plugin_root / "skills").resolve() in get_plugin_skill_roots()
     finally:
         TOOL_REGISTRY.clear()
         TOOL_REGISTRY.update(original_registry)
@@ -418,7 +418,7 @@ def test_resolved_tool_metadata_for_runtime_does_not_mutate_live_registry(tmp_pa
     original_metadata = TOOL_METADATA.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
 
     try:
         resolved_metadata = metadata_module.resolved_tool_metadata_for_runtime(
@@ -492,7 +492,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
 
     original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
@@ -503,7 +503,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
         assert "demo_pkg_tool" in TOOL_REGISTRY
         tool = get_tool_by_name("demo_pkg_tool", runtime_paths_for(config), worker_target=None)
         assert tool.name == "demo_pkg"
-        assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
+        assert (plugin_root / "skills").resolve() in get_plugin_skill_roots()
     finally:
         TOOL_REGISTRY.clear()
         TOOL_REGISTRY.update(original_registry)
@@ -531,7 +531,7 @@ def test_load_plugins_from_explicit_python_package_spec(tmp_path: Path, monkeypa
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["python:demo_pkg"]), config_path)
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
@@ -551,7 +551,7 @@ def test_explicit_python_plugin_spec_requires_importable_module(tmp_path: Path) 
     """Explicit python: specs should fail closed when the module cannot be resolved."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
@@ -718,7 +718,7 @@ def test_load_plugins_accepts_safe_manifest_names(tmp_path: Path, plugin_name: s
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/safe-name"]), config_path)
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
 
     try:
         plugins = load_plugins(config, runtime_paths_for(config))
@@ -793,7 +793,7 @@ def test_load_plugins_skips_missing_plugin_directory_with_warning(
     original_metadata = TOOL_METADATA.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
 
     monkeypatch.setattr(plugin_module, "logger", mock_logger)
 
@@ -865,7 +865,7 @@ def test_load_plugins_rejects_missing_tools_module(tmp_path: Path) -> None:
 
 def test_validate_with_runtime_does_not_mutate_plugin_skill_roots(tmp_path: Path) -> None:
     """Runtime validation should not swap global plugin skill roots before activation."""
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     sentinel_root = tmp_path / "existing-plugin-skills"
     sentinel_root.mkdir()
     set_plugin_skill_roots([sentinel_root])
@@ -883,7 +883,7 @@ def test_validate_with_runtime_does_not_mutate_plugin_skill_roots(tmp_path: Path
 
     try:
         _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
-        assert _get_plugin_skill_roots() == [sentinel_root.resolve()]
+        assert get_plugin_skill_roots() == [sentinel_root.resolve()]
     finally:
         set_plugin_skill_roots(original_plugin_roots)
 
@@ -923,7 +923,7 @@ def test_load_plugins_warns_once_for_repeated_non_bundled_plugin_loads(
     mock_logger = MagicMock()
     original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_warned_messages = plugin_module._WARNED_PLUGIN_MESSAGES.copy()
@@ -968,13 +968,13 @@ def test_load_plugins_revalidates_skill_dirs_when_manifest_cache_is_warm(tmp_pat
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     try:
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo-plugin"]
         skill_dir.rmdir()
         assert load_plugins(config, runtime_paths_for(config)) == []
-        assert _get_plugin_skill_roots() == []
+        assert get_plugin_skill_roots() == []
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
@@ -1287,7 +1287,7 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
 
     try:
         assert [plugin.name for plugin in load_plugins(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
@@ -1365,7 +1365,7 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
 
     try:
         assert [plugin.name for plugin in load_plugins(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
@@ -1419,7 +1419,7 @@ def test_load_plugins_preserves_metadata_only_built_in_tools(tmp_path: Path) -> 
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
 
     try:
         assert load_plugins(config_without_plugins, runtime_paths_for(config_without_plugins)) == []
@@ -1474,7 +1474,7 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
 
     try:
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo_plugin"]
@@ -1687,7 +1687,7 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
 
     try:
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo_plugin"]
@@ -1803,7 +1803,7 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     mock_logger = MagicMock()
 
     monkeypatch.setattr(plugin_module, "logger", mock_logger)
@@ -2583,7 +2583,7 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     mock_logger = MagicMock()
 
     monkeypatch.setattr(plugin_module, "logger", mock_logger)
@@ -2938,7 +2938,7 @@ async def test_reload_plugins_invalidates_helper_modules_under_plugin_root(tmp_p
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/helper-reload"]), config_path)
 
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
@@ -2994,7 +2994,7 @@ def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> No
     config = _bind_runtime_paths(Config(plugins=["./plugins/oauth-reload"]), config_path)
     runtime_paths = runtime_paths_for(config)
 
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
@@ -3108,7 +3108,7 @@ async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -
     config = _bind_runtime_paths(Config(plugins=["./plugins/task-reload"]), config_path)
     runtime_paths = runtime_paths_for(config)
 
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     shared_task = asyncio.create_task(asyncio.Event().wait())
@@ -3163,7 +3163,7 @@ async def test_reload_plugins_cancels_tasks_for_removed_plugins(tmp_path: Path) 
     config_without_plugin = _bind_runtime_paths(Config(plugins=[]), config_path)
     runtime_paths = runtime_paths_for(config_with_plugin)
 
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
@@ -3218,7 +3218,7 @@ def test_reload_plugins_raises_when_configured_plugin_becomes_invalid(tmp_path: 
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/broken-reload"]), config_path)
 
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
@@ -3275,7 +3275,7 @@ def test_failed_strict_tool_plugin_reload_preserves_previous_live_registry(tmp_p
 
     original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
@@ -3329,7 +3329,7 @@ def test_reload_plugins_skip_broken_plugins_keeps_healthy_plugin_when_explicit_p
     runtime_paths = _minimal_runtime_paths(tmp_path)
     config = Config(plugins=["./plugins/good", "python:definitely_missing_package.sub"])
 
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
@@ -3425,6 +3425,6 @@ def test_deactivating_plugins_clears_cached_plugin_skills(tmp_path: Path) -> Non
 
         plugins_module.deactivate_plugins()
 
-        assert _get_plugin_skill_roots() == []
+        assert get_plugin_skill_roots() == []
         assert skills_module._load_root_skills(skills_root) is not first_load
         skills_module.clear_skill_cache()

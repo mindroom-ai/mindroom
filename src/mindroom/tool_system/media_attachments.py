@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.attachments.storage import register_bytes_attachment
@@ -15,20 +15,24 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def _retain_tool_media(result: object) -> object:  # noqa: PLR0911
+def _ready_receipt(result: ToolResult) -> dict[str, Any] | None:
+    """Return the JSON receipt of a ready image view, or None when ``result`` is not one."""
+    if not isinstance(result.content, str):
+        return None
+    try:
+        receipt = json.loads(result.content)
+    except (ValueError, TypeError):
+        return None
+    return receipt if isinstance(receipt, dict) and receipt.get("view_status") == "ready" else None
+
+
+def _retain_tool_media(result: object) -> object:
     """Keep delivered bytes for reuse; never resolve paths supplied by a worker."""
     context = get_tool_runtime_context()
     if not isinstance(result, ToolResult) or not result.images or context is None or context.storage_path is None:
         return result
-    if len(result.images) != 1 or not isinstance(result.content, str):
-        return result
-    try:
-        metadata = json.loads(result.content)
-    except (ValueError, TypeError):
-        return result
-    if not isinstance(metadata, dict) or metadata.get("view_status") != "ready":
-        return result
-    if metadata.get("attachment_id"):
+    metadata = _ready_receipt(result) if len(result.images) == 1 else None
+    if metadata is None or metadata.get("attachment_id"):
         return result
     image = result.images[0]
     if not isinstance(image.content, bytes) or image.mime_type not in {"image/png", "image/jpeg"}:
@@ -68,13 +72,8 @@ def _image_marked_unsupported(result: object, context: ToolRuntimeContext) -> ob
     """Turn a ready image view into an explicit unsupported result when the active model cannot see it."""
     if not isinstance(result, ToolResult) or not result.images or not _active_model_omits_images(context):
         return result
-    if not isinstance(result.content, str):
-        return result
-    try:
-        receipt = json.loads(result.content)
-    except (TypeError, ValueError):
-        return result
-    if not isinstance(receipt, dict) or receipt.get("view_status") != "ready":
+    receipt = _ready_receipt(result)
+    if receipt is None:
         return result
     receipt["view_status"] = "unsupported"
     receipt["message"] = "The active model adapter does not support viewed image tool results."

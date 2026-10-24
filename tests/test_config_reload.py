@@ -53,7 +53,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_system.plugins import PluginReloadResult
-from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -1012,7 +1012,7 @@ async def test_reload_plugins_now_deactivates_broken_plugin_after_failure(tmp_pa
     orchestrator.config = config
     orchestrator.running = True
 
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
@@ -1094,7 +1094,7 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
     orchestrator.config = config
     orchestrator.running = True
 
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
@@ -1105,7 +1105,7 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
             "first",
             "second",
         ]
-        assert _get_plugin_skill_roots() == [first_root / "skills"]
+        assert get_plugin_skill_roots() == [first_root / "skills"]
 
         second_manifest_path.write_text(
             '{"name": "first", "hooks_module": "hooks.py", "skills": []}',
@@ -1116,7 +1116,7 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
             await orchestrator.reload_plugins_now(source="test")
 
         assert orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED) == ()
-        assert _get_plugin_skill_roots() == []
+        assert get_plugin_skill_roots() == []
     finally:
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
@@ -1425,7 +1425,7 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
 ) -> None:
     """Config-driven plugin removal should tear down the old live plugin runtime."""
     hooks_path = _write_plugin_removal_test_files(tmp_path)
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)
@@ -1599,7 +1599,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         authorization_changed=False,
     )
 
-    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_roots = get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_modules = set(sys.modules)

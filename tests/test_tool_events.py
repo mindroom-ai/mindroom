@@ -8,7 +8,6 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.tool_system.events import (
     _MAX_TOOL_RESULT_DISPLAY_CHARS,
-    _MAX_TOOL_TRACE_EVENTS,
     _TOOL_TRACE_KEY,
     StreamingToolTracker,
     ToolTraceEntry,
@@ -468,14 +467,12 @@ def test_streaming_tool_tracker_updates_visible_trace_slot() -> None:
 
 def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None:
     """V2 tool trace keeps all events so `[N] -> events[N-1]` remains valid."""
-    entries = [
-        ToolTraceEntry(type="tool_call_started", tool_name=f"tool_{i}") for i in range(_MAX_TOOL_TRACE_EVENTS + 5)
-    ]
+    entries = [ToolTraceEntry(type="tool_call_started", tool_name=f"tool_{i}") for i in range(125)]
     payload = build_tool_trace_content(entries)
     assert payload is not None
     trace = payload[_TOOL_TRACE_KEY]
     assert trace["version"] == 2
-    assert len(trace["events"]) == _MAX_TOOL_TRACE_EVENTS + 5
+    assert len(trace["events"]) == 125
     assert "events_truncated" not in trace
 
 

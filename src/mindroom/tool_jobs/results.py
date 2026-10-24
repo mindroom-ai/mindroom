@@ -73,10 +73,9 @@ def _file_bytes(path: Path, allowance: _FileAllowance) -> bytes:
 
 def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit branch per supported wire tag.
     if isinstance(value, ToolValue):
+        media = (value.images, value.audios, value.videos, value.files)
         fields: dict[str, Any] = {"content": value.content}
-        fields.update(
-            {name: list(media) for name, media in zip(_TOOL_VALUE_MEDIA, _tool_value_media(value), strict=True)},
-        )
+        fields.update({name: list(items) for name, items in zip(_TOOL_VALUE_MEDIA, media, strict=True)})
         return {"type": "ToolResult", "value": _encode(fields, allowance)}
     if isinstance(value, (Image, Audio, Video, File)):
         fields = asdict(value)
@@ -102,10 +101,6 @@ def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901
         return value
     # Any other value, such as a datetime or a driver's own type, keeps the text the model reads for it inline.
     return str(value)
-
-
-def _tool_value_media(value: ToolValue) -> tuple[tuple[Any, ...], ...]:
-    return value.images, value.audios, value.videos, value.files
 
 
 def _decode(value: Any) -> Any:  # noqa: ANN401, PLR0911 - One explicit branch per supported wire tag.

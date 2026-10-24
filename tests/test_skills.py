@@ -895,10 +895,10 @@ def test_workspace_skills_that_fail_to_load_still_spend_the_budget(
     parse = skills_module._parse_skill_frontmatter
     parse_count = 0
 
-    def recording_parse(content: str, *, allow_missing: bool) -> tuple[dict[str, Any], str]:
+    def recording_parse(content: str) -> tuple[dict[str, Any], str]:
         nonlocal parse_count
         parse_count += 1
-        return parse(content, allow_missing=allow_missing)
+        return parse(content)
 
     monkeypatch.setattr(skills_module, "_parse_skill_frontmatter", recording_parse)
 

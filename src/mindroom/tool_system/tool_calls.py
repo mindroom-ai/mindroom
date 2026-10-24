@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from threading import Lock
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 from mindroom.constants import tracking_dir
 from mindroom.logging_config import get_logger
@@ -332,6 +332,25 @@ def _append_tool_call_record(record: _ToolCallRecord, runtime_paths: RuntimePath
     )
 
 
+def _persist_tool_call_record(
+    record: _ToolCallRecord,
+    runtime_paths: RuntimePaths | None,
+    *,
+    outcome: Literal["failure", "success"],
+) -> _ToolCallRecord:
+    """Append one record to the tool-call log when runtime paths are available; a failed write is only logged."""
+    if runtime_paths is None:
+        event = f"Skipping tool {outcome} persistence without runtime paths"
+        logger.debug(event, tool_name=record.tool_name, correlation_id=record.correlation_id)
+        return record
+    try:
+        _append_tool_call_record(record, runtime_paths)
+    except Exception:
+        event = f"Failed to persist tool {outcome} record"
+        logger.exception(event, tool_name=record.tool_name, correlation_id=record.correlation_id)
+    return record
+
+
 def record_tool_failure(
     *,
     tool_name: str,
@@ -367,22 +386,7 @@ def record_tool_failure(
         correlation_id=correlation_id,
         origin=origin,
     )
-    if runtime_paths is None:
-        logger.debug(
-            "Skipping tool failure persistence without runtime paths",
-            tool_name=tool_name,
-            correlation_id=correlation_id,
-        )
-        return record
-    try:
-        _append_tool_call_record(record, runtime_paths)
-    except Exception:
-        logger.exception(
-            "Failed to persist tool failure record",
-            tool_name=tool_name,
-            correlation_id=correlation_id,
-        )
-    return record
+    return _persist_tool_call_record(record, runtime_paths, outcome="failure")
 
 
 def record_tool_success(
@@ -420,19 +424,4 @@ def record_tool_success(
         correlation_id=correlation_id,
         origin=origin,
     )
-    if runtime_paths is None:
-        logger.debug(
-            "Skipping tool success persistence without runtime paths",
-            tool_name=tool_name,
-            correlation_id=correlation_id,
-        )
-        return record
-    try:
-        _append_tool_call_record(record, runtime_paths)
-    except Exception:
-        logger.exception(
-            "Failed to persist tool success record",
-            tool_name=tool_name,
-            correlation_id=correlation_id,
-        )
-    return record
+    return _persist_tool_call_record(record, runtime_paths, outcome="success")

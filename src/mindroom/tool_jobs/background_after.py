@@ -39,8 +39,6 @@ def read_background_after(arguments: dict[str, Any] | None, *, owned_execution: 
     return value
 
 
-def application_arguments(arguments: dict[str, Any] | None) -> dict[str, Any] | None:
+def application_arguments(arguments: dict[str, Any] | None) -> dict[str, Any]:
     """Remove reserved metadata without mutating exact persisted call evidence."""
-    if arguments is None:
-        return None
-    return {key: value for key, value in arguments.items() if key != BACKGROUND_AFTER}
+    return {key: value for key, value in (arguments or {}).items() if key != BACKGROUND_AFTER}

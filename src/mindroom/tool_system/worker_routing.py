@@ -33,12 +33,10 @@ _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
 SHARED_DIRECTORIES_DIRNAME = "shared_directories"
 WORKER_CREDENTIALS_DIRNAME = "credentials"
 WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
-_SHARED_ONLY_INTEGRATION_NAMES = frozenset(
-    {
-        "spotify",
-        "homeassistant",
-    },
-)
+# Tools and dashboard integrations restricted to shared scope. MCP registry tools are supported on every scope:
+# OAuth-backed servers follow the configured worker scope, and non-OAuth servers always execute through the shared
+# server session without requester credentials.
+_SHARED_ONLY_INTEGRATION_NAMES = frozenset({"spotify", "homeassistant"})
 
 
 @dataclass(frozen=True)
@@ -124,18 +122,7 @@ def parse_tool_execution_identity_payload(
             )
         optional_values[field_name] = value
 
-    return ToolExecutionIdentity(
-        channel=cast("_ExecutionChannel", channel),
-        agent_name=agent_name,
-        requester_id=optional_values["requester_id"],
-        room_id=optional_values["room_id"],
-        thread_id=optional_values["thread_id"],
-        resolved_thread_id=optional_values["resolved_thread_id"],
-        session_id=optional_values["session_id"],
-        tenant_id=optional_values["tenant_id"],
-        account_id=optional_values["account_id"],
-        transport_agent_name=optional_values["transport_agent_name"],
-    )
+    return ToolExecutionIdentity(channel=cast("_ExecutionChannel", channel), agent_name=agent_name, **optional_values)
 
 
 def _invalid_tool_execution_identity_payload(strict: bool, message: str) -> None:
@@ -292,12 +279,6 @@ def _encode_worker_requester_part(value: str) -> str:
 def _normalize_worker_dir_part(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9._@+-]+", "_", value.strip()).strip("_")
     return normalized or "worker"
-
-
-def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
-    if identity.requester_id:
-        return _encode_worker_requester_part(identity.requester_id)
-    return None
 
 
 def build_tool_execution_identity(
@@ -466,21 +447,9 @@ def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | Non
     return worker_scope in (None, "shared")
 
 
-def _requires_shared_only_integration_scope(name: str) -> bool:
-    """Return whether a tool or dashboard integration is restricted to shared scope.
-
-    MCP registry tools are supported on every scope: OAuth-backed servers follow
-    the configured worker scope, and non-OAuth servers always execute through
-    the shared server session without requester credentials.
-    """
-    return name in _SHARED_ONLY_INTEGRATION_NAMES
-
-
 def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:
     """Return whether one tool/integration name is supported for the effective execution scope."""
-    return not _requires_shared_only_integration_scope(name) or worker_scope_allows_shared_only_integrations(
-        worker_scope,
-    )
+    return name not in _SHARED_ONLY_INTEGRATION_NAMES or worker_scope_allows_shared_only_integrations(worker_scope)
 
 
 def unsupported_shared_only_integration_names(
@@ -490,7 +459,7 @@ def unsupported_shared_only_integration_names(
     """Return shared-only integration names that are invalid for the effective execution scope."""
     if worker_scope_allows_shared_only_integrations(worker_scope):
         return []
-    return [name for name in names if _requires_shared_only_integration_scope(name)]
+    return [name for name in names if name in _SHARED_ONLY_INTEGRATION_NAMES]
 
 
 def unsupported_shared_only_integration_message(
@@ -521,25 +490,17 @@ def resolve_worker_key(
     """Derive a stable worker key from scope and execution identity."""
     tenant_key = normalize_worker_key_part(identity.tenant_id or identity.account_id or "default")
     effective_agent_name = normalize_worker_key_part(agent_name or identity.agent_name)
-    worker_key: str | None
-
     if worker_scope == "shared":
-        worker_key = f"v1:{tenant_key}:shared:{effective_agent_name}"
-    elif worker_scope == "user":
-        requester_key = _identity_requester_key(identity)
-        if requester_key is None:
-            return None
-        worker_key = f"v1:{tenant_key}:user:{requester_key}"
-    elif worker_scope == "user_agent":
-        requester_key = _identity_requester_key(identity)
-        if requester_key is None:
-            return None
-        worker_key = f"v1:{tenant_key}:user_agent:{requester_key}:{effective_agent_name}"
-    else:
+        return f"v1:{tenant_key}:shared:{effective_agent_name}"
+    if worker_scope not in ("user", "user_agent"):
         msg = f"Unknown worker scope: {worker_scope}"
         raise ValueError(msg)
-
-    return worker_key
+    if not identity.requester_id:
+        return None
+    requester_key = _encode_worker_requester_part(identity.requester_id)
+    if worker_scope == "user":
+        return f"v1:{tenant_key}:user:{requester_key}"
+    return f"v1:{tenant_key}:user_agent:{requester_key}:{effective_agent_name}"
 
 
 def resolve_unscoped_worker_key(
@@ -600,17 +561,11 @@ def worker_key_agent_name(worker_key: str) -> str | None:
     scope = resolved_worker_key_scope(worker_key)
     if scope is None or scope == "user":
         return None
-
     parts = worker_key.split(":")
-    min_parts_by_scope = {
-        "shared": 4,
-        "unscoped": 4,
-        "user_agent": 5,
-    }
-    min_parts = min_parts_by_scope.get(scope)
-    if min_parts is None or len(parts) < min_parts:
-        return None
-    return parts[3] if scope in {"shared", "unscoped"} else parts[-1]
+    # A scoped key has at least four parts; a user_agent key also names its requester before the agent.
+    if scope == "user_agent":
+        return parts[-1] if len(parts) >= 5 else None
+    return parts[3]
 
 
 def _resolve_execution_identity_for_worker_scope(
