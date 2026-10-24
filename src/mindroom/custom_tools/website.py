@@ -199,9 +199,9 @@ class _MindRoomWebsiteReader:
     _visited: set[str] = field(default_factory=set, init=False, repr=False)
     _urls_to_crawl: list[tuple[str, int]] = field(default_factory=list, init=False, repr=False)
 
-    def delay(self, min_seconds: float = 1, max_seconds: float = 3) -> None:
-        """Pause a random interval before each fetch so a crawl does not hammer one host."""
-        time.sleep(random.uniform(min_seconds, max_seconds))  # noqa: S311 - pacing, not security.
+    def delay(self) -> None:
+        """Pause a random 1-3 seconds before each fetch so a crawl does not hammer one host."""
+        time.sleep(random.uniform(1, 3))  # noqa: S311 - pacing, not security.
 
     def _queue_links(self, soup: BeautifulSoup, current_url: str, current_depth: int, crawl_host: str) -> None:
         """Queue same-host crawl links from the unmodified page soup."""
@@ -304,18 +304,12 @@ class _MindRoomWebsiteReader:
 
         return 0
 
-    def _documents_from_crawl(
-        self,
-        crawler_result: dict[str, str],
-        *,
-        url: str,
-        name: str | None,
-    ) -> list[Document]:
-        """Build Agno documents from crawled page content."""
+    def _documents_from_crawl(self, crawler_result: dict[str, str], *, url: str) -> list[Document]:
+        """Build one document per crawled page, named by the URL the crawl started from."""
         documents: list[Document] = []
         for crawled_url, crawled_content in crawler_result.items():
             document = Document(
-                name=name or url,
+                name=url,
                 id=str(crawled_url),
                 meta_data={"url": str(crawled_url)},
                 content=crawled_content,
@@ -341,14 +335,14 @@ class _MindRoomWebsiteReader:
         self._queue_links(soup, current_url, current_depth, crawl_host)
         return bool(main_content)
 
-    def crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
+    def crawl(self, url: str) -> dict[str, str]:
         """Crawl a website while logging only sanitized URL forms."""
         starting_url = validate_server_fetch_url(url)
         crawl_host = _normalized_hostname(starting_url)
         num_links = 0
         crawler_result: dict[str, str] = {}
         self._visited = set()
-        self._urls_to_crawl = [(starting_url, starting_depth)]
+        self._urls_to_crawl = [(starting_url, 1)]
         while self._urls_to_crawl:
             current_url, current_depth = self._urls_to_crawl.pop(0)
             if current_url in self._visited or self._should_skip_crawl_url(
@@ -376,11 +370,11 @@ class _MindRoomWebsiteReader:
 
         return crawler_result
 
-    def read(self, url: str, name: str | None = None) -> list[Document]:
+    def read(self, url: str) -> list[Document]:
         """Read a website while logging only sanitized URL forms."""
         log_debug(f"Reading: {_safe_url_for_log(url)}")
         try:
-            return self._documents_from_crawl(self.crawl(url), url=url, name=name)
+            return self._documents_from_crawl(self.crawl(url), url=url)
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
             log_error(f"Error reading website {_safe_url_for_log(url)}: {e.__class__.__name__}")
             raise
