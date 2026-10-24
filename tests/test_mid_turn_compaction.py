@@ -155,7 +155,7 @@ class _Agent:
     lifecycle: CompactionLifecycle | None = None
     turn_recorder: TurnRecorder | None = None
     native_compaction: NativeCompactionReplay | None = None
-    tool_call_limit: int | None = None
+    max_tool_calls_per_turn: int | None = None
     before_request: tuple[BeforeRequestHook, ...] = ()
     records: list[RunRecord] = field(default_factory=list)
 
@@ -166,7 +166,7 @@ class _Agent:
             model=self.model,
             system_message=None,
             toolkits=(adapt_toolkit(Toolkit(name="probes", tools=list(self.tools))),),
-            tool_call_limit=self.tool_call_limit,
+            max_tool_calls_per_turn=self.max_tool_calls_per_turn,
         )
 
 
@@ -1044,7 +1044,7 @@ async def test_the_loop_caps_a_request_before_compacting_it(tmp_path: Path, summ
     )
 
     # The cap allows the limit plus two requests, so it refuses the fifth.
-    await _run(_agent(model, config, paths, tool_call_limit=2), "Do the task")
+    await _run(_agent(model, config, paths, max_tool_calls_per_turn=2), "Do the task")
 
     assert len(model.requests) == 4
     assert summary_calls.inputs == []

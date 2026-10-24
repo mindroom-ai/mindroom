@@ -74,7 +74,7 @@ async def _catalog(
     owners: Mapping[str, str] | None = None,
     include: Callable[[Any], bool] | None = None,
     middleware: Sequence[ToolMiddleware] = (),
-    tool_call_limit: int | None = None,
+    max_tool_calls_per_turn: int | None = None,
 ) -> agent_tool_calls.PreparedAgentToolCatalog:
     session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
     catalog = agent_tool_calls.PreparedAgentToolCatalog(
@@ -82,7 +82,7 @@ async def _catalog(
         run=RunContext(run_id="run", session_id="session", user_id="@alice:test", session=session),
         runtime_context=_runtime(tmp_path),
         middleware=middleware,
-        tool_call_limit=tool_call_limit,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
     )
     if owners is None:
         owners = {function.name: toolkit.name for toolkit in toolkits for function in toolkit.functions}
@@ -280,7 +280,7 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
         seen.append(value)
         return value
 
-    catalog = await _catalog(tmp_path, [_function(action)], tool_call_limit=1)
+    catalog = await _catalog(tmp_path, [_function(action)], max_tool_calls_per_turn=1)
     events = await _events(catalog, "actions", "action", {"value": "wrong"})
     assert events[-1].kind == "failed"
     assert seen == []

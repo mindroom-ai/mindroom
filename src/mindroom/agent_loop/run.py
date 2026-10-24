@@ -338,7 +338,7 @@ async def drive_run[R: AnyRunRecord](
             record=record,
             run=ctx,
             hooks=hooks,
-            tool_call_limit=spec.tool_call_limit,
+            max_tool_calls_per_turn=spec.max_tool_calls_per_turn,
             request_template=template,
             resumed=resumed,
         )

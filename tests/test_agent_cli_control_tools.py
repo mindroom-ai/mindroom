@@ -86,10 +86,18 @@ def _flagged(name: str, *entrypoints: Callable[..., object], **flags: object) ->
     return AdaptedToolkit(name=name, functions=tuple(functions), instructions=None)
 
 
-async def _delegation_catalog(tmp_path, config, paths, toolkits, *, tool_call_limit=None, approval_handler=None):
+async def _delegation_catalog(
+    tmp_path,
+    config,
+    paths,
+    toolkits,
+    *,
+    max_tool_calls_per_turn=None,
+    approval_handler=None,
+):
     """Return a catalog whose turn may delegate: a stored session, the live parent run, and its requester context."""
     entity_ids(config, paths)
-    catalog = await _catalog(tmp_path, toolkits, tool_call_limit=tool_call_limit)
+    catalog = await _catalog(tmp_path, toolkits, max_tool_calls_per_turn=max_tool_calls_per_turn)
     runtime = _delegate_runtime_context(config, paths)
     runtime = replace(
         runtime,
@@ -235,7 +243,7 @@ async def test_hidden_delegation_uses_native_child_owner(
         config,
         paths,
         [_flagged("delegate", run_subagent, continue_subagent, external_execution=True)],
-        tool_call_limit=limit,
+        max_tool_calls_per_turn=limit,
     )
     children = []
 

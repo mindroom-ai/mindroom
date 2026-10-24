@@ -123,7 +123,7 @@ async def bind_standard_cli(
         runtime_context=runtime,
         store=store,
         middleware=agent_tool_middleware(build),
-        tool_call_limit=build.spec.tool_call_limit,
+        max_tool_calls_per_turn=build.spec.max_tool_calls_per_turn,
     )
     try:
         await catalog.prepare(build.spec.toolkits, build.tool_owners, include=_cli_callable)

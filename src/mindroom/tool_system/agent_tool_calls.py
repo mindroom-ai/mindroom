@@ -98,8 +98,8 @@ class PreparedAgentToolCatalog:
     ``run`` is the turn's run identity, whose session holds the state its calls share; that session and ``store``
     are where the run is stored, and ``record`` is the run itself once known: the live run after its first tool batch
     is planned, or the stored run a recovery continues. ``middleware`` is the build's tool-call policy, which every
-    call runs through, and ``tool_call_limit`` bounds the calls of one turn. The toolkits it connects, the ones a
-    run reaches only through it and every deferred toolkit it materializes, stay connected until it closes.
+    call runs through, and ``max_tool_calls_per_turn`` bounds the calls of one turn. The toolkits it connects, the
+    ones a run reaches only through it and every deferred toolkit it materializes, stay connected until it closes.
     """
 
     agent_name: str
@@ -107,7 +107,7 @@ class PreparedAgentToolCatalog:
     runtime_context: ToolRuntimeContext
     store: ConversationStore | None = None
     middleware: Sequence[ToolMiddleware] = ()
-    tool_call_limit: int | None = None
+    max_tool_calls_per_turn: int | None = None
     record: RunRecord | None = None
     _bindings: dict[ToolKey, PreparedAgentToolBinding] = field(default_factory=dict, init=False)
     _deferred: dict[str, DeferredAgentToolkit] = field(default_factory=dict, init=False)
@@ -423,7 +423,7 @@ async def _execute_agent_tool_call(
         except ValueError:
             yield _failure(binding, call_id, arguments, "Invalid tool arguments")
             return
-        limit = catalog.tool_call_limit
+        limit = catalog.max_tool_calls_per_turn
         if limit is not None and catalog._call_count >= limit:
             yield _failure(binding, call_id, arguments, "Tool call limit reached")
             return

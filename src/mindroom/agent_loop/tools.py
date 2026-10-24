@@ -116,14 +116,14 @@ def plan_tool_batch(
     messages: list[Message],
     *,
     calls_so_far: int,
-    tool_call_limit: int | None,
+    max_tool_calls_per_turn: int | None,
 ) -> ToolBatch:
     """Resolve an assistant message's tool calls, apply the limit, and classify the admitted ones.
 
     A call naming no offered function, or whose arguments cannot be decoded, is answered with an error tool message
     appended to ``messages`` right away and never counts toward the limit. Of the rest, each call past
-    ``tool_call_limit`` gets a limit-error result instead of running. An admitted call whose function requires
-    confirmation or external execution is planned paused, with the flags its stored execution carries.
+    ``max_tool_calls_per_turn`` gets a limit-error result instead of running. An admitted call whose function
+    requires confirmation or external execution is planned paused, with the flags its stored execution carries.
     """
     planned: list[PlannedCall] = []
     refused: list[Message] = []
@@ -140,9 +140,9 @@ def plan_tool_batch(
         if isinstance(arguments, ToolArgumentError):
             messages.append(Message(role="tool", tool_call_id=call_id, tool_name=name, content=arguments.error_text))
             continue
-        if tool_call_limit is not None:
+        if max_tool_calls_per_turn is not None:
             count += 1
-            if count > tool_call_limit:
+            if count > max_tool_calls_per_turn:
                 refused.append(
                     Message(
                         role="tool",

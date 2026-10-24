@@ -344,7 +344,7 @@ def _base_leader_spec(spec: TeamSpec) -> AgentSpec:
         model=spec.model,
         system_message=spec.system_message,
         toolkits=spec.toolkits,
-        tool_call_limit=spec.tool_call_limit,
+        max_tool_calls_per_turn=spec.max_tool_calls_per_turn,
     )
 
 

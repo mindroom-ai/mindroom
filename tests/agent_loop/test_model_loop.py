@@ -74,7 +74,7 @@ async def _run(
             record=record,
             run=context(),
             hooks=hooks,
-            tool_call_limit=agent.tool_call_limit,
+            max_tool_calls_per_turn=agent.max_tool_calls_per_turn,
             **kwargs,
         )
     ]
@@ -250,7 +250,7 @@ async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests()
     messages = _prompt()
 
     with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(add), tool_call_limit=1), messages)
+        events, record = await _run(spec(model, toolkit(add), max_tool_calls_per_turn=1), messages)
 
     limit_text = "Tool call limit reached. Tool call add not executed. Don't try to execute it again."
     tool_messages = [message for message in messages if message.role == "tool"]

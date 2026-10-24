@@ -66,7 +66,7 @@ class TeamSpec:
 
     ``id`` and ``name`` are stored on every team run as ``team_id`` and ``team_name``. ``system_message`` is the
     rendered leader prompt (``prompt.render_leader_system_message``); ``toolkits`` are the leader's own tools, to
-    which each run adds the delegation tool for ``mode``; ``tool_call_limit`` bounds the leader's calls,
+    which each run adds the delegation tool for ``mode``; ``max_tool_calls_per_turn`` bounds the leader's calls,
     delegations included.
     """
 
@@ -76,7 +76,7 @@ class TeamSpec:
     model: ModelProvider
     system_message: Message
     toolkits: tuple[AdaptedToolkit, ...] = ()
-    tool_call_limit: int | None = None
+    max_tool_calls_per_turn: int | None = None
     members: tuple[TeamMember, ...]
 
 

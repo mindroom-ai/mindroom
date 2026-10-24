@@ -159,7 +159,7 @@ async def run_model_loop(
     record: AnyRunRecord,
     run: RunContext,
     hooks: LoopHooks = NO_HOOKS,
-    tool_call_limit: int | None = None,
+    max_tool_calls_per_turn: int | None = None,
     request_template: ModelRequest = EMPTY_REQUEST,
     resumed: Sequence[RunRequirement] | None = None,
 ) -> AsyncIterator[LoopEvent]:
@@ -187,7 +187,7 @@ async def run_model_loop(
         loop_start_ids=frozenset(message.id for message in messages),
         request_template=request_template,
     )
-    max_requests = None if tool_call_limit is None else tool_call_limit + _EXTRA_MODEL_REQUESTS
+    max_requests = None if max_tool_calls_per_turn is None else max_tool_calls_per_turn + _EXTRA_MODEL_REQUESTS
     progress = _Progress()
     if resumed is not None:
         async for event in _answer_resumed(resumed, state, progress, hooks):
@@ -214,7 +214,7 @@ async def run_model_loop(
         yield RequestCompleted(model_id=identity.id, provider=identity.provider_name, usage=message.metrics)
         if not message.tool_calls:
             break
-        async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, tool_call_limit):
+        async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn):
             yield event
     if hooks.on_loop_end is not None and progress.last_request is not None:
         hooks.on_loop_end(state, progress.last_request)
@@ -278,7 +278,7 @@ async def _run_tool_batch(
     state: LoopState,
     progress: _Progress,
     hooks: LoopHooks,
-    tool_call_limit: int | None,
+    max_tool_calls_per_turn: int | None,
 ) -> AsyncIterator[ToolStarted | ToolCompleted]:
     """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan and run them."""
     assert message.tool_calls
@@ -293,7 +293,7 @@ async def _run_tool_batch(
         state.offered.functions,
         state.messages,
         calls_so_far=progress.calls_so_far,
-        tool_call_limit=tool_call_limit,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
     )
     _record_batch(state.record, batch)
     if hooks.before_dispatch is not None:
