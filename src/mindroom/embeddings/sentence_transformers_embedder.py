@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom.embeddings.errors import EmbedderRequestError, describe_embedder_error
 from mindroom.embeddings.signatures import ensure_sentence_transformers_dependencies
-from mindroom.model_defaults import SENTENCE_TRANSFORMERS_DEFAULT
 from mindroom.tool_system.dependencies import optional_dependency_environment
 
 if TYPE_CHECKING:
@@ -58,7 +57,6 @@ def _load_sentence_transformer(model: str) -> _SentenceTransformerModel:
 class _SentenceTransformersEmbedder:
     """Embed one text per call with the model's own query or document prompt, one call at a time per process."""
 
-    model: str
     client: _SentenceTransformerModel = field(repr=False)
 
     @property
@@ -86,7 +84,7 @@ class _SentenceTransformersEmbedder:
 
 def create_sentence_transformers_embedder(
     runtime_paths: RuntimePaths,
-    model: str = SENTENCE_TRANSFORMERS_DEFAULT,
+    model: str,
 ) -> _SentenceTransformersEmbedder:
     """Create a local sentence-transformers embedder after ensuring its optional extra exists."""
     ensure_sentence_transformers_dependencies(runtime_paths)
@@ -94,4 +92,4 @@ def create_sentence_transformers_embedder(
     with optional_dependency_environment(), _LOCAL_EMBEDDING_LOCK:
         if _SENTENCE_TRANSFORMER_CLIENT is None or _SENTENCE_TRANSFORMER_CLIENT[0] != model:
             _SENTENCE_TRANSFORMER_CLIENT = (model, _load_sentence_transformer(model))
-        return _SentenceTransformersEmbedder(model=model, client=_SENTENCE_TRANSFORMER_CLIENT[1])
+        return _SentenceTransformersEmbedder(client=_SENTENCE_TRANSFORMER_CLIENT[1])

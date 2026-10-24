@@ -60,9 +60,6 @@ def _knowledge_search_tool_description(
     memory_search_available: bool,
 ) -> str:
     """Build the description shown to the model for the knowledge-search tool."""
-    if not sources:
-        return "Search this agent's configured knowledge bases for information about a query."
-
     lines = [
         "Search this agent's configured knowledge bases for information about a query.",
         "Available sources:",
@@ -135,7 +132,7 @@ class AgentKnowledge:
             return f"Error searching knowledge base: {type(exc).__name__}"
         return _format_search_hits(hits)
 
-    def search_function(self, *, memory_search_available: bool = False) -> Function:
+    def search_function(self, *, memory_search_available: bool) -> Function:
         """Return the ``search_knowledge_base`` tool, authored as an Agno function so Agno generates its schema.
 
         ``adapt_function`` turns it into the ``ToolFunction`` an agent offers.

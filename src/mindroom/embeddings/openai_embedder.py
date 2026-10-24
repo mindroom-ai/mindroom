@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 from openai import AsyncOpenAI, OpenAI
 
-from mindroom.embeddings.embedder_health import EmbedderHealthRecorder, capture_embedder_health_recorder
 from mindroom.embeddings.errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
     EmbedderRequestError,
@@ -36,6 +35,11 @@ if TYPE_CHECKING:
     from openai.types.create_embedding_response import CreateEmbeddingResponse
 
     from mindroom.embeddings.base import EmbeddingPurpose
+    from mindroom.embeddings.embedder_health import EmbedderHealthRecorder
+
+
+#: The most texts one request carries; longer lists go in further requests.
+_MAX_TEXTS_PER_REQUEST = 100
 
 
 def _classified_request_error(exc: Exception, health_recorder: EmbedderHealthRecorder) -> EmbedderRequestError:
@@ -75,10 +79,13 @@ class OpenAIEmbedder:
     """Embed through an OpenAI-compatible ``/embeddings`` endpoint without forcing OpenAI defaults onto other hosts.
 
     A request carrying one text sends it as a bare string, and one carrying several sends a list of at most
-    ``batch_size`` texts, exactly as the vectors in existing indexes were requested.
+    ``_MAX_TEXTS_PER_REQUEST`` texts, exactly as the vectors in existing indexes were requested.
     """
 
     model: str
+    #: The recorder this embedder's request outcomes feed; the factory captures it, so every embedder built for one
+    #: config generation reports into that generation.
+    health_recorder: EmbedderHealthRecorder = field(repr=False)
     api_key: str | None = field(default=None, repr=False)
     base_url: str | None = None
     #: Explicitly configured width; OpenAI's own models fall back to ``OPENAI_EMBEDDING_DIMENSIONS``.
@@ -88,10 +95,8 @@ class OpenAIEmbedder:
     #: SDK client limits; health probes shorten them so a stalled endpoint fails fast.
     timeout: float | None = None
     max_retries: int | None = None
-    batch_size: int = 100
     client: OpenAI | None = field(default=None, repr=False)
     async_client: AsyncOpenAI | None = field(default=None, repr=False)
-    health_recorder: EmbedderHealthRecorder = field(default_factory=capture_embedder_health_recorder, repr=False)
 
     @property
     def sends_batches(self) -> bool:
@@ -140,8 +145,8 @@ class OpenAIEmbedder:
         return request
 
     def _batches(self, texts: Sequence[str]) -> Iterator[Sequence[str]]:
-        for start in range(0, len(texts), self.batch_size):
-            yield texts[start : start + self.batch_size]
+        for start in range(0, len(texts), _MAX_TEXTS_PER_REQUEST):
+            yield texts[start : start + _MAX_TEXTS_PER_REQUEST]
 
     def embed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
         """Return one vector per text; raise a classified error on failure."""

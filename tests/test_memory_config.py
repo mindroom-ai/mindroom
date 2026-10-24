@@ -26,6 +26,7 @@ from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
+from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.embeddings.errors import EmbedderRequestError
 from mindroom.embeddings.factory import create_configured_embedder, resolve_embedder_settings
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
@@ -907,7 +908,12 @@ class TestMemoryConfig:
         )
         client = MagicMock()
         client.embeddings.create.return_value = SimpleNamespace(data=[], usage=None)
-        strict_embedder = OpenAIEmbedder(model="text-embedding-3-small", api_key="sk-test", client=client)
+        strict_embedder = OpenAIEmbedder(
+            model="text-embedding-3-small",
+            api_key="sk-test",
+            client=client,
+            health_recorder=capture_embedder_health_recorder(),
+        )
         memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object(), embedding_model=object())
 
         with (
@@ -964,6 +970,7 @@ class TestMemoryConfig:
                 client=client,
                 query_prefix="q: ",
                 document_prefix="d: ",
+                health_recorder=capture_embedder_health_recorder(),
             ),
         )
 

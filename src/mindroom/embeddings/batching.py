@@ -37,15 +37,10 @@ _MAX_EMBEDDING_BATCH_ITEMS = 64
 _MAX_EMBEDDING_BATCH_PAYLOAD_BYTES = 512_000
 
 
-def plan_embedding_batches(
-    texts: Sequence[str],
-    *,
-    max_items: int = _MAX_EMBEDDING_BATCH_ITEMS,
-    max_payload_bytes: int = _MAX_EMBEDDING_BATCH_PAYLOAD_BYTES,
-) -> list[list[str]]:
+def plan_embedding_batches(texts: Sequence[str]) -> list[list[str]]:
     """Split texts into provider requests bounded by item count and payload size.
 
-    A single text larger than ``max_payload_bytes`` still gets its own request:
+    A single text larger than the payload bound still gets its own request:
     splitting it here would embed a fragment of a chunk.
     """
     batches: list[list[str]] = []
@@ -54,7 +49,8 @@ def plan_embedding_batches(
     for text in texts:
         text_bytes = len(text.encode("utf-8"))
         exceeds_limits = current and (
-            len(current) >= max(max_items, 1) or current_bytes + text_bytes > max_payload_bytes
+            len(current) >= _MAX_EMBEDDING_BATCH_ITEMS
+            or current_bytes + text_bytes > _MAX_EMBEDDING_BATCH_PAYLOAD_BYTES
         )
         if exceeds_limits:
             batches.append(current)
@@ -86,7 +82,7 @@ class RefreshEmbedder:
         return not self._batching_disabled and self.embedder.sends_batches
 
     def embed_texts(self, texts: Sequence[str]) -> dict[str, list[float]]:
-        """Embed distinct chunk texts as documents, in one request when batching is usable.
+        """Embed one planned batch of distinct chunk texts as documents, in one request when batching is usable.
 
         Batch support is a capability claim that only a real multi-input
         request can test: some OpenAI-compatible backends accept an array and
@@ -106,31 +102,28 @@ class RefreshEmbedder:
         re-raised because it is provably global, and grinding one doomed
         request per remaining chunk would bury the cause.
         """
-        pending = list(dict.fromkeys(texts))
-        if not pending:
-            return {}
-        if not self.batches() or len(pending) == 1:
+        if not self.batches() or len(texts) == 1:
             # A single-input request proves nothing about batch support, so it
             # is never allowed to retire batching.
-            return self._embed_each_leaving_failures(pending)
+            return self._embed_each_leaving_failures(texts)
 
         try:
-            vectors = self.embedder.embed(pending, purpose="document")
+            vectors = self.embedder.embed(texts, purpose="document")
         except Exception as exc:
             if embedder_failure_is_transient(exc) or not embedder_batch_cardinality_mismatch(exc):
                 raise
             self._disable_batching(f"multi-input request failed: {describe_embedder_error(exc)}")
-            return self._embed_each_leaving_failures(pending)
+            return self._embed_each_leaving_failures(texts)
 
-        if len(vectors) != len(pending):
+        if len(vectors) != len(texts):
             # The partial result is discarded on purpose: with fewer vectors
             # than inputs there is no trustworthy way to tell which input each
             # one belongs to, and guessing by position would silently attach a
             # vector to the wrong chunk.
-            self._disable_batching(f"multi-input request returned {len(vectors)} vectors for {len(pending)} inputs")
-            return self._embed_each_leaving_failures(pending)
+            self._disable_batching(f"multi-input request returned {len(vectors)} vectors for {len(texts)} inputs")
+            return self._embed_each_leaving_failures(texts)
 
-        return {text: self._validated(vector) for text, vector in zip(pending, vectors, strict=True)}
+        return {text: self._validated(vector) for text, vector in zip(texts, vectors, strict=True)}
 
     def embed_each(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed each chunk text as a document in its own request, raising the first failure."""

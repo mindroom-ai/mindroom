@@ -109,6 +109,8 @@ def create_configured_embedder(
     if settings.provider == "ollama":
         from mindroom.embeddings.ollama_embedder import OllamaEmbedder  # noqa: PLC0415
 
+        # The resolver always resolves an Ollama host; only the other providers leave it unset.
+        assert settings.host is not None
         return OllamaEmbedder(model=settings.model, host=settings.host)
 
     if settings.provider == "sentence_transformers":
