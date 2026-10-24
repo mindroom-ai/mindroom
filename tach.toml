@@ -1188,7 +1188,6 @@ depends_on = []
 path = "mindroom.providers.google_adc"
 depends_on = ["mindroom.startup_errors"]
 visibility = [
-    "mindroom.cli.doctor",
     "mindroom.providers.anthropic.messages",
 ]
 
@@ -8687,7 +8686,6 @@ depends_on = [
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.projection",
-    "mindroom.ai",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.state",
     "mindroom.turn_continuation",
@@ -8725,7 +8723,6 @@ depends_on = [
     "mindroom.agent_cli.shell_access",
     "mindroom.approval.tool_approval",
     "mindroom.custom_tools.job",
-    "mindroom.tool_jobs.settings",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
 ]
