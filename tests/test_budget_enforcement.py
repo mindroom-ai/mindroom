@@ -31,7 +31,7 @@ from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
 from mindroom.llm.messages import Message
 from mindroom.teams.envelope import PreparedTeamExecution
-from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, TeamTurnModelSelection
+from mindroom.teams.members import BuiltTeam, TeamTurnModelSelection
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -366,7 +366,7 @@ def test_openai_compat_agent_completion_budgets_mapped_requesters(
     assert response.await_args.args[0].active_model_name == expected
 
 
-def _memberless_team() -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
+def _memberless_team() -> BuiltTeam:
     """Return what ``_build_team`` builds for a team whose leader answers on its own: no members materialized."""
     spec = TeamSpec(
         id="super-team",
@@ -376,17 +376,7 @@ def _memberless_team() -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
         system_message=Message(role="system", content="You lead the team."),
         members=(),
     )
-    members = ResolvedExactTeamMembers(
-        requested_agent_names=[],
-        builds=[],
-        display_names=[],
-        failed_agent_names=[],
-    )
-    return (
-        members,
-        BuiltTeam(spec=spec, history_settings=Config().resolve_entity(None).history_settings, leader_middleware=()),
-        TeamMode.COORDINATE,
-    )
+    return BuiltTeam(spec=spec, history_settings=Config().resolve_entity(None).history_settings, leader_middleware=())
 
 
 def _prepared_team_turn() -> PreparedTeamExecution:

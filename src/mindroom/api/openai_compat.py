@@ -76,7 +76,6 @@ from mindroom.run_storage import TerminalRecord
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
 from mindroom.teams.members import (
     BuiltTeam,
-    ResolvedExactTeamMembers,
     TeamTurnModelSelection,
     build_team_spec,
     materialize_exact_team_members,
@@ -985,13 +984,12 @@ def _build_team(
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     *,
     models: TeamTurnModelSelection,
-) -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
+) -> BuiltTeam:
     """Create member builds and build one team for a configured team.
 
     Raises when the configured team cannot be materialized.
     """
     team_config = config.teams[team_name]
-    mode = TeamMode(team_config.mode)
     config.assert_team_agents_supported(team_config.agents, team_name=team_name)
 
     team_members = materialize_exact_team_members(
@@ -1005,9 +1003,9 @@ def _build_team(
         reason_prefix=f"Team '{team_name}'",
         active_model_names=models.member_model_names,
     )
-    built = build_team_spec(
+    return build_team_spec(
         members=team_members,
-        mode=mode,
+        mode=TeamMode(team_config.mode),
         config=config,
         runtime_paths=runtime_paths,
         team_display_name=team_label(team_members.requested_agent_names),
@@ -1016,7 +1014,6 @@ def _build_team(
         model_name=models.team_model_name,
         configured_team_name=team_name,
     )
-    return team_members, built, mode
 
 
 async def _prepare_openai_team_execution(
@@ -1065,7 +1062,7 @@ async def _prepare_team_turn(
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         with tool_execution_identity(execution_identity):
-            members, built, mode = await asyncio.to_thread(
+            built = await asyncio.to_thread(
                 _build_team,
                 team_name,
                 config,
@@ -1085,8 +1082,8 @@ async def _prepare_team_turn(
     logger.info(
         "Team streaming request" if stream else "Team completion request",
         team=team_name,
-        mode=mode.value,
-        members=len(members.builds),
+        mode=built.spec.mode.value,
+        members=len(built.spec.members),
         session_id=session_id,
     )
 
