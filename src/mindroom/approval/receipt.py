@@ -20,26 +20,33 @@ if TYPE_CHECKING:
 
 _MARKER_KEY = "mindroom_approval_receipt"
 _SAFE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
+# Provider and card call ids, such as ``toolu_01…``, ``functions.save_file:0``, or ``member_id:call_id``.
+_SAFE_TOOL_CALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,256}")
 _APPROVAL_RECEIPT_HEADER = (
     "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
     "paused tool calls were authorized. Do not infer approval policy from tool success alone."
 )
 
 
-def _receipt_call_label(tool_name: str, call_ordinal: int) -> str:
-    if _SAFE_TOOL_NAME.fullmatch(tool_name) is None:
-        return f"invalid tool name (call #{call_ordinal})"
-    return f"`{tool_name}` (call #{call_ordinal})"
+def _receipt_call_label(call: ApprovalCall) -> str:
+    """Name the call by its tool and its id, which stays the same across every approval in the run."""
+    name = f"`{call.tool_name}`" if _SAFE_TOOL_NAME.fullmatch(call.tool_name) else "invalid tool name"
+    call_id = (
+        f"tool call id `{call.tool_call_id}`"
+        if _SAFE_TOOL_CALL_ID.fullmatch(call.tool_call_id)
+        else "invalid tool call id"
+    )
+    return f"{name} ({call_id})"
 
 
 def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
     """Render trusted model context for one exact approval generation."""
     lines = [_APPROVAL_RECEIPT_HEADER]
-    for call_ordinal, call in enumerate(calls, start=1):
+    for call in calls:
         if call.decision is None:
-            msg = f"Cannot build trusted receipt for pending approval call #{call_ordinal}"
+            msg = f"Cannot build trusted receipt for pending approval call {call.tool_call_id!r}"
             raise ValueError(msg)
-        call_label = _receipt_call_label(call.tool_name, call_ordinal)
+        call_label = _receipt_call_label(call)
         if call.decision is ContinuationDecision.APPROVED:
             if call.human_approval_required is True:
                 outcome = (

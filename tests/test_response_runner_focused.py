@@ -4838,7 +4838,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
             "base rules\n\n"
             "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
             "paused tool calls were authorized. Do not infer approval policy from tool success alone.\n"
-            "- `publish_report` (call #1): human approval was required and granted before execution, "
+            "- `publish_report` (tool call id `call-1`): human approval was required and granted before execution, "
             "directly or through a matching timed approval window.",
         ),
         ("tool", "published"),
