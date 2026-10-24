@@ -81,9 +81,9 @@ def test_a_fresh_database_gets_its_tables_from_the_first_write_only(tmp_path: Pa
     assert store.path == tmp_path / "sessions" / "code.db"
     assert _tables(store.path) == set()
 
-    store.save_run(
+    store.save_runs(
         ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
-        _run("r1"),
+        [_run("r1")],
     )
 
     assert _tables(store.path) >= {
@@ -105,9 +105,9 @@ def test_a_storage_name_that_leaves_the_sessions_directory_opens_nothing(tmp_pat
 def test_stored_runs_leave_out_the_prompt_roles_of_the_history_settings(tmp_path: Path) -> None:
     """Every factory-opened store applies the one prompt-role policy, so a run's system message is not stored."""
     store = _open(tmp_path)
-    store.save_run(
+    store.save_runs(
         ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
-        _run("r1"),
+        [_run("r1")],
     )
 
     loaded = store.load_session("session-1", "agent")

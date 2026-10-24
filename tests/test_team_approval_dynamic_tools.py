@@ -246,15 +246,17 @@ async def _exercise_team_member_assembly(
     )
     assert scope is not None
     assert scope.session is not None
-    scope.storage.save_run(
+    scope.storage.save_runs(
         scope.session,
-        TeamRunRecord(
-            run_id="paused-team-run",
-            session_id=identity.session_id,
-            user_id=identity.requester_id,
-            team_id="research",
-            status=RunStatus.paused,
-        ),
+        [
+            TeamRunRecord(
+                run_id="paused-team-run",
+                session_id=identity.session_id,
+                user_id=identity.requester_id,
+                team_id="research",
+                status=RunStatus.paused,
+            ),
+        ],
     )
     monkeypatch.setattr("mindroom.teams.resume.build_team_spec", inspect_members)
     with pytest.raises(_MemberAssemblyObservedError):

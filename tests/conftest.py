@@ -3498,10 +3498,10 @@ def seed_session(storage: "ConversationStore", session: "ConversationSession") -
     Production code writes runs one at a time as they finish; tests seed whole histories with this instead. The
     runs are saved as conversation writes, so the usage ledger and session totals stay empty; ``persist_session``
     seeds those too. A row that already exists keeps its fields; change them through the store's field writers.
+    The session's runs are handed over as copies, since a save refuses a run object the session holds.
     """
     storage.ensure_session_row(session)
-    for run in session.runs:
-        storage.save_run(session, run)
+    storage.save_runs(session, [replace(run) for run in session.runs])
     return session
 
 

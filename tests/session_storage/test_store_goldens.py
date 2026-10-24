@@ -249,7 +249,7 @@ def test_a_first_turns_session_row_stores_no_metadata_as_agno_stored_it(
     fresh = ConversationStore(tmp_path / golden.name)
 
     for run in _replayed(rows):
-        fresh.save_run(session, run)
+        fresh.save_runs(session, [run])
 
     column = SESSION_COLUMNS.index("metadata")
     assert golden_row[column] == "null"
@@ -333,7 +333,7 @@ def test_new_databases_get_the_layout_agno_created(tmp_path: Path) -> None:
     )
 
     for db_file in (fresh, golden):
-        ConversationStore(db_file).save_run(session, RunRecord(run_id="r1", agent_id="code"))
+        ConversationStore(db_file).save_runs(session, [RunRecord(run_id="r1", agent_id="code")])
 
     assert _layout(fresh, tables) == _layout(golden, tables)
     assert _schema_objects(golden) == objects

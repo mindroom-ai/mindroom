@@ -469,7 +469,7 @@ def _seed(
     owner = "general" if kind == "agent" else "queued-notice-team"
     for run in runs:
         run.session_id = session_id
-    return seed_session(
+    seeded = seed_session(
         store,
         ConversationSession(
             session_id=session_id,
@@ -479,6 +479,9 @@ def _seed(
             created_at=1,
         ),
     )
+    if isinstance(store, _RecordingStore):
+        store.saves.clear()  # Seeding is setup, not a save the test observes.
+    return seeded
 
 
 def _stored_runs(
@@ -3513,7 +3516,7 @@ async def test_error_responses_never_attach_notices_to_prior_completed_run(tmp_p
             await _after_batch(messages, OwnedMessage(role="tool", content=f"failed result {index}"))
             error_run = _completed(f"error-run-{index}", messages)
             error_run.status = OwnedRunStatus.error
-            store.save_run(session, error_run)
+            store.save_runs(session, [error_run])
             register_queued_notice_storage(
                 storage_factory=lambda: store,
                 session_id="session-1",

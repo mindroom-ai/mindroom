@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.types import Refusal, SaveOutcome, SessionKind
+    from mindroom.session_storage.types import Refusal, SessionKind
     from mindroom.usage.storage import IndependentUsageKind
 
 # How long an operation waits for another connection's write lock on the database, its migrations included.
@@ -223,30 +223,6 @@ class ConversationStore:
             created = _ensure_session_row(connection, self.names, session)
         _record_stored_state(session, created)
 
-    def save_run(
-        self,
-        session: ConversationSession,
-        run: AnyRunRecord,
-        *,
-        state: dict[str, Any] | None = None,
-    ) -> SaveOutcome:
-        """Save one run of ``session`` under the conversation log's insertion rules, creating the session row if needed.
-
-        A run a cut removed, or a member of one, writes no row (``"removed"``). A visible run behind its scope's
-        latest summary row, or a member of one, stays as stored (``"frozen"``). A run new to the session, or saved
-        visible over a stored paused, cancelled, or errored row, takes the next position after every run and
-        summary row. The first requester a written run names is stored on a session row that has none; no other
-        write of the store names a requester. The usage ledger and session totals are left alone: a run's terminal
-        record reaches them through ``persist_to``.
-
-        With ``state``, a ``session_state_snapshot`` of the state the run ran with, the run and the state commit in
-        one transaction, so a failure leaves neither. The state is written only when the row does not already hold it.
-
-        Once the save commits, ``session.runs`` holds the run as the store does (see ``_reconcile``).
-        """
-        (saved,) = self._save_encoded(session, [_encoded(run)], record_usage=False, state=state)
-        return "written" if isinstance(saved.row, _WrittenRow) else saved.row
-
     def save_runs(
         self,
         session: ConversationSession,
@@ -254,14 +230,22 @@ class ConversationStore:
         *,
         state: dict[str, Any] | None = None,
     ) -> None:
-        """Write conversation-only changes to runs of ``session`` in one transaction, then reconcile its copies.
+        """Save ``runs`` of ``session`` in one transaction under the conversation log's insertion rules.
 
-        Conversation rewrites leave the usage ledger and session totals untouched. With ``state``, a
-        ``session_state_snapshot``, the session state commits in the same transaction (see ``save_run``). Once the
-        transaction commits, ``session.runs`` holds each run as the store does (see ``_reconcile``), so a removed run
-        leaves the session and a frozen one keeps the session's copy. Callers therefore edit a copy and hand the copy
-        here: a refused save must leave the session's copy as stored. A call with neither runs nor ``state`` writes
-        nothing.
+        The session row is created if needed. A run a cut removed, or a member of one, writes no row. A visible run
+        behind its scope's latest summary row, or a member of one, stays as stored. A run new to the session, or
+        saved visible over a stored paused, cancelled, or errored row, takes the next position after every run and
+        summary row. The first requester a written run names is stored on a session row that has none; no other
+        write of the store names a requester. The usage ledger and session totals are left alone: a run's terminal
+        record reaches them through ``persist_to``.
+
+        With ``state``, a ``session_state_snapshot`` of the state the runs ran with, the runs and the state commit in
+        one transaction, so a failure leaves neither. The state is written only when the row does not already hold it.
+
+        Once the transaction commits, ``session.runs`` holds each written run as the store does (see ``_reconcile``),
+        so a removed run leaves the session and a frozen one keeps the session's copy. Callers therefore edit a copy
+        and hand the copy here: a refused save must leave the session's copy as stored. A call with neither runs nor
+        ``state`` writes nothing.
         """
         runs = list(runs)
         if not runs and state is None:
@@ -551,7 +535,7 @@ def runs_without(runs: Iterable[AnyRunRecord], run_ids: Iterable[str]) -> list[A
 def persist_to(store: ConversationStore, session: ConversationSession) -> Callable[[AnyRunRecord], Awaitable[None]]:
     """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
 
-    The record saves under ``save_run``'s rules. Its usage replaces its earlier snapshot in the usage ledger, which
+    The record saves under ``save_runs``' rules. Its usage replaces its earlier snapshot in the usage ledger, which
     outlives removed runs, and the session totals change by the difference, in the same transaction; a frozen run's
     usage is final and changes neither.
     The record and ``session.session_state``, which the run's tools change in place, are copied on the caller's task

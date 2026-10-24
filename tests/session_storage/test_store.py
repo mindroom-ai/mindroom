@@ -103,7 +103,7 @@ def _team_run(run_id: str, status: RunStatus = RunStatus.completed, **fields: An
 
 def _seed(store: ConversationStore, runs: list[AnyRunRecord], session: ConversationSession | None = None) -> None:
     for run in runs:
-        store.save_run(session or _session(), run)
+        store.save_runs(session or _session(), [run])
 
 
 def _query(store: ConversationStore, sql: str, *parameters: object) -> list[tuple[Any, ...]]:
@@ -311,14 +311,11 @@ def test_a_folded_run_is_frozen(store: ConversationStore) -> None:
     _summary_after(store, "r2")
     before, usage_before, totals_before = _stored(store, "r1"), _usage_row(store, "r1"), _totals(store)
 
-    outcomes = [
-        store.save_run(_session(), _run("r1", RunStatus.paused, content="stale paused")),
-        store.save_run(_session(), _run("r1", content="stale", metrics=_usage(99))),
-        store.save_run(_session(), _run("p0", RunStatus.paused, content="still waiting")),
-    ]
+    store.save_runs(_session(), [_run("r1", RunStatus.paused, content="stale paused")])
+    store.save_runs(_session(), [_run("r1", content="stale", metrics=_usage(99))])
+    store.save_runs(_session(), [_run("p0", RunStatus.paused, content="still waiting")])
     persist_runs(store, _session(), _run("r1", content="stale", metrics=_usage(99)))
 
-    assert outcomes == ["frozen", "frozen", "written"]
     assert _stored(store, "r1") == before
     assert _usage_row(store, "r1") == usage_before
     assert _totals(store) == totals_before
@@ -332,12 +329,9 @@ def test_a_member_of_a_folded_team_run_is_frozen(store: ConversationStore) -> No
     _seed(store, [_run("m0", parent="t0", agent_id="helper", content="original"), _team_run("t0")], team)
     _summary_after(store, "t0", "team:eng")
 
-    outcomes = [
-        store.save_run(team, _run("m0", parent="t0", agent_id="helper", content="stale")),
-        store.save_run(team, _run("m-new", parent="t0", agent_id="helper")),
-    ]
+    store.save_runs(team, [_run("m0", parent="t0", agent_id="helper", content="stale")])
+    store.save_runs(team, [_run("m-new", parent="t0", agent_id="helper")])
 
-    assert outcomes == ["frozen", "frozen"]
     assert _stored(store, "m0")[2]["content"] == "original"
     assert not _has_row(store, "m-new")
 
@@ -347,13 +341,10 @@ def test_a_removed_run_is_never_written_again_but_its_usage_counts(store: Conver
     persist_runs(store, _session(), _run("r0", metrics=_usage(10)))
     _remove(store, "gone")
 
-    outcomes = [
-        store.save_run(_session(), _run("gone", metrics=_usage(5))),
-        store.save_run(_session(), _run("gone-member", parent="gone", agent_id="helper")),
-    ]
+    store.save_runs(_session(), [_run("gone", metrics=_usage(5))])
+    store.save_runs(_session(), [_run("gone-member", parent="gone", agent_id="helper")])
     persist_runs(store, _session(), _run("gone", metrics=_usage(5)))
 
-    assert outcomes == ["removed", "removed"]
     assert _loaded_ids(store) == ["r0"]
     assert not _has_row(store, "gone")
     assert not _has_row(store, "gone-member")
@@ -823,15 +814,14 @@ def test_first_writes_to_a_fresh_database_from_many_owners_all_land(tmp_path: Pa
     """Owners opening one new database at once each create its tables or find them; none fails."""
     start = threading.Barrier(8)
 
-    def first_write(index: int) -> str:
+    def first_write(index: int) -> None:
         store = _store(tmp_path)
         start.wait()
-        return store.save_run(_session(f"s{index}"), _run(f"r{index}"))
+        store.save_runs(_session(f"s{index}"), [_run(f"r{index}")])
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        outcomes = list(pool.map(first_write, range(8)))
+        list(pool.map(first_write, range(8)))
 
-    assert outcomes == ["written"] * 8
     assert sorted(_run_rows(_store(tmp_path))) == sorted((f"r{index}", 0) for index in range(8))
 
 
@@ -940,7 +930,7 @@ def test_session_field_writes_leave_the_other_field_and_the_totals_alone(store: 
 
 @pytest.mark.parametrize(
     "create",
-    ["ensure_session_row", "save_run", "save_runs", "save_session_state", "save_independent_usage"],
+    ["ensure_session_row", "save_runs", "save_session_state", "save_independent_usage"],
 )
 def test_every_writer_of_a_session_row_stores_absent_metadata_as_json_null(
     store: ConversationStore,
@@ -950,7 +940,6 @@ def test_every_writer_of_a_session_row_stores_absent_metadata_as_json_null(
     session = ConversationSession(session_id="s1", kind="agent", owner_id="code")
     writes = {
         "ensure_session_row": lambda: store.ensure_session_row(session),
-        "save_run": lambda: store.save_run(session, _run("r1")),
         "save_runs": lambda: store.save_runs(session, [_run("r1")]),
         "save_session_state": lambda: store.save_session_state(session, {}),
         "save_independent_usage": lambda: store.save_independent_usage(
@@ -1006,19 +995,9 @@ def _row_requester(store: ConversationStore) -> str | None:
     return user_id
 
 
-@pytest.mark.parametrize("save", ["save_run", "save_runs"])
-def test_a_saved_run_gives_a_session_row_created_without_a_requester_the_runs(
-    store: ConversationStore,
-    save: str,
-) -> None:
+def test_a_saved_run_gives_a_session_row_created_without_a_requester_the_runs(store: ConversationStore) -> None:
     """A conversation's row stores its first run's requester, as Agno's session did, whoever created the row."""
-    session = _session()
-    run = _requested_run("r1", "@alice:example.test")
-
-    if save == "save_run":
-        store.save_run(session, run)
-    else:
-        store.save_runs(session, [run])
+    store.save_runs(_session(), [_requested_run("r1", "@alice:example.test")])
 
     assert _row_requester(store) == "@alice:example.test"
 
@@ -1041,11 +1020,11 @@ def test_a_session_row_keeps_the_first_requester_a_run_named(store: Conversation
     """A later run of another requester, or of none, leaves the row's requester alone."""
     session = _session()
 
-    store.save_run(session, _requested_run("r0", None))
+    store.save_runs(session, [_requested_run("r0", None)])
     assert _row_requester(store) is None
-    store.save_run(session, _requested_run("r1", "@alice:example.test"))
-    store.save_run(session, _requested_run("r2", "@bob:example.test"))
-    store.save_run(session, _requested_run("r3", None))
+    store.save_runs(session, [_requested_run("r1", "@alice:example.test")])
+    store.save_runs(session, [_requested_run("r2", "@bob:example.test")])
+    store.save_runs(session, [_requested_run("r3", None)])
 
     assert _row_requester(store) == "@alice:example.test"
 
@@ -1056,12 +1035,9 @@ def test_a_frozen_or_removed_run_does_not_name_the_requester(store: Conversation
     _summary_after(store, "r1")
     _remove(store, "gone")
 
-    outcomes = [
-        store.save_run(_session(), _requested_run("r0", "@alice:example.test")),
-        store.save_run(_session(), _requested_run("gone", "@alice:example.test")),
-    ]
+    store.save_runs(_session(), [_requested_run("r0", "@alice:example.test")])
+    store.save_runs(_session(), [_requested_run("gone", "@alice:example.test")])
 
-    assert outcomes == ["frozen", "removed"]
     assert _row_requester(store) is None
 
 
@@ -1213,7 +1189,7 @@ async def test_the_save_that_creates_the_session_row_records_the_state_it_stored
     session.session_state["cwd"] = "/repo"
     persist = persist_to(store, session)
 
-    store.save_run(session, _run("r1"))
+    store.save_runs(session, [_run("r1")])
 
     assert session.stored_session_state == {"cwd": "/repo"}
     assert session.stored_session_state is not session.session_state
@@ -1371,7 +1347,7 @@ def test_usage_saves_move_the_sessions_update_time_and_rewrites_do_not(store: Co
     store.save_runs(session, [_run("r1", content="rewritten")])
     assert _query(store, "SELECT updated_at FROM code_sessions") == [(5,)]
 
-    store.save_run(session, _run("r2"))
+    store.save_runs(session, [_run("r2")])
     assert _query(store, "SELECT updated_at FROM code_sessions") == [(5,)]
 
     persist_runs(store, session, _run("r3"))

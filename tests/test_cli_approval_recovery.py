@@ -114,9 +114,9 @@ def _with_toolkit(build: AgentBuild, toolkit: AdaptedToolkit) -> AgentBuild:
 
 def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tuple[RunRecord, ConversationSession]:
     """Store ``record`` as the run an approval paused in, and return it with its session as recovery reads them."""
-    store.save_run(
+    store.save_runs(
         ConversationSession(session_id=session_id, kind="agent", owner_id="helper"),
-        record,
+        [record],
     )
     session = store.load_session(session_id, "agent")
     persisted = store.get_run(record.run_id)

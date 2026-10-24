@@ -528,9 +528,9 @@ async def test_finalize_acknowledges_only_claims_whose_call_the_parent_run_saved
         status=RunStatus.completed,
         tools=[ToolExecution(tool_call_id="saved-call", tool_name="tool", result="done")],
     )
-    store.save_run(
+    store.save_runs(
         ConversationSession(session_id="parent-session", kind="agent", owner_id="parent"),
-        parent,
+        [parent],
     )
     owner = ConsumptionOwner(storage_factory=lambda: store)
 

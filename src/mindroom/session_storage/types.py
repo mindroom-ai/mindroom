@@ -14,8 +14,6 @@ if TYPE_CHECKING:
 type SessionKind = Literal["agent", "team"]
 # Why a run save wrote no row: a cut removed the run, or it is folded behind its scope's latest summary row.
 type Refusal = Literal["removed", "frozen"]
-# What a run save did: wrote the row, or refused it.
-type SaveOutcome = Literal["written"] | Refusal
 
 
 def session_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
@@ -69,7 +67,6 @@ class ConversationSession:
 __all__ = [
     "ConversationSession",
     "Refusal",
-    "SaveOutcome",
     "SessionFields",
     "SessionKind",
     "session_state_snapshot",
