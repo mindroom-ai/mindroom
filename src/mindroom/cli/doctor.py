@@ -334,9 +334,9 @@ def _validate_vertexai_claude_connection(
     if missing:
         return None, f"missing {', '.join(missing)}"
 
+    # Google auth and the anthropic SDK load only when a Vertex Claude model is checked.
     from google.auth.exceptions import DefaultCredentialsError  # noqa: PLC0415
 
-    # The anthropic SDK loads only when a Vertex Claude model is checked.
     from mindroom.providers.anthropic.messages import build_provider  # noqa: PLC0415
 
     probe_config = model_config.model_copy(update={"extra_kwargs": {"timeout": 10, **extra_kwargs, "max_tokens": 1}})
