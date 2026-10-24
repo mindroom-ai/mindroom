@@ -17,6 +17,7 @@ from mindroom.session_storage.agent_storage import create_session_storage, creat
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
+    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+
+_TEAM_STATE_ROOT_DIRNAME = "teams"
 
 _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
 
@@ -195,5 +198,14 @@ def create_scope_session_storage(
         return create_session_storage(agent_name, config, runtime_paths, execution_identity=execution_identity)
     normalized_scope_id = _TEAM_STORAGE_NAME_PATTERN.sub("_", scope.scope_id).strip("_") or "team"
     storage_name = f"team_{normalized_scope_id}_{hashlib.sha256(scope.key.encode()).hexdigest()[:12]}"
-    state_root = resolve_session_state_root(runtime_paths.storage_root / "teams" / storage_name, runtime_paths)
-    return create_state_storage(storage_name, state_root)
+    return create_state_storage(
+        storage_name,
+        resolve_session_state_root(
+            _team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
+            runtime_paths,
+        ),
+    )
+
+
+def _team_scope_state_root(*, storage_name: str, runtime_paths: RuntimePaths) -> Path:
+    return runtime_paths.storage_root / _TEAM_STATE_ROOT_DIRNAME / storage_name
