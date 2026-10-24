@@ -150,7 +150,7 @@ class _ResolvedToolContext:
     """Who a tool call runs for and what its hooks receive; the room, thread, and requester are its identity's."""
 
     agent_name: str
-    execution_identity: ToolExecutionIdentity | None = None
+    execution_identity: ToolExecutionIdentity | None
     reply_to_event_id: str | None
     config: Config | None
     runtime_paths: RuntimePaths | None
