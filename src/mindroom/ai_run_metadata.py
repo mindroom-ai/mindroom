@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import RunMetrics
-from mindroom.model_usage import context_input_tokens_from_counts
+from mindroom.model_usage import context_input_tokens_from_counts, uncached_input_tokens_from_counts
 from mindroom.providers.names import canonical_provider
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.budgets.pricing import PricedModel
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.history.types import PreparedHistoryState
@@ -153,7 +155,40 @@ def _native_context_counts(
     return None
 
 
-def build_ai_run_metadata_content(  # noqa: C901, PLR0912
+def _uncached_input_tokens(
+    metrics: RunMetrics | None,
+    usage_payload: dict[str, Any] | None,
+    *,
+    provider: str | None,
+    configured_provider: str | None,
+    model_id: str | None,
+) -> int | None:
+    """Split new input from cache reads per model, since providers count cache tokens differently."""
+    entries = [entry for entries in ((metrics.details if metrics else None) or {}).values() for entry in entries]
+    if entries:
+        return sum(
+            uncached_input_tokens_from_counts(
+                input_tokens=entry.input_tokens,
+                cache_read_tokens=entry.cache_read_tokens,
+                cache_write_tokens=entry.cache_write_tokens,
+                provider=entry.provider,
+                configured_provider=None,
+                model_id=entry.id,
+            )
+            or 0
+            for entry in entries
+        )
+    return uncached_input_tokens_from_counts(
+        input_tokens=_int_usage_value(usage_payload, "input_tokens"),
+        cache_read_tokens=_int_usage_value(usage_payload, "cache_read_tokens"),
+        cache_write_tokens=_int_usage_value(usage_payload, "cache_write_tokens"),
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id=model_id,
+    )
+
+
+def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     *,
     config: Config,
     model_name: str,
@@ -162,6 +197,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     status: RunStatus | str | None,
     model: str | None,
     model_provider: str | None,
+    prices: Mapping[tuple[str, str], PricedModel],
     metrics: RunMetrics | None = None,
     context_metrics: RunMetrics | None = None,
     context_raw_input_tokens: int | None = None,
@@ -178,6 +214,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     mid-run (for example via `switch_thread_model`), and this metadata must
     describe the model that actually produced the response.
     `context_metrics` belongs to that model run before team-member billing is aggregated.
+    `prices` maps recorded (provider, model ID) identities to prices for the reply's cost.
     """
     model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
@@ -244,7 +281,25 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
         model_payload["provider"] = provider
     payload["model"] = model_payload
     if usage_payload:
+        uncached_input_tokens = _uncached_input_tokens(
+            metrics,
+            usage_payload,
+            provider=provider,
+            configured_provider=model_config.provider if model_config is not None else None,
+            model_id=model_id,
+        )
+        if uncached_input_tokens is not None:
+            usage_payload["uncached_input_tokens"] = uncached_input_tokens
         payload["usage"] = usage_payload
+    cost = run_cost_usd(
+        metrics,
+        usage_payload,
+        model_provider=model_provider,
+        model_id=model_id,
+        prices=prices,
+    )
+    if cost is not None:
+        payload["cost"] = {"usd": format_cost_usd(cost)}
     context_payload = _build_context_payload(
         context_input_tokens=resolved_context_input_tokens,
         cache_read_tokens=resolved_context_cache_read_tokens,

@@ -874,6 +874,7 @@ def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path, display_nam
     )
 
     metadata = build_ai_run_metadata_content(
+        prices={},
         config=config,
         model_name=prepared_model_name,
         run_id="run-1",
@@ -912,6 +913,7 @@ def test_ai_run_metadata_optional_model_display_name(
     config.models["default"] = ModelConfig(provider="openai", id="default-model", display_name=display_name)
 
     metadata = build_ai_run_metadata_content(
+        prices={},
         config=config,
         model_name=model_name,
         run_id="run-1",

@@ -22,6 +22,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.approval.resume import forward_resume, resume_from_session
+from mindroom.budgets.pricing import model_prices
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -601,6 +602,7 @@ def agent_run_metadata_content(
     config: Config,
     record: AnyRunRecord | None,
     *,
+    runtime_paths: RuntimePaths,
     model_name: str,
     run_id: str | None,
     session_id: str | None,
@@ -617,6 +619,7 @@ def agent_run_metadata_content(
     metrics = record.metrics if record is not None else None
     return build_ai_run_metadata_content(
         config=config,
+        prices=model_prices(config, runtime_paths),
         model_name=model_name,
         run_id=run_id,
         session_id=(record.session_id if record is not None else None) or session_id,
@@ -1624,6 +1627,7 @@ async def ai_response(  # noqa: C901
         return agent_run_metadata_content(
             config,
             record,
+            runtime_paths=runtime_paths,
             model_name=prepared_run.runtime_model_name,
             run_id=run_id,
             session_id=session_id,
@@ -2057,6 +2061,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             return agent_run_metadata_content(
                 config,
                 attempt_state.terminal.record,
+                runtime_paths=runtime_paths,
                 model_name=prepared_run.runtime_model_name,
                 run_id=run_id,
                 session_id=event_session_id or session_id,

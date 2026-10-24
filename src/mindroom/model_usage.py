@@ -48,6 +48,27 @@ def context_input_tokens_from_counts(
     return input_tokens + (cache_read_tokens or 0) + (cache_write_tokens or 0)
 
 
+def uncached_input_tokens_from_counts(
+    *,
+    input_tokens: int | None,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
+    provider: str | None,
+    configured_provider: str | None,
+    model_id: str | None,
+) -> int | None:
+    """Return input tokens not read from cache; tokens written to cache are new input."""
+    if input_tokens is None:
+        return None
+    if provider_reports_cache_tokens_outside_input(
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id=model_id,
+    ):
+        return input_tokens + (cache_write_tokens or 0)
+    return max(0, input_tokens - (cache_read_tokens or 0))
+
+
 def response_context_tokens(
     message: Message,
     *,

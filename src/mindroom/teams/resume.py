@@ -551,7 +551,12 @@ async def continue_paused_team_run(
             )
             return CompletedApprovalRun(
                 response_text=response_text,
-                metadata_content=attempt.metadata_content(config, session_id=session_id, status=continued.status),
+                metadata_content=attempt.metadata_content(
+                    config,
+                    runtime_paths=runtime_paths,
+                    session_id=session_id,
+                    status=continued.status,
+                ),
             )
         finally:
             try:

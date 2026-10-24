@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.budgets.pricing import price_table
+from mindroom.budgets.pricing import _price_table
 from mindroom.budgets.spend import _UnpricedModelUsage, collect_monthly_spend, month_bounds
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -143,7 +143,7 @@ def _wire(
 
 def _spend(config: Config, tmp_path: Path) -> object:
     paths = _paths(tmp_path)
-    return collect_monthly_spend(config, paths, NOW, price_table(config, paths).prices)
+    return collect_monthly_spend(config, paths, NOW, _price_table(config, paths).prices)
 
 
 def test_month_bounds_are_utc_calendar_months() -> None:
@@ -304,7 +304,7 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
         ),
     )
 
-    snapshot = collect_monthly_spend(config, paths, NOW, price_table(config, paths).prices)
+    snapshot = collect_monthly_spend(config, paths, NOW, _price_table(config, paths).prices)
 
     assert snapshot.spend_usd == {ALICE: pytest.approx(5.0 + 3.0)}
     assert snapshot.unpriced_models == ()
@@ -359,6 +359,6 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         clock.setattr("mindroom.session_storage.store.time", lambda: resumed)
         storage.save_run(session, run, record_usage=True)
 
-    snapshot = collect_monthly_spend(config, paths, NOW, price_table(config, paths).prices)
+    snapshot = collect_monthly_spend(config, paths, NOW, _price_table(config, paths).prices)
 
     assert snapshot.spend_usd == {ALICE: pytest.approx(5.0)}

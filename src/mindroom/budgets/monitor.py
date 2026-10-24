@@ -10,16 +10,15 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
-from mindroom.budgets.pricing import price_table
+from mindroom.budgets.pricing import model_prices
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
 from mindroom.logging_config import get_logger
 from mindroom.providers.names import provider_route
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
-    from mindroom.budgets.pricing import PricedModel
     from mindroom.config.budgets import BudgetsConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -177,8 +176,6 @@ class BudgetMonitor:
     tick_seconds: float = _TICK_SECONDS
     caps: BudgetCaps = field(init=False)
     _snapshot: SpendSnapshot | None = field(default=None, init=False)
-    # Priced models are instantiated to learn their recorded identity, so the table is kept per config object.
-    _prices: tuple[Config, Mapping[tuple[str, str], PricedModel]] | None = field(default=None, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
 
@@ -290,10 +287,4 @@ class BudgetMonitor:
         self._snapshot = snapshot
 
     def _collect(self, config: Config, now: datetime) -> SpendSnapshot:
-        prices = self._prices[1] if self._prices is not None and self._prices[0] is config else None
-        if prices is None:
-            table = price_table(config, self.runtime_paths)
-            prices = table.prices
-            # A priced model that failed to build is retried on the next scan instead of staying unpriced.
-            self._prices = (config, prices) if table.complete else None
-        return collect_monthly_spend(config, self.runtime_paths, now, prices)
+        return collect_monthly_spend(config, self.runtime_paths, now, model_prices(config, self.runtime_paths))

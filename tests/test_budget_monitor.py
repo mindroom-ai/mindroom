@@ -13,6 +13,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.budgets import monitor as monitor_module
+from mindroom.budgets import pricing as pricing_module
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model, budget_user_id
 from mindroom.budgets.pricing import _PriceTable
@@ -85,8 +86,8 @@ class _Scans:
         self.error: Exception | None = None
         self.unavailable = 0
         monkeypatch.setattr(
-            monitor_module,
-            "price_table",
+            pricing_module,
+            "_price_table",
             lambda _config, _paths: _PriceTable(prices={}, complete=True),
         )
         monkeypatch.setattr(monitor_module, "collect_monthly_spend", self._collect)
@@ -525,7 +526,7 @@ async def test_an_incomplete_price_table_is_rebuilt_on_the_next_scan(
         builds.append(complete)
         return _PriceTable(prices={}, complete=complete)
 
-    monkeypatch.setattr(monitor_module, "price_table", table)
+    monkeypatch.setattr(pricing_module, "_price_table", table)
     monitor, _current = _monitor(tmp_path, _config())
     monitor.sync()
     await _until(lambda: scans.calls == 1)

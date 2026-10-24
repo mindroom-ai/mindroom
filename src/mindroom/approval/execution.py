@@ -268,6 +268,7 @@ async def _continue_persisted_agent(
         metadata_content=agent_run_metadata_content(
             config,
             response,
+            runtime_paths=runtime_paths,
             model_name=model_name,
             run_id=response.run_id,
             session_id=continuation.session_id,

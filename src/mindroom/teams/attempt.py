@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
+from mindroom.budgets.pricing import model_prices
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import TurnPartialSnapshot
@@ -26,6 +27,7 @@ from mindroom.tool_system.events import StructuredStreamChunk, append_stream_tex
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.history.types import PreparedHistoryState
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.teams.members import ResolvedExactTeamMembers
@@ -213,12 +215,20 @@ class TeamAttempt:
             presentation_state=self.presentation.to_state(),
         )
 
-    def metadata_content(self, config: Config, *, session_id: str, status: RunStatus) -> dict[str, Any]:
+    def metadata_content(
+        self,
+        config: Config,
+        *,
+        runtime_paths: RuntimePaths,
+        session_id: str,
+        status: RunStatus,
+    ) -> dict[str, Any]:
         """Return the stored run's metadata payload: the leader's identity, the team's usage, and the prepared history."""
         record = self.records.terminal(self.team_name)
         prepared_history = self.prepared_history
         return build_ai_run_metadata_content(
             config=config,
+            prices=model_prices(config, runtime_paths),
             model_name=self.runtime_model_name,
             run_id=record.run_id,
             session_id=record.session_id or session_id,

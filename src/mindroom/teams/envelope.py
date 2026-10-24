@@ -743,7 +743,12 @@ class _TeamTurn:
         """Return the run metadata of a failed attempt when the caller collects metadata and the run was stored."""
         if self.run_metadata_collector is None or attempt.records.record is None:
             return None
-        return attempt.metadata_content(self.config, session_id=self.session_id, status=RunStatus.error)
+        return attempt.metadata_content(
+            self.config,
+            runtime_paths=self.runtime_paths,
+            session_id=self.session_id,
+            status=RunStatus.error,
+        )
 
     async def finalize_attempt(self, scope_context: ScopeSessionContext | None) -> None:
         """Register the team's storage for the turn's queued-notice finalization once an attempt ran."""
@@ -844,7 +849,12 @@ class _TeamTurn:
         if len(rendered) > _MAX_LOG_MESSAGE_LENGTH:
             logger.debug("team_response_full", agents=attempt.members.display_names, response=rendered)
         metadata_content = (
-            attempt.metadata_content(self.config, session_id=self.session_id, status=record.status)
+            attempt.metadata_content(
+                self.config,
+                runtime_paths=self.runtime_paths,
+                session_id=self.session_id,
+                status=record.status,
+            )
             if self.run_metadata_collector is not None
             else None
         )
