@@ -227,10 +227,11 @@ def resumed_record[R: AnyRunRecord](paused: R) -> R:
     resume changes nothing; a team record keeps its own copy of the member runs that ended before the pause, as
     Agno's continuation of its live run kept them. The copy's own requirements share their tool entries: Agno's
     continuation replaced each tool entry by the requirement's execution of the same call, so a decision recorded on
-    a requirement shows on the run's tools too. A team run also holds its members' requirements, whose call ids come from other provider requests and may
-    equal a leader call's id; those belong to the member's run and never replace the leader's entries. A member
-    record resumed on its own owns its requirements too: the team runtime names them with that record's run id
-    (``_plan_member_resumes``), so the ``member_run_id`` half of the check keeps the aliasing on the member's tools.
+    a requirement shows on the run's tools too. A team run also holds its members' requirements, whose call ids come
+    from other provider requests and may equal a leader call's id; those belong to the member's run and never
+    replace the leader's entries. A member record resumed on its own owns its requirements too: the team runtime
+    names them with that record's run id (``_plan_member_resumes``), so the ``member_run_id`` half of the check
+    keeps the aliasing on the member's tools.
     """
     if paused.status is not RunStatus.paused:
         msg = f"Only a paused run can be resumed; run {paused.run_id!r} is {paused.status.value}"
