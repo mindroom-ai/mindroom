@@ -81,6 +81,7 @@ class ResponsesWire:
     route: Literal["openai", "codex"]
     store: bool | None
     explicit_breakpoint: bool
+    # Only Codex requests read it, as their instructions; the openai route carries the same prompt unused.
     default_instructions: str
 
 
