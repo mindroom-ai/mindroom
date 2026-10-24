@@ -12,7 +12,6 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import Any, LiteralString, cast
 
@@ -135,25 +134,18 @@ def _decode_json_columns(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 @contextmanager
-def _read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
-    """Open one SQLite database read-only."""
+def _sqlite_query(path: Path) -> Iterator[_Query]:
+    """Open one SQLite database read-only and yield a query function returning dict rows."""
     connection = sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True, timeout=1.0)
     connection.row_factory = sqlite3.Row
     try:
-        yield connection
+
+        def query(sql: str, params: Sequence[object]) -> list[dict[str, Any]]:
+            return [dict(row) for row in connection.execute(sql, tuple(params))]
+
+        yield query
     finally:
         connection.close()
-
-
-def _dict_rows(connection: sqlite3.Connection, sql: str, params: Sequence[object]) -> list[dict[str, Any]]:
-    return [dict(row) for row in connection.execute(sql, tuple(params))]
-
-
-@contextmanager
-def _sqlite_query(path: Path) -> Iterator[_Query]:
-    """Open one SQLite database read-only and yield a query function returning dict rows."""
-    with _read_only_connection(path) as connection:
-        yield partial(_dict_rows, connection)
 
 
 @contextmanager
@@ -303,17 +295,16 @@ def _read_run_database(
     The runs table is the one `TableNames.of_database` names for the database's file.
     """
     # The schema module loads the history package, which the CLI's import path keeps out (tests/test_cli_config.py).
-    from mindroom.session_storage.schema import TableNames, table_names  # noqa: PLC0415
+    from mindroom.session_storage.schema import TableNames  # noqa: PLC0415
 
     where = " OR ".join(conditions)
     runs_table = TableNames.of_database(database).runs
-    with _read_only_connection(database) as connection:
-        if runs_table not in table_names(connection):
+    with _sqlite_query(database) as query:
+        if not query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [runs_table]):
             return 0, []
         # The table name comes from the database's file name; values are placeholders.
-        [counted] = _dict_rows(connection, f'SELECT COUNT(*) AS matches FROM "{runs_table}" WHERE {where}', params)  # noqa: S608
-        rows = _dict_rows(
-            connection,
+        [counted] = query(f'SELECT COUNT(*) AS matches FROM "{runs_table}" WHERE {where}', params)  # noqa: S608
+        rows = query(
             f'SELECT * FROM "{runs_table}" WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?',  # noqa: S608
             [*params, _MAX_RUNS],
         )
