@@ -274,21 +274,26 @@ async def _video_part(video: Video, route: MediaRoute) -> dict[str, Any] | None:
     return _inline(video.content, mime_type) if video.content else None
 
 
+def _file_mime_type(file: File, name: str, declared: str | None = None) -> str:
+    """Return the file's own MIME type, else the one its download declared, else its name's, else PDF."""
+    return file.mime_type or declared or mimetypes.guess_type(name)[0] or "application/pdf"
+
+
 async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
     if file.content:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-        return _inline(data, file.mime_type or mimetypes.guess_type(file.filename or "")[0] or "application/pdf")
+        return _inline(data, _file_mime_type(file, file.filename or ""))
     if (url := file.url) is not None:
         # Gemini fetches a Cloud Storage file, or an HTTPS file of known type, itself; other files are downloaded.
         if url.startswith("gs://"):
-            return _file_uri(url, file.mime_type or mimetypes.guess_type(url)[0] or "application/pdf")
+            return _file_uri(url, _file_mime_type(file, url))
         if url.startswith("https://") and file.mime_type:
             return _file_uri(url, file.mime_type)
         data, declared = await _downloaded(url, "file", route)
-        return _inline(data, file.mime_type or declared or mimetypes.guess_type(url)[0] or "application/pdf")
+        return _inline(data, _file_mime_type(file, url, declared))
     if file.filepath is None:
         return None
-    mime_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
+    mime_type = _file_mime_type(file, file.filepath)
     return await _local_part(file.filepath, "file", route, lambda _: mime_type)
 
 
