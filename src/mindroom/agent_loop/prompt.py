@@ -53,9 +53,8 @@ def render_instructions(instructions: Sequence[str]) -> str:
     """
     if len(instructions) == 1:
         return instructions[0]
-    if not any(_is_block(instruction) for instruction in instructions):
-        return "\n".join(f"- {instruction.strip()}" for instruction in instructions)
-    return "\n\n".join(
+    separator = "\n\n" if any(_is_block(instruction) for instruction in instructions) else "\n"
+    return separator.join(
         instruction if _is_block(instruction) else f"- {instruction.strip()}" for instruction in instructions
     )
 
