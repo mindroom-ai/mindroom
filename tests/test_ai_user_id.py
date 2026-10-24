@@ -1052,7 +1052,7 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
-    async def test_prepare_agent_and_prompt_uses_raw_prompt_for_memory_and_appends_additional_context(
+    async def test_prepare_agent_and_prompt_uses_raw_prompt_for_memory_and_appends_turn_context(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,

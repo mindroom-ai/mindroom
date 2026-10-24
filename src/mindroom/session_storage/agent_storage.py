@@ -41,7 +41,7 @@ def create_state_storage(storage_name: str, state_root: Path) -> ConversationSto
         db_path.parent.mkdir(parents=True, exist_ok=True)
         migrate_usage_database(db_path, names)
         migrate_to_summary_rows(db_path, names)
-        return ConversationStore(db_path, names, prompt_roles=frozenset({"system"}))
+        return ConversationStore(db_path, names, strip_system_messages=True)
 
 
 def create_session_storage(

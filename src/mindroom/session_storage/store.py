@@ -99,14 +99,14 @@ def migrate_database(
 class ConversationStore:
     """One conversation database; it holds no connection, so there is nothing to close.
 
-    ``prompt_roles`` are message roles, such as ``system``, that stored runs leave out unless they are paused.
+    With ``strip_system_messages``, stored runs leave out their system messages unless they are paused.
     Tables are created by the first write. Migrations that recognize an older database by a missing summary-row
     or usage table must run before that write.
     """
 
     path: Path
     names: TableNames
-    prompt_roles: frozenset[str] = frozenset()
+    strip_system_messages: bool = False
 
     @contextmanager
     def transaction(self, *, write: bool) -> Iterator[sqlite3.Connection]:
@@ -450,9 +450,9 @@ class ConversationStore:
         record_usage: bool,
     ) -> _SavedRun:
         """Save one run from its stored dict (``record.to_dict()``), under the insertion rules."""
-        if data["status"] != RunStatus.paused.value and self.prompt_roles:
+        if data["status"] != RunStatus.paused.value and self.strip_system_messages:
             # Prompts are rebuilt from config on every request; a paused run keeps them until it continues.
-            data["messages"] = [message for message in data["messages"] if message["role"] not in self.prompt_roles]
+            data["messages"] = [message for message in data["messages"] if message["role"] != "system"]
         row = _write_run_row(connection, self.names, data, row_type=row_type, session_id=session_id)
         saved = _SavedRun(data["run_id"], row_type, row)
         if isinstance(row, _WrittenRow):

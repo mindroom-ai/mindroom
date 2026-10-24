@@ -2099,7 +2099,6 @@ def create_agent(
     )
     prepared = prepare_run_tools(spec)
     prompt = PromptSpec(
-        # An authored prompt leads the system message in place of the agent's identity.
         persona=persona_prompt,
         role=role_context.role,
         instructions=tuple(instructions),

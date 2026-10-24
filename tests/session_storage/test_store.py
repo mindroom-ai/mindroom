@@ -37,8 +37,8 @@ if TYPE_CHECKING:
 _NAMES = TableNames("code")
 
 
-def _store(tmp_path: Path, *, prompt_roles: frozenset[str] = frozenset({"system"})) -> ConversationStore:
-    return ConversationStore(tmp_path / "code.db", _NAMES, prompt_roles=prompt_roles)
+def _store(tmp_path: Path) -> ConversationStore:
+    return ConversationStore(tmp_path / "code.db", _NAMES, strip_system_messages=True)
 
 
 @pytest.fixture
