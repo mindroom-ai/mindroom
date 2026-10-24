@@ -229,6 +229,13 @@ class ToolResultView:
     is_error: bool
 
 
+# LEGACY_COMPAT: Tool messages stored without content.
+# Legacy format: a stored ``tool`` message whose ``content`` is null. The Agno runtime's result writer
+# (``create_function_call_result``) stored a call's output, or a failed call's error text, as content that could be
+# missing.
+# Last legacy release: v2026.10.492; replacement: unreleased; every owned writer stores string content.
+# Handling: the view gives such a result empty content, so every wire still answers its call when the row replays.
+# Coverage: tests/providers/test_provider_families.py::test_every_family_encodes_a_tool_result_with_its_call_name_content_and_failure
 def tool_result_view(message: Message) -> ToolResultView:
     """Return the tool result a ``tool`` message carries, as every wire encodes it."""
     return ToolResultView(
