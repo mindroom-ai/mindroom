@@ -136,9 +136,9 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
     """
     if not show_tool_calls:
         return
+    unordered = "Approval suspension requires an ordered presentation for every pending tool"
     if not tool_markers_match_trace(paused.response_text, paused.tool_trace):
-        msg = "Approval suspension requires an ordered presentation for every pending tool"
-        raise RuntimeError(msg)
+        raise RuntimeError(unordered)
     requirements_by_call_id = {
         requirement.tool_execution.tool_call_id: requirement
         for requirement in paused.requirements
@@ -150,8 +150,7 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
     for tool in paused.tools:
         call_id = tool.tool_call_id
         if call_id is None:
-            msg = "Approval suspension requires an ordered presentation for every pending tool"
-            raise RuntimeError(msg)
+            raise RuntimeError(unordered)
         requirement = requirements_by_call_id.get(call_id)
         member_id, anchor_id = (None, call_id) if requirement is None else pending_call_slot(requirement, member_names)
         matches = [
@@ -161,15 +160,13 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
         ]
         # An unanchored call is refused as such, before its member identity is resolved.
         if not matches:
-            msg = "Approval suspension requires an ordered presentation for every pending tool"
-            raise RuntimeError(msg)
+            raise RuntimeError(unordered)
         if member_id is not None:
             member_id = member_slot_id(config_names_by_provider_id, member_id)
         expected_scope = f"agent:{member_id}" if member_id is not None else ("team" if is_team_presentation else None)
         # Call ids are unique only within one member's run, so another member's call may share the anchor's id.
         if sum(entry.scope_key == expected_scope for entry in matches) != 1:
-            msg = "Approval suspension requires an ordered presentation for every pending tool"
-            raise RuntimeError(msg)
+            raise RuntimeError(unordered)
 
 
 def continuation_target(
@@ -531,15 +528,13 @@ class ApprovalResponseCoordinator:
         recover: bool = False,
     ) -> MatrixDelivery | None:
         """Return the continuation's frozen FINAL, optionally retrying its delivery."""
-        outbox = self.delivery_gateway.deps.outbox
-        delivery = await outbox.load_matrix_delivery(
+        load = partial(
+            self.delivery_gateway.deps.outbox.load_matrix_delivery,
             delivery_id=continuation.source_event_ids[0],
             stage=DeliveryStage.FINAL,
         )
+        delivery = await load()
         if recover and delivery is not None and delivery.acknowledged_event_id is None:
             await self.delivery_gateway.recover_deliveries()
-            delivery = await outbox.load_matrix_delivery(
-                delivery_id=continuation.source_event_ids[0],
-                stage=DeliveryStage.FINAL,
-            )
+            delivery = await load()
         return delivery
