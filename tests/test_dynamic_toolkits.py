@@ -128,14 +128,14 @@ def _function_names(build: AgentBuild) -> set[str]:
 
 def _native_deferred_names(build: AgentBuild) -> frozenset[str]:
     """The functions native tool search sends marked deferred; portable search sends none of them."""
-    native = build.spec.model.capabilities.native_tool_search
-    return build.request_template.deferred_tools.names if native else frozenset()
+    deferred = build.request_template.deferred_tools
+    return frozenset() if deferred.portable else deferred.names
 
 
 def _portable_deferred_names(build: AgentBuild) -> frozenset[str]:
     """The functions portable tool search keeps off the request behind tool_search and call_tool."""
-    native = build.spec.model.capabilities.native_tool_search
-    return frozenset() if native else build.request_template.deferred_tools.names
+    deferred = build.request_template.deferred_tools
+    return deferred.names if deferred.portable else frozenset()
 
 
 async def _search(build: AgentBuild, query: str) -> dict[str, object]:

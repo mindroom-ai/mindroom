@@ -424,6 +424,9 @@ async def replay_through_pipeline(
     A decision request runs inside ``without_provider_tools()``, as participation decisions and judgments do.
     """
     request = golden_request(case_input, native=adapter.native_history_route)
+    if (deferred := case_input["deferred_tool_search"]) is not None:
+        # The build defers natively exactly where the route has native tool search, so the recorded mode follows it.
+        assert adapter.capabilities.native_tool_search == (deferred["mode"] == "native")
     decision = without_provider_tools() if case_input.get("provider_tools_disabled") else nullcontext()
     with decision:
         events = [event async for event in pipeline_provider(adapter).stream(request)]
