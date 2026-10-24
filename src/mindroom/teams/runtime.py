@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class MemberEvent:
-    """One of a member run's events, tagged with the member and its run; ``ToolCompleted`` names the team run as parent."""
+    """One of a member run's events, tagged with the member and its run."""
 
     member_id: str
     member_name: str
@@ -445,12 +445,8 @@ class _MemberRuns:
         try:
             async with closing_async_stream(stream):
                 async for event in stream:
-                    if isinstance(event, RunFinished):
-                        continue
-                    tagged = (
-                        replace(event, parent_run_id=self.record.run_id) if isinstance(event, ToolCompleted) else event
-                    )
-                    self.emit(MemberEvent(member.spec.id, member.spec.name, run_id, tagged))
+                    if not isinstance(event, RunFinished):
+                        self.emit(MemberEvent(member.spec.id, member.spec.name, run_id, event))
         except Exception as error:
             logger.warning(
                 "team_member_run_failed",
