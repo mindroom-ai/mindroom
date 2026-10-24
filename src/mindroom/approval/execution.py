@@ -186,7 +186,6 @@ async def _continue_persisted_agent(
     denial_reasons: dict[str, str | None],
     knowledge: AgentKnowledge | None,
     tool_trace_collector: list[ToolTraceEntry],
-    run_id_callback: Callable[[str], None] | None,
     tool_dispatch: ToolDispatchContext,
     progress: ProgressPublisher | None,
 ) -> CompletedApprovalRun | PausedAttempt:
@@ -288,7 +287,6 @@ async def _continue_persisted_agent(
         knowledge=knowledge,
         refresh_scheduler=refresh_scheduler,
         tool_trace_collector=tool_trace_collector,
-        run_id_callback=run_id_callback,
         tool_dispatch=tool_dispatch,
         progress=progress,
     )
@@ -328,7 +326,6 @@ async def _stream_continuation_turn(
     knowledge: AgentKnowledge | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     tool_trace_collector: list[ToolTraceEntry],
-    run_id_callback: Callable[[str], None] | None,
     tool_dispatch: ToolDispatchContext,
     progress: ProgressPublisher | None,
     resumed_attempt: ResumedAttempt | None = None,
@@ -357,7 +354,6 @@ async def _stream_continuation_turn(
         knowledge=knowledge,
         execution_identity=execution_identity,
         refresh_scheduler=refresh_scheduler,
-        run_id_callback=run_id_callback,
         run_metadata_collector=run_metadata,
         show_tool_calls=show_tool_calls,
         tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
@@ -417,7 +413,6 @@ class AgentApprovalExecution:
         tool_trace_collector: list[ToolTraceEntry],
         typing_log_context: Mapping[str, object],
         progress: ProgressPublisher | None,
-        run_id_callback: Callable[[str], None] | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
         """Apply exact decisions and continue the matching persisted paused run.
 
@@ -554,7 +549,6 @@ class AgentApprovalExecution:
                                 knowledge=knowledge,
                                 refresh_scheduler=self.refresh_scheduler(),
                                 tool_trace_collector=tool_trace_collector,
-                                run_id_callback=run_id_callback,
                                 tool_dispatch=tool_dispatch,
                                 progress=progress,
                             )
@@ -584,7 +578,6 @@ class AgentApprovalExecution:
                             denial_reasons=denial_reasons,
                             knowledge=knowledge,
                             tool_trace_collector=tool_trace_collector,
-                            run_id_callback=run_id_callback,
                             tool_dispatch=tool_dispatch,
                             progress=progress,
                         )

@@ -3238,7 +3238,6 @@ class TestAgentBot(AgentBotTestBase):
                 progress=progress,
                 response_function=generate,
                 user_id=claimed.user_id,
-                run_id="run-silent",
                 build_post_response_outcome=lambda _outcome: cast("Any", SimpleNamespace()),
                 post_response_deps=lambda: cast("Any", SimpleNamespace()),
             )

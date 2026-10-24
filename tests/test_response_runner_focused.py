@@ -6573,7 +6573,6 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
             progress=progress,
             response_function=generate,
             user_id=request.user_id,
-            run_id="run-1",
             build_post_response_outcome=build_post_outcome,
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -6649,7 +6648,6 @@ async def test_approval_handoff_uses_visibility_frozen_for_the_turn(
             progress=progress,
             response_function=AsyncMock(),
             user_id=request.user_id,
-            run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             approval_suspension_handler=suspend,
@@ -6704,7 +6702,6 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
                 progress=progress,
                 response_function=AsyncMock(),
                 user_id=request.user_id,
-                run_id="run-1",
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             )
@@ -6799,7 +6796,6 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
                 progress=progress,
                 response_function=AsyncMock(),
                 user_id=request.user_id,
-                run_id="run-process-shutdown",
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(
                     logger=get_logger("tests.post_response"),
@@ -6859,7 +6855,6 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
             progress=progress,
             response_function=AsyncMock(),
             user_id=request.user_id,
-            run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -6902,7 +6897,6 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
             progress=progress,
             response_function=AsyncMock(),
             user_id=request.user_id,
-            run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -6974,7 +6968,6 @@ async def test_terminal_send_cancellation_preserves_source_replay(
             progress=progress,
             response_function=AsyncMock(),
             user_id=request.user_id,
-            run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -7021,7 +7014,6 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
             progress=progress,
             response_function=AsyncMock(),
             user_id=request.user_id,
-            run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -7080,7 +7072,6 @@ async def test_landed_terminal_interruption_settles_the_turn(
                 progress=progress,
                 response_function=AsyncMock(),
                 user_id=request.user_id,
-                run_id="run-1",
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             )
@@ -7138,7 +7129,6 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
             progress=progress,
             response_function=AsyncMock(),
             user_id=request.user_id,
-            run_id="run-1",
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -7181,7 +7171,6 @@ async def test_terminal_settlement_rethrows_generation_error_after_post_effects(
             progress=progress,
             response_function=AsyncMock(),
             user_id=request.user_id,
-            run_id="run-1",
             build_post_response_outcome=build_post_outcome,
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )

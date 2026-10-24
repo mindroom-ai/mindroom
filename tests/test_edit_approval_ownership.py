@@ -650,7 +650,6 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
                 progress=progress,
                 response_function=AsyncMock(),
                 user_id=request.user_id,
-                run_id="run",
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(logger=runner.deps.logger),
                 approval_suspension_handler=fail_handoff,

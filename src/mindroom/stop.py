@@ -50,15 +50,14 @@ async def send_stop_button(client: AsyncClient, room_id: str, message_id: str) -
 
 @dataclass
 class _LiveSpan:
-    """The task executing one reply span, and the run it is on."""
+    """The task executing one reply span."""
 
     task: asyncio.Task[object]
-    run_id: str | None = None
     cancel_requested: bool = False
 
 
 class SpanRegistry:
-    """The task and run of each reply span this bot instance executes.
+    """The task of each reply span this bot instance executes.
 
     A Stop names a span, never a message: the reply's records decide which span
     it reaches, so a reply whose event does not exist yet is just as stoppable.
@@ -103,15 +102,8 @@ class SpanRegistry:
         if live.cancel_requested:
             return
         live.cancel_requested = True
-        logger.info("Hard cancelling reply span task", span_id=span_id, run_id=live.run_id, cancel_source=cancel_source)
+        logger.info("Hard cancelling reply span task", span_id=span_id, cancel_source=cancel_source)
         request_task_cancel(live.task, cancel_source=cancel_source)
-
-    def update_run_id(self, span_id: str, run_id: str | None) -> None:
-        """Note the run a span's next attempt uses, for the stop log."""
-        live = self._spans.get(span_id)
-        if live is None or live.task.done():
-            return
-        live.run_id = run_id
 
     def live_span_ids(self) -> frozenset[str]:
         """Return the spans whose task is still running."""
