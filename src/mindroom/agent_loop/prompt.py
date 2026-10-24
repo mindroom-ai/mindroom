@@ -1,9 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Render an agent's system message from its prompt inputs, in the layout Agno 3.0.9 sent.
+"""Render an agent's system message from its prompt inputs.
 
-The layout is part of every provider's prompt-cache prefix, so section order, tags, and blank lines match Agno's
-``aget_system_message`` byte for byte for the inputs MindRoom uses.
-Agno's ``{key}`` and ``$key`` substitution of session state and run metadata is not ported: no MindRoom prompt uses it.
+The layout is part of every provider's prompt-cache prefix, so section order, tags, and blank lines stay as main sends
+them.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import Capabilities
 
-# Claude routes add this line to the system message of every request that offers tools, as Agno's Claude model did.
+# Claude routes add this line to the system message of every request that offers tools (``model_note_for``).
 CLAUDE_TOOLS_NOTE = "Do not reflect on the quality of the returned search results in your response\n\n"
 
 
@@ -27,8 +26,7 @@ class PromptSpec:
     """Every input of one agent's system message, in the order the message renders them.
 
     ``system_message``, when set, is sent verbatim instead of everything else, as minimal mode's bootstrap message is.
-    ``markdown`` adds the markdown line; Agno left it out of requests with an output schema, so such callers leave it
-    False.
+    ``markdown`` adds the markdown line; callers with an output schema leave it False, as main does.
     ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered.
     ``model_note`` is the text the provider family adds (``model_note_for``), and ``output_format_prompt`` the JSON
     prompt a structured-output request needs (``structured.select_response_format``).

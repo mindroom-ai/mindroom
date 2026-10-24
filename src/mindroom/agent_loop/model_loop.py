@@ -257,15 +257,18 @@ def _accept_turn(
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
     The provider stamped the message with the model that answered it. A request that answers without content, as the
-    adapters report a streamed turn without text, leaves the content as it was, as Agno's loop did, so a resumed run
-    keeps its paused text until the model says something new. Empty content, which a reply that does not stream can
-    carry, is blank text, as Agno's non-streaming loop recorded it; its member results tell blank text from none.
+    adapters report a streamed turn without text, leaves the content as it was, so a resumed run keeps its paused text
+    until the model says something new. Empty content, which a reply that does not stream can carry, is blank text;
+    its member results tell blank text from none.
     """
     state.messages.append(message)
     _count_request(metrics, message.metrics, identity)
     state.request_index += 1
     if message.content is not None:
         progress.text_parts.append(message.get_content_string())
+        # TODO(simplify): the requests' texts join with no separator, so the run's text before and after a tool call
+        # runs together in its content. Join them with a blank line. Users (blocking replies), models reading a
+        # member's result, and stored data would notice. (#3075)
         state.record.content = "".join(progress.text_parts)
 
 
@@ -350,7 +353,7 @@ async def _answer_resumed(
 
 
 def _rejection_message(requirement: RunRequirement) -> Message:
-    """Return the tool message that answers a denied call with its denial note, as Agno's ``reject_tool_call`` did."""
+    """Return the tool message that answers a denied call with its denial note."""
     execution = requirement.tool_execution
     return Message(
         role="tool",
@@ -377,8 +380,8 @@ async def _answer_batch(
     Each result is one canonical tool message; media leave them first, so a wire that merges results never carries
     them, and reach the model on one user message after the results. Every batch path answers here, so one rule
     decides the stop: a batch stops the run when any of its results does, counting the results a resumed batch
-    answered before its pause, as Agno's loop decided for a fresh batch. No later request reads what a hook would
-    add after a batch that stops the run, so none runs.
+    answered before its pause. No later request reads what a hook would add after a batch that stops the run, so none
+    runs.
     """
     follow_up = media_follow_up(results)
     messages.extend(results)

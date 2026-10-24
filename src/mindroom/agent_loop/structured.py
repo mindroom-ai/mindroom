@@ -1,10 +1,10 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Ask a model for structured output the way its provider supports, and read the answer back into the schema.
 
-Providers with native structured output receive the pydantic schema, JSON-schema providers receive Agno's
-``json_schema`` response format, and every other provider receives JSON mode plus a JSON prompt in the system message.
-The request formats, the prompt text, and the lenient parsing are Agno 3.0.9's, because helper prompts and
-response formats are part of the model-visible parity contract.
+Providers with native structured output receive the pydantic schema, JSON-schema providers receive a ``json_schema``
+response format, and every other provider receives JSON mode plus a JSON prompt in the system message.
+The request formats, the prompt text, and the lenient parsing are kept as main behaves: helper prompts and response
+formats are model-visible.
 """
 
 from __future__ import annotations

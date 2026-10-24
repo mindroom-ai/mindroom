@@ -1,8 +1,7 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """The tool side of the loop: the tools a run offers, and one assistant message's tool calls planned, run, and answered.
 
-Resolution, the tool-call limit, pause classification, result messages, and the media follow-up reproduce what
-Agno 3.0.9's model loop did, so stored tool messages and tool executions keep their shapes.
+Tool messages, tool executions, and the texts the model reads keep the shapes main stores and sends.
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Agno's texts: the model reads the first for a call past the limit and the second for a result that carries media.
+# The model reads the first for a call past the limit and the second for a result that carries media.
 _LIMIT_ERROR_TEXT = "Tool call limit reached. Tool call {name} not executed. Don't try to execute it again."
 MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
 
@@ -47,7 +46,7 @@ class PreparedTools:
     instructions: tuple[str, ...]
 
     def specs(self) -> tuple[ToolSpec, ...]:
-        """Return the model-facing definitions sorted by name, the order Agno sent them in for prompt-cache stability."""
+        """Return the model-facing definitions sorted by name, a stable order for prompt caches."""
         return tuple(sorted((function.definition() for function in self.functions.values()), key=lambda s: s.name))
 
 
@@ -69,8 +68,7 @@ def offered_functions(spec: AgentSpec) -> Iterator[tuple[AdaptedToolkit, ToolFun
 def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
     """Flatten the agent's toolkits into the functions a run offers, as ``offered_functions`` selects them.
 
-    A toolkit's instructions are kept whenever Agno would have added them to the prompt, once per toolkit identity,
-    which Agno keyed by name, instructions, and function surface.
+    Each toolkit's instructions are kept once per toolkit identity: its name, instructions, and function names.
     """
     functions = {function.name: function for _toolkit, function in offered_functions(spec)}
     instructions: dict[tuple[str, str, frozenset[str]], str] = {}
@@ -214,7 +212,7 @@ def _complete_call(call: PlannedCall, outcome: ToolOutcome, elapsed: float) -> M
 
 
 def tool_result_message(execution: ToolExecution, media: ToolValue | None = None) -> Message:
-    """Return the tool message that answers ``execution`` with its recorded result, as Agno built it.
+    """Return the tool message that answers ``execution`` with its recorded result.
 
     ``media`` is the successful tool value whose media the message carries; a failed call carries none.
     """

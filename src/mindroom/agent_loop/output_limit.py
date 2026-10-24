@@ -62,9 +62,9 @@ def output_limit_policy() -> AnswerToolCalls:
 
 def output_limit_answers(capabilities: Capabilities) -> AnswerToolCalls | None:
     """Return the output-limit policy of one run on a Claude-family model, and None on any other model."""
-    # TODO(simplify): only Claude-family runs answer cut-off tool calls; elsewhere a call the output limit cut off runs
-    # and the model reads an argument error. Apply the policy on every route, which removes this function.
-    # Models would notice: they would read why the call did not run. (#3075)
+    # TODO(simplify): only Claude-family runs answer cut-off tool calls; elsewhere a cut-off call answers with an
+    # argument error when its arguments no longer parse, and runs when they still do. Apply the policy on every route,
+    # which removes this function. Models would notice: they would read why the calls did not run. (#3075)
     return output_limit_policy() if capabilities.claude_family else None
 
 
