@@ -251,10 +251,23 @@ class _PreparedAgentRun:
 
 @dataclass(frozen=True)
 class _AgentAttempt:
-    """Inputs and identity for one agent run attempt."""
+    """Inputs and identity for one agent run attempt, and the partial output a streamed one has shown."""
 
     run_input: list[Message]
     run_id: str
+    stream_state: _StreamingAttemptState | None = None
+
+    def partial_snapshot(self) -> TurnPartialSnapshot:
+        """Return what an interruption records of this attempt: a streamed one's partial output, and its run id."""
+        state = self.stream_state
+        if state is None:
+            return TurnPartialSnapshot(attempt_run_id=self.run_id)
+        return TurnPartialSnapshot(
+            assistant_text=state.assistant_text,
+            completed_tools=tuple(state.completed_tools),
+            interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
+            attempt_run_id=self.run_id,
+        )
 
 
 @dataclass
@@ -306,28 +319,17 @@ class _StreamingAttemptState:
         return self.tool_tracker.completed_tools
 
 
-@dataclass
-class _AgentTurnHolder:
-    """Live per-turn agent state shared between attempt closures and adapter callbacks."""
-
-    attempt: _AgentAttempt | None = None
-    state: _StreamingAttemptState | None = None  # streaming turns only
-    attempt_started: bool = False  # streaming turns only
-
-
 @dataclass(frozen=True)
 class _AgentTurnCallbacks:
     """Adapter callbacks shared by the blocking and streaming agent turns."""
 
     load_scope: Callable[[], ScopeSessionContext | None]
     on_scope_loaded: Callable[[ScopeSessionContext | None], None]
-    release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None]
 
 
 def _build_agent_turn_callbacks(
-    holder: _AgentTurnHolder,
     *,
     agent_name: str,
     prompt: str,
@@ -354,13 +356,6 @@ def _build_agent_turn_callbacks(
             scope_context=scope_context,
             entity_name=agent_name,
         )
-
-    def _release_attempt_entity(_scope_context: ScopeSessionContext | None) -> None:
-        # Cancel snapshots taken between this release and the next attempt must
-        # not see the spent attempt's partials; its completed tools already
-        # carried over via the turn state.
-        holder.attempt = None
-        holder.state = None
 
     def _discard_empty_run(scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
         ai_runtime.discard_empty_completed_run(
@@ -390,20 +385,8 @@ def _build_agent_turn_callbacks(
     return _AgentTurnCallbacks(
         load_scope=_load_scope,
         on_scope_loaded=_on_scope_loaded,
-        release_attempt_entity=_release_attempt_entity,
         discard_empty_run=_discard_empty_run,
         persist_standalone_replay=_persist_standalone_replay,
-    )
-
-
-def _streaming_partial_snapshot(holder: _AgentTurnHolder) -> TurnPartialSnapshot:
-    """Return the live partial-output view of one streaming agent turn."""
-    state = holder.state or _StreamingAttemptState()
-    return TurnPartialSnapshot(
-        assistant_text=state.assistant_text,
-        completed_tools=tuple(state.completed_tools),
-        interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
-        attempt_run_id=holder.attempt.run_id if holder.attempt is not None else None,
     )
 
 
@@ -754,6 +737,8 @@ def _begin_attempt(
     run_context: _AgentRunContext,
     continuation: TurnContinuationRunState,
     media: MediaInputs,
+    *,
+    stream_state: _StreamingAttemptState | None = None,
 ) -> tuple[_AttemptStorage, _AgentAttempt]:
     """Record one prepared attempt on the turn's run state, and return where its run is stored and its request.
 
@@ -777,9 +762,10 @@ def _begin_attempt(
         scope_context = run.scope_context = run.scope_context.with_session()
         assert scope_context.session is not None
         storage = _AttemptStorage(store=scope_context.storage, session=scope_context.session, scope=scope_context.scope)
-    attempt = _AgentAttempt(
+    attempt = run.attempt = _AgentAttempt(
         run_input=prepared_run.run_input(media),
         run_id=continuation.active_run_id or str(uuid4()),
+        stream_state=stream_state,
     )
     return storage, attempt
 
@@ -1609,9 +1595,7 @@ async def ai_response(  # noqa: C901
     except ValueError as e:
         return get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
 
-    holder = _AgentTurnHolder()
     callbacks = _build_agent_turn_callbacks(
-        holder,
         agent_name=agent_name,
         prompt=_compose_current_turn_prompt(raw_prompt=prompt, model_prompt=model_prompt),
         current_prompt_is_structured=current_prompt_is_structured,
@@ -1657,7 +1641,6 @@ async def ai_response(  # noqa: C901
             )
         prepared_run = run_context.prepared_run
         storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs)
-        holder.attempt = attempt
 
         def operation() -> Awaitable[_NonStreamingAttemptResult]:
             return _run_non_streaming_agent_attempts(
@@ -1765,10 +1748,6 @@ async def ai_response(  # noqa: C901
     adapter = BlockingTurnAdapter(
         load_scope=callbacks.load_scope,
         run_attempt=_run_blocking_attempt,
-        snapshot_partial=lambda: TurnPartialSnapshot(
-            attempt_run_id=holder.attempt.run_id if holder.attempt is not None else None,
-        ),
-        release_attempt_entity=callbacks.release_attempt_entity,
         discard_empty_run=callbacks.discard_empty_run,
         on_scope_loaded=callbacks.on_scope_loaded,
         persist_standalone_replay=callbacks.persist_standalone_replay,
@@ -1995,9 +1974,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         yield get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
         return
 
-    holder = _AgentTurnHolder()
     callbacks = _build_agent_turn_callbacks(
-        holder,
         agent_name=agent_name,
         prompt=_compose_current_turn_prompt(raw_prompt=prompt, model_prompt=model_prompt),
         current_prompt_is_structured=current_prompt_is_structured,
@@ -2007,10 +1984,13 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         execution_identity=execution_identity,
     )
 
+    attempt_started = False
+
     async def _finalize_streaming_attempt(scope_context: ScopeSessionContext | None) -> None:
-        if not holder.attempt_started:
+        nonlocal attempt_started
+        if not attempt_started:
             return
-        holder.attempt_started = False
+        attempt_started = False
         ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=agent_name)
 
     async def _run_streaming_attempt(  # noqa: C901
@@ -2018,6 +1998,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
+        nonlocal attempt_started
         try:
             run_context = await _prepare_agent_run_context(
                 ctx,
@@ -2050,12 +2031,10 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             yield AttemptResolved(HandledAttempt())
             return
         prepared_run = run_context.prepared_run
-        storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs)
-        holder.attempt = attempt
-        holder.attempt_started = True
-        turn_state = run.turn_state
         state = _StreamingAttemptState()
-        holder.state = state
+        storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs, stream_state=state)
+        attempt_started = True
+        turn_state = run.turn_state
 
         def _sync_live_turn_recorder(
             *,
@@ -2189,8 +2168,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     adapter = StreamingTurnAdapter[AIStreamChunk](
         load_scope=callbacks.load_scope,
         run_attempt=_run_streaming_attempt,
-        snapshot_partial=lambda: _streaming_partial_snapshot(holder),
-        release_attempt_entity=callbacks.release_attempt_entity,
         discard_empty_run=callbacks.discard_empty_run,
         on_scope_loaded=callbacks.on_scope_loaded,
         finalize_attempt=_finalize_streaming_attempt,

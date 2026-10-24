@@ -187,11 +187,19 @@ class _AdapterLog:
     """Call log shared by the fake adapter callbacks."""
 
     scope: Any = None
-    released: int = 0
     finalized: int = 0
     discards: list[EmptyRunDiscard] = field(default_factory=list)
     persisted: list[StandaloneReplaySnapshot] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _FixedAttempt:
+    """A running attempt whose partial output is fixed."""
+
     snapshot: TurnPartialSnapshot = field(default_factory=TurnPartialSnapshot)
+
+    def partial_snapshot(self) -> TurnPartialSnapshot:
+        return self.snapshot
 
 
 def _load_scope_factory(log: _AdapterLog) -> Callable[[], ScopeSessionContext]:
@@ -224,8 +232,6 @@ def _blocking_adapter(
     return BlockingTurnAdapter(
         load_scope=load_scope or _load_scope_factory(log),
         run_attempt=run_attempt,
-        snapshot_partial=lambda: log.snapshot,
-        release_attempt_entity=lambda _scope: _bump(log, "released"),
         discard_empty_run=lambda _scope, discard: log.discards.append(discard),
         finalize_attempt=_finalize,
         unexpected_error_text=unexpected_error_text,
@@ -473,8 +479,6 @@ def _streaming_adapter(
     return StreamingTurnAdapter[str](
         load_scope=load_scope or _load_scope_factory(log),
         run_attempt=run_attempt,
-        snapshot_partial=lambda: log.snapshot,
-        release_attempt_entity=lambda _scope: _bump(log, "released"),
         discard_empty_run=lambda _scope, discard: log.discards.append(discard),
         make_text_chunk=lambda text: f"notice:{text}",
         finalize_attempt=_finalize,
@@ -1074,7 +1078,6 @@ def test_blocking_external_cancel_with_recorder_records_its_synced_state() -> No
 def test_blocking_external_cancel_builds_fallback_metadata() -> None:
     """An external cancel before prepare persists a replay with rebuilt run metadata."""
     log = _AdapterLog()
-    log.snapshot = TurnPartialSnapshot(attempt_run_id=None)
 
     async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> CompletedAttempt:
         raise asyncio.CancelledError
@@ -1127,16 +1130,19 @@ def test_blocking_external_cancel_skips_persist_after_inline_persist() -> None:
 
 
 def test_blocking_continuation_advances_and_resets_turn_state() -> None:
-    """A model-switch attempt releases the entity and reruns with the continuation prompt."""
+    """A model-switch attempt is dropped, and the turn reruns with the continuation prompt."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     prompts: list[str] = []
+    live_at_start: list[object] = []
     first_trace = _trace("switch_thread_model")
 
     async def _attempt(
-        _run: TurnRunState,
+        run: TurnRunState,
         continuation: TurnContinuationRunState,
     ) -> CompletedAttempt:
+        live_at_start.append(run.attempt)
+        run.attempt = _FixedAttempt()
         prompts.append(continuation.active_prompt)
         if len(prompts) == 1:
             return CompletedAttempt(
@@ -1164,7 +1170,7 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
     assert len(prompts) == 2
     assert prompts[0] == "original ask"
     assert "MODEL SWITCH TOOL CALL COMPLETED" in prompts[1]
-    assert log.released == 1
+    assert live_at_start == [None, None]
     assert log.finalized == 2
     # The continuation reset synced empty partial state carrying the prior tools.
     assert recorder.synced_calls[-1]["completed_tools"] == [first_trace]
@@ -1260,14 +1266,17 @@ def test_blocking_continuation_limit_returns_limit_message() -> None:
 
 
 def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
-    """The empty-run guard discards, retries once, then falls back to the notice."""
+    """The empty-run guard discards, drops the spent attempt, retries once, then falls back to the notice."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     attempts = 0
+    live_at_start: list[object] = []
 
-    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> CompletedAttempt:
+    async def _attempt(run: TurnRunState, _c: TurnContinuationRunState) -> CompletedAttempt:
         nonlocal attempts
         attempts += 1
+        live_at_start.append(run.attempt)
+        run.attempt = _FixedAttempt()
         return CompletedAttempt(is_empty=True, session_id="session-live", run_id=f"run-{attempts}")
 
     result = asyncio.run(
@@ -1283,7 +1292,7 @@ def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
     assert attempts == 2
     # Both empty runs are discarded; the notice is delivery-only.
     assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
-    assert log.released == 1
+    assert live_at_start == [None, None]
     assert recorder.completed_calls == [
         {"run_metadata": None, "assistant_text": "", "completed_tools": []},
     ]
@@ -1294,10 +1303,13 @@ def test_blocking_no_report_empty_run_completes_without_retry_or_notice() -> Non
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     attempts = 0
+    runs: list[TurnRunState] = []
 
-    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> CompletedAttempt:
+    async def _attempt(run: TurnRunState, _c: TurnContinuationRunState) -> CompletedAttempt:
         nonlocal attempts
         attempts += 1
+        runs.append(run)
+        run.attempt = _FixedAttempt()
         return CompletedAttempt(is_empty=True, session_id="session-live", run_id="run-empty")
 
     result = asyncio.run(
@@ -1312,7 +1324,7 @@ def test_blocking_no_report_empty_run_completes_without_retry_or_notice() -> Non
     assert result == ""
     assert attempts == 1
     assert log.discards == []
-    assert log.released == 0
+    assert runs[0].attempt is not None
     assert recorder.completed_calls == [
         {"run_metadata": None, "assistant_text": "", "completed_tools": []},
     ]
@@ -1528,20 +1540,22 @@ def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
 
 
 def test_streaming_external_cancel_records_snapshot_partials() -> None:
-    """An external cancel records the adapter's live partial snapshot."""
+    """An external cancel records the running attempt's partial output."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
-    log.snapshot = TurnPartialSnapshot(
-        assistant_text="live partial",
-        completed_tools=(_trace("search"),),
-        interrupted_tools=(_trace("browse"),),
-        attempt_run_id="run-live",
-    )
 
     async def _attempt(
-        _run: TurnRunState,
+        run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
+        run.attempt = _FixedAttempt(
+            TurnPartialSnapshot(
+                assistant_text="live partial",
+                completed_tools=(_trace("search"),),
+                interrupted_tools=(_trace("browse"),),
+                attempt_run_id="run-live",
+            ),
+        )
         yield "chunk"
         raise asyncio.CancelledError
 
@@ -1568,14 +1582,14 @@ def test_streaming_external_cancel_records_snapshot_partials() -> None:
 
 
 def test_streaming_external_cancel_without_recorder_persists_snapshot() -> None:
-    """A recorder-less external cancel persists the standalone replay from the snapshot."""
+    """A recorder-less external cancel persists the standalone replay from the running attempt's partial output."""
     log = _AdapterLog()
-    log.snapshot = TurnPartialSnapshot(assistant_text="live partial", attempt_run_id="run-live")
 
     async def _attempt(
-        _run: TurnRunState,
+        run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
+        run.attempt = _FixedAttempt(TurnPartialSnapshot(assistant_text="live partial", attempt_run_id="run-live"))
         yield "chunk"
         raise asyncio.CancelledError
 
@@ -1634,13 +1648,16 @@ def test_streaming_no_report_empty_run_completes_without_retry_or_notice() -> No
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     attempts = 0
+    runs: list[TurnRunState] = []
 
     async def _attempt(
-        _run: TurnRunState,
+        run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         nonlocal attempts
         attempts += 1
+        runs.append(run)
+        run.attempt = _FixedAttempt()
         yield AttemptResolved(CompletedAttempt(is_empty=True, run_id="run-empty"))
 
     chunks = asyncio.run(
@@ -1657,7 +1674,7 @@ def test_streaming_no_report_empty_run_completes_without_retry_or_notice() -> No
     assert chunks == []
     assert attempts == 1
     assert log.discards == []
-    assert log.released == 0
+    assert runs[0].attempt is not None
     assert recorder.completed_calls == [
         {"run_metadata": None, "assistant_text": "", "completed_tools": []},
     ]
@@ -1665,14 +1682,17 @@ def test_streaming_no_report_empty_run_completes_without_retry_or_notice() -> No
 
 @pytest.mark.parametrize("hidden", [False, True])
 def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
-    """A streamed model-switch attempt continues the turn and streams the second attempt."""
+    """A streamed model-switch attempt is dropped, and the turn continues and streams the second attempt."""
     log = _AdapterLog()
     prompts: list[str] = []
+    live_at_start: list[object] = []
 
     async def _attempt(
-        _run: TurnRunState,
+        run: TurnRunState,
         continuation: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
+        live_at_start.append(run.attempt)
+        run.attempt = _FixedAttempt()
         prompts.append(continuation.active_prompt)
         if len(prompts) == 1:
             yield "switching models"
@@ -1701,8 +1721,62 @@ def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
     assert chunks == ["switching models", "final answer"]
     assert len(prompts) == 2
     assert "MODEL SWITCH TOOL CALL COMPLETED" in prompts[1]
-    assert log.released == 1
+    assert live_at_start == [None, None]
     assert log.finalized == 2
+
+
+def test_a_stop_before_the_next_attempt_starts_records_none_of_the_spent_attempt() -> None:
+    """A stop between a dropped attempt and the next one records no text or calls of the dropped attempt.
+
+    Its finished calls already carried over through the turn state, so keeping them here would count them twice.
+    """
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    switch = _trace("switch_thread_model")
+    attempts = 0
+
+    async def _attempt(
+        run: TurnRunState,
+        _c: TurnContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise asyncio.CancelledError
+        run.attempt = _FixedAttempt(
+            TurnPartialSnapshot(
+                assistant_text="stale partial",
+                completed_tools=(switch,),
+                interrupted_tools=(_trace("browse"),),
+                attempt_run_id="run-1",
+            ),
+        )
+        yield "stale partial"
+        yield AttemptResolved(
+            CompletedAttempt(
+                attempt_run_id="run-1",
+                tool_executions=(_model_switch_execution("next-turn"),),
+                completed_tools=(switch,),
+            ),
+        )
+
+    async def _run() -> None:
+        async for _chunk in stream_response_turn(
+            _ctx(),
+            _streaming_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ):
+            pass
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(_run())
+
+    assert attempts == 2
+    [interrupted] = recorder.interrupted_calls
+    assert interrupted["assistant_text"] == ""
+    assert interrupted["completed_tools"] == [switch]
+    assert interrupted["interrupted_tools"] == []
 
 
 def test_streaming_continuation_limit_yields_limit_message() -> None:

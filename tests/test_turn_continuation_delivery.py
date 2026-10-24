@@ -35,7 +35,6 @@ from mindroom.response_turn import (
     ResponseTurnContext,
     StreamingTurnAdapter,
     TurnContinuationRunState,
-    TurnPartialSnapshot,
     TurnRunState,
     TurnSinks,
     run_blocking_response_turn,
@@ -89,8 +88,6 @@ def _blocking_adapter(
     return BlockingTurnAdapter(
         load_scope=_load_scope,
         run_attempt=run_attempt,
-        snapshot_partial=TurnPartialSnapshot,
-        release_attempt_entity=_noop,
         discard_empty_run=_noop,
     )
 
@@ -104,8 +101,6 @@ def _streaming_adapter(
     return StreamingTurnAdapter[str](
         load_scope=_load_scope,
         run_attempt=run_attempt,
-        snapshot_partial=TurnPartialSnapshot,
-        release_attempt_entity=_noop,
         discard_empty_run=_noop,
         make_text_chunk=lambda text: text,
     )

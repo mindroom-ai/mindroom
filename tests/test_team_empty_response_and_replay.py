@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import time
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
 from mindroom import ai_runtime
+from mindroom.agents import create_agent
 from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
@@ -110,6 +112,24 @@ async def test_an_empty_completed_attempt_is_discarded_and_retried_once(
     assert len(team.models["default"].requests) == 2
     assert _team_run_ids(team) == ["run-1"]
     assert 0 < timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_the_empty_retry_runs_on_rebuilt_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """The retry builds its members again, as a model-switch continuation does."""
+    team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Recovered answer")])
+
+    with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
+        text = await team.reply(stream=stream)
+
+    assert text.endswith("Recovered answer")
+    assert build.call_count == 2
 
 
 @pytest.mark.asyncio

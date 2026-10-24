@@ -24,7 +24,7 @@ import asyncio
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 from uuid import uuid4
 
 from mindroom import ai_runtime
@@ -365,23 +365,6 @@ class TurnSinks:
     on_completed: Callable[[CompletedAttempt], None] | None = None
 
 
-@dataclass
-class TurnRunState:
-    """Driver-owned mutable state shared with the adapter attempt bodies.
-
-    Attempt bodies must set ``run_metadata`` and ``unseen_event_ids`` once
-    prepare finishes; interruption recording falls back to rebuilt metadata
-    while they are still unset.
-    """
-
-    turn_state: AITurnState = field(default_factory=AITurnState)
-    scope_context: ScopeSessionContext | None = None
-    run_metadata: dict[str, Any] | None = None
-    unseen_event_ids: list[str] = field(default_factory=list)
-    standalone_replay_persisted: bool = False
-    empty_response_retried: bool = False
-
-
 @dataclass(frozen=True)
 class TurnPartialSnapshot:
     """Live partial-output view used when a turn is cancelled from outside."""
@@ -390,6 +373,39 @@ class TurnPartialSnapshot:
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     interrupted_tools: tuple[ToolTraceEntry, ...] = ()
     attempt_run_id: str | None = None
+
+
+class _LiveAttempt(Protocol):
+    """The attempt a turn is running, as an interruption records it."""
+
+    def partial_snapshot(self) -> TurnPartialSnapshot:
+        """Return the attempt's partial output and run id."""
+        ...
+
+
+@dataclass
+class TurnRunState:
+    """Driver-owned mutable state shared with the adapter attempt bodies.
+
+    Attempt bodies must set ``run_metadata`` and ``unseen_event_ids`` once
+    prepare finishes; interruption recording falls back to rebuilt metadata
+    while they are still unset. They set ``attempt`` once their attempt starts;
+    the driver drops it when the attempt is spent, so an interruption before the
+    next attempt starts records none of the spent attempt's partial output, whose
+    finished calls the turn state already carries.
+    """
+
+    turn_state: AITurnState = field(default_factory=AITurnState)
+    scope_context: ScopeSessionContext | None = None
+    run_metadata: dict[str, Any] | None = None
+    unseen_event_ids: list[str] = field(default_factory=list)
+    standalone_replay_persisted: bool = False
+    empty_response_retried: bool = False
+    attempt: _LiveAttempt | None = None
+
+    def partial_snapshot(self) -> TurnPartialSnapshot:
+        """Return the running attempt's partial output, empty while no attempt runs."""
+        return self.attempt.partial_snapshot() if self.attempt is not None else TurnPartialSnapshot()
 
 
 @dataclass(frozen=True)
@@ -673,8 +689,6 @@ class BlockingTurnAdapter:
         [TurnRunState, TurnContinuationRunState],
         Awaitable[BlockingAttemptResolution],
     ]
-    snapshot_partial: Callable[[], TurnPartialSnapshot]
-    release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
@@ -691,8 +705,6 @@ class StreamingTurnAdapter[ChunkT]:
         [TurnRunState, TurnContinuationRunState],
         AsyncIterator[ChunkT | AttemptResolved],
     ]
-    snapshot_partial: Callable[[], TurnPartialSnapshot]
-    release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     make_text_chunk: Callable[[str], ChunkT]
     on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
@@ -803,7 +815,7 @@ def _record_turn_excluded_fallback(
     original_status: RunStatus,
     use_recorder_state: bool,
 ) -> None:
-    snapshot = adapter.snapshot_partial()
+    snapshot = run.partial_snapshot()
     recorder = sinks.turn_recorder
     if recorder is not None:
         if recorder.outcome == "completed":
@@ -855,8 +867,7 @@ def _settle_empty_run(
     turn with no content teaches the model that ending immediately is the
     expected continuation. The one-shot retry borrows a continuation slot so
     the outer loop's iteration budget stays authoritative; a granted retry
-    closes the spent entity's runtime state exactly like the continuation
-    handoff.
+    drops the spent attempt exactly like the continuation handoff.
     """
     adapter.discard_empty_run(
         run.scope_context,
@@ -869,12 +880,11 @@ def _settle_empty_run(
     if run.empty_response_retried or continuation_count >= TURN_CONTINUATION_LIMIT:
         return False
     run.empty_response_retried = True
-    adapter.release_attempt_entity(run.scope_context)
+    run.attempt = None
     return True
 
 
 def _advance_turn_continuation(
-    adapter: _TurnAdapter,
     sinks: TurnSinks,
     run: TurnRunState,
     resolution: CompletedAttempt,
@@ -884,9 +894,9 @@ def _advance_turn_continuation(
     active_model_name: str | None,
     apply_model_to_team_members: bool,
 ) -> TurnContinuationRunState:
-    """Close the spent attempt entity and prepare run state for one more continuation."""
+    """Drop the spent attempt and prepare run state for one more continuation."""
     completed_tools_for_turn = run.turn_state.completed_tools_for(resolution.completed_tools)
-    adapter.release_attempt_entity(run.scope_context)
+    run.attempt = None
     advanced = continuation.advance(
         continuation_prompt=next_prompt or continuation.original_prompt,
         previous_run_id=resolution.attempt_run_id,
@@ -1149,7 +1159,6 @@ def _settle_completed_attempt(
         return _CompletionSettle(
             keep_going=True,
             continuation=_advance_turn_continuation(
-                adapter,
                 sinks,
                 run,
                 resolution,
