@@ -493,7 +493,6 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             config=config,
             runtime_paths=paths,
             execution_identity=identity,
-            create_session_if_missing=True,
         )
     else:
         load_scope = partial(

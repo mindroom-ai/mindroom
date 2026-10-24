@@ -4473,15 +4473,15 @@ class TestTeamCompletion:
                 },
             )
 
-        scope_context = load_bound_scope_session(
+        loaded = load_bound_scope_session(
             member_names=["general"],
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
             execution_identity=None,
-            create_session_if_missing=True,
         )
-        assert scope_context is not None
+        assert loaded is not None
+        scope_context = loaded.with_session()
         assert scope_context.session is not None
         scope_context.session.runs = [
             TeamRunRecord(

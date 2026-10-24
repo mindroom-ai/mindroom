@@ -132,7 +132,6 @@ def load_bound_scope_session(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     team_name: str | None = None,
-    create_session_if_missing: bool = False,
 ) -> ScopeSessionContext | None:
     """Load the canonical scope-backed session context for one bound team run."""
     if not member_names and team_name is not None and team_name in config.teams:
@@ -152,7 +151,6 @@ def load_bound_scope_session(
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
-        create_session_if_missing=create_session_if_missing,
     )
 
 
