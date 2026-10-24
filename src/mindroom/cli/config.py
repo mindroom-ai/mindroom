@@ -1511,8 +1511,8 @@ def _provider_env_template(  # noqa: PLR0911
         # or set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
         """).rstrip()
 
-    # TODO(simplify): the generated .env calls the default Azure OpenAI API version Agno's, but MindRoom's OpenAI
-    # provider sets it now. Say "the default Azure OpenAI API version". Users reading a new .env would notice.
+    # TODO(simplify): the generated .env credits Agno with the default Azure OpenAI API version, which
+    # providers/openai/build.py sets. Say "the default Azure OpenAI API version". Users reading a new .env would notice.
     if provider_preset == "azure":
         return textwrap.dedent(f"""\
         # Azure OpenAI configuration

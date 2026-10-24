@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue  # Agno reads ToolValue from module globals.
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

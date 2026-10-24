@@ -508,6 +508,28 @@ async def _resolve_auto_route(
     return selection.entity_name
 
 
+def _openai_turn_context(
+    entity_label: str,
+    *,
+    session_id: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    model_name: str | None = None,
+) -> ResponseTurnContext:
+    """Build the turn context for one OpenAI-compatible completion, which has no Matrix conversation."""
+    return ResponseTurnContext(
+        entity_label=entity_label,
+        session_id=session_id,
+        run_id=None,
+        correlation_id=uuid4().hex,
+        reply_to_event_id=None,
+        room_id=None,
+        thread_id=None,
+        requester_id=execution_identity.requester_id if execution_identity is not None else None,
+        matrix_run_metadata=None,
+        active_model_name=model_name,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -772,28 +794,6 @@ async def _chat_completions(  # noqa: C901, PLR0912
 # ---------------------------------------------------------------------------
 # Non-streaming completion
 # ---------------------------------------------------------------------------
-
-
-def _openai_turn_context(
-    entity_label: str,
-    *,
-    session_id: str | None,
-    execution_identity: ToolExecutionIdentity | None,
-    model_name: str | None = None,
-) -> ResponseTurnContext:
-    """Build the turn context for one OpenAI-compatible completion, which has no Matrix conversation."""
-    return ResponseTurnContext(
-        entity_label=entity_label,
-        session_id=session_id,
-        run_id=None,
-        correlation_id=uuid4().hex,
-        reply_to_event_id=None,
-        room_id=None,
-        thread_id=None,
-        requester_id=execution_identity.requester_id if execution_identity is not None else None,
-        matrix_run_metadata=None,
-        active_model_name=model_name,
-    )
 
 
 async def _non_stream_completion(
