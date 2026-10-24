@@ -1093,7 +1093,7 @@ async def test_editing_a_team_turn_removes_the_team_history_of_an_earlier_redact
         event_id: TurnRecord.create(
             [event_id],
             response_event_id=f"{event_id}-reply",
-            response_owner="agent",
+            response_owner="team_general",
             requester_id="@user:example.org",
             history_scope=scope,
             conversation_target=target,
