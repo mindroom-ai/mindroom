@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
@@ -103,7 +104,7 @@ def member(
         system_message=Message(role="system", content=system or f"You are {name}."),
         toolkits=toolkits,
     )
-    return TeamMember(spec=spec, role=f"{name} role.")
+    return TeamMember(spec=spec, role=f"{name} role.", new_hooks=lambda: NO_HOOKS, request_template=EMPTY_REQUEST)
 
 
 def squad(
@@ -129,6 +130,7 @@ def squad(
         model=leader,
         system_message=Message(role="system", content=system),
         toolkits=tuple(leader_toolkits),
+        max_tool_calls_per_turn=None,
         members=(
             member("writer", "Writer", writer, *writer_tools),
             member("checker", "Checker", checker, *checker_tools, system=checker_system),

@@ -87,6 +87,8 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
             mode=TeamMode.COORDINATE,
             model=model,
             system_message=Message(role="system", content="You lead the squad."),
+            toolkits=(),
+            max_tool_calls_per_turn=None,
             members=(),
         ),
         history_settings=settings,

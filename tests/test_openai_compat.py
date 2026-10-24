@@ -36,6 +36,7 @@ from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
 
 from mindroom import constants
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agents import create_agent
@@ -3202,6 +3203,8 @@ def _scripted_team(
         mode=mode,
         model=leader,
         system_message=Message(role="system", content="You lead the team."),
+        toolkits=(),
+        max_tool_calls_per_turn=None,
         members=tuple(
             TeamMember(
                 spec=AgentSpec(
@@ -3212,6 +3215,8 @@ def _scripted_team(
                     toolkits=member_toolkits,
                 ),
                 role=f"{name} role.",
+                new_hooks=lambda: NO_HOOKS,
+                request_template=EMPTY_REQUEST,
             )
             for member_id, name, model in members
         ),
@@ -3224,7 +3229,12 @@ def _scripted_team(
     )
     return (
         resolved,
-        BuiltTeam(spec=spec, history_settings=Config().resolve_entity(None).history_settings, leader_middleware=()),
+        BuiltTeam(
+            spec=spec,
+            history_settings=Config().resolve_entity(None).history_settings,
+            leader_middleware=(),
+            leader_jobs=None,
+        ),
         mode,
     )
 

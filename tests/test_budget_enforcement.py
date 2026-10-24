@@ -374,6 +374,8 @@ def _memberless_team() -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
         mode=TeamMode.COORDINATE,
         model=ScriptedModel([answer("Team answer")]),
         system_message=Message(role="system", content="You lead the team."),
+        toolkits=(),
+        max_tool_calls_per_turn=None,
         members=(),
     )
     members = ResolvedExactTeamMembers(
@@ -384,7 +386,12 @@ def _memberless_team() -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
     )
     return (
         members,
-        BuiltTeam(spec=spec, history_settings=Config().resolve_entity(None).history_settings, leader_middleware=()),
+        BuiltTeam(
+            spec=spec,
+            history_settings=Config().resolve_entity(None).history_settings,
+            leader_middleware=(),
+            leader_jobs=None,
+        ),
         TeamMode.COORDINATE,
     )
 

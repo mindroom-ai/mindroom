@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -129,6 +130,8 @@ def _squad(tmp_path: Path, *, leader: list[list[Any]], member: list[list[Any]], 
             toolkits=(toolkit(lookup, name="lookup"), gated(publish, name="publish")),
         ),
         role="Does the work.",
+        new_hooks=lambda: NO_HOOKS,
+        request_template=EMPTY_REQUEST,
     )
     spec = TeamSpec(
         id="squad",
@@ -136,6 +139,8 @@ def _squad(tmp_path: Path, *, leader: list[list[Any]], member: list[list[Any]], 
         mode=TeamMode.COLLABORATE if collaborate else TeamMode.COORDINATE,
         model=leader_model,
         system_message=Message(role="system", content="You lead."),
+        toolkits=(),
+        max_tool_calls_per_turn=None,
         members=(worker,),
     )
     return _Squad(config, runtime_paths, spec, store, session, leader_model, member_model, hanging)

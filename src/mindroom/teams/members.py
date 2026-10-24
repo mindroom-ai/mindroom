@@ -384,7 +384,7 @@ class BuiltTeam:
     spec: TeamSpec
     history_settings: ResolvedHistorySettings
     leader_middleware: tuple[ToolMiddleware, ...]
-    leader_jobs: JobActor | None = None
+    leader_jobs: JobActor | None
 
 
 def build_team_spec(
