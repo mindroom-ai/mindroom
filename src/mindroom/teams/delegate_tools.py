@@ -140,9 +140,9 @@ def collaborate_result_text(
 ) -> str:
     """Return the collaborate result: one piece per member in member order, joined with no separator.
 
-    Streaming, a piece is the member's result (``_streamed_result``); blocking, it is the result labeled with the
-    member's name (``_labeled_result``). A paused member contributes its pause notice and its requirements reach the
-    team run.
+    Member order keeps the result deterministic whatever order the members finish in. Streaming, a piece is the
+    member's result (``_streamed_result``); blocking, it is the result labeled with the member's name
+    (``_labeled_result``). A paused member contributes its pause notice and its requirements reach the team run.
     """
     # TODO(simplify): Pieces join with no separator, and a finished member's piece is labeled only without streaming,
     # by a third result rule (``_labeled_result``). Label every piece by one rule and separate pieces with blank lines.
