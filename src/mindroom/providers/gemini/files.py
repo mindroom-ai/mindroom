@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from google.genai import Client
-    from google.genai.types import File
 
 # The interval between checks while the Files API processes an upload.
 _PROCESSING_POLL_SECONDS = 2.0
@@ -50,7 +49,12 @@ async def uploaded_file_uri(client: Client, path: Path, mime_type: str, *, provi
     except OSError as error:
         msg = f"The attachment {path.name} could not be read for upload"
         raise InvalidRequest(msg, provider=provider) from error
-    file = await _existing_file(client, name)
+    try:
+        file = await client.aio.files.get(name=name)
+    except APIError as error:
+        if error.code not in _MISSING_FILE_STATUSES:
+            raise
+        file = None
     if file is None:
         try:
             file = await client.aio.files.upload(file=path, config={"name": name, "mime_type": mime_type})
@@ -71,17 +75,6 @@ async def uploaded_file_uri(client: Client, path: Path, mime_type: str, *, provi
         msg = f"The Gemini Files API could not process {path.name}"
         raise InvalidRequest(msg, provider=provider)
     return file.uri
-
-
-async def _existing_file(client: Client, name: str) -> File | None:
-    from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
-
-    try:
-        return await client.aio.files.get(name=name)
-    except APIError as error:
-        if error.code in _MISSING_FILE_STATUSES:
-            return None
-        raise
 
 
 __all__ = ["uploaded_file_uri"]
