@@ -930,7 +930,7 @@ def test_session_field_writes_leave_the_other_field_and_the_totals_alone(store: 
 
 @pytest.mark.parametrize(
     "create",
-    ["ensure_session_row", "save_runs", "save_session_state", "save_independent_usage"],
+    ["ensure_session_row", "save_runs", "persist_to", "save_session_state", "save_independent_usage"],
 )
 def test_every_writer_of_a_session_row_stores_absent_metadata_as_json_null(
     store: ConversationStore,
@@ -941,6 +941,7 @@ def test_every_writer_of_a_session_row_stores_absent_metadata_as_json_null(
     writes = {
         "ensure_session_row": lambda: store.ensure_session_row(session),
         "save_runs": lambda: store.save_runs(session, [_run("r1")]),
+        "persist_to": lambda: persist_runs(store, session, _run("r1")),
         "save_session_state": lambda: store.save_session_state(session, {}),
         "save_independent_usage": lambda: store.save_independent_usage(
             session_id="s1",

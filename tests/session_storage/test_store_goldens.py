@@ -248,8 +248,7 @@ def test_a_first_turns_session_row_stores_no_metadata_as_agno_stored_it(
     session = new_scope_session(session_id=session_id, scope_id=team_id or agent_id, is_team=kind == "team")
     fresh = ConversationStore(tmp_path / golden.name)
 
-    for run in _replayed(rows):
-        fresh.save_runs(session, [run])
+    persist_runs(fresh, session, *_replayed(rows))
 
     column = SESSION_COLUMNS.index("metadata")
     assert golden_row[column] == "null"
