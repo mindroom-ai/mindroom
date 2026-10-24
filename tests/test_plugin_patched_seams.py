@@ -34,10 +34,10 @@ class _Recorder:
     def __init__(self) -> None:
         self.finished_results: list[object] = []
 
-    async def started(self, tool_name: str, args: object) -> str:
+    async def started(self, tool_name: str, args: object) -> str:  # noqa: ARG002 - the recorder protocol passes args
         return f"{tool_name}-1"
 
-    async def finished(self, call_id: str, tool_name: str, args: object, result: object) -> None:
+    async def finished(self, call_id: str, tool_name: str, args: object, result: object) -> None:  # noqa: ARG002
         self.finished_results.append(result)
 
 
