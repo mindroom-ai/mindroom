@@ -538,7 +538,6 @@ async def _session_started_probe(tmp_path: Path, create_storage: Callable[[], ob
     watch = await lifecycle.setup_session_watch(
         tool_context=tool_context,
         session_id=target.session_id,
-        session_type="agent",
         scope=HistoryScope(kind="agent", scope_id="general"),
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,

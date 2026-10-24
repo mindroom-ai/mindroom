@@ -4673,7 +4673,6 @@ class ResponseRunner:
         session_started_watch = await lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(tool_dispatch),
             session_id=session_id,
-            session_type=session_scope.kind,
             scope=session_scope,
             room_id=request.room_id,
             thread_id=resolved_target.resolved_thread_id,
@@ -5395,7 +5394,6 @@ class ResponseRunner:
         session_started_watch = await lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
-            session_type=session_scope.kind,
             scope=session_scope,
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
@@ -5532,7 +5530,6 @@ class ResponseRunner:
         session_started_watch = await lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
-            session_type=session_scope.kind,
             scope=session_scope,
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,

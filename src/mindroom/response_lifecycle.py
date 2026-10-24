@@ -609,7 +609,6 @@ class _SessionStartedWatch:
     session_id: str
     room_id: str
     thread_id: str | None
-    session_type: SessionKind
     correlation_id: str
     create_storage: Callable[[], ConversationStore]
 
@@ -687,18 +686,18 @@ class ResponseLifecycle:
         *,
         tool_context: ToolRuntimeContext | None,
         session_id: str,
-        session_type: SessionKind,
+        scope: HistoryScope,
         create_storage: Callable[[], ConversationStore],
     ) -> bool:
         if tool_context is None or not tool_context.hook_registry.has_hooks(EVENT_SESSION_STARTED):
             return False
         try:
-            return not await asyncio.to_thread(_session_exists, create_storage, session_id, session_type)
+            return not await asyncio.to_thread(_session_exists, create_storage, session_id, scope.kind)
         except Exception as error:
             self.deps.logger.exception(
                 "Failed to probe session storage for session:started eligibility",
                 session_id=session_id,
-                session_type=str(session_type),
+                session_type=scope.kind,
                 failure_reason=str(error),
             )
             return False
@@ -708,7 +707,6 @@ class ResponseLifecycle:
         *,
         tool_context: ToolRuntimeContext | None,
         session_id: str,
-        session_type: SessionKind,
         scope: HistoryScope,
         room_id: str,
         thread_id: str | None,
@@ -719,7 +717,7 @@ class ResponseLifecycle:
             should_watch=await self._session_started_watch_is_needed(
                 tool_context=tool_context,
                 session_id=session_id,
-                session_type=session_type,
+                scope=scope,
                 create_storage=create_storage,
             ),
             tool_context=tool_context,
@@ -727,7 +725,6 @@ class ResponseLifecycle:
             session_id=session_id,
             room_id=room_id,
             thread_id=thread_id,
-            session_type=session_type,
             correlation_id=self.identity.correlation_id,
             create_storage=create_storage,
         )
@@ -735,7 +732,7 @@ class ResponseLifecycle:
     async def _maybe_emit_session_started(self, watch: _SessionStartedWatch) -> None:
         if watch.tool_context is None or not watch.should_watch:
             return
-        if not await asyncio.to_thread(_session_exists, watch.create_storage, watch.session_id, watch.session_type):
+        if not await asyncio.to_thread(_session_exists, watch.create_storage, watch.session_id, watch.scope.kind):
             return
 
         bindings = resolve_tool_runtime_hook_bindings(watch.tool_context)
