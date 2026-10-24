@@ -162,20 +162,11 @@ def collaborate_result_text(
 
 
 def _labeled_result(child: RunRecord) -> str:
-    """Return the result Agno's non-stream broadcast labeled for a finished member run.
-
-    Unlike a coordinate delegation, the broadcast kept empty tool results and named a blank run without tools.
-    """
+    """Return ``_blocking_result``, but blank text gives all tool results, empty ones too, else ``No Response``."""
     content = child.handover_content
-    if content is None and not child.tools:
-        return NO_MEMBER_RESPONSE
-    if isinstance(content, str):
-        if content.strip():
-            return content
-        if child.tools:
-            return ",".join(tool.result or "" for tool in child.tools)
-        return "No Response"
-    return _json_text(content)
+    if isinstance(content, str) and not content.strip():
+        return ",".join(tool.result or "" for tool in child.tools) if child.tools else "No Response"
+    return _blocking_result(child)
 
 
 def _json_text(content: object) -> str:
