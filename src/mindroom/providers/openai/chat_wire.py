@@ -1,7 +1,7 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Chat Completions request bodies and response parsing for every OpenAI-compatible route.
 
-Three dialects reproduce the bytes each route sent through Agno: ``openai`` (OpenAI, Azure, OpenRouter,
+Three dialects keep each route's request bytes as main sends them: ``openai`` (OpenAI, Azure, OpenRouter,
 DeepSeek, Z.ai, llama.cpp, Kimi), ``groq``, and ``cerebras``. Functions here are pure: they build the SDK
 call from canonical messages and fold SDK chunks or completions into one finished turn.
 """
@@ -102,15 +102,6 @@ def chat_stop_reason(finish_reason: str | None) -> StopReason | None:
 # --- Requests -------------------------------------------------------------------------------------------------
 
 
-def _with_file_parts(content: str | list[Any] | None, message: Message) -> list[Any]:
-    """Return ``content`` as a part list with each file's part inserted ahead of the text."""
-    parts: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
-    for file in message.files or ():
-        if (part := chat_file_part(file)) is not None:
-            parts.insert(0, part)
-    return parts
-
-
 def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str]) -> dict[str, Any]:
     values: dict[str, Any] = {
         "role": role_map.get(message.role, message.role),
@@ -131,7 +122,13 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
     if message.tool_calls is not None and len(message.tool_calls) == 0:
         formatted["tool_calls"] = None
     if message.files is not None:
-        formatted["content"] = _with_file_parts(formatted.get("content"), message)
+        content = formatted.get("content")
+        parts: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
+        # Each file's part goes ahead of the text.
+        for file in message.files:
+            if (part := chat_file_part(file)) is not None:
+                parts.insert(0, part)
+        formatted["content"] = parts
     if message.content is None:
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None
@@ -160,12 +157,9 @@ def _groq_message(message: Message) -> dict[str, Any]:
 def _cerebras_message(message: Message) -> dict[str, Any]:
     content = message.content if message.role == "tool" or message.content is not None else ""
     if message.role == "tool" and message.tool_call_id:
-        return {
-            key: value
-            for key, value in (("role", "tool"), ("tool_call_id", message.tool_call_id), ("content", content))
-            if value is not None
-        }
-    formatted: dict[str, Any] = {"role": message.role, "content": content}
+        formatted: dict[str, Any] = {"role": "tool", "tool_call_id": message.tool_call_id, "content": content}
+        return {key: value for key, value in formatted.items() if value is not None}
+    formatted = {"role": message.role, "content": content}
     if message.name:
         formatted["name"] = message.name
     if message.tool_calls:
@@ -199,7 +193,7 @@ def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSe
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
-    """Return the function definition OpenAI-family wires send, as Agno's ``Function.to_dict()``: same keys, same order."""
+    """Return the function definition OpenAI-family wires send: its set fields, in the order main sends them."""
     fields = {
         "name": tool.name,
         "description": tool.description,
@@ -218,7 +212,7 @@ def _chat_tools(tools: Sequence[ToolSpec], wire: ChatWire) -> list[dict[str, Any
     """Return tool definitions sorted by name, the order every cached prompt prefix depends on."""
     formatted: list[dict[str, Any]]
     if wire.dialect == "cerebras":
-        # Cerebras takes the function shape without Agno's approval flags or strict; None is left out.
+        # Cerebras takes the function shape without the approval flags or strict; a missing description is left out.
         formatted = [
             {
                 "type": "function",
@@ -384,7 +378,7 @@ def sdk_call_kwargs(params: Mapping[str, Any], endpoint: _SDKEndpoint) -> dict[s
     """Return the SDK ``create`` arguments for one request's body fields and SDK options.
 
     The SDK serializes its keywords in its own order and appends ``extra_body`` after them, so every field the SDK
-    names travels as its keyword, as Agno passed it, and only the fields it does not name travel in ``extra_body``.
+    names travels as its keyword and only the fields it does not name travel in ``extra_body``.
     Authored ``extra_body`` keys still win, because the SDK merges them over the fields it serializes.
     """
     named = _sdk_body_fields(endpoint)
@@ -496,7 +490,7 @@ def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> N
 
 
 def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Give id-less calls (local servers) a generated id, as Agno's loop did."""
+    """Give id-less calls (local servers) a generated id, so their results can reference them."""
     for call in calls:
         if not call.get("id"):
             call["id"] = str(uuid4())
@@ -504,7 +498,7 @@ def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _reply_metadata(reply: ChatCompletion | ChatCompletionChunk) -> dict[str, Any]:
-    """Return the ``id``, ``system_fingerprint``, and unknown fields a reply carried, as Agno stored them."""
+    """Return the ``id``, ``system_fingerprint``, and unknown fields a reply carried, kept as main stores them."""
     data: dict[str, Any] = {}
     if reply.id:
         data["id"] = reply.id
@@ -556,7 +550,7 @@ class ChatStream:
         return events
 
     def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
-        # Cerebras ignored empty content deltas; the other dialects kept them, with their reply metadata.
+        # Cerebras skips empty content deltas; the other dialects keep them, with their reply metadata.
         if content is None or (not content and self.wire.dialect == "cerebras"):
             return []
         self._content.append(content)
