@@ -58,7 +58,6 @@ def _load_sentence_transformer(model: str) -> _SentenceTransformerModel:
 class _SentenceTransformersEmbedder:
     """Embed one text per call with the model's own query or document prompt, one call at a time per process."""
 
-    model: str
     client: _SentenceTransformerModel = field(repr=False)
 
     @property
@@ -94,4 +93,4 @@ def create_sentence_transformers_embedder(
     with optional_dependency_environment(), _LOCAL_EMBEDDING_LOCK:
         if _SENTENCE_TRANSFORMER_CLIENT is None or _SENTENCE_TRANSFORMER_CLIENT[0] != model:
             _SENTENCE_TRANSFORMER_CLIENT = (model, _load_sentence_transformer(model))
-        return _SentenceTransformersEmbedder(model=model, client=_SENTENCE_TRANSFORMER_CLIENT[1])
+        return _SentenceTransformersEmbedder(client=_SENTENCE_TRANSFORMER_CLIENT[1])

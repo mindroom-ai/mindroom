@@ -87,7 +87,6 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
     embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
 
     assert captured == {"installed": TEST_RUNTIME_PATHS, "model": SENTENCE_TRANSFORMERS_DEFAULT}
-    assert embedder.model == SENTENCE_TRANSFORMERS_DEFAULT
     assert embedder.client is loaded
     assert embedder.sends_batches is False
 
