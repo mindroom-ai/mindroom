@@ -305,9 +305,9 @@ def _context_tokens(config: Config, model: ModelProvider, model_name: str, metri
     identity = model.identity
     return (
         context_input_tokens_from_counts(
-            input_tokens=metrics.input_tokens,
-            cache_read_tokens=metrics.cache_read_tokens,
-            cache_write_tokens=metrics.cache_write_tokens,
+            input_tokens=metrics.tokens.input_tokens,
+            cache_read_tokens=metrics.tokens.cache_read_tokens,
+            cache_write_tokens=metrics.tokens.cache_write_tokens,
             provider=identity.provider,
             configured_provider=config.models[model_name].provider,
             model_id=identity.id,
@@ -422,5 +422,5 @@ async def review_conversation(
         forked=review.forked,
         model_requests=len(own_model_messages(record)),
         input_tokens=_context_tokens(config, review.model, review.model_name, metrics),
-        cache_read_tokens=metrics.cache_read_tokens,
+        cache_read_tokens=metrics.tokens.cache_read_tokens,
     )

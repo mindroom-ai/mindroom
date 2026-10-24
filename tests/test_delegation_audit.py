@@ -28,7 +28,7 @@ from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.llm.usage import RunMetrics
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -246,7 +246,7 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
         status=RunStatus.paused,
         content="partial response",
         tools=[completed_tool, pending_tool],
-        metrics=RunMetrics(input_tokens=5, output_tokens=2),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=5, output_tokens=2)),
     )
 
     await settle_child_response(child, paused, config=config, runtime_paths=runtime_paths)
@@ -266,7 +266,7 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
         status=RunStatus.completed,
         content="final response",
         tools=[completed_tool, resumed_tool],
-        metrics=RunMetrics(input_tokens=8, output_tokens=4),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=8, output_tokens=4)),
     )
     await settle_child_response(
         child,
@@ -339,7 +339,7 @@ async def test_settlement_finishes_a_full_record_with_its_reserved_terminal_even
         status=status,
         content="final response",
         tools=[ToolExecution(tool_call_id="lookup-call", tool_name="lookup", tool_args={}, result="found")],
-        metrics=RunMetrics(input_tokens=8, output_tokens=4),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=8, output_tokens=4)),
     )
 
     if status == RunStatus.paused:
@@ -470,7 +470,7 @@ async def test_live_observer_distinguishes_retried_attempt_tool_ids(tmp_path: Pa
         caller_execution_identity=_identity("leader", "parent-session"),
     )
     tool = ToolExecution(tool_call_id="reused-tool", tool_name="lookup", tool_args={"value": 1})
-    first_metrics = RunMetrics(input_tokens=9, output_tokens=3)
+    first_metrics = RunMetrics(tokens=TokenCounts(input_tokens=9, output_tokens=3))
 
     async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
         await observe_child_event(ToolStarted(tool))

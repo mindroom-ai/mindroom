@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
 from mindroom.llm.media import IMAGE_HEADER_BYTES, image_mime_type
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.providers.remote_media import download_media
 from mindroom.providers.stored_tool_calls import call_arguments
@@ -648,15 +648,15 @@ def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
 
 def _usage_metrics(usage: GenerateContentResponseUsageMetadata) -> MessageMetrics:
     """Return the usage of one reply; thinking counts as output, as Google bills it."""
-    input_tokens = usage.prompt_token_count or 0
     reasoning_tokens = usage.thoughts_token_count or 0
-    output_tokens = (usage.candidates_token_count or 0) + reasoning_tokens
-    return MessageMetrics(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
+    counts = TokenCounts(
+        input_tokens=usage.prompt_token_count or 0,
+        output_tokens=(usage.candidates_token_count or 0) + reasoning_tokens,
         reasoning_tokens=reasoning_tokens,
         cache_read_tokens=usage.cached_content_token_count or 0,
+    )
+    return MessageMetrics(
+        tokens=counts.with_totals(),
         provider_metrics=None if usage.traffic_type is None else {"traffic_type": usage.traffic_type.value},
     )
 

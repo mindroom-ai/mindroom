@@ -799,12 +799,16 @@ async def test_conversation_memory_extraction_records_its_token_usage(storage_pa
         "@alice:example.org",
     )
     assert run.metrics is not None
-    assert (run.metrics.input_tokens, run.metrics.output_tokens, run.metrics.total_tokens) == (120, 30, 150)
+    assert (run.metrics.tokens.input_tokens, run.metrics.tokens.output_tokens, run.metrics.tokens.total_tokens) == (
+        120,
+        30,
+        150,
+    )
     # Each extraction call is one request in usage reports.
     [message] = run.messages or []
     assert message.role == "assistant"
     assert message.metrics is not None
-    assert message.metrics.total_tokens == 150
+    assert message.metrics.tokens.total_tokens == 150
     assert message.provider_data == {"mindroom_model": {"id": "gpt-6-luna", "provider": "OpenAI"}}
 
 
@@ -834,7 +838,7 @@ async def test_team_memory_extraction_counts_as_internal_usage(storage_path: Pat
     assert kwargs == {"runtime_paths": runtime_paths_for(config), "kind": "memory_extraction"}
     assert run.metrics is not None
     # Team memory is extracted once into each store it is kept in.
-    assert run.metrics.total_tokens == 150 * fake_stores.call_count
+    assert run.metrics.tokens.total_tokens == 150 * fake_stores.call_count
     assert len(run.messages or []) == fake_stores.call_count
 
 
@@ -871,7 +875,7 @@ async def test_extraction_usage_is_recorded_when_a_later_store_fails(storage_pat
 
     [(run, _kwargs)] = recorded
     assert run.metrics is not None
-    assert run.metrics.total_tokens == 150
+    assert run.metrics.tokens.total_tokens == 150
 
 
 @pytest.mark.asyncio
@@ -913,7 +917,7 @@ async def test_memory_tool_additions_record_usage_for_the_reply_that_made_them(
         "@alice:example.org",
     )
     assert run.metrics is not None
-    assert run.metrics.total_tokens == 150
+    assert run.metrics.tokens.total_tokens == 150
 
 
 @pytest.mark.asyncio
@@ -930,7 +934,7 @@ async def test_memory_addition_outside_a_reply_counts_as_internal_usage(storage_
     [(run, kwargs)] = recorded
     assert kwargs["kind"] == "memory_extraction"
     assert run.metrics is not None
-    assert run.metrics.total_tokens == 150
+    assert run.metrics.tokens.total_tokens == 150
 
 
 @pytest.mark.asyncio
@@ -952,7 +956,7 @@ async def test_memory_addition_records_usage_when_storing_the_facts_fails(storag
 
     [(run, _kwargs)] = recorded
     assert run.metrics is not None
-    assert run.metrics.total_tokens == 150
+    assert run.metrics.tokens.total_tokens == 150
 
 
 @pytest.mark.asyncio
@@ -1053,11 +1057,11 @@ def test_each_provider_reports_its_extraction_tokens(
     assert run.metrics is not None
     metrics = run.metrics
     assert (
-        metrics.input_tokens,
-        metrics.output_tokens,
-        metrics.cache_read_tokens,
-        metrics.cache_write_tokens,
-        metrics.reasoning_tokens,
+        metrics.tokens.input_tokens,
+        metrics.tokens.output_tokens,
+        metrics.tokens.cache_read_tokens,
+        metrics.tokens.cache_write_tokens,
+        metrics.tokens.reasoning_tokens,
     ) == expected
 
 

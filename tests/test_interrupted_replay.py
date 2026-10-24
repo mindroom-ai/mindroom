@@ -23,7 +23,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
@@ -580,12 +580,14 @@ def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_te
         model="test-model",
         model_provider="test-provider",
         status=RunStatus.error,
-        metrics=RunMetrics(input_tokens=20, output_tokens=2, total_tokens=22, cache_read_tokens=5),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22, cache_read_tokens=5)),
         messages=[
             Message(
                 role="assistant",
                 content="Text emitted before interruption",
-                metrics=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22, cache_read_tokens=5),
+                metrics=MessageMetrics(
+                    tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22, cache_read_tokens=5),
+                ),
             ),
         ],
         metadata={"requester_id": "@alice:example.test"},

@@ -246,4 +246,4 @@ async def test_a_refused_summary_still_records_its_usage(route: str, tmp_path: P
             timeout_seconds=10,
             on_usage=on_usage,
         )
-    assert [(usage.input_tokens, usage.output_tokens) for usage in recorded] == [(3000, 7)]
+    assert [(usage.tokens.input_tokens, usage.tokens.output_tokens) for usage in recorded] == [(3000, 7)]

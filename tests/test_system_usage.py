@@ -15,7 +15,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -54,13 +54,15 @@ async def test_system_usage_is_content_free_idempotent_and_does_not_create_conve
         model="metered-model",
         model_provider="test-provider",
         created_at=1_723_837_600,
-        metrics=RunMetrics(input_tokens=7, output_tokens=3, cache_read_tokens=2, total_tokens=10),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, cache_read_tokens=2, total_tokens=10)),
         messages=[
             Message(
                 role="assistant",
                 content="secret message",
                 created_at=1_723_837_600,
-                metrics=MessageMetrics(input_tokens=7, output_tokens=3, cache_read_tokens=2, total_tokens=10),
+                metrics=MessageMetrics(
+                    tokens=TokenCounts(input_tokens=7, output_tokens=3, cache_read_tokens=2, total_tokens=10),
+                ),
             ),
         ],
     )
@@ -86,7 +88,7 @@ async def test_system_usage_is_content_free_idempotent_and_does_not_create_conve
                     model="metered-model",
                     model_provider="test-provider",
                     created_at=1_723_837_600,
-                    metrics=RunMetrics(input_tokens=4, output_tokens=1, total_tokens=5),
+                    metrics=RunMetrics(tokens=TokenCounts(input_tokens=4, output_tokens=1, total_tokens=5)),
                 ),
             ],
         ),
@@ -151,7 +153,11 @@ async def test_system_usage_storage_failure_logs_without_content_but_cancellatio
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    response = RunRecord(run_id="paid", content="PRIVATE RESULT", metrics=RunMetrics(total_tokens=1))
+    response = RunRecord(
+        run_id="paid",
+        content="PRIVATE RESULT",
+        metrics=RunMetrics(tokens=TokenCounts(total_tokens=1)),
+    )
     logged: list[tuple[str, dict[str, object]]] = []
 
     class CapturedLogger:

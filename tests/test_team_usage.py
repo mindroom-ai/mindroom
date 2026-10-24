@@ -18,7 +18,7 @@ from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, TeamRunRecord
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
@@ -39,19 +39,23 @@ _MIDNIGHT = 1_700_006_400
 
 def _metrics(input_tokens: int, model: str) -> RunMetrics:
     return RunMetrics(
-        input_tokens=input_tokens,
-        output_tokens=1,
-        total_tokens=input_tokens + 1,
-        cache_read_tokens=input_tokens // 2,
+        tokens=TokenCounts(
+            input_tokens=input_tokens,
+            output_tokens=1,
+            total_tokens=input_tokens + 1,
+            cache_read_tokens=input_tokens // 2,
+        ),
         details={
             "model": [
                 ModelMetrics(
+                    tokens=TokenCounts(
+                        input_tokens=input_tokens,
+                        output_tokens=1,
+                        total_tokens=input_tokens + 1,
+                        cache_read_tokens=input_tokens // 2,
+                    ),
                     id=model,
                     provider="test-provider",
-                    input_tokens=input_tokens,
-                    output_tokens=1,
-                    total_tokens=input_tokens + 1,
-                    cache_read_tokens=input_tokens // 2,
                 ),
             ],
         },
@@ -64,10 +68,12 @@ def _request(input_tokens: int, created_at: int) -> Message:
         content="private response",
         created_at=created_at,
         metrics=MessageMetrics(
-            input_tokens=input_tokens,
-            output_tokens=1,
-            total_tokens=input_tokens + 1,
-            cache_read_tokens=input_tokens // 2,
+            tokens=TokenCounts(
+                input_tokens=input_tokens,
+                output_tokens=1,
+                total_tokens=input_tokens + 1,
+                cache_read_tokens=input_tokens // 2,
+            ),
         ),
     )
 

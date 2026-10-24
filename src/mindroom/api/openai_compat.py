@@ -275,10 +275,10 @@ def _usage_from_team_output(record: TeamRunRecord) -> _UsageInfo:
     total = _UsageInfo()
     for run, metrics in team_usage_runs(record, record.ended_member_runs):
         usage = _usage_info(
-            input_tokens=metrics.input_tokens,
-            output_tokens=metrics.output_tokens,
-            cache_read_tokens=metrics.cache_read_tokens,
-            cache_write_tokens=metrics.cache_write_tokens,
+            input_tokens=metrics.tokens.input_tokens,
+            output_tokens=metrics.tokens.output_tokens,
+            cache_read_tokens=metrics.tokens.cache_read_tokens,
+            cache_write_tokens=metrics.tokens.cache_write_tokens,
             provider=run.model_provider,
             model_id=run.model,
         )

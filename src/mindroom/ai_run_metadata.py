@@ -168,9 +168,9 @@ def _uncached_input_tokens(
     if entries:
         return sum(
             uncached_input_tokens_from_counts(
-                input_tokens=entry.input_tokens,
-                cache_read_tokens=entry.cache_read_tokens,
-                cache_write_tokens=entry.cache_write_tokens,
+                input_tokens=entry.tokens.input_tokens,
+                cache_read_tokens=entry.tokens.cache_read_tokens,
+                cache_write_tokens=entry.tokens.cache_write_tokens,
                 provider=entry.provider,
                 configured_provider=None,
                 model_id=entry.id,

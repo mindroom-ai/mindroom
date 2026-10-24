@@ -27,7 +27,7 @@ from mindroom.llm.runs import (
     ToolExecution,
     run_record_from_dict,
 )
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, ToolCallMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts, ToolCallMetrics
 from tests.llm.agno_dict_helpers import (
     DROPPED_RUN_KEYS,
     DROPPED_TOOL_EXECUTION_KEYS,
@@ -110,7 +110,7 @@ def test_message_metrics_round_trip_agno_dict() -> None:
 
 
 def test_message_metrics_to_dict_omits_zero_and_none_as_agno() -> None:
-    owned = MessageMetrics(input_tokens=1, cost=0.0, duration=0.0, provider_metrics={})
+    owned = MessageMetrics(tokens=TokenCounts(input_tokens=1), cost=0.0, duration=0.0, provider_metrics={})
 
     assert owned.to_dict() == {"input_tokens": 1, "cost": 0.0, "duration": 0.0}
     assert MessageMetrics().to_dict() == {}
@@ -118,7 +118,7 @@ def test_message_metrics_to_dict_omits_zero_and_none_as_agno() -> None:
 
 def test_message_metrics_from_dict_ignores_timer_and_unknown_keys() -> None:
     assert MessageMetrics.from_dict({"input_tokens": 3, "timer": {"start": 1}, "mystery": 1}) == MessageMetrics(
-        input_tokens=3,
+        tokens=TokenCounts(input_tokens=3),
     )
 
 
@@ -126,7 +126,7 @@ def test_message_metrics_addition_matches_agno() -> None:
     owned = MessageMetrics.from_dict(agno("message_metrics")) + MessageMetrics.from_dict(agno("message_metrics_addend"))
 
     assert owned.to_dict() == agno("message_metrics_sum")
-    assert (MessageMetrics(input_tokens=1) + MessageMetrics()).to_dict() == {"input_tokens": 1}
+    assert (MessageMetrics(tokens=TokenCounts(input_tokens=1)) + MessageMetrics()).to_dict() == {"input_tokens": 1}
 
 
 def test_tool_call_metrics_round_trip_agno_dict() -> None:
@@ -178,7 +178,7 @@ def test_run_metrics_addition_matches_agno() -> None:
     owned = RunMetrics.from_dict(agno("run_metrics")) + RunMetrics.from_dict(agno("run_metrics_addend"))
 
     assert owned.to_dict() == agno("run_metrics_sum")
-    assert (RunMetrics(input_tokens=1) + RunMetrics()).to_dict() == {"input_tokens": 1}
+    assert (RunMetrics(tokens=TokenCounts(input_tokens=1)) + RunMetrics()).to_dict() == {"input_tokens": 1}
 
 
 def test_model_metrics_round_trip_agno_dict() -> None:
@@ -214,7 +214,7 @@ def test_message_dict_keys_match_agno_for_every_field() -> None:
         reasoning_content="r",
         redacted_reasoning_content="rr",
         provider_data={"k": "v"},
-        metrics=MessageMetrics(input_tokens=1),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=1)),
         from_history=True,
         images=[Image(id="i", url="https://example.invalid/i")],
         audio=[Audio(id="a", url="https://example.invalid/a")],
@@ -566,7 +566,7 @@ def test_session_metrics_count_a_saved_again_run_once() -> None:
     paused = RunMetrics.from_dict(agno("run_metrics"))
     finished = RunMetrics.from_dict(agno("run_metrics"))
     finished.add(
-        MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10, cost=0.25),
+        MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10), cost=0.25),
         model_id="m",
         provider="P",
     )
@@ -577,7 +577,7 @@ def test_session_metrics_count_a_saved_again_run_once() -> None:
     twice.count_run(paused)
     twice.count_run(finished, replacing=paused)
 
-    assert twice.input_tokens == finished.input_tokens
+    assert twice.tokens.input_tokens == finished.tokens.input_tokens
     # Undoing a model entry that reported an empty ``provider_metrics`` leaves that empty dict, as Agno's merge would.
     assert _without_empty_provider_metrics(twice.to_dict()) == _without_empty_provider_metrics(once.to_dict())
 

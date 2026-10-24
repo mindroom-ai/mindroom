@@ -218,12 +218,11 @@ def test_single_model_run_is_priced_from_usage() -> None:
 def test_team_details_are_priced_per_model() -> None:
     """A team reply whose member runs another model is charged that model's prices, not the leader's."""
     metrics = RunMetrics(
-        input_tokens=1_000_000,
-        output_tokens=1_000_000,
+        tokens=TokenCounts(input_tokens=1_000_000, output_tokens=1_000_000),
         details={
             "model": [
-                ModelMetrics(id="a", provider="P", input_tokens=1_000_000),
-                ModelMetrics(id="b", provider="P", output_tokens=1_000_000),
+                ModelMetrics(tokens=TokenCounts(input_tokens=1_000_000), id="a", provider="P"),
+                ModelMetrics(tokens=TokenCounts(output_tokens=1_000_000), id="b", provider="P"),
             ],
         },
     )
@@ -240,12 +239,12 @@ def test_team_details_are_priced_per_model() -> None:
 def test_summed_team_metrics_keep_each_member_model_priced() -> None:
     """Team replies add member metrics to the leader's, which must keep per-model details apart."""
     leader = RunMetrics(
-        input_tokens=1_000_000,
-        details={"model": [ModelMetrics(id="a", provider="P", input_tokens=1_000_000)]},
+        tokens=TokenCounts(input_tokens=1_000_000),
+        details={"model": [ModelMetrics(tokens=TokenCounts(input_tokens=1_000_000), id="a", provider="P")]},
     )
     member = RunMetrics(
-        output_tokens=1_000_000,
-        details={"model": [ModelMetrics(id="b", provider="P", output_tokens=1_000_000)]},
+        tokens=TokenCounts(output_tokens=1_000_000),
+        details={"model": [ModelMetrics(tokens=TokenCounts(output_tokens=1_000_000), id="b", provider="P")]},
     )
     prices = {
         ("P", "a"): PricedModel(ModelPricing(input=1, output=1), input_includes_cache=True),
@@ -259,8 +258,8 @@ def test_partly_priced_details_charge_only_priced_models() -> None:
     metrics = RunMetrics(
         details={
             "model": [
-                ModelMetrics(id="a", provider="P", input_tokens=1_000_000),
-                ModelMetrics(id="local", provider="Ollama", input_tokens=5_000_000),
+                ModelMetrics(tokens=TokenCounts(input_tokens=1_000_000), id="a", provider="P"),
+                ModelMetrics(tokens=TokenCounts(input_tokens=5_000_000), id="local", provider="Ollama"),
             ],
         },
     )

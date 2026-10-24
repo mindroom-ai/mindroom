@@ -860,7 +860,7 @@ class _TeamTurn:
             run_id=record.run_id,
             attempt_run_id=attempt.run_id,
             runtime_model_name=attempt.runtime_model_name,
-            output_tokens=record.metrics.output_tokens if record.metrics is not None else None,
+            output_tokens=record.metrics.tokens.output_tokens if record.metrics is not None else None,
             tool_executions=tuple(tool_executions),
             completed_tools=tuple(attempt.presentation.tool_tracker.completed_tools),
             metadata_content=self.run_metadata_content(attempt, record.status),

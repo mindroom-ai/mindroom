@@ -423,7 +423,12 @@ async def test_gemini_parses_reasoning_tool_calls_and_usage(tmp_path: Path) -> N
     assert call["thought_signature"] == "c2ln"
     assert call["id"]
     metrics = message.metrics
-    assert (metrics.input_tokens, metrics.output_tokens, metrics.total_tokens, metrics.reasoning_tokens) == (
+    assert (
+        metrics.tokens.input_tokens,
+        metrics.tokens.output_tokens,
+        metrics.tokens.total_tokens,
+        metrics.tokens.reasoning_tokens,
+    ) == (
         10,
         5,
         15,
@@ -629,8 +634,12 @@ async def test_gemini_usage_counts_thinking_as_output_and_keeps_cached_input(tmp
     _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(chunk))
 
     metrics = _completed(events).message.metrics
-    assert (metrics.input_tokens, metrics.output_tokens, metrics.total_tokens) == (1000, 1700, 2700)
-    assert (metrics.reasoning_tokens, metrics.cache_read_tokens) == (1500, 400)
+    assert (metrics.tokens.input_tokens, metrics.tokens.output_tokens, metrics.tokens.total_tokens) == (
+        1000,
+        1700,
+        2700,
+    )
+    assert (metrics.tokens.reasoning_tokens, metrics.tokens.cache_read_tokens) == (1500, 400)
 
 
 @pytest.mark.asyncio
@@ -644,7 +653,7 @@ async def test_gemini_non_streaming_requests_use_generate_content(tmp_path: Path
     completed = _completed(events)
     assert [type(event).__name__ for event in events] == ["UsageReported", "UsageReported", "TurnCompleted"]
     assert completed.message.content == "Whole."
-    assert completed.message.metrics.input_tokens == 10
+    assert completed.message.metrics.tokens.input_tokens == 10
 
 
 @pytest.mark.asyncio
@@ -693,8 +702,10 @@ async def test_gemini_non_streamed_blocked_prompt_reports_its_prompt_usage(tmp_p
     completed = _completed(events)
     assert [type(event).__name__ for event in events] == ["UsageReported", "UsageReported", "TurnCompleted"]
     usage = [event.usage for event in events if isinstance(event, UsageReported) and event.final]
-    assert [(metrics.input_tokens, metrics.output_tokens, metrics.total_tokens) for metrics in usage] == [(9, 0, 9)]
-    assert completed.message.metrics.input_tokens == 9
+    assert [
+        (metrics.tokens.input_tokens, metrics.tokens.output_tokens, metrics.tokens.total_tokens) for metrics in usage
+    ] == [(9, 0, 9)]
+    assert completed.message.metrics.tokens.input_tokens == 9
     assert (completed.message.content, completed.message.tool_calls, completed.stop_reason) == (None, None, None)
 
 
@@ -1543,8 +1554,8 @@ async def test_ollama_parses_text_tool_calls_usage_and_length_stops(tmp_path: Pa
     [call] = completed.message.tool_calls or []
     assert call["function"] == {"name": "get_weather", "arguments": '{"city": "Paris"}'}
     assert call["id"]
-    assert completed.message.metrics.input_tokens == 7
-    assert completed.message.metrics.output_tokens == 5
+    assert completed.message.metrics.tokens.input_tokens == 7
+    assert completed.message.metrics.tokens.output_tokens == 5
     assert completed.stop_reason == "output_limit"
 
 
@@ -1602,7 +1613,7 @@ async def test_ollama_non_streaming_replies_split_think_tags(tmp_path: Path) -> 
     completed = _completed(events)
     assert (completed.message.content, completed.message.reasoning_content) == ("Hi there", "Plan first.")
     assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
-    assert completed.message.metrics.input_tokens == 7
+    assert completed.message.metrics.tokens.input_tokens == 7
 
 
 @pytest.mark.asyncio

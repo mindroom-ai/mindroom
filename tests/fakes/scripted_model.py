@@ -19,7 +19,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 
 if TYPE_CHECKING:
@@ -67,10 +67,19 @@ class ScriptedModel:
             yield step
 
 
-def usage(input_tokens: int, output_tokens: int, **counters: float) -> MessageMetrics:
+def usage(
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    time_to_first_token: float | None = None,
+    **counters: int,
+) -> MessageMetrics:
     """Return one request's usage; ``total_tokens`` is the sum unless given."""
     counters.setdefault("total_tokens", input_tokens + output_tokens)
-    return MessageMetrics(input_tokens=input_tokens, output_tokens=output_tokens, **counters)  # type: ignore[arg-type]
+    return MessageMetrics(
+        tokens=TokenCounts(input_tokens=input_tokens, output_tokens=output_tokens, **counters),
+        time_to_first_token=time_to_first_token,
+    )
 
 
 def tool_call(function: str, call_id: str, /, **arguments: object) -> dict[str, Any]:

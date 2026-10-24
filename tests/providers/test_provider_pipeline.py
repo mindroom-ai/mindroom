@@ -43,7 +43,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.pipeline import request_log as request_log_stage
@@ -140,8 +140,8 @@ def _user(text: str = "hi", **media: object) -> Message:
 @pytest.mark.asyncio
 async def test_transient_failure_before_output_is_retried_and_its_usage_carried() -> None:
     """A failed attempt's reported usage is added to the finished turn, which is marked as aggregated."""
-    failed_usage = MessageMetrics(input_tokens=40, output_tokens=0, total_tokens=40)
-    final_usage = MessageMetrics(input_tokens=42, output_tokens=12, total_tokens=54)
+    failed_usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=0, total_tokens=40))
+    final_usage = MessageMetrics(tokens=TokenCounts(input_tokens=42, output_tokens=12, total_tokens=54))
     inner = _ScriptedProvider(
         [
             [UsageReported(failed_usage), _transient()],
@@ -307,7 +307,7 @@ async def test_a_timeout_the_provider_raises_is_not_reported_as_a_stall() -> Non
 @pytest.mark.asyncio
 async def test_a_failed_attempt_without_tokens_leaves_the_finished_turn_unmarked() -> None:
     """The finished turn's token counts stay one request's own, so they still describe its context."""
-    final_usage = MessageMetrics(input_tokens=42, output_tokens=12, total_tokens=54, duration=2.0)
+    final_usage = MessageMetrics(tokens=TokenCounts(input_tokens=42, output_tokens=12, total_tokens=54), duration=2.0)
     inner = _ScriptedProvider(
         [
             [UsageReported(MessageMetrics(duration=1.5)), _transient()],
@@ -353,7 +353,9 @@ async def test_media_the_route_omits_is_replaced_by_the_fallback_note() -> None:
 @pytest.mark.asyncio
 async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_route() -> None:
     rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
-    inner = _ScriptedProvider([[UsageReported(MessageMetrics(input_tokens=5)), rejection], [_turn()], [_turn()]])
+    inner = _ScriptedProvider(
+        [[UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=5))), rejection], [_turn()], [_turn()]],
+    )
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
 
@@ -363,7 +365,7 @@ async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_ro
     assert (retried.images, retried.content) == (None, f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}")
     finished = events[-1]
     assert isinstance(finished, TurnCompleted)
-    assert finished.message.metrics.input_tokens == 5
+    assert finished.message.metrics.tokens.input_tokens == 5
     assert finished.message.provider_data["mindroom_aggregate_usage"] is True
     # The capability gap is learned, so the next request leaves the image out up front.
     await _drain(provider, request)
@@ -613,7 +615,7 @@ def _refusal(usage: MessageMetrics) -> TurnCompleted:
 
 @pytest.mark.asyncio
 async def test_a_refused_turn_raises_the_typed_refusal_after_its_usage() -> None:
-    usage = MessageMetrics(input_tokens=40, output_tokens=9, total_tokens=49)
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=9, total_tokens=49))
     inner = _ScriptedProvider([[UsageReported(usage), _refusal(usage)]])
     events = WrappedProvider(inner, refusal_stream).stream(ModelRequest(messages=[_user()]))
 
@@ -634,7 +636,7 @@ async def test_a_refused_turn_raises_the_typed_refusal_after_its_usage() -> None
 @pytest.mark.asyncio
 async def test_a_refusal_is_neither_retried_nor_resent_without_media() -> None:
     """A transient failure before still retries; the refused attempt ends the request with its media intact."""
-    usage = MessageMetrics(input_tokens=40, output_tokens=9, total_tokens=49)
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=9, total_tokens=49))
     inner = _ScriptedProvider([[_transient()], [UsageReported(usage), _refusal(usage)]])
     provider = wrap_provider(inner, idle_timeout_seconds=None, media_fallback_prompt="x", request_log=None)
 
@@ -651,8 +653,8 @@ async def test_a_refusal_is_neither_retried_nor_resent_without_media() -> None:
 @pytest.mark.asyncio
 async def test_a_malformed_tool_call_is_retried_with_guidance_on_the_retried_request_only() -> None:
     """The guidance is appended to the resent request, never to the caller's conversation; usage carries over."""
-    failed = MessageMetrics(input_tokens=30, total_tokens=30)
-    final = MessageMetrics(input_tokens=42, output_tokens=12, total_tokens=54)
+    failed = MessageMetrics(tokens=TokenCounts(input_tokens=30, total_tokens=30))
+    final = MessageMetrics(tokens=TokenCounts(input_tokens=42, output_tokens=12, total_tokens=54))
     inner = _ScriptedProvider(
         [[UsageReported(failed), _malformed()], [TextDelta("done"), UsageReported(final), _turn(usage=final)]],
     )
@@ -694,7 +696,7 @@ async def test_only_a_malformed_tool_call_before_output_gets_guidance(attempt: l
 
 @pytest.mark.asyncio
 async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> None:
-    usage = MessageMetrics(input_tokens=42, output_tokens=12, total_tokens=54, cache_read_tokens=30)
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=42, output_tokens=12, total_tokens=54, cache_read_tokens=30))
     inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]], model_params={"temperature": 0.2})
     log = RequestLog(
         model_name="default",
@@ -819,8 +821,15 @@ async def test_usage_telemetry_is_logged_without_the_request_log(
     ratio: float,
 ) -> None:
     """Every request reports its usage; Anthropic counts cached tokens beside the input, not inside it."""
-    usage = MessageMetrics(input_tokens=1_000, output_tokens=50, reasoning_tokens=20, cache_read_tokens=800)
-    usage.cache_write_tokens = 100
+    usage = MessageMetrics(
+        tokens=TokenCounts(
+            input_tokens=1_000,
+            output_tokens=50,
+            reasoning_tokens=20,
+            cache_read_tokens=800,
+            cache_write_tokens=100,
+        ),
+    )
     identity = replace(_IDENTITY, provider=provider)
     inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]], identity=identity)
     log = _request_log(tmp_path, enabled=False, provider=provider.lower())
@@ -876,7 +885,7 @@ async def test_a_failing_request_log_neither_fails_the_request_nor_hides_its_err
         raise OSError(message)
 
     monkeypatch.setattr(request_log_stage, "_write_line", unwritable)
-    usage = MessageMetrics(input_tokens=3, output_tokens=1)
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, output_tokens=1))
     answered = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
     failed = _ScriptedProvider([[InvalidRequest("bad request", provider="Scripted Chat", status_code=400)]])
 
@@ -906,7 +915,7 @@ async def test_a_response_record_that_cannot_be_written_is_reported_and_the_answ
         write_line(path, payload)
 
     monkeypatch.setattr(request_log_stage, "_write_line", fills_after_one_line)
-    usage = MessageMetrics(input_tokens=3, output_tokens=1)
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, output_tokens=1))
     inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
 
     with capture_logs() as logs:
@@ -947,7 +956,7 @@ def test_concurrent_large_records_each_land_on_their_own_line(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_usage_seen_before_a_stream_is_abandoned_is_still_recorded(tmp_path: Path) -> None:
-    usage = MessageMetrics(input_tokens=3, cache_read_tokens=42)
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, cache_read_tokens=42))
     inner = _ScriptedProvider([[UsageReported(usage), TextDelta("ok"), TextDelta("never read"), _turn()]])
     stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
 
@@ -962,7 +971,7 @@ async def test_usage_seen_before_a_stream_is_abandoned_is_still_recorded(tmp_pat
 @pytest.mark.asyncio
 async def test_a_partial_usage_report_of_an_abandoned_stream_is_recorded(tmp_path: Path) -> None:
     """A request cut off after only a partial report logs that usage, as every other consumer settles it."""
-    usage = MessageMetrics(input_tokens=3, output_tokens=1, cache_read_tokens=42)
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, output_tokens=1, cache_read_tokens=42))
     inner = _ScriptedProvider([[UsageReported(usage, final=False), TextDelta("ok"), TextDelta("never read"), _turn()]])
     stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
 
@@ -1007,19 +1016,22 @@ async def test_reported_usage_always_sums_to_the_finished_turn(rejection: Provid
     """Usage of transient retries inside a media or guidance retry is counted once, in reports and final metrics."""
     inner = _ScriptedProvider(
         [
-            [UsageReported(MessageMetrics(input_tokens=5)), _transient()],
-            [UsageReported(MessageMetrics(input_tokens=7)), rejection],
-            [UsageReported(MessageMetrics(input_tokens=10)), _turn(usage=MessageMetrics(input_tokens=10))],
+            [UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=5))), _transient()],
+            [UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=7))), rejection],
+            [
+                UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=10))),
+                _turn(usage=MessageMetrics(tokens=TokenCounts(input_tokens=10))),
+            ],
         ],
     )
     provider = wrap_provider(inner, idle_timeout_seconds=None, media_fallback_prompt="x", request_log=None)
 
     events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
-    reported = sum(event.usage.input_tokens for event in events if isinstance(event, UsageReported))
+    reported = sum(event.usage.tokens.input_tokens for event in events if isinstance(event, UsageReported))
     finished = events[-1]
     assert isinstance(finished, TurnCompleted)
-    assert reported == finished.message.metrics.input_tokens == 22
+    assert reported == finished.message.metrics.tokens.input_tokens == 22
 
 
 @pytest.mark.asyncio
@@ -1039,14 +1051,20 @@ async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_tu
     attempt that fails in between was billed for what its partial report says.
     """
     started = MessageMetrics(
-        input_tokens=12,
-        output_tokens=1,
-        total_tokens=13,
-        cache_read_tokens=900,
-        cache_write_tokens=40,
+        tokens=TokenCounts(
+            input_tokens=12,
+            output_tokens=1,
+            total_tokens=13,
+            cache_read_tokens=900,
+            cache_write_tokens=40,
+        ),
     )
-    restarted = MessageMetrics(input_tokens=12, output_tokens=1, total_tokens=13, cache_read_tokens=940)
-    final = MessageMetrics(input_tokens=12, output_tokens=30, total_tokens=42, cache_read_tokens=940)
+    restarted = MessageMetrics(
+        tokens=TokenCounts(input_tokens=12, output_tokens=1, total_tokens=13, cache_read_tokens=940),
+    )
+    final = MessageMetrics(
+        tokens=TokenCounts(input_tokens=12, output_tokens=30, total_tokens=42, cache_read_tokens=940),
+    )
     inner = _ScriptedProvider(
         [
             [UsageReported(started, final=False), StreamProgress(), failure],
@@ -1083,11 +1101,17 @@ async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_part
     inner = _ScriptedProvider(
         [
             [
-                UsageReported(MessageMetrics(input_tokens=5, total_tokens=5, cache_read_tokens=40), final=False),
+                UsageReported(
+                    MessageMetrics(tokens=TokenCounts(input_tokens=5, total_tokens=5, cache_read_tokens=40)),
+                    final=False,
+                ),
                 _transient(),
             ],
             [
-                UsageReported(MessageMetrics(input_tokens=6, total_tokens=6, cache_read_tokens=40), final=False),
+                UsageReported(
+                    MessageMetrics(tokens=TokenCounts(input_tokens=6, total_tokens=6, cache_read_tokens=40)),
+                    final=False,
+                ),
                 rejection,
             ],
         ],
@@ -1106,7 +1130,7 @@ async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_part
     [record] = saved
     assert record.status is RunStatus.error
     assert record.messages[-1].metrics.to_dict() == {"input_tokens": 11, "total_tokens": 11, "cache_read_tokens": 80}
-    assert (record.metrics.input_tokens, record.metrics.cache_read_tokens) == (11, 80)
+    assert (record.metrics.tokens.input_tokens, record.metrics.tokens.cache_read_tokens) == (11, 80)
 
 
 @pytest.mark.asyncio
@@ -1122,8 +1146,12 @@ async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attem
         streaming.set()
         await asyncio.get_running_loop().create_future()
 
-    started = MessageMetrics(input_tokens=12, total_tokens=12, cache_read_tokens=900, cache_write_tokens=40)
-    restarted = MessageMetrics(input_tokens=12, output_tokens=1, total_tokens=13, cache_read_tokens=940)
+    started = MessageMetrics(
+        tokens=TokenCounts(input_tokens=12, total_tokens=12, cache_read_tokens=900, cache_write_tokens=40),
+    )
+    restarted = MessageMetrics(
+        tokens=TokenCounts(input_tokens=12, output_tokens=1, total_tokens=13, cache_read_tokens=940),
+    )
     inner = _ScriptedProvider(
         [
             [UsageReported(started, final=False), _transient()],
@@ -1156,7 +1184,11 @@ async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attem
         "cache_read_tokens": 1840,
         "cache_write_tokens": 40,
     }
-    assert (record.metrics.input_tokens, record.metrics.cache_read_tokens, record.metrics.cache_write_tokens) == (
+    assert (
+        record.metrics.tokens.input_tokens,
+        record.metrics.tokens.cache_read_tokens,
+        record.metrics.tokens.cache_write_tokens,
+    ) == (
         24,
         1840,
         40,

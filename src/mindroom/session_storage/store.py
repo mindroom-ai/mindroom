@@ -24,7 +24,7 @@ from mindroom.history.summary_rows_schema import (
 )
 from mindroom.history.types import ScopeSummary
 from mindroom.llm.runs import RunStatus
-from mindroom.llm.usage import TOKEN_FIELDS, ModelMetrics, RunMetrics, SessionMetrics
+from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from mindroom.session_storage.codec import run_from_row, run_type
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json
@@ -796,12 +796,11 @@ def _record_run_usage(
 
 def _counted_usage(snapshot: Mapping[str, object]) -> RunMetrics:
     """Return the usage a ledger snapshot records: its token counters, in total and for each model."""
-    counted = RunMetrics()
     metrics = snapshot.get("metrics")
     if not isinstance(metrics, dict):
-        return counted
+        return RunMetrics()
     metrics = cast("dict[str, object]", metrics)
-    _set_token_counts(counted, metrics)
+    counted = RunMetrics(tokens=TokenCounts.from_mapping(metrics, _counted_value))
     details = metrics.get("details")
     models = cast("dict[str, object]", details).get("model") if isinstance(details, dict) else None
     if isinstance(models, list):
@@ -813,20 +812,16 @@ def _counted_usage(snapshot: Mapping[str, object]) -> RunMetrics:
 
 def _counted_model(entry: Mapping[str, object]) -> ModelMetrics:
     model_id, provider = entry.get("id"), entry.get("provider")
-    model = ModelMetrics(
+    return ModelMetrics(
+        tokens=TokenCounts.from_mapping(entry, _counted_value),
         id=model_id if isinstance(model_id, str) else "",
         provider=provider if isinstance(provider, str) else "",
     )
-    _set_token_counts(model, entry)
-    return model
 
 
-def _set_token_counts(target: RunMetrics | ModelMetrics, metrics: Mapping[str, object]) -> None:
+def _counted_value(value: object) -> int:
     # The ledger keeps an invalid counter as a sentinel for its reporter; only real counts add up.
-    for name in TOKEN_FIELDS:
-        value = metrics.get(name)
-        if isinstance(value, int) and not isinstance(value, bool):
-            setattr(target, name, value)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def delete_run_subtrees_in_transaction(

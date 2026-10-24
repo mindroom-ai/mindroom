@@ -50,7 +50,7 @@ from mindroom.llm.provider import (
     ToolSpec,
 )
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.model_usage import response_context_tokens
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
@@ -433,7 +433,10 @@ async def test_failed_mid_turn_compaction_does_not_carry_into_the_next_run(
 @pytest.mark.asyncio
 async def test_request_sizing_uses_the_latest_response_usage(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path, context_window=1_000_000)
-    model = ToolLoopModel(tool_rounds=2, usage=lambda number: MessageMetrics(input_tokens=999_000 * number))
+    model = ToolLoopModel(
+        tool_rounds=2,
+        usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=999_000 * number)),
+    )
 
     await _run(_agent(model, config, paths), "Do the task")
 
@@ -453,7 +456,7 @@ async def test_request_sizing_counts_the_turns_thinking(
     config, paths = _config(tmp_path, context_window=20_000)
     model = ToolLoopModel(
         tool_rounds=2,
-        usage=lambda _number: MessageMetrics(input_tokens=input_tokens),
+        usage=lambda _number: MessageMetrics(tokens=TokenCounts(input_tokens=input_tokens)),
         reasoning="t" * 100_000,
     )
 
@@ -577,7 +580,7 @@ def test_aggregate_usage_of_retried_requests_never_anchors_sizing() -> None:
     message = Message(
         role="assistant",
         content="done",
-        metrics=MessageMetrics(input_tokens=90_000),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=90_000)),
         provider_data={"mindroom_aggregate_usage": True},
     )
 
@@ -826,7 +829,10 @@ async def test_request_sizing_counts_thinking_the_response_did_not_show(
     summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path, context_window=20_000)
-    model = ToolLoopModel(tool_rounds=2, usage=lambda _number: MessageMetrics(input_tokens=10, output_tokens=30_000))
+    model = ToolLoopModel(
+        tool_rounds=2,
+        usage=lambda _number: MessageMetrics(tokens=TokenCounts(input_tokens=10, output_tokens=30_000)),
+    )
 
     await _run(_agent(model, config, paths), "Do the task")
 
@@ -842,7 +848,7 @@ async def test_folded_request_usage_stays_in_the_usage_projection(
     config, paths = _config(tmp_path)
     model = ToolLoopModel(
         tool_rounds=8,
-        usage=lambda number: MessageMetrics(input_tokens=1001 * number, output_tokens=1),
+        usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=1001 * number, output_tokens=1)),
     )
 
     output = await _run(_agent(model, config, paths), "Do the task")
@@ -862,7 +868,7 @@ async def test_folded_request_usage_stays_on_a_run_cancelled_after_compaction(tm
     storage = seeded_storage(config, paths)
     model = ToolLoopModel(
         tool_rounds=5,
-        usage=lambda number: MessageMetrics(input_tokens=1001 * number, output_tokens=1),
+        usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=1001 * number, output_tokens=1)),
     )
     agent = _scoped_agent(model, config, paths, storage, lifecycle=_CancelOnSuccess())
 
@@ -1040,7 +1046,9 @@ async def test_the_loop_caps_a_request_before_compacting_it(tmp_path: Path, summ
     # The fourth response reports a request far over the window, so only the fifth request would compact.
     model = ToolLoopModel(
         tool_rounds=8,
-        usage=lambda number: MessageMetrics(input_tokens=1_000_000 if number == 4 else 10, output_tokens=1),
+        usage=lambda number: MessageMetrics(
+            tokens=TokenCounts(input_tokens=1_000_000 if number == 4 else 10, output_tokens=1),
+        ),
     )
 
     # The cap allows the limit plus two requests, so it refuses the fifth.
@@ -1634,7 +1642,10 @@ async def test_native_request_under_the_limit_never_text_compacts(
     summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path, context_window=1_000_000)
-    model = ToolLoopModel(tool_rounds=4, usage=lambda number: MessageMetrics(input_tokens=999_900 * number))
+    model = ToolLoopModel(
+        tool_rounds=4,
+        usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=999_900 * number)),
+    )
 
     await _run(_agent(model, config, paths, native_compaction=_native(500_000)), "Do the task")
 
@@ -1716,7 +1727,9 @@ async def test_thinking_a_native_checkpoint_replaced_never_triggers_text_compact
     config, paths = _config(tmp_path, context_window=40_000)
     model = _CheckpointingLoop(
         tool_rounds=6,
-        usage=lambda number: MessageMetrics(input_tokens=0, output_tokens=15_000 if number < 3 else 5_000),
+        usage=lambda number: MessageMetrics(
+            tokens=TokenCounts(input_tokens=0, output_tokens=15_000 if number < 3 else 5_000),
+        ),
     )
 
     await _run(_agent(model, config, paths, native_compaction=_native(20_000)), "Do the task")

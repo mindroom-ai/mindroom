@@ -34,7 +34,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -155,11 +155,11 @@ def test_message_is_mutable_and_copies_independently() -> None:
     message = Message(role="assistant", content="draft", provider_data={"signature": "s"})
     message.content = "final"
     message.from_history = True
-    message.metrics.input_tokens = 7
+    message.metrics.tokens = TokenCounts(input_tokens=7)
     duplicate = copy.deepcopy(message)
     duplicate.provider_data["signature"] = "other"  # type: ignore[index]
 
-    assert (message.content, message.from_history, message.metrics.input_tokens) == ("final", True, 7)
+    assert (message.content, message.from_history, message.metrics.tokens.input_tokens) == ("final", True, 7)
     assert message.provider_data == {"signature": "s"}
     assert replace(message, from_history=False).from_history is False
 
@@ -268,11 +268,11 @@ def test_team_run_record_defaults() -> None:
 
 def test_run_metrics_sum_keeps_the_cost_only_one_run_reported() -> None:
     # A team turn sums its member runs, and only some providers, such as OpenRouter, report a request's cost.
-    priced = RunMetrics(input_tokens=10, cost=0.25, duration=2.0)
-    unpriced = RunMetrics(input_tokens=5, duration=1.0)
+    priced = RunMetrics(tokens=TokenCounts(input_tokens=10), cost=0.25, duration=2.0)
+    unpriced = RunMetrics(tokens=TokenCounts(input_tokens=5), duration=1.0)
 
     total = priced + unpriced
-    assert (total.input_tokens, total.cost, total.duration) == (15, 0.25, 3.0)
+    assert (total.tokens.input_tokens, total.cost, total.duration) == (15, 0.25, 3.0)
     assert (unpriced + priced).cost == 0.25
 
 
@@ -302,14 +302,14 @@ async def test_complete_drains_the_stream_and_returns_the_turn() -> None:
         role="assistant",
         content="Hello there",
         tool_calls=[{"id": "c1"}],
-        metrics=MessageMetrics(input_tokens=3),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=3)),
     )
     provider = _ScriptedProvider(
         [
             TextDelta("Hello"),
             ReasoningDelta("hmm"),
             ToolCallReady({"id": "c1"}),
-            UsageReported(MessageMetrics(input_tokens=3), final=False),
+            UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=3)), final=False),
             StreamProgress(),
             TextDelta(" there"),
             TurnCompleted(message=final, stop_reason="tool_use"),
@@ -326,7 +326,7 @@ async def test_complete_drains_the_stream_and_returns_the_turn() -> None:
     assert (turn.content, turn.tool_calls, turn.usage) == (
         "Hello there",
         [{"id": "c1"}],
-        MessageMetrics(input_tokens=3),
+        MessageMetrics(tokens=TokenCounts(input_tokens=3)),
     )
     assert provider.requests == [request]
 
@@ -390,7 +390,7 @@ def test_run_events_are_frozen_values() -> None:
         ReasoningDelta("why"),
         ToolStarted(tool),
         ToolCompleted(tool),
-        RequestCompleted(model_id="m", provider="P", usage=MessageMetrics(output_tokens=1)),
+        RequestCompleted(model_id="m", provider="P", usage=MessageMetrics(tokens=TokenCounts(output_tokens=1))),
         RunFinished(record),
     ]
 

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelPricing
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.usage import ModelMetrics, RunMetrics
+    from mindroom.llm.usage import RunMetrics
 
 logger = get_logger(__name__)
 
@@ -109,7 +109,7 @@ def model_prices(config: Config, runtime_paths: RuntimePaths) -> Mapping[tuple[s
     return table.prices
 
 
-def _priced_counts(counts: TokenCounts | ModelMetrics) -> TokenCounts:
+def _priced_counts(counts: TokenCounts) -> TokenCounts:
     """Return only the counters prices apply to, so usage with none of them stays unpriced."""
     return TokenCounts(
         input_tokens=counts.input_tokens,
@@ -138,7 +138,7 @@ def run_cost_usd(
     """
     details = metrics.details if metrics is not None else None
     entries = [
-        ((entry.provider, entry.id), _priced_counts(entry))
+        ((entry.provider, entry.id), _priced_counts(entry.tokens))
         for model_type_entries in (details or {}).values()
         for entry in model_type_entries
     ]

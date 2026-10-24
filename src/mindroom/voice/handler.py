@@ -32,7 +32,7 @@ from mindroom.helper_usage import record_system_usage
 from mindroom.llm.media import Audio, canonical_mime_type
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
@@ -88,16 +88,6 @@ class _NormalizedVoiceMessage:
 
     attachment_id: str | None
     transcribed_message: str | None
-
-
-@dataclass(frozen=True)
-class _TranscriptionTokenUsage:
-    """Provider counters for one token-metered transcription request."""
-
-    input_tokens: int
-    output_tokens: int
-    total_tokens: int
-    audio_tokens: int | None = None
 
 
 _VOICE_NORMALIZATION_CACHE_MAX_ENTRIES = 128
@@ -504,7 +494,7 @@ def _token_counter(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
-def _transcription_token_usage(result: object) -> _TranscriptionTokenUsage | None:
+def _transcription_token_usage(result: object) -> TokenCounts | None:
     """Accept only complete, consistent provider-reported token counters."""
     if not isinstance(result, dict):
         return None
@@ -526,42 +516,28 @@ def _transcription_token_usage(result: object) -> _TranscriptionTokenUsage | Non
     audio_tokens = (
         cast("dict[str, object]", token_details).get("audio_tokens") if isinstance(token_details, dict) else None
     )
-    if audio_tokens is not None:
-        audio_count = _token_counter(audio_tokens)
-        if audio_count is None or audio_count > input_tokens:
-            return None
-        return _TranscriptionTokenUsage(input_tokens, output_tokens, total_tokens, audio_count)
-    return _TranscriptionTokenUsage(input_tokens, output_tokens, total_tokens)
+    audio_count = 0 if audio_tokens is None else _token_counter(audio_tokens)
+    if audio_count is None or audio_count > input_tokens:
+        return None
+    counts = TokenCounts(input_tokens=input_tokens, output_tokens=output_tokens, audio_input_tokens=audio_count)
+    return counts.with_totals()
 
 
 def _transcription_usage_run(
-    usage: _TranscriptionTokenUsage,
+    usage: TokenCounts,
     *,
     model: str | None,
     provider: str | None,
     created_at: int,
 ) -> RunRecord:
     """Represent one provider response without retaining transcription content."""
-    run_metrics = RunMetrics(
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_tokens=usage.total_tokens,
-    )
-    message_metrics = MessageMetrics(
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_tokens=usage.total_tokens,
-    )
-    if usage.audio_tokens is not None:
-        run_metrics.audio_input_tokens = run_metrics.audio_total_tokens = usage.audio_tokens
-        message_metrics.audio_input_tokens = message_metrics.audio_total_tokens = usage.audio_tokens
     return RunRecord(
         run_id=str(uuid.uuid4()),
         model=model,
         model_provider=provider,
         created_at=created_at,
-        metrics=run_metrics,
-        messages=[Message(role="assistant", created_at=created_at, metrics=message_metrics)],
+        metrics=RunMetrics(tokens=usage),
+        messages=[Message(role="assistant", created_at=created_at, metrics=MessageMetrics(tokens=usage))],
     )
 
 

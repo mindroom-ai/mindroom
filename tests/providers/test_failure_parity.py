@@ -1411,7 +1411,7 @@ async def test_a_response_that_ended_incomplete_ends_the_turn_with_its_stop_reas
 
     turn = await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=stream))
 
-    assert (turn.content, turn.stop_reason, turn.usage.output_tokens, len(sent)) == (_PARTIAL, stop_reason, 9, 1)
+    assert (turn.content, turn.stop_reason, turn.usage.tokens.output_tokens, len(sent)) == (_PARTIAL, stop_reason, 9, 1)
     assert turn.tool_calls == ([_CUT_OFF_CALL] if cut_off_call else [])
 
 
@@ -1619,7 +1619,7 @@ def _silent_after_usage(
 
 def _billed(usage: ReportedUsage) -> tuple[int, int] | None:
     received = usage.received
-    return None if received is None else (received.input_tokens, received.output_tokens)
+    return None if received is None else (received.tokens.input_tokens, received.tokens.output_tokens)
 
 
 @pytest.mark.asyncio

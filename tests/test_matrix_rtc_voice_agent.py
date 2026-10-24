@@ -305,7 +305,13 @@ async def test_realtime_session_records_each_responses_token_usage(monkeypatch: 
     latest = recorded[-1]
     assert latest.model == "gpt-realtime-2.1"
     assert [
-        (r.input_tokens, r.output_tokens, r.cache_read_tokens, r.audio_input_tokens, r.audio_output_tokens)
+        (
+            r.tokens.input_tokens,
+            r.tokens.output_tokens,
+            r.tokens.cache_read_tokens,
+            r.tokens.audio_input_tokens,
+            r.tokens.audio_output_tokens,
+        )
         for r in latest.responses
     ] == [(900, 300, 400, 800, 250), (1100, 400, 800, 1000, 350)]
 
@@ -322,7 +328,7 @@ async def test_realtime_usage_reported_while_the_call_closes_is_saved(monkeypatc
     report(_llm_usage(900))
     await bridge.aclose()
 
-    assert [response.input_tokens for response in recorded[-1].responses] == [900, 1100]
+    assert [response.tokens.input_tokens for response in recorded[-1].responses] == [900, 1100]
 
 
 @pytest.mark.asyncio

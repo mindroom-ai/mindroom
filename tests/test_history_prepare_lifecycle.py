@@ -52,7 +52,7 @@ from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, NativeCompactionReplay
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -1918,7 +1918,7 @@ def _reported_run(
     answer = Message(
         role="assistant",
         content="a" * 2_000,
-        metrics=MessageMetrics(input_tokens=input_tokens),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=input_tokens)),
         created_at=created_at,
     )
     stamp_model(answer, ModelIdentity(id=model, provider="fake", provider_name="fake"))

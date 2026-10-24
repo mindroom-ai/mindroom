@@ -270,10 +270,10 @@ async def test_a_streamed_collaborate_run_stores_agno_s_rows_and_joins_member_te
     # The turn's usage is the leader's plus each member's, counted once, within the leader's duration.
     total = team_usage(record, members)
     assert total is not None
-    assert (total.input_tokens, total.output_tokens, total.total_tokens) == (911, 23, 934)
+    assert (total.tokens.input_tokens, total.tokens.output_tokens, total.tokens.total_tokens) == (911, 23, 934)
     assert total.duration == record.metrics.duration  # type: ignore[union-attr]
     assert total.details is not None
-    assert sorted((entry.id, entry.input_tokens) for entry in total.details["model"]) == [
+    assert sorted((entry.id, entry.tokens.input_tokens) for entry in total.details["model"]) == [
         ("checker-model", 61),
         ("leader-model", 790),
         ("writer-model", 60),

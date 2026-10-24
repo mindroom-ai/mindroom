@@ -68,7 +68,7 @@ from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
@@ -267,7 +267,9 @@ def _model_runtime_context(
 
 def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
     """Run metrics serialize only the counters the provider reported."""
-    payload = _serialize_metrics(RunMetrics(input_tokens=6, output_tokens=0, cache_read_tokens=46449))
+    payload = _serialize_metrics(
+        RunMetrics(tokens=TokenCounts(input_tokens=6, output_tokens=0, cache_read_tokens=46449)),
+    )
 
     assert payload == {
         "input_tokens": 6,
@@ -358,7 +360,7 @@ def test_ai_run_metadata_context_regression_cached_prefix_sample() -> None:
         status="completed",
         model="claude-sonnet-5",
         model_provider="google",
-        metrics=RunMetrics(input_tokens=3_277, cache_read_tokens=99_772, cache_write_tokens=49_886),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=3_277, cache_read_tokens=99_772, cache_write_tokens=49_886)),
         context_input_tokens=30_210,
         context_raw_input_tokens=1_777,
         context_cache_read_tokens=49_886,
@@ -383,7 +385,7 @@ def test_ai_run_metadata_records_reply_cost_as_a_decimal_string() -> None:
         status="completed",
         model="test-model",
         model_provider="OpenAI",
-        metrics=RunMetrics(input_tokens=1_000, output_tokens=10),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10)),
         prices={("OpenAI", "test-model"): PricedModel(ModelPricing(input=2, output=8), input_includes_cache=True)},
     )
 
@@ -410,7 +412,7 @@ def test_an_agent_reply_on_a_priced_model_publishes_its_cost(tmp_path: Path) -> 
     identity = build_model_provider(config, paths, "default").identity
     metrics = RunMetrics()
     metrics.add(
-        MessageMetrics(input_tokens=1_000, output_tokens=10),
+        MessageMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10)),
         model_id=identity.id,
         provider=identity.provider_name,
     )
@@ -447,7 +449,7 @@ def test_ai_run_metadata_omits_cost_without_prices() -> None:
         status="completed",
         model="test-model",
         model_provider="OpenAI",
-        metrics=RunMetrics(input_tokens=1_000, output_tokens=10),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10)),
         prices={},
     )
 
@@ -457,18 +459,18 @@ def test_ai_run_metadata_omits_cost_without_prices() -> None:
 def test_ai_run_metadata_splits_uncached_input_per_model() -> None:
     """A team mixing providers counts each model's new input by that provider's cache accounting."""
     metrics = RunMetrics(
-        input_tokens=1_100,
-        cache_read_tokens=1_300,
-        cache_write_tokens=10,
+        tokens=TokenCounts(input_tokens=1_100, cache_read_tokens=1_300, cache_write_tokens=10),
         details={
             "model": [
-                ModelMetrics(id="gpt-6-luna", provider="OpenAI", input_tokens=1_000, cache_read_tokens=400),
                 ModelMetrics(
+                    tokens=TokenCounts(input_tokens=1_000, cache_read_tokens=400),
+                    id="gpt-6-luna",
+                    provider="OpenAI",
+                ),
+                ModelMetrics(
+                    tokens=TokenCounts(input_tokens=100, cache_read_tokens=900, cache_write_tokens=10),
                     id="claude-sonnet-5-5",
                     provider="Anthropic",
-                    input_tokens=100,
-                    cache_read_tokens=900,
-                    cache_write_tokens=10,
                 ),
             ],
         },
@@ -499,7 +501,7 @@ def test_ai_run_metadata_splits_uncached_input_from_streamed_counters() -> None:
         status="completed",
         model="gpt-6-luna",
         model_provider="OpenAI",
-        metrics=RunMetrics(input_tokens=1_674, cache_read_tokens=1_408, output_tokens=31),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=1_674, cache_read_tokens=1_408, output_tokens=31)),
     )
 
     assert metadata[AI_RUN_METADATA_KEY]["usage"]["uncached_input_tokens"] == 266

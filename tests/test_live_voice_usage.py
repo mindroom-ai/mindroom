@@ -11,6 +11,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
+from mindroom.llm.usage import TokenCounts
 from mindroom.matrix_rtc.call_tools import record_call_token_usage, record_call_voice_usage
 from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage, _RealtimeResponseUsage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -85,19 +86,23 @@ async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) ->
     )
     first = _RealtimeResponseUsage(
         created_at=1_700_000_010,
-        input_tokens=900,
-        output_tokens=300,
-        cache_read_tokens=400,
-        audio_input_tokens=800,
-        audio_output_tokens=250,
+        tokens=TokenCounts(
+            input_tokens=900,
+            output_tokens=300,
+            cache_read_tokens=400,
+            audio_input_tokens=800,
+            audio_output_tokens=250,
+        ),
     )
     second = _RealtimeResponseUsage(
         created_at=1_700_000_040,
-        input_tokens=1100,
-        output_tokens=400,
-        cache_read_tokens=800,
-        audio_input_tokens=1000,
-        audio_output_tokens=350,
+        tokens=TokenCounts(
+            input_tokens=1100,
+            output_tokens=400,
+            cache_read_tokens=800,
+            audio_input_tokens=1000,
+            audio_output_tokens=350,
+        ),
     )
     for responses in ((first,), (first, second)):
         usage = RealtimeCallUsage(

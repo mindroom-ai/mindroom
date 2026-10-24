@@ -15,7 +15,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import RunMetrics
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.private_storage.legacy_private_storage_aliases import historical_private_instance_worker_key
 from mindroom.private_storage.private_instance_identity_store import (
     ensure_private_instance_identity,
@@ -114,11 +114,13 @@ def seed_private_usage(
                     model="test-model",
                     created_at=1_700_000_000 if agent == "code" else 1_700_086_400,
                     metrics=RunMetrics(
-                        input_tokens=run_tokens - 3,
-                        output_tokens=3,
-                        total_tokens=run_tokens,
-                        cache_read_tokens=2,
-                        cache_write_tokens=1,
+                        tokens=TokenCounts(
+                            input_tokens=run_tokens - 3,
+                            output_tokens=3,
+                            total_tokens=run_tokens,
+                            cache_read_tokens=2,
+                            cache_write_tokens=1,
+                        ),
                     ),
                 ),
             ],

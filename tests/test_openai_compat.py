@@ -71,7 +71,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import RunMetrics
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
@@ -1073,11 +1073,13 @@ class TestChatCompletions:
                         model="claude-sonnet-5-5",
                         model_provider="Anthropic",
                         metrics=RunMetrics(
-                            input_tokens=40,
-                            output_tokens=200,
-                            total_tokens=240,
-                            cache_read_tokens=30000,
-                            cache_write_tokens=500,
+                            tokens=TokenCounts(
+                                input_tokens=40,
+                                output_tokens=200,
+                                total_tokens=240,
+                                cache_read_tokens=30000,
+                                cache_write_tokens=500,
+                            ),
                         ),
                     ),
                 )

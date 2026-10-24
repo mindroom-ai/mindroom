@@ -796,7 +796,7 @@ async def test_resume_entry_hooks_run_after_the_decided_results_and_the_loop_con
     assert [tool.tool_call_id for tool in record.tools] == ["c1", "c2"]
     assert [event.tool.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1", "c2"]
     assert record.metrics is not None
-    assert record.metrics.total_tokens == 6
+    assert record.metrics.tokens.total_tokens == 6
 
 
 def switch_thread_model(model_name: str) -> str:

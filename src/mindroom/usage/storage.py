@@ -38,11 +38,6 @@ SYSTEM_USAGE_ENTITY = "system:internal"
 SYSTEM_USAGE_STORAGE_NAME = "system"
 
 
-def has_token_usage(metrics: Mapping[str, object]) -> bool:
-    """Return whether serialized metrics report any provider token counter."""
-    return any(metrics.get(key) for key in TOKEN_FIELDS)
-
-
 def quote_identifier(value: str) -> str:
     """Quote a SQLite identifier supplied by the storage owner."""
     return '"' + value.replace('"', '""') + '"'

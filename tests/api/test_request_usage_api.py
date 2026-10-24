@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.api import config_lifecycle
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import RunMetrics
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.api.test_private_usage_api import _client as _private_client
@@ -176,7 +176,7 @@ def test_helper_usage_exports_once_without_counting_another_reply(
         run_id="ordinary",
         model="test-model",
         model_provider="test-provider",
-        metrics=RunMetrics(input_tokens=10, output_tokens=1, total_tokens=11),
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=10, output_tokens=1, total_tokens=11)),
     )
     assert run.metrics is not None
     storage.save_run(

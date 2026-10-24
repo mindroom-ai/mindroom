@@ -15,7 +15,7 @@ from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
-from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.providers.registry import build_model_provider
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.members import ResolvedExactTeamMembers
@@ -173,9 +173,9 @@ def test_a_team_reply_on_priced_models_publishes_its_cost_at_each_model_s_prices
     leader_model = build_model_provider(config, paths, "leader").identity
     member_model = build_model_provider(config, paths, "member").identity
     leader_metrics, member_metrics = RunMetrics(), RunMetrics()
-    leader_usage = MessageMetrics(input_tokens=1_000, output_tokens=10)
+    leader_usage = MessageMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10))
     leader_metrics.add(leader_usage, model_id=leader_model.id, provider=leader_model.provider_name)
-    member_usage = MessageMetrics(input_tokens=1_000, output_tokens=100)
+    member_usage = MessageMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=100))
     member_metrics.add(member_usage, model_id=member_model.id, provider=member_model.provider_name)
     leader = TeamRunRecord(
         run_id="run-1",

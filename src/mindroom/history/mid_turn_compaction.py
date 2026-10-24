@@ -480,7 +480,7 @@ def _thinking_tokens(messages: Sequence[Message]) -> int:
             continue
         text = estimate_text_tokens((message.reasoning_content or "") + (message.redacted_reasoning_content or ""))
         visible = estimate_request_messages_tokens([message], replay_model=None)
-        total += max(text, message.metrics.output_tokens - visible, 0)
+        total += max(text, message.metrics.tokens.output_tokens - visible, 0)
     return total
 
 

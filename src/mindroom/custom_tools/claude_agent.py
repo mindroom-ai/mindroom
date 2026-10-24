@@ -25,7 +25,7 @@ from claude_agent_sdk import (
 
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import ModelMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
@@ -283,6 +283,15 @@ async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
         logger.warning("Claude session cleanup failed", error=str(error))
 
 
+def _input_counts(usage: dict[str, typing.Any]) -> TokenCounts:
+    """Return the input and cache counters one Claude Code usage report gives."""
+    return TokenCounts(
+        input_tokens=usage.get("input_tokens") or 0,
+        cache_read_tokens=usage.get("cache_read_input_tokens") or 0,
+        cache_write_tokens=usage.get("cache_creation_input_tokens") or 0,
+    )
+
+
 async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> None:
     """Count one Claude Code turn's main-conversation usage toward the conversation and requester that ran it.
 
@@ -297,36 +306,22 @@ async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> No
     finishing_model = responses[-1].model if responses else session_model
     if owner is None or finishing_model is None:
         return
-    models: dict[str, ModelMetrics] = {}
+    models: dict[str, TokenCounts] = {}
     for response in responses:
-        usage = response.usage or {}
-        model = models.setdefault(response.model, ModelMetrics(id=response.model, provider="Anthropic"))
-        model.input_tokens += usage.get("input_tokens") or 0
-        model.cache_read_tokens += usage.get("cache_read_input_tokens") or 0
-        model.cache_write_tokens += usage.get("cache_creation_input_tokens") or 0
+        models[response.model] = models.get(response.model, TokenCounts()) + _input_counts(response.usage or {})
     result_usage = (turn.result.usage if turn.result is not None else None) or {}
     # A crashed turn's result can report zeroes, so the result only ever adds to what its messages reported.
-    unseen_input = (result_usage.get("input_tokens") or 0) - sum(model.input_tokens for model in models.values())
-    unseen_cache_reads = (result_usage.get("cache_read_input_tokens") or 0) - sum(
-        model.cache_read_tokens for model in models.values()
+    unseen = _input_counts(result_usage) - sum(models.values(), TokenCounts())
+    models[finishing_model] = models.get(finishing_model, TokenCounts()) + TokenCounts(
+        input_tokens=max(unseen.input_tokens, 0),
+        output_tokens=result_usage.get("output_tokens") or 0,
+        cache_read_tokens=max(unseen.cache_read_tokens, 0),
+        cache_write_tokens=max(unseen.cache_write_tokens, 0),
     )
-    unseen_cache_writes = (result_usage.get("cache_creation_input_tokens") or 0) - sum(
-        model.cache_write_tokens for model in models.values()
-    )
-    finishing = models.setdefault(finishing_model, ModelMetrics(id=finishing_model, provider="Anthropic"))
-    finishing.input_tokens += max(unseen_input, 0)
-    finishing.cache_read_tokens += max(unseen_cache_reads, 0)
-    finishing.cache_write_tokens += max(unseen_cache_writes, 0)
-    finishing.output_tokens = result_usage.get("output_tokens") or 0
-    metrics = RunMetrics(details={"model": list(models.values())})
-    for model in models.values():
-        model.total_tokens = model.input_tokens + model.output_tokens
-        metrics.input_tokens += model.input_tokens
-        metrics.output_tokens += model.output_tokens
-        metrics.total_tokens += model.total_tokens
-        metrics.cache_read_tokens += model.cache_read_tokens
-        metrics.cache_write_tokens += model.cache_write_tokens
-    if not (metrics.total_tokens or metrics.cache_read_tokens or metrics.cache_write_tokens):
+    metrics = RunMetrics()
+    for model, counts in models.items():
+        metrics.add(MessageMetrics(tokens=counts.with_totals()), model_id=model, provider="Anthropic")
+    if not (metrics.tokens.total_tokens or metrics.tokens.cache_read_tokens or metrics.tokens.cache_write_tokens):
         return
     # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
     requester_context = get_tool_runtime_context() or get_detached_requester_context()

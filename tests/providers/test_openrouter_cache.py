@@ -288,7 +288,10 @@ async def test_cache_reads_and_writes_reach_the_usage(tmp_path: Path) -> None:
     """OpenRouter's cached and cache-write prompt tokens become MindRoom's cache usage."""
     _, completed = await _send(tmp_path, _conversation())
 
-    assert (completed.message.metrics.cache_read_tokens, completed.message.metrics.cache_write_tokens) == (4000, 900)
+    assert (
+        completed.message.metrics.tokens.cache_read_tokens,
+        completed.message.metrics.tokens.cache_write_tokens,
+    ) == (4000, 900)
 
 
 @pytest.mark.asyncio

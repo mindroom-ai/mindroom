@@ -316,7 +316,7 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
     }
-    assert turn.usage.input_tokens == 40
+    assert turn.usage.tokens.input_tokens == 40
 
 
 @pytest.mark.asyncio

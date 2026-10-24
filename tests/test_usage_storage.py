@@ -13,7 +13,7 @@ import pytest
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.store import ConversationStore
@@ -57,21 +57,25 @@ def _run(tokens: int = 10, *, run_id: str = "run-1", parent_run_id: str | None =
         messages=[Message(role="user", content="private request content")],
         metadata={"requester_id": "@alice:example.test", "extra": "private metadata content"},
         metrics=RunMetrics(
-            input_tokens=tokens - 3,
-            output_tokens=3,
-            total_tokens=tokens,
-            cache_read_tokens=2,
-            cache_write_tokens=4,
+            tokens=TokenCounts(
+                input_tokens=tokens - 3,
+                output_tokens=3,
+                total_tokens=tokens,
+                cache_read_tokens=2,
+                cache_write_tokens=4,
+            ),
             details={
                 "model": [
                     ModelMetrics(
+                        tokens=TokenCounts(
+                            input_tokens=tokens - 3,
+                            output_tokens=3,
+                            total_tokens=tokens,
+                            cache_read_tokens=2,
+                            cache_write_tokens=4,
+                        ),
                         id="test-model",
                         provider="test-provider",
-                        input_tokens=tokens - 3,
-                        output_tokens=3,
-                        total_tokens=tokens,
-                        cache_read_tokens=2,
-                        cache_write_tokens=4,
                     ),
                 ],
             },
@@ -126,8 +130,8 @@ def test_concurrent_saves_keep_run_and_usage_snapshots_consistent(usage_db: Conv
             future.result()
     session = usage_db.load_session("session", "agent")
     assert session is not None
-    assert session.runs[0].metrics.total_tokens in (20, 30)
-    assert _rows(usage_db)[0][1]["metrics"]["total_tokens"] == session.runs[0].metrics.total_tokens
+    assert session.runs[0].metrics.tokens.total_tokens in (20, 30)
+    assert _rows(usage_db)[0][1]["metrics"]["total_tokens"] == session.runs[0].metrics.tokens.total_tokens
 
 
 def test_repeated_saves_replace_the_usage_snapshot(usage_db: ConversationStore) -> None:
@@ -185,7 +189,7 @@ def test_usage_write_failure_rolls_back_the_run(usage_db: ConversationStore) -> 
 
     session = usage_db.load_session("session", "agent")
     assert session is not None
-    assert session.runs[0].metrics.total_tokens == 10
+    assert session.runs[0].metrics.tokens.total_tokens == 10
     assert _rows(usage_db)[0][1]["metrics"]["total_tokens"] == 10
 
 
@@ -238,12 +242,12 @@ def test_a_request_names_the_model_that_answered_it_and_a_retried_request_s_sum_
     answered = {"mindroom_model": {"id": "reply-model", "provider": "test-provider"}}
     single = Message(
         role="assistant",
-        metrics=MessageMetrics(input_tokens=100, output_tokens=1),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=1)),
         provider_data=answered,
     )
     retried = Message(
         role="assistant",
-        metrics=MessageMetrics(input_tokens=300, output_tokens=3),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=300, output_tokens=3)),
         provider_data={**answered, "mindroom_aggregate_usage": True},
     )
 
@@ -266,7 +270,7 @@ def test_a_request_whose_recorded_model_has_another_shape_has_invalid_attributio
     """A recorded model that is not the shape the loop writes marks both of the request's model fields invalid."""
     message = Message(
         role="assistant",
-        metrics=MessageMetrics(input_tokens=100, output_tokens=1),
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=1)),
         provider_data={"mindroom_model": recorded},
     )
 
@@ -277,8 +281,16 @@ def test_a_request_whose_recorded_model_has_another_shape_has_invalid_attributio
 
 def test_carried_request_usage_is_not_counted_again_while_its_message_is_saved() -> None:
     """A failed reply can keep the messages a compaction folded; their carried usage must not count twice."""
-    folded = Message(role="assistant", content="step", metrics=MessageMetrics(input_tokens=100, output_tokens=1))
-    later = Message(role="assistant", content="done", metrics=MessageMetrics(input_tokens=50, output_tokens=1))
+    folded = Message(
+        role="assistant",
+        content="step",
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=1)),
+    )
+    later = Message(
+        role="assistant",
+        content="done",
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=50, output_tokens=1)),
+    )
     carried = [{**request, "message_id": folded.id} for request in project_requests([folded.to_dict()]) or []]
     run = RunRecord(
         run_id="run",
