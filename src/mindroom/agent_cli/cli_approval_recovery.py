@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.agent_cli.delegation import advance_cli_delegation
-from mindroom.agent_cli.events import project_cli_execution, stream_cli_events
+from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.minimal_agent import bind_minimal_owner, minimal_context_documents, prepare_minimal_catalog
 from mindroom.agent_cli.projection import register_cli_media
@@ -21,7 +21,7 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
 )
 from mindroom.hooks import EnrichmentItem
-from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import (
     CompletedApprovalRun,
@@ -108,6 +108,8 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         denial_reasons=denial_reasons,
     )
     key = ToolKey(payload.toolkit, payload.function)
+    # Where the resumed call ran, which its own events in the reply's tool trace keep.
+    call_origin = ToolCallOrigin(payload.parent_bash_call_id, key.toolkit)
     call_id = payload.call_id
     arguments = deepcopy(payload.arguments)
     requirement = next((item for item in requirements if item.tool_execution.tool_call_id == call_id), None)
@@ -183,15 +185,11 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
             child_id = str(event.tool.tool_call_id)
             if child_id not in child_toolkits:
                 return
-            execution = project_cli_execution(
-                event.tool,
-                parent=payload.parent_bash_call_id,
-                toolkit_name=child_toolkits[child_id],
-            )
+            origin = ToolCallOrigin(payload.parent_bash_call_id, child_toolkits[child_id])
             if isinstance(event, ToolCompleted):
-                presentation.complete_tool(execution)
+                presentation.complete_tool(event.tool, origin=origin)
             elif not any(entry.tool_call_id == child_id for entry in presentation.tool_trace):
-                presentation.start_tool(execution)
+                presentation.start_tool(event.tool, origin=origin)
 
     result = "Bash was interrupted and its saved command was not resumed."
     controls: list[ToolExecution] = []
@@ -214,28 +212,17 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
             if isinstance(outcome, PausedAttempt):
                 for tool in outcome.tools:
                     if not any(entry.tool_call_id == tool.tool_call_id for entry in presentation.tool_trace):
-                        presentation.start_tool(
-                            project_cli_execution(
-                                tool,
-                                parent=payload.parent_bash_call_id,
-                                toolkit_name=outcome.toolkit_owners.get(
-                                    (outcome.approval_agent_name or continuation.entity_name, str(tool.tool_name)),
-                                ),
-                            ),
+                        toolkit_name = outcome.toolkit_owners.get(
+                            (outcome.approval_agent_name or continuation.entity_name, str(tool.tool_name)),
                         )
+                        presentation.start_tool(tool, origin=ToolCallOrigin(payload.parent_bash_call_id, toolkit_name))
                 return replace(
                     outcome,
                     response_text=presentation.final_text(),
                     tool_trace=tuple(presentation.tool_trace),
                     continuation_count=continuation.continuation_count,
                 )
-            presentation.complete_tool(
-                project_cli_execution(
-                    outcome,
-                    parent=payload.parent_bash_call_id,
-                    toolkit_name=key.toolkit,
-                ),
-            )
+            presentation.complete_tool(outcome, origin=call_origin)
             result = str(outcome.result or "")
         elif not decisions[call_id] or call_id == payload.parent_bash_call_id:
             assert requirement is not None
@@ -248,9 +235,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                 is_error=True,
                 requires_confirmation=False,
             )
-            presentation.complete_tool(
-                project_cli_execution(denied, parent=payload.parent_bash_call_id, toolkit_name=key.toolkit),
-            )
+            presentation.complete_tool(denied, origin=call_origin)
         else:
             binding = await (await prepare()).bind(key)
             if recovery_owner is not None:
@@ -278,9 +263,9 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                         # nested calls keep their own provenance.
                         if event.tool.tool_call_id != call_id:
                             if isinstance(event, ToolStarted):
-                                presentation.start_tool(event.tool)
+                                presentation.start_tool(event.tool, origin=event.origin)
                             else:
-                                presentation.complete_tool(event.tool)
+                                presentation.complete_tool(event.tool, origin=event.origin)
                             await presentation.publish(progress)
                         continue
                     if not isinstance(event, AgentToolCallEvent):
@@ -294,15 +279,10 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                             call_id=call_id,
                         )
                     if event.execution is not None:
-                        execution = project_cli_execution(
-                            event.execution,
-                            parent=payload.parent_bash_call_id,
-                            toolkit_name=key.toolkit,
-                        )
                         if event.kind == "started":
-                            presentation.start_tool(execution)
+                            presentation.start_tool(event.execution, origin=call_origin)
                         elif event.kind in {"completed", "failed", "continuation_required"}:
-                            presentation.complete_tool(execution)
+                            presentation.complete_tool(event.execution, origin=call_origin)
                             result = str(event.execution.result or "")
                         if event.kind == "continuation_required":
                             controls.append(event.execution)

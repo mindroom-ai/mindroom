@@ -24,7 +24,7 @@ from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.checkpoint import BatchCheckpoint
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
-from mindroom.agent_cli.events import emit_cli_suspension, project_cli_execution
+from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
@@ -40,6 +40,7 @@ from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_argu
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
+from mindroom.llm.events import ToolCallOrigin
 from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
@@ -438,7 +439,8 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
 
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
     presentation.start_tool(
-        project_cli_execution(requirement.tool_execution, parent="bash-parent", toolkit_name="actions"),
+        requirement.tool_execution,
+        origin=ToolCallOrigin("bash-parent", "actions"),
     )
     published = []
 
@@ -627,7 +629,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
         RunRecord(run_id="run", session_id="session", agent_id="helper", status=RunStatus.cancelled),
     )
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
-    presentation.start_tool(project_cli_execution(requirement.tool_execution, parent="bash", toolkit_name="shell"))
+    presentation.start_tool(requirement.tool_execution, origin=ToolCallOrigin("bash", "shell"))
     continuation = approval_continuation(
         run_id="run",
         session_id="session",
@@ -713,10 +715,10 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
     )
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
     for execution, parent in ((folded, None), (nested, "folded-bash")):
-        projected = project_cli_execution(execution, parent=parent, toolkit_name="shell")
-        presentation.start_tool(projected)
-        presentation.complete_tool(projected)
-    presentation.start_tool(project_cli_execution(requirement.tool_execution, parent="bash", toolkit_name="shell"))
+        origin = ToolCallOrigin(parent, "shell")
+        presentation.start_tool(execution, origin=origin)
+        presentation.complete_tool(execution, origin=origin)
+    presentation.start_tool(requirement.tool_execution, origin=ToolCallOrigin("bash", "shell"))
     continuation = approval_continuation(
         run_id="run",
         session_id="session",
@@ -924,7 +926,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     tool = ToolExecution(tool_call_id="hidden", tool_name=name, tool_args=arguments, requires_confirmation=True)
     requirement = RunRequirement(tool)
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
-    presentation.start_tool(project_cli_execution(tool, parent="old-bash", toolkit_name=namespace))
+    presentation.start_tool(tool, origin=ToolCallOrigin("old-bash", namespace))
     store = create_session_storage(
         "helper",
         runtime.config,

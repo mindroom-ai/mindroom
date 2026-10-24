@@ -35,11 +35,7 @@ from mindroom.delegation.lifecycle import (
 )
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
-from mindroom.history.interrupted_replay import (
-    persist_interrupted_replay,
-    split_interrupted_tool_trace,
-    tool_execution_call_id,
-)
+from mindroom.history.interrupted_replay import persist_interrupted_replay, split_interrupted_tool_trace
 from mindroom.history.mid_turn_compaction import without_fold_records
 from mindroom.history.native import with_native_history
 from mindroom.history.replay import compaction_marker
@@ -99,11 +95,11 @@ from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import (
-    AuditedToolExecution,
     CollectedStreamPresentation,
     StreamingToolTracker,
     complete_pending_tool_block,
     format_tool_combined,
+    tool_execution_call_id,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -467,9 +463,9 @@ async def collect_streamed_response_content(
                     if chunk.record.content is not None:
                         presentation.canonical_final_body_candidate = chunk.record.content
                 elif isinstance(chunk, ToolStarted):
-                    presentation.start_tool(chunk.tool)
+                    presentation.start_tool(chunk.tool, origin=chunk.origin)
                 elif isinstance(chunk, ToolCompleted):
-                    presentation.complete_tool(chunk.tool)
+                    presentation.complete_tool(chunk.tool, origin=chunk.origin)
                 if on_update is not None:
                     await on_update()
     except ResponsePausedForApproval as error:
@@ -660,15 +656,10 @@ def _attempt_run_metadata(
     )
 
 
-def _track_stream_tool_started(
-    state: _StreamingAttemptState,
-    tool: ToolExecution,
-    *,
-    show_tool_calls: bool,
-) -> bool:
+def _track_stream_tool_started(state: _StreamingAttemptState, event: ToolStarted, *, show_tool_calls: bool) -> bool:
     """Track started tool-call metadata for streaming output."""
     display_tool_index = state.tool_count + 1 if show_tool_calls else None
-    tool_msg, trace_entry = state.tool_tracker.start(tool, tool_index=display_tool_index)
+    tool_msg, trace_entry = state.tool_tracker.start(event.tool, tool_index=display_tool_index, origin=event.origin)
     if trace_entry is None:
         return False
     state.observed_tool_calls += 1
@@ -688,25 +679,21 @@ def _materialize_paused_agent_tool_events(
     show_tool_calls: bool,
 ) -> tuple[ToolStarted, ...]:
     """Return the tool-start events of paused calls the stream has not announced yet."""
-    return tuple(
-        ToolStarted(tool) for tool in tools if _track_stream_tool_started(state, tool, show_tool_calls=show_tool_calls)
-    )
+    events = (ToolStarted(tool) for tool in tools)
+    return tuple(event for event in events if _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls))
 
 
 def _track_stream_tool_completed(
     state: _StreamingAttemptState,
-    tool: ToolExecution,
+    event: ToolCompleted,
     *,
     show_tool_calls: bool,
     agent_name: str,
 ) -> None:
-    """Track completed tool-call metadata for streaming output."""
-    if not isinstance(tool, AuditedToolExecution):
-        state.completed_tool_executions.append(tool)
-    completion = state.tool_tracker.complete(tool)
-    if completion is None:
-        return
-    tool_name, result, pending_tool, _ = completion
+    """Track completed tool-call metadata for streaming output; a hidden CLI call is not one of the run's own."""
+    if event.origin is None:
+        state.completed_tool_executions.append(event.tool)
+    tool_name, result, pending_tool, _ = state.tool_tracker.complete(event.tool, origin=event.origin)
     if not show_tool_calls:
         return
 
@@ -1829,7 +1816,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     tool_call_id=tool_execution_call_id(event.tool),
                     show_tool_calls=show_tool_calls,
                 )
-                _track_stream_tool_started(state, event.tool, show_tool_calls=show_tool_calls)
+                _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls)
                 if state_updated is not None:
                     state_updated()
                 yield event
@@ -1844,7 +1831,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     tool_call_id=tool_execution_call_id(event.tool),
                     show_tool_calls=show_tool_calls,
                 )
-                _track_stream_tool_completed(state, event.tool, show_tool_calls=show_tool_calls, agent_name=agent_name)
+                _track_stream_tool_completed(state, event, show_tool_calls=show_tool_calls, agent_name=agent_name)
                 if state_updated is not None:
                     state_updated()
                 yield event

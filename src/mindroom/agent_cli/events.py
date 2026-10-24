@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
-from mindroom.llm.events import ToolCompleted, ToolStarted
-from mindroom.llm.runs import ToolExecution
+from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
-from mindroom.tool_system.events import AuditedToolExecution
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -20,7 +18,6 @@ __all__ = [
     "emit_cli_run_event",
     "emit_cli_suspension",
     "emit_cli_tool_event",
-    "project_cli_execution",
     "stream_cli_events",
 ]
 
@@ -63,21 +60,7 @@ def emit_cli_run_event(
     sink = _SINK.get()
     if sink is None:
         return
-    sink(replace(event, tool=project_cli_execution(event.tool, parent=parent, toolkit_name=toolkit_name)))
-
-
-def project_cli_execution(
-    tool: ToolExecution,
-    *,
-    parent: str | None,
-    toolkit_name: str | None,
-) -> AuditedToolExecution:
-    """Copy a native execution for live or paused presentation without changing its owner."""
-    return AuditedToolExecution(
-        **{item.name: getattr(tool, item.name) for item in fields(ToolExecution)},
-        parent_bash_call_id=parent,
-        toolkit_name=toolkit_name,
-    )
+    sink(replace(event, origin=ToolCallOrigin(parent, toolkit_name)))
 
 
 async def stream_cli_events[EventT](

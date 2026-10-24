@@ -19,7 +19,7 @@ from mindroom import agents
 from mindroom.agent_cli import cli_approval_recovery
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls_for_cli_pause
-from mindroom.agent_cli.events import project_cli_execution, stream_cli_events
+from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
@@ -32,6 +32,7 @@ from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.delegation.state import DelegationState
 from mindroom.interactive import parse_and_format_interactive
+from mindroom.llm.events import ToolCallOrigin
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
@@ -510,10 +511,11 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
 
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
             presentation.start_tool(
-                project_cli_execution(requirement.tool_execution, parent="bash-parent", toolkit_name="delegate"),
+                requirement.tool_execution,
+                origin=ToolCallOrigin("bash-parent", "delegate"),
             )
             for tool in paused.tools:
-                presentation.start_tool(project_cli_execution(tool, parent="bash-parent", toolkit_name="report"))
+                presentation.start_tool(tool, origin=ToolCallOrigin("bash-parent", "report"))
             continuation = approval_continuation(
                 continuation_count=2,
                 run_id="run",

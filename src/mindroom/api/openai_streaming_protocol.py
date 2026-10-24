@@ -258,8 +258,6 @@ def format_stream_tool_event(event: ToolStarted | ToolCompleted, tool_state: Too
         if started:
             ids[tool_call_id] = tool_id
     _, trace = format_tool_started_event(event.tool) if started else format_tool_completed_event(event.tool)
-    # A present tool always formats to a trace.
-    assert trace is not None
     message = f"{escape(trace.tool_name, quote=True)}({escape(trace.args_preview or '', quote=True)})"
     if not started:
         message += f"\n{escape(trace.result_preview or '', quote=True)}"

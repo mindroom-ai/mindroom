@@ -13,17 +13,27 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolCallOrigin:
+    """Where a hidden CLI call ran: the Bash call that ran it and its toolkit. Only the reply's tool trace keeps it."""
+
+    parent_bash_call_id: str | None
+    toolkit_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ToolStarted:
-    """A tool call was admitted; paused calls are announced too."""
+    """A tool call was admitted; paused calls are announced too. ``origin`` is set for a hidden CLI call."""
 
     tool: ToolExecution
+    origin: ToolCallOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ToolCompleted:
-    """A tool call finished."""
+    """A tool call finished. ``origin`` is set for a hidden CLI call."""
 
     tool: ToolExecution
+    origin: ToolCallOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +60,7 @@ __all__ = [
     "RunEvent",
     "RunFinished",
     "TextDelta",
+    "ToolCallOrigin",
     "ToolCompleted",
     "ToolStarted",
 ]

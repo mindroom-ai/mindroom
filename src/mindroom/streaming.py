@@ -1750,29 +1750,21 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
         elif isinstance(chunk, ToolStarted):
             if not streaming.show_tool_calls:
                 await _flush_phase_boundary_if_needed(streaming, delivery_queue)
-                if chunk.tool is not None:
-                    cleared_terminal_failures = any(
-                        warmup.last_event.phase == "failed"
-                        for warmup in streaming._warmup_state.active_warmups.values()
-                    )
-                    streaming._warmup_state.clear_terminal_failures()
-                    streaming._ensure_hidden_tool_gap()
-                    _queue_delivery_request(
-                        delivery_queue,
-                        force_refresh=cleared_terminal_failures,
-                        progress_hint=not cleared_terminal_failures,
-                        allow_empty_progress=cleared_terminal_failures and not streaming.accumulated_text.strip(),
-                    )
-                    continue
-                _queue_delivery_request(delivery_queue, progress_hint=True)
-                continue
-
-            if chunk.tool is None:
-                await _flush_phase_boundary_if_needed(streaming, delivery_queue)
+                cleared_terminal_failures = any(
+                    warmup.last_event.phase == "failed" for warmup in streaming._warmup_state.active_warmups.values()
+                )
+                streaming._warmup_state.clear_terminal_failures()
+                streaming._ensure_hidden_tool_gap()
+                _queue_delivery_request(
+                    delivery_queue,
+                    force_refresh=cleared_terminal_failures,
+                    progress_hint=not cleared_terminal_failures,
+                    allow_empty_progress=cleared_terminal_failures and not streaming.accumulated_text.strip(),
+                )
                 continue
 
             tool_index = len(streaming.tool_trace) + 1
-            text_chunk, trace_entry = tool_tracker.start(chunk.tool, tool_index=tool_index)
+            text_chunk, trace_entry = tool_tracker.start(chunk.tool, tool_index=tool_index, origin=chunk.origin)
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
             await _apply_visible_text_chunk(
@@ -1787,45 +1779,38 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             )
             continue
         elif isinstance(chunk, ToolCompleted):
-            completion = tool_tracker.complete(chunk.tool)
-            if completion is not None:
-                tool_name, result, pending_tool, completed_trace = completion
-                if streaming.show_tool_calls:
-                    if pending_tool is None or pending_tool.visible_tool_index is None:
-                        logger.warning(
-                            "Missing pending tool start in streaming response; skipping completion marker",
-                            tool_name=tool_name,
-                        )
-                        _queue_delivery_request(delivery_queue, progress_hint=True)
-                        continue
-                    tool_index = pending_tool.visible_tool_index
-                    prior_delta_at = streaming.last_delta_at
-                    previous_text = streaming.accumulated_text
-                    streaming.accumulated_text, _ = complete_pending_tool_block(
-                        streaming.accumulated_text,
-                        tool_name,
-                        result,
-                        tool_index=tool_index,
-                    )
-                    text_changed = streaming.accumulated_text != previous_text
-                    if text_changed:
-                        streaming._mark_nonadditive_text_mutation()
-                    if not tool_tracker.update_visible_trace_entry(streaming.tool_trace, pending_tool, completed_trace):
-                        logger.warning(
-                            "Missing tool trace slot in streaming response for completion",
-                            tool_name=tool_name,
-                            tool_index=tool_index,
-                            trace_len=len(streaming.tool_trace),
-                        )
-                else:
-                    _queue_delivery_request(delivery_queue, progress_hint=True)
-                    continue
-                _queue_delivery_request(
-                    delivery_queue,
-                    prior_delta_at=prior_delta_at if text_changed else None,
-                )
+            tool_name, result, pending_tool, completed_trace = tool_tracker.complete(chunk.tool, origin=chunk.origin)
+            if not streaming.show_tool_calls:
+                _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue
-            text_chunk = ""
+            if pending_tool is None or pending_tool.visible_tool_index is None:
+                logger.warning(
+                    "Missing pending tool start in streaming response; skipping completion marker",
+                    tool_name=tool_name,
+                )
+                _queue_delivery_request(delivery_queue, progress_hint=True)
+                continue
+            tool_index = pending_tool.visible_tool_index
+            prior_delta_at = streaming.last_delta_at
+            previous_text = streaming.accumulated_text
+            streaming.accumulated_text, _ = complete_pending_tool_block(
+                streaming.accumulated_text,
+                tool_name,
+                result,
+                tool_index=tool_index,
+            )
+            text_changed = streaming.accumulated_text != previous_text
+            if text_changed:
+                streaming._mark_nonadditive_text_mutation()
+            if not tool_tracker.update_visible_trace_entry(streaming.tool_trace, pending_tool, completed_trace):
+                logger.warning(
+                    "Missing tool trace slot in streaming response for completion",
+                    tool_name=tool_name,
+                    tool_index=tool_index,
+                    trace_len=len(streaming.tool_trace),
+                )
+            _queue_delivery_request(delivery_queue, prior_delta_at=prior_delta_at if text_changed else None)
+            continue
         else:
             logger.debug("unhandled_streaming_event_type", event_type=type(chunk).__name__)
             continue

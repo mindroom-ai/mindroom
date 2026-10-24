@@ -266,7 +266,6 @@ expose = [
 path = "mindroom.agent_cli.events"
 depends_on = [
     "mindroom.tool_system.context_bound_streams",
-    "mindroom.tool_system.events",
     "mindroom.llm",
 ]
 visibility = [
@@ -282,7 +281,6 @@ expose = [
     "emit_cli_run_event",
     "emit_cli_suspension",
     "emit_cli_tool_event",
-    "project_cli_execution",
     "stream_cli_events",
 ]
 
@@ -7168,7 +7166,6 @@ expose = [
     "persist_interrupted_replay_snapshot",
     "render_stopped_attempt",
     "split_interrupted_tool_trace",
-    "tool_execution_call_id",
 ]
 from = ["mindroom.history.interrupted_replay"]
 
@@ -7178,7 +7175,6 @@ from = ["mindroom.history.turn_recorder"]
 
 [[interfaces]]
 expose = [
-    "AuditedToolExecution",
     "CollectedStreamPresentation",
     "StreamingToolTracker",
     "StructuredStreamChunk",
@@ -7189,7 +7185,6 @@ expose = [
     "build_tool_trace_content",
     "complete_pending_tool_block",
     "deserialize_tool_trace",
-    "extract_tool_completed_info",
     "format_tool_combined",
     "format_tool_completed_event",
     "format_tool_started_event",
@@ -7202,6 +7197,7 @@ expose = [
     "serialize_tool_trace",
     "strip_visible_tool_markers",
     "tool_marker_text",
+    "tool_execution_call_id",
     "tool_markers_match_trace",
 ]
 from = ["mindroom.tool_system.events"]

@@ -16,7 +16,6 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     deserialize_tool_trace,
     ensure_visible_tool_marker_spacing,
-    extract_tool_completed_info,
     format_tool_combined,
     format_tool_completed_event,
     serialize_tool_trace,
@@ -604,28 +603,6 @@ def test_complete_pending_tool_block_roundtrip_with_multiline_args() -> None:
     assert "⏳" not in updated
     assert updated.count("🔧") == 1
     assert trace.result_preview == "saved"
-
-
-def test_extract_tool_completed_info_without_tool_returns_none() -> None:
-    """None tool should return None."""
-    assert extract_tool_completed_info(None) is None
-
-
-def test_extract_tool_completed_info_uses_tool_result() -> None:
-    """Should return tool.result (actual output)."""
-    tool = ToolExecution(tool_name="check", result="actual output")
-    info = extract_tool_completed_info(tool)
-    assert info is not None
-    tool_name, result = info
-    assert tool_name == "check"
-    assert result == "actual output"
-
-
-def test_format_tool_completed_event_without_tool_returns_empty() -> None:
-    """None tool should return empty text and no trace."""
-    text, trace = format_tool_completed_event(None)
-    assert text == ""
-    assert trace is None
 
 
 def test_format_tool_completed_event_formats_combined_block() -> None:

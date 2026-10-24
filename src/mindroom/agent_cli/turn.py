@@ -15,7 +15,7 @@ from uuid import uuid4
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.checkpoint import BatchCheckpoint
 from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls_for_cli_pause
-from mindroom.agent_cli.events import emit_cli_run_event, emit_cli_tool_event, project_cli_execution
+from mindroom.agent_cli.events import emit_cli_run_event, emit_cli_tool_event
 from mindroom.agent_cli.json_io import canonical_json, read_json
 from mindroom.agent_cli.projection import project_cli_result, register_cli_media, schema_context_document
 from mindroom.agent_cli.protocol import (
@@ -37,7 +37,7 @@ from mindroom.agent_cli.session import (
 from mindroom.agent_cli.shell_contract import bound_agent_cli_shell_env
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel, task_is_process_shutdown
-from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_agent_shell_call, execute_agent_tool_call
@@ -561,9 +561,7 @@ class LiveTurnTools(TurnToolBridge):
             # Native iterator has closed; no catalog mutation lock spans human time.
             await self.checkpoint.persist_approval(parent)
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
-            presentation.start_tool(
-                project_cli_execution(waiting.tool_execution, parent=parent, toolkit_name=binding.key.toolkit),
-            )
+            presentation.start_tool(waiting.tool_execution, origin=ToolCallOrigin(parent, binding.key.toolkit))
             resolved = await handler(
                 PausedAttempt(
                     session_id=self.catalog.run.session_id,
@@ -645,7 +643,7 @@ class LiveTurnTools(TurnToolBridge):
                 )
                 child_toolkits[str(tool.tool_call_id)] = child_toolkit
                 emit_cli_run_event(ToolStarted(tool), parent=parent, toolkit_name=child_toolkit)
-                presentation.start_tool(project_cli_execution(tool, parent=parent, toolkit_name=child_toolkit))
+                presentation.start_tool(tool, origin=ToolCallOrigin(parent, child_toolkit))
             paused = replace(result, response_text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace))
             resolved = await handler(paused)
             approval_calls = approval_calls_for_cli_pause(paused, self.catalog.runtime_context.agent_name)

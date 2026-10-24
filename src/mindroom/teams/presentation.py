@@ -318,7 +318,7 @@ class TeamStreamPresentation:
             self.consensus = remap_visible_tool_marker_indices(self.consensus, index_map)
         self.tool_tracker.sync_visible_indices(self.tool_trace)
 
-    def start_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
+    def start_tool(self, scope_key: str, tool: ToolExecution) -> None:
         """Record a tool start in its exact member or coordinator slot."""
         tool_index = len(self.tool_trace) + 1
         marker, trace_entry = self.tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
@@ -332,13 +332,10 @@ class TeamStreamPresentation:
             self.separate_next_scopes.add(scope_key)
         self._align_tool_trace_with_document()
 
-    def complete_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
+    def complete_tool(self, scope_key: str, tool: ToolExecution) -> None:
         """Complete only the pending slot identified by this tool event."""
-        completion = self.tool_tracker.complete(tool, scope_key=scope_key)
-        if completion is None:
-            return
-        tool_name, result, pending_tool, completed_trace = completion
-        if pending_tool is None or pending_tool.visible_tool_index is None or completed_trace is None:
+        tool_name, result, pending_tool, completed_trace = self.tool_tracker.complete(tool, scope_key=scope_key)
+        if pending_tool is None or pending_tool.visible_tool_index is None:
             return
         completed_trace.scope_key = scope_key
         if self.show_tool_calls:
@@ -351,11 +348,11 @@ class TeamStreamPresentation:
             self._set_slot_text(scope_key, updated_text)
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
 
-    def start_member_tool(self, member_id: str, tool: ToolExecution | None) -> None:
+    def start_member_tool(self, member_id: str, tool: ToolExecution) -> None:
         """Record a tool start in the slot of ``member_id``, which ``resolve_member_id`` returned."""
         self.start_tool(f"agent:{member_id}", tool)
 
-    def complete_member_tool(self, member_id: str, tool: ToolExecution | None) -> None:
+    def complete_member_tool(self, member_id: str, tool: ToolExecution) -> None:
         """Record a tool completion in the slot of ``member_id``, which ``resolve_member_id`` returned."""
         self.complete_tool(f"agent:{member_id}", tool)
 
