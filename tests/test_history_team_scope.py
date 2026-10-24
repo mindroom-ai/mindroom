@@ -22,7 +22,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.session_context import (
     ScopeSessionContext,
-    open_bound_scope_session_context,
+    load_bound_scope_session,
     resolve_bound_team_scope,
 )
 from mindroom.history.types import (
@@ -124,6 +124,13 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
     estimator = build_static_token_estimator(built.spec.system_message, leader_tool_specs(built.spec), frozenset())
     expected_static_prompt_tokens = _expected_static_tokens(built, "Current prompt")
 
+    scope_context = load_bound_scope_session(
+        member_names=["zeta", "alpha"],
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
     with (
         patch(
             "mindroom.history.runtime.prepare_scope_history",
@@ -133,13 +140,6 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
             "tests.test_history_team_scope.finalize_history_preparation",
             return_value=PreparedHistoryState(replays_persisted_history=True),
         ) as mock_finalize,
-        open_bound_scope_session_context(
-            member_names=["zeta", "alpha"],
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        ) as scope_context,
     ):
         prepared_scope_history = await prepare_bound_scope_history(
             member_names=["zeta", "alpha"],
@@ -186,27 +186,27 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
 
     monkeypatch.setattr(execution_preparation, "build_static_token_estimator", capture_estimator)
 
-    with open_bound_scope_session_context(
+    scope_context = load_bound_scope_session(
         member_names=["zeta", "alpha"],
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
         team_name="pair",
-    ) as scope_context:
-        await prepare_materialized_team_execution(
-            make_turn_context("pair", session_id="session-1"),
-            scope_context=scope_context,
-            spec=built.spec,
-            message="Current prompt",
-            thread_history=None,
-            config=config,
-            runtime_paths=runtime_paths,
-            runtime_model=config.resolve_runtime_model(entity_name="pair", active_model_name="default"),
-            response_sender_id=None,
-            current_sender_id=None,
-            configured_team_name="pair",
-        )
+    )
+    await prepare_materialized_team_execution(
+        make_turn_context("pair", session_id="session-1"),
+        scope_context=scope_context,
+        spec=built.spec,
+        message="Current prompt",
+        thread_history=None,
+        config=config,
+        runtime_paths=runtime_paths,
+        runtime_model=config.resolve_runtime_model(entity_name="pair", active_model_name="default"),
+        response_sender_id=None,
+        current_sender_id=None,
+        configured_team_name="pair",
+    )
     events = run_team(
         built.spec,
         [Message(role="user", content="Current prompt")],
@@ -229,22 +229,22 @@ def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
 ) -> None:
     config, runtime_paths = _pair_config(tmp_path, teams={"pair": _PAIR})
 
-    with open_bound_scope_session_context(
+    scope_context = load_bound_scope_session(
         member_names=["zeta", "alpha"],
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
         team_name="pair",
-    ) as scope_context:
-        assert scope_context is not None
-        configured = _build_pair(
-            config,
-            runtime_paths,
-            monkeypatch,
-            configured_team_name="pair",
-            scope_context=scope_context,
-        )
+    )
+    assert scope_context is not None
+    configured = _build_pair(
+        config,
+        runtime_paths,
+        monkeypatch,
+        configured_team_name="pair",
+        scope_context=scope_context,
+    )
     ad_hoc = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
 
     assert (configured.spec.id, configured.spec.tool_call_limit) == ("pair", 3)
@@ -288,27 +288,25 @@ def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path
             session_id="session-1",
         )
 
-    with (
-        open_bound_scope_session_context(
-            member_names=member_names,
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=identity_for("@alice:localhost"),
-        ) as alice_scope,
-        open_bound_scope_session_context(
-            member_names=member_names,
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=identity_for("@bob:localhost"),
-        ) as bob_scope,
-    ):
-        assert alice_scope is not None
-        assert bob_scope is not None
-        assert alice_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
-        assert bob_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
-        assert alice_scope.scope != bob_scope.scope
+    alice_scope = load_bound_scope_session(
+        member_names=member_names,
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=identity_for("@alice:localhost"),
+    )
+    bob_scope = load_bound_scope_session(
+        member_names=member_names,
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=identity_for("@bob:localhost"),
+    )
+    assert alice_scope is not None
+    assert bob_scope is not None
+    assert alice_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
+    assert bob_scope.scope.scope_id.startswith("team_private_worker+shared_requester_")
+    assert alice_scope.scope != bob_scope.scope
 
 
 def test_private_ad_hoc_bound_team_scope_requires_requester_identity(tmp_path: Path) -> None:

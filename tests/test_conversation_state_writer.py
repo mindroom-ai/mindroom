@@ -13,7 +13,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.history.session_context import create_scope_session_storage, open_bound_scope_session_context
+from mindroom.history.session_context import create_scope_session_storage, load_bound_scope_session
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
@@ -168,13 +168,13 @@ def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: 
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
-    with open_bound_scope_session_context(
+    bound_scope_context = load_bound_scope_session(
         member_names=["private_worker", "shared"],
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
-    ) as bound_scope_context:
-        assert bound_scope_context is not None
-        assert bound_scope_context.scope == writer_scope
-        assert bound_scope_context.storage.path == writer_storage.path
+    )
+    assert bound_scope_context is not None
+    assert bound_scope_context.scope == writer_scope
+    assert bound_scope_context.storage.path == writer_storage.path

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, Never
 
 import pytest
@@ -178,7 +177,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
                     _blocking_adapter(
                         _AdapterLog(),
                         interrupted_attempt,
-                        open_scope=lambda: nullcontext(crash_scope),
+                        load_scope=lambda: crash_scope,
                     ),
                     TurnSinks(),
                     continuation=_continuation("Retrieve retained work"),

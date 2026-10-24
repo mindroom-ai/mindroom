@@ -28,7 +28,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.session_context import (
     ScopeSessionContext,
-    open_resolved_scope_session_context,
+    load_scope_session,
 )
 from mindroom.history.storage import (
     _with_scope_state,
@@ -89,7 +89,7 @@ def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> 
 async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     team_scope = HistoryScope(kind="team", scope_id="team-123")
-    with open_resolved_scope_session_context(
+    scope_context = load_scope_session(
         scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
@@ -97,16 +97,16 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
         config=config,
         execution_identity=None,
         create_session_if_missing=True,
-    ) as scope_context:
-        assert scope_context is not None
-        assert scope_context.scope == team_scope
-        session = _team_session(
-            "session-1",
-            team_id="team-123",
-            runs=[_completed_team_run("team-1", team_id="team-123")],
-            summary=ScopeSummary(text="team summary", updated_at=datetime.now(UTC)),
-        )
-        seed_session(scope_context.storage, session)
+    )
+    assert scope_context is not None
+    assert scope_context.scope == team_scope
+    session = _team_session(
+        "session-1",
+        team_id="team-123",
+        runs=[_completed_team_run("team-1", team_id="team-123")],
+        summary=ScopeSummary(text="team summary", updated_at=datetime.now(UTC)),
+    )
+    seed_session(scope_context.storage, session)
 
     prepared = await prepare_history_for_run_for_test(
         agent_name="test_agent",

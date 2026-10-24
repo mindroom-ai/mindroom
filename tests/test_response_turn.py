@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import threading
 from dataclasses import dataclass, field, fields, replace
@@ -52,8 +51,7 @@ from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
-    from contextlib import AbstractContextManager
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
 
@@ -196,24 +194,24 @@ class _AdapterLog:
     snapshot: TurnPartialSnapshot = field(default_factory=TurnPartialSnapshot)
 
 
-def _open_scope_factory(log: _AdapterLog) -> Callable[[], AbstractContextManager[ScopeSessionContext]]:
-    def _open() -> AbstractContextManager[ScopeSessionContext]:
+def _load_scope_factory(log: _AdapterLog) -> Callable[[], ScopeSessionContext]:
+    def _load() -> ScopeSessionContext:
         log.scope = ScopeSessionContext(
             scope=HistoryScope(kind="agent", scope_id="general"),
             storage=Mock(spec=ConversationStore),
             session=None,
             session_id="session-1",
         )
-        return contextlib.nullcontext(log.scope)
+        return log.scope
 
-    return _open
+    return _load
 
 
 def _blocking_adapter(
     log: _AdapterLog,
     run_attempt: Callable[[TurnRunState, TurnContinuationRunState], Awaitable[Any]],
     *,
-    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]] | None = None,
+    load_scope: Callable[[], ScopeSessionContext | None] | None = None,
     with_standalone_replay: bool = True,
     unexpected_error_text: Callable[[Exception], str] | None = None,
 ) -> BlockingTurnAdapter:
@@ -224,7 +222,7 @@ def _blocking_adapter(
         _bump(log, "finalized")
 
     return BlockingTurnAdapter(
-        open_scope=open_scope or _open_scope_factory(log),
+        load_scope=load_scope or _load_scope_factory(log),
         run_attempt=run_attempt,
         snapshot_partial=lambda: log.snapshot,
         release_attempt_entity=lambda _scope: _bump(log, "released"),
@@ -462,7 +460,7 @@ def _streaming_adapter(
         AsyncGenerator[str | AttemptResolved, None],
     ],
     *,
-    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]] | None = None,
+    load_scope: Callable[[], ScopeSessionContext | None] | None = None,
     with_standalone_replay: bool = True,
     unexpected_error_text: Callable[[Exception], str] | None = None,
 ) -> StreamingTurnAdapter[str]:
@@ -473,7 +471,7 @@ def _streaming_adapter(
         _bump(log, "finalized")
 
     return StreamingTurnAdapter[str](
-        open_scope=open_scope or _open_scope_factory(log),
+        load_scope=load_scope or _load_scope_factory(log),
         run_attempt=run_attempt,
         snapshot_partial=lambda: log.snapshot,
         release_attempt_entity=lambda _scope: _bump(log, "released"),
@@ -539,7 +537,7 @@ async def test_helper_usage_owner_stays_inside_attempt_across_task_handoff(finis
         assert (
             await run_blocking_response_turn(
                 _ctx(),
-                _blocking_adapter(log, blocking_attempt, open_scope=lambda: contextlib.nullcontext(scope)),
+                _blocking_adapter(log, blocking_attempt, load_scope=lambda: scope),
                 TurnSinks(),
                 continuation=_continuation(),
             )
@@ -549,7 +547,7 @@ async def test_helper_usage_owner_stays_inside_attempt_across_task_handoff(finis
     else:
         stream = stream_response_turn(
             _ctx(),
-            _streaming_adapter(log, streamed_attempt, open_scope=lambda: contextlib.nullcontext(scope)),
+            _streaming_adapter(log, streamed_attempt, load_scope=lambda: scope),
             TurnSinks(),
             continuation=_continuation(),
         )
@@ -573,19 +571,15 @@ async def test_helper_usage_owner_stays_inside_attempt_across_task_handoff(finis
 
 
 @pytest.mark.asyncio
-async def test_blocking_scope_storage_lifecycle_runs_off_event_loop() -> None:
-    """A slow synchronous session open or close must not stall every response."""
+async def test_blocking_scope_session_loads_off_event_loop() -> None:
+    """A slow synchronous session load must not stall every response."""
     log = _AdapterLog()
     event_loop_thread = threading.get_ident()
-    lifecycle_threads: dict[str, int] = {}
+    load_threads: list[int] = []
 
-    @contextlib.contextmanager
-    def _open_scope() -> Iterator[ScopeSessionContext | None]:
-        lifecycle_threads["enter"] = threading.get_ident()
-        try:
-            yield None
-        finally:
-            lifecycle_threads["exit"] = threading.get_ident()
+    def _load_scope() -> ScopeSessionContext | None:
+        load_threads.append(threading.get_ident())
+        return None
 
     async def _attempt(
         _run: TurnRunState,
@@ -596,30 +590,26 @@ async def test_blocking_scope_storage_lifecycle_runs_off_event_loop() -> None:
     assert (
         await run_blocking_response_turn(
             _ctx(),
-            _blocking_adapter(log, _attempt, open_scope=_open_scope),
+            _blocking_adapter(log, _attempt, load_scope=_load_scope),
             TurnSinks(),
             continuation=_continuation(),
         )
         == "done"
     )
-    assert lifecycle_threads["enter"] != event_loop_thread
-    assert lifecycle_threads["exit"] != event_loop_thread
+    assert len(load_threads) == 1
+    assert load_threads[0] != event_loop_thread
 
 
 @pytest.mark.asyncio
-async def test_streaming_scope_storage_lifecycle_runs_off_event_loop() -> None:
-    """Streaming responses use the same non-blocking scope-storage boundary."""
+async def test_streaming_scope_session_loads_off_event_loop() -> None:
+    """Streaming responses load their scope session off the event loop too."""
     log = _AdapterLog()
     event_loop_thread = threading.get_ident()
-    lifecycle_threads: dict[str, int] = {}
+    load_threads: list[int] = []
 
-    @contextlib.contextmanager
-    def _open_scope() -> Iterator[ScopeSessionContext | None]:
-        lifecycle_threads["enter"] = threading.get_ident()
-        try:
-            yield None
-        finally:
-            lifecycle_threads["exit"] = threading.get_ident()
+    def _load_scope() -> ScopeSessionContext | None:
+        load_threads.append(threading.get_ident())
+        return None
 
     async def _attempt(
         _run: TurnRunState,
@@ -631,45 +621,42 @@ async def test_streaming_scope_storage_lifecycle_runs_off_event_loop() -> None:
         await _collect(
             stream_response_turn(
                 _ctx(),
-                _streaming_adapter(log, _attempt, open_scope=_open_scope),
+                _streaming_adapter(log, _attempt, load_scope=_load_scope),
                 TurnSinks(),
                 continuation=_continuation(),
             ),
         )
         == []
     )
-    assert lifecycle_threads["enter"] != event_loop_thread
-    assert lifecycle_threads["exit"] != event_loop_thread
+    assert len(load_threads) == 1
+    assert load_threads[0] != event_loop_thread
 
 
 @pytest.mark.asyncio
-async def test_cancel_during_scope_open_closes_entered_context() -> None:
-    """Cancellation waits for an accepted scope open and then closes its storage."""
+async def test_cancel_during_scope_load_waits_for_the_load() -> None:
+    """Cancellation waits for an accepted scope load to finish and starts no attempt."""
     log = _AdapterLog()
     enter_started = threading.Event()
     allow_enter = threading.Event()
-    exited = threading.Event()
+    loaded = threading.Event()
 
-    @contextlib.contextmanager
-    def _open_scope() -> Iterator[ScopeSessionContext | None]:
+    def _load_scope() -> ScopeSessionContext | None:
         enter_started.set()
         if not allow_enter.wait(timeout=5):
-            pytest.fail("scope entry was never released")
-        try:
-            yield None
-        finally:
-            exited.set()
+            pytest.fail("scope load was never released")
+        loaded.set()
+        return None
 
     async def _unexpected_attempt(
         _run: TurnRunState,
         _continuation_state: TurnContinuationRunState,
     ) -> CompletedAttempt:
-        pytest.fail("a cancelled scope open must not start an attempt")
+        pytest.fail("a cancelled scope load must not start an attempt")
 
     turn_task = asyncio.create_task(
         run_blocking_response_turn(
             _ctx(),
-            _blocking_adapter(log, _unexpected_attempt, open_scope=_open_scope),
+            _blocking_adapter(log, _unexpected_attempt, load_scope=_load_scope),
             TurnSinks(),
             continuation=_continuation(),
         ),
@@ -680,7 +667,7 @@ async def test_cancel_during_scope_open_closes_entered_context() -> None:
     with pytest.raises(asyncio.CancelledError):
         await turn_task
 
-    assert exited.is_set()
+    assert loaded.is_set()
 
 
 def _history_run(run_id: str, *, team: bool, event_id: str, seen: list[str]) -> RunRecord | TeamRunRecord:
@@ -741,14 +728,12 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
         lookups.append(event_ids)
         return dict.fromkeys(set(event_ids) & {redacted_event_id})
 
-    def _open_scope() -> AbstractContextManager[ScopeSessionContext]:
-        return contextlib.nullcontext(
-            ScopeSessionContext(
-                scope=HistoryScope(kind="team" if team else "agent", scope_id="crew"),
-                storage=storage,
-                session=_stored_session(),
-                session_id="session-1",
-            ),
+    def _load_scope() -> ScopeSessionContext:
+        return ScopeSessionContext(
+            scope=HistoryScope(kind="team" if team else "agent", scope_id="crew"),
+            storage=storage,
+            session=_stored_session(),
+            session_id="session-1",
         )
 
     attempt_history: list[list[str | None]] = []
@@ -778,7 +763,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
             await _collect(
                 stream_response_turn(
                     ctx,
-                    _streaming_adapter(log, _streaming_attempt, open_scope=_open_scope),
+                    _streaming_adapter(log, _streaming_attempt, load_scope=_load_scope),
                     TurnSinks(),
                     continuation=_continuation(),
                 ),
@@ -786,7 +771,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
         else:
             await run_blocking_response_turn(
                 ctx,
-                _blocking_adapter(log, _blocking_attempt, open_scope=_open_scope),
+                _blocking_adapter(log, _blocking_attempt, load_scope=_load_scope),
                 TurnSinks(),
                 continuation=_continuation(),
             )
@@ -2188,12 +2173,12 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(streamin
     elif gate is not None and gate_state == "silent":
         gate.decline("already_answered")
 
-    def broken_scope() -> AbstractContextManager[ScopeSessionContext | None]:
+    def broken_scope() -> ScopeSessionContext | None:
         message = "Scope unavailable"
         raise RuntimeError(message)
 
     async def attempt(_run: TurnRunState, _continuation: TurnContinuationRunState) -> CompletedAttempt:
-        pytest.fail("Scope must open before an attempt")
+        pytest.fail("Scope must load before an attempt")
 
     async def streamed_attempt(
         run: TurnRunState,
@@ -2210,7 +2195,7 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(streamin
                     _streaming_adapter(
                         log,
                         streamed_attempt,
-                        open_scope=broken_scope,
+                        load_scope=broken_scope,
                         unexpected_error_text=lambda _: "Visible error",
                     ),
                     TurnSinks(turn_recorder=cast("Any", recorder)),
@@ -2224,7 +2209,7 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(streamin
             _blocking_adapter(
                 log,
                 attempt,
-                open_scope=broken_scope,
+                load_scope=broken_scope,
                 unexpected_error_text=lambda _: "Visible error",
             ),
             TurnSinks(turn_recorder=cast("Any", recorder)),

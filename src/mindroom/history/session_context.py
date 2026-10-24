@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
@@ -16,7 +15,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -37,8 +36,8 @@ class ScopeSessionContext:
 
     ``session`` is the session the scope's runs load from and save into: the stored one, or a first one the context
     was given (``with_session``) before anything stored it; None while the context holds neither.
-    ``session_exists`` tells whether the scope had a stored session when the context was opened. ``session_id`` is
-    the id the context was opened for, which the scope's first session takes, so a run is saved from the context alone.
+    ``session_exists`` tells whether the scope had a stored session when the context was loaded. ``session_id`` is
+    the id the context was loaded for, which the scope's first session takes, so a run is saved from the context alone.
     """
 
     scope: HistoryScope
@@ -93,8 +92,7 @@ def resolve_bound_team_scope(
     return HistoryScope(kind="team", scope_id=team_scope_id) if team_scope_id is not None else None
 
 
-@contextmanager
-def open_resolved_scope_session_context(
+def load_scope_session(
     *,
     agent_name: str,
     scope: HistoryScope | None,
@@ -103,11 +101,10 @@ def open_resolved_scope_session_context(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     create_session_if_missing: bool = False,
-) -> Iterator[ScopeSessionContext | None]:
-    """Open one already-resolved persisted history scope for the current request."""
+) -> ScopeSessionContext | None:
+    """Load the session context of one already-resolved persisted history scope for the current request."""
     if session_id is None or scope is None:
-        yield None
-        return
+        return None
     storage_factory = partial(
         create_scope_session_storage,
         agent_name=agent_name,
@@ -126,11 +123,10 @@ def open_resolved_scope_session_context(
         storage_factory=storage_factory,
         session_exists=session is not None,
     )
-    yield context.with_session() if create_session_if_missing else context
+    return context.with_session() if create_session_if_missing else context
 
 
-@contextmanager
-def open_bound_scope_session_context(
+def load_bound_scope_session(
     *,
     member_names: Sequence[str],
     session_id: str | None,
@@ -139,8 +135,8 @@ def open_bound_scope_session_context(
     execution_identity: ToolExecutionIdentity | None,
     team_name: str | None = None,
     create_session_if_missing: bool = False,
-) -> Iterator[ScopeSessionContext | None]:
-    """Open the canonical scope-backed session context for one bound team run."""
+) -> ScopeSessionContext | None:
+    """Load the canonical scope-backed session context for one bound team run."""
     if not member_names and team_name is not None and team_name in config.teams:
         scope = HistoryScope(kind="team", scope_id=team_name)
     else:
@@ -151,9 +147,8 @@ def open_bound_scope_session_context(
             execution_identity=execution_identity,
         )
     if scope is None:
-        yield None
-        return
-    with open_resolved_scope_session_context(
+        return None
+    return load_scope_session(
         agent_name=scope.scope_id,
         scope=scope,
         session_id=session_id,
@@ -161,8 +156,7 @@ def open_bound_scope_session_context(
         config=config,
         execution_identity=execution_identity,
         create_session_if_missing=create_session_if_missing,
-    ) as scope_context:
-        yield scope_context
+    )
 
 
 def create_scope_session_storage(

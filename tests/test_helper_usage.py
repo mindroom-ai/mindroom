@@ -28,8 +28,8 @@ from mindroom.custom_tools.dynamic_workflow import _aexecute_participant, _arun_
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, helper_usage_context, record_helper_usage
 from mindroom.history.session_context import (
-    open_bound_scope_session_context,
-    open_resolved_scope_session_context,
+    load_bound_scope_session,
+    load_scope_session,
 )
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -172,8 +172,8 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         kind="team" if caller == "team" else "agent",
         scope_id="reviewers" if caller == "team" else "general",
     )
-    open_scope = partial(
-        open_resolved_scope_session_context,
+    load_scope = partial(
+        load_scope_session,
         agent_name="general",
         scope=scope,
         session_id="approval-session",
@@ -220,13 +220,13 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     paused = raised.value.paused
     if is_cli:
         # Reconstruct an interrupted minimal response using its exact saved approval.
-        with open_scope() as scope_context:
-            assert scope_context is not None
-            stored = scope_context.storage.get_run(paused.run_id)
-            assert isinstance(stored, RunRecord)
-            stored.metadata = {**(stored.metadata or {}), "agent_mode": "minimal"}
-            assert scope_context.session is not None
-            scope_context.storage.save_runs(scope_context.session, [stored])
+        scope_context = load_scope()
+        assert scope_context is not None
+        stored = scope_context.storage.get_run(paused.run_id)
+        assert isinstance(stored, RunRecord)
+        stored.metadata = {**(stored.metadata or {}), "agent_mode": "minimal"}
+        assert scope_context.session is not None
+        scope_context.storage.save_runs(scope_context.session, [stored])
     calls_ = (
         ApprovalCall(
             "approved",
@@ -321,9 +321,9 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
             await resume()
     assert get_helper_usage_owner() is None
     assert helper_results == ["Sample helper output."]
-    with open_scope() as scope_context:
-        assert scope_context is not None
-        rows = _usage_rows(scope_context.storage)
+    scope_context = load_scope()
+    assert scope_context is not None
+    rows = _usage_rows(scope_context.storage)
     helpers = [
         (session_id, json.loads(value))
         for session_id, value in rows
@@ -487,8 +487,8 @@ async def test_workflow_first_turn_uses_actual_caller_store(
     )
     identity = build_execution_identity_from_runtime_context(context)
     if caller.endswith("team"):
-        open_scope = partial(
-            open_bound_scope_session_context,
+        load_scope = partial(
+            load_bound_scope_session,
             member_names=["test_agent", "second"],
             team_name="reviewers" if caller == "configured_team" else None,
             session_id=context.session_id,
@@ -498,8 +498,8 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             create_session_if_missing=True,
         )
     else:
-        open_scope = partial(
-            open_resolved_scope_session_context,
+        load_scope = partial(
+            load_scope_session,
             agent_name="test_agent",
             scope=HistoryScope(kind="agent", scope_id="test_agent"),
             session_id=context.session_id,
@@ -510,7 +510,8 @@ async def test_workflow_first_turn_uses_actual_caller_store(
         )
     model = ScriptedModel([answer("Sample output.", owned_usage(20, 2))])
     monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args: model)
-    with open_scope() as scope_context, helper_usage_context(scope_context):
+    scope_context = load_scope()
+    with helper_usage_context(scope_context):
         assert scope_context is not None
         storage = scope_context.storage
         result = await _aexecute_participant(
@@ -583,8 +584,8 @@ async def test_workflow_participant_usage_counts_however_its_run_ends(
         else [UsageReported(owned_usage(30, 3), final=ending == "error"), Await(interrupt)]
     )
     monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args: ScriptedModel([turn]))
-    open_scope = partial(
-        open_resolved_scope_session_context,
+    load_scope = partial(
+        load_scope_session,
         agent_name="test_agent",
         scope=scope,
         session_id="session",
@@ -592,7 +593,8 @@ async def test_workflow_participant_usage_counts_however_its_run_ends(
         runtime_paths=paths,
         execution_identity=build_execution_identity_from_runtime_context(context),
     )
-    with open_scope() as scope_context, helper_usage_context(scope_context):
+    scope_context = load_scope()
+    with helper_usage_context(scope_context):
         participant = asyncio.create_task(
             _aexecute_participant(
                 context,
@@ -624,8 +626,8 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
     """A helper owner must reset on cancellation, and first-turn initialization must not overwrite live state."""
     config, paths = _make_config(tmp_path)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    open_scope = partial(
-        open_resolved_scope_session_context,
+    load_scope = partial(
+        load_scope_session,
         agent_name="test_agent",
         scope=scope,
         session_id="session",
@@ -635,9 +637,9 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
         create_session_if_missing=True,
     )
     assert get_helper_usage_owner() is None
+    context = load_scope()
     with (  # noqa: PT012 - cancellation intentionally exits the bound scope
         pytest.raises(asyncio.CancelledError),
-        open_scope() as context,
         helper_usage_context(context),
     ):
         assert context is not None
@@ -658,12 +660,12 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
         raise asyncio.CancelledError
     assert get_helper_usage_owner() is None
     assert collect_admin_usage(config=config, runtime_paths=paths).totals.total_tokens == 11
-    with open_scope() as context:
-        assert context is not None
-        sessions = quote_identifier(context.storage.names.sessions)
-        with context.storage.transaction(write=True) as connection:
-            connection.execute(f"DELETE FROM {sessions} WHERE session_id = ?", ("session",))  # noqa: S608
-        assert _usage_rows(context.storage) == []
+    context = load_scope()
+    assert context is not None
+    sessions = quote_identifier(context.storage.names.sessions)
+    with context.storage.transaction(write=True) as connection:
+        connection.execute(f"DELETE FROM {sessions} WHERE session_id = ?", ("session",))  # noqa: S608
+    assert _usage_rows(context.storage) == []
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from threading import Event
 from types import SimpleNamespace
@@ -847,8 +847,8 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     )
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
-        lambda **kwargs: nullcontext(SimpleNamespace(session_id=kwargs["session_id"])),
+        "mindroom.matrix_rtc.call_tools.load_scope_session",
+        lambda **kwargs: SimpleNamespace(session_id=kwargs["session_id"]),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
@@ -1111,8 +1111,8 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable=())),
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
-        lambda **_kwargs: nullcontext(SimpleNamespace()),
+        "mindroom.matrix_rtc.call_tools.load_scope_session",
+        lambda **_kwargs: SimpleNamespace(),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
@@ -1213,8 +1213,8 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
         blocked_resolution,
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
-        lambda **kwargs: nullcontext(SimpleNamespace(session_id=kwargs["session_id"])),
+        "mindroom.matrix_rtc.call_tools.load_scope_session",
+        lambda **kwargs: SimpleNamespace(session_id=kwargs["session_id"]),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
@@ -1919,8 +1919,8 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
-        lambda **_kwargs: nullcontext(SimpleNamespace()),
+        "mindroom.matrix_rtc.call_tools.load_scope_session",
+        lambda **_kwargs: SimpleNamespace(),
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", persist_interrupted)
     tooling = await build_call_tools(

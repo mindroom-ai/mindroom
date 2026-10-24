@@ -35,7 +35,7 @@ from mindroom.history.mid_turn_compaction import without_fold_records
 from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
-from mindroom.history.session_context import open_bound_scope_session_context
+from mindroom.history.session_context import load_bound_scope_session
 from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
@@ -100,7 +100,6 @@ from mindroom.tool_system.events import StructuredStreamChunk
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
-    from contextlib import AbstractContextManager
 
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.config.main import Config, ResolvedRuntimeModel
@@ -876,8 +875,8 @@ class _TeamTurn:
             output_tokens=discard.output_tokens,
         )
 
-    def open_scope(self) -> AbstractContextManager[ScopeSessionContext | None]:
-        return open_bound_scope_session_context(
+    def load_scope(self) -> ScopeSessionContext | None:
+        return load_bound_scope_session(
             member_names=self.requested_agent_names,
             session_id=self.session_id,
             runtime_paths=self.runtime_paths,
@@ -1062,7 +1061,7 @@ async def team_response(
         return turn
 
     adapter = BlockingTurnAdapter(
-        open_scope=turn.open_scope,
+        load_scope=turn.load_scope,
         run_attempt=turn.run_blocking_attempt,
         snapshot_partial=turn.holder.partial_snapshot,
         release_attempt_entity=turn.holder.release_attempt_members,
@@ -1142,7 +1141,7 @@ async def team_response_stream(
         return
 
     adapter = StreamingTurnAdapter[TeamStreamChunk](
-        open_scope=turn.open_scope,
+        load_scope=turn.load_scope,
         run_attempt=turn.run_streaming_attempt,
         snapshot_partial=turn.holder.partial_snapshot,
         release_attempt_entity=turn.holder.release_attempt_members,

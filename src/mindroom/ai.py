@@ -45,7 +45,7 @@ from mindroom.history.native import with_native_history
 from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
-from mindroom.history.session_context import ScopeSessionContext, open_resolved_scope_session_context
+from mindroom.history.session_context import ScopeSessionContext, load_scope_session
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -110,7 +110,6 @@ from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
-    from contextlib import AbstractContextManager
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
@@ -320,8 +319,8 @@ class _AgentTurnHolder:
 class _AgentTurnCallbacks:
     """Adapter callbacks shared by the blocking and streaming agent turns."""
 
-    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]]
-    on_scope_opened: Callable[[ScopeSessionContext | None], None]
+    load_scope: Callable[[], ScopeSessionContext | None]
+    on_scope_loaded: Callable[[ScopeSessionContext | None], None]
     release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None]
@@ -340,8 +339,8 @@ def _build_agent_turn_callbacks(
 ) -> _AgentTurnCallbacks:
     """Build the entity-specific turn-driver callbacks for one agent response."""
 
-    def _open_scope() -> AbstractContextManager[ScopeSessionContext | None]:
-        return open_resolved_scope_session_context(
+    def _load_scope() -> ScopeSessionContext | None:
+        return load_scope_session(
             agent_name=agent_name,
             scope=HistoryScope(kind="agent", scope_id=agent_name),
             session_id=session_id,
@@ -350,7 +349,7 @@ def _build_agent_turn_callbacks(
             execution_identity=execution_identity,
         )
 
-    def _on_scope_opened(scope_context: ScopeSessionContext | None) -> None:
+    def _on_scope_loaded(scope_context: ScopeSessionContext | None) -> None:
         ai_runtime.scrub_queued_notice_session_context(
             scope_context=scope_context,
             entity_name=agent_name,
@@ -389,8 +388,8 @@ def _build_agent_turn_callbacks(
         )
 
     return _AgentTurnCallbacks(
-        open_scope=_open_scope,
-        on_scope_opened=_on_scope_opened,
+        load_scope=_load_scope,
+        on_scope_loaded=_on_scope_loaded,
         release_attempt_entity=_release_attempt_entity,
         discard_empty_run=_discard_empty_run,
         persist_standalone_replay=_persist_standalone_replay,
@@ -1764,14 +1763,14 @@ async def ai_response(  # noqa: C901
         )
 
     adapter = BlockingTurnAdapter(
-        open_scope=callbacks.open_scope,
+        load_scope=callbacks.load_scope,
         run_attempt=_run_blocking_attempt,
         snapshot_partial=lambda: TurnPartialSnapshot(
             attempt_run_id=holder.attempt.run_id if holder.attempt is not None else None,
         ),
         release_attempt_entity=callbacks.release_attempt_entity,
         discard_empty_run=callbacks.discard_empty_run,
-        on_scope_opened=callbacks.on_scope_opened,
+        on_scope_loaded=callbacks.on_scope_loaded,
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
     return await run_blocking_response_turn(
@@ -2188,12 +2187,12 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         )
 
     adapter = StreamingTurnAdapter[AIStreamChunk](
-        open_scope=callbacks.open_scope,
+        load_scope=callbacks.load_scope,
         run_attempt=_run_streaming_attempt,
         snapshot_partial=lambda: _streaming_partial_snapshot(holder),
         release_attempt_entity=callbacks.release_attempt_entity,
         discard_empty_run=callbacks.discard_empty_run,
-        on_scope_opened=callbacks.on_scope_opened,
+        on_scope_loaded=callbacks.on_scope_loaded,
         finalize_attempt=_finalize_streaming_attempt,
         make_text_chunk=ContentDelta,
         persist_standalone_replay=callbacks.persist_standalone_replay,

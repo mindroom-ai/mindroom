@@ -25,7 +25,7 @@ from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.request_messages import TurnMessages
-from mindroom.history.session_context import open_resolved_scope_session_context
+from mindroom.history.session_context import load_scope_session
 from mindroom.history.storage import (
     _with_scope_state,
     read_scope_seen_event_ids,
@@ -470,17 +470,15 @@ async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_r
         make_visible_message(sender="@bot:localhost", body="Prior answer", event_id="$agent-reply"),
     ]
 
-    with (
-        open_resolved_scope_session_context(
-            scope=_SCOPE,
-            agent_name="test_agent",
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        ) as scope_context,
-        _no_memory(),
-    ):
+    scope_context = load_scope_session(
+        scope=_SCOPE,
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+    with _no_memory():
         prepared_run = await _prepare_agent_and_prompt(
             make_turn_context("test_agent", session_id="session-1"),
             prompt="Current prompt",
@@ -593,27 +591,27 @@ async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_pa
         reading_threads.append(threading.get_ident())
         return read_scope_seen_event_ids(*args)  # type: ignore[arg-type]
 
-    with open_resolved_scope_session_context(
+    scope_context = load_scope_session(
         scope=_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        with _no_memory(), patch("mindroom.execution_preparation.read_scope_seen_event_ids", new=recording_read):
-            await _prepare_agent_and_prompt(
-                make_turn_context("test_agent", reply_to_event_id="event-2"),
-                prompt="Current prompt",
-                runtime_paths=runtime_paths,
-                config=config,
-                scope_context=scope_context,
-                thread_history=[
-                    make_visible_message(event_id="event-1", sender="alice", body="Earlier message"),
-                    make_visible_message(event_id="event-2", sender="alice", body="Current message body"),
-                ],
-            )
+    )
+    assert scope_context is not None
+    with _no_memory(), patch("mindroom.execution_preparation.read_scope_seen_event_ids", new=recording_read):
+        await _prepare_agent_and_prompt(
+            make_turn_context("test_agent", reply_to_event_id="event-2"),
+            prompt="Current prompt",
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=scope_context,
+            thread_history=[
+                make_visible_message(event_id="event-1", sender="alice", body="Earlier message"),
+                make_visible_message(event_id="event-2", sender="alice", body="Current message body"),
+            ],
+        )
 
     assert len(reading_threads) == 2
     assert loop_thread not in reading_threads
@@ -631,28 +629,28 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     update_scope_seen_event_ids(storage, session, _SCOPE, ["event-1"])
     seed_summary(storage, session, _SCOPE, "stored summary")
 
-    with open_resolved_scope_session_context(
+    scope_context = load_scope_session(
         scope=_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        with _no_memory():
-            prepared_run = await _prepare_agent_and_prompt(
-                make_turn_context("test_agent", reply_to_event_id="event-3"),
-                prompt="Current prompt",
-                runtime_paths=runtime_paths,
-                config=config,
-                scope_context=scope_context,
-                thread_history=[
-                    make_visible_message(event_id="event-1", sender="alice", body="Already seen"),
-                    make_visible_message(event_id="event-2", sender="alice", body="Fresh follow-up"),
-                    make_visible_message(event_id="event-3", sender="alice", body="Current message body"),
-                ],
-            )
+    )
+    assert scope_context is not None
+    with _no_memory():
+        prepared_run = await _prepare_agent_and_prompt(
+            make_turn_context("test_agent", reply_to_event_id="event-3"),
+            prompt="Current prompt",
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=scope_context,
+            thread_history=[
+                make_visible_message(event_id="event-1", sender="alice", body="Already seen"),
+                make_visible_message(event_id="event-2", sender="alice", body="Fresh follow-up"),
+                make_visible_message(event_id="event-3", sender="alice", body="Current message body"),
+            ],
+        )
 
     full_prompt = prepared_run.prompt_text
     assert prepared_run.unseen_event_ids == ["event-2"]

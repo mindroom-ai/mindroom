@@ -112,14 +112,14 @@ def consumption_context(owner: ConsumptionOwner) -> Iterator[None]:
 
 
 def set_consumption_storage(storage_factory: Callable[[], ConversationStore] | None) -> None:
-    """Bind registered canonical storage after the response opens its scope."""
+    """Bind registered canonical storage after the response loads its scope."""
     owner = _OWNER.get()
     if owner is not None:
         owner.storage_factory = storage_factory
 
 
 async def finalize_consumption() -> None:
-    """Read exact persisted parent evidence before any attempt storage is closed."""
+    """Settle the response's job claims against the parent runs its attempts saved."""
     owner = _OWNER.get()
     if owner is not None:
         await run_coroutine_until_complete(owner.finalize())

@@ -25,7 +25,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
-from mindroom.history.session_context import open_bound_scope_session_context
+from mindroom.history.session_context import load_bound_scope_session
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
@@ -901,37 +901,37 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
     _seed_history(team, messages=[Message(role="user", content="Earlier"), _notice("prior-response")])
     members = materialize_team_members(list(team.member_names), team.orchestrator, team.identity)
 
-    with open_bound_scope_session_context(
+    scope_context = load_bound_scope_session(
         member_names=team.member_names,
         session_id=SESSION_ID,
         runtime_paths=team.runtime_paths,
         config=team.config,
         execution_identity=team.identity,
-    ) as scope_context:
-        built = build_team_spec(
-            members=members,
-            mode=team.mode,
-            config=team.config,
-            runtime_paths=team.runtime_paths,
-            team_display_name=team_label(members.requested_agent_names),
-            scope_context=scope_context,
-            execution_identity=team.identity,
-            model_name="default",
-            configured_team_name=None,
-        )
-        await prepare_materialized_team_execution(
-            team.ctx(),
-            scope_context=scope_context,
-            spec=built.spec,
-            message="Hello",
-            thread_history=[],
-            config=team.config,
-            runtime_paths=team.runtime_paths,
-            runtime_model=team.config.resolve_runtime_model(entity_name=None),
-            response_sender_id=None,
-            current_sender_id=None,
-            configured_team_name=None,
-        )
+    )
+    built = build_team_spec(
+        members=members,
+        mode=team.mode,
+        config=team.config,
+        runtime_paths=team.runtime_paths,
+        team_display_name=team_label(members.requested_agent_names),
+        scope_context=scope_context,
+        execution_identity=team.identity,
+        model_name="default",
+        configured_team_name=None,
+    )
+    await prepare_materialized_team_execution(
+        team.ctx(),
+        scope_context=scope_context,
+        spec=built.spec,
+        message="Hello",
+        thread_history=[],
+        config=team.config,
+        runtime_paths=team.runtime_paths,
+        runtime_model=team.config.resolve_runtime_model(entity_name=None),
+        response_sender_id=None,
+        current_sender_id=None,
+        configured_team_name=None,
+    )
 
     assert _notices(team, "prior-response") == [("run-earlier", "persisted", QUEUED_MESSAGE_NOTICE_TEXT)]
 
@@ -1411,18 +1411,10 @@ async def test_a_resume_whose_history_cannot_be_opened_builds_no_member(
 ) -> None:
     team = _team(tmp_path, monkeypatch)
 
-    class _Unavailable:
-        def __enter__(self) -> None:
-            msg = "scope open failed"
-            raise RuntimeError(msg)
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
     with (
         patch("mindroom.teams.resume.materialize_exact_team_members") as materialize,
-        patch("mindroom.teams.resume.open_resolved_scope_session_context", return_value=_Unavailable()),
-        pytest.raises(RuntimeError, match="scope open failed"),
+        patch("mindroom.teams.resume.load_scope_session", side_effect=RuntimeError("scope load failed")),
+        pytest.raises(RuntimeError, match="scope load failed"),
     ):
         await team.resume(
             PausedAttempt(session_id=SESSION_ID, run_id="run-1", tools=(), toolkit_owners={}),
