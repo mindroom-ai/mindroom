@@ -467,7 +467,6 @@ async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_r
 
     scope_context = load_scope_session(
         scope=_SCOPE,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -588,7 +587,6 @@ async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_pa
 
     scope_context = load_scope_session(
         scope=_SCOPE,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -626,7 +624,6 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
 
     scope_context = load_scope_session(
         scope=_SCOPE,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,

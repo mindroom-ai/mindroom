@@ -79,7 +79,6 @@ TEAM_SESSION_ID = "!test:localhost:$thread-root"
 def _team_store(config: Config, runtime_paths: RuntimePaths, *, scope_id: str = "ultimate") -> ConversationStore:
     """Open the team scope's conversation store, where a team reply of ``config`` stores its runs."""
     return create_scope_session_storage(
-        agent_name="general",
         scope=HistoryScope(kind="team", scope_id=scope_id),
         config=config,
         runtime_paths=runtime_paths,

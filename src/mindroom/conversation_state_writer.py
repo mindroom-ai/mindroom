@@ -12,7 +12,6 @@ from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
-from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 
 if TYPE_CHECKING:
@@ -79,20 +78,9 @@ class ConversationStateWriter:
         scope: HistoryScope | None = None,
     ) -> ConversationStore:
         """Open the conversation store of one exact persisted history scope."""
-        config = self.deps.runtime.config
-        own_scope = self.history_scope()
-        scope = own_scope if scope is None else scope
-        if scope == own_scope and scope.kind == "agent":
-            return create_session_storage(
-                agent_name=self.deps.agent_name,
-                config=config,
-                runtime_paths=self.deps.runtime_paths,
-                execution_identity=execution_identity,
-            )
         return create_scope_session_storage(
-            agent_name=scope.scope_id if scope.kind == "agent" else self.deps.agent_name,
-            scope=scope,
-            config=config,
+            scope=self.history_scope() if scope is None else scope,
+            config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             execution_identity=execution_identity,
         )

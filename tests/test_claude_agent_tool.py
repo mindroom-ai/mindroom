@@ -1197,7 +1197,6 @@ async def _send_metered_turns(
     config, paths, _storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
     load_scope = partial(
         load_scope_session,
-        agent_name="test_agent",
         scope=scope,
         session_id="session",
         config=config,

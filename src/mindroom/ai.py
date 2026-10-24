@@ -338,7 +338,6 @@ def _build_agent_turn_callbacks(
 
     def _load_scope() -> ScopeSessionContext | None:
         return load_scope_session(
-            agent_name=agent_name,
             scope=HistoryScope(kind="agent", scope_id=agent_name),
             session_id=session_id,
             runtime_paths=runtime_paths,

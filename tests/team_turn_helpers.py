@@ -182,7 +182,6 @@ class TeamTurn:
     def storage(self) -> ConversationStore:
         """The store of the team's history scope."""
         return create_scope_session_storage(
-            agent_name=self.scope.scope_id,
             scope=self.scope,
             config=self.config,
             runtime_paths=self.runtime_paths,

@@ -175,7 +175,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     )
     load_scope = partial(
         load_scope_session,
-        agent_name="general",
         scope=scope,
         session_id="approval-session",
         config=config,
@@ -499,7 +498,6 @@ async def test_workflow_first_turn_uses_actual_caller_store(
     else:
         load_scope = partial(
             load_scope_session,
-            agent_name="test_agent",
             scope=HistoryScope(kind="agent", scope_id="test_agent"),
             session_id=context.session_id,
             config=config,
@@ -585,7 +583,6 @@ async def test_workflow_participant_usage_counts_however_its_run_ends(
     install_model_providers(monkeypatch, {"default": ScriptedModel([turn])})
     load_scope = partial(
         load_scope_session,
-        agent_name="test_agent",
         scope=scope,
         session_id="session",
         config=config,
@@ -627,7 +624,6 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     load_scope = partial(
         load_scope_session,
-        agent_name="test_agent",
         scope=scope,
         session_id="session",
         config=config,

@@ -4288,7 +4288,6 @@ class TestTeamCompletion:
 
         first, second = runs
         storage = create_scope_session_storage(
-            agent_name="super_team",
             scope=HistoryScope(kind="team", scope_id="super_team"),
             config=team_config,
             runtime_paths=runtime_paths,
@@ -4345,7 +4344,6 @@ class TestTeamCompletion:
         assert response.status_code == 200
         [run] = runs
         storage = create_scope_session_storage(
-            agent_name="super_team",
             scope=HistoryScope(kind="team", scope_id="super_team"),
             config=team_config,
             runtime_paths=runtime_paths,

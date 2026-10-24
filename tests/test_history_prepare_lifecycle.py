@@ -91,7 +91,6 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
     team_scope = HistoryScope(kind="team", scope_id="team-123")
     scope_context = load_scope_session(
         scope=team_scope,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,

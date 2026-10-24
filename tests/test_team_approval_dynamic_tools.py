@@ -237,7 +237,6 @@ async def _exercise_team_member_assembly(
         raise _MemberAssemblyObservedError
 
     scope = load_scope_session(
-        agent_name="alpha",
         scope=HistoryScope(kind="team", scope_id="research"),
         session_id=identity.session_id,
         config=config,

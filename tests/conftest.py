@@ -571,7 +571,6 @@ async def prepare_history_for_run_for_test(
         prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
     else:
         scope_context = load_scope_session(
-            agent_name=agent_name,
             session_id=session_id,
             runtime_paths=runtime_paths,
             config=config,

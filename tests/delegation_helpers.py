@@ -363,7 +363,6 @@ def stored_run(
     """Return the run ``entity_name`` stored under ``run_id``: an agent's from its store, a team's from its scope's."""
     kind = "team" if entity_name in config.teams else "agent"
     store = create_scope_session_storage(
-        agent_name=entity_name,
         scope=HistoryScope(kind=kind, scope_id=entity_name),
         config=config,
         runtime_paths=runtime_paths,

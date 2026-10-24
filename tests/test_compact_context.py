@@ -178,7 +178,6 @@ async def _compact_as_team_member(tool: CompactContextTools, team_scope: History
 def _load_scope_context(
     *,
     scope: HistoryScope,
-    agent_name: str,
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -187,7 +186,6 @@ def _load_scope_context(
 ) -> ScopeSessionContext:
     scope_context = load_scope_session(
         scope=scope,
-        agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
@@ -613,7 +611,6 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
     team_scope = HistoryScope(kind="team", scope_id="team-123")
     team_context = _load_scope_context(
         scope=team_scope,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -630,7 +627,6 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
     direct_state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     reloaded_team_context = _load_scope_context(
         scope=team_scope,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -897,7 +893,6 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
 
     team_context = _load_scope_context(
         scope=team_scope,
-        agent_name="beta",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -941,7 +936,6 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
     team_scope = HistoryScope(kind="team", scope_id="team_123")
     team_context = _load_scope_context(
         scope=team_scope,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -975,7 +969,6 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
 
     reloaded_team_context = _load_scope_context(
         scope=team_scope,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -1026,7 +1019,6 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
     team_scope = HistoryScope(kind="team", scope_id="team_123")
     team_context = _load_scope_context(
         scope=team_scope,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -1060,7 +1052,6 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
 
     reloaded_team_context = _load_scope_context(
         scope=team_scope,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -1107,7 +1098,6 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
     )
     scope_context = _load_scope_context(
         scope=_AGENT_SCOPE,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -1141,7 +1131,6 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
 
     reloaded_scope_context = _load_scope_context(
         scope=_AGENT_SCOPE,
-        agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,

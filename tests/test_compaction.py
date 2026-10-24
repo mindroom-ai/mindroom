@@ -316,14 +316,12 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
     )
 
     first_storage = create_scope_session_storage(
-        agent_name="general",
         scope=scope,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=first_identity,
     )
     second_storage = create_scope_session_storage(
-        agent_name="general",
         scope=scope,
         config=config,
         runtime_paths=runtime_paths,

@@ -94,7 +94,6 @@ def resolve_bound_team_scope(
 
 def load_scope_session(
     *,
-    agent_name: str,
     scope: HistoryScope | None,
     session_id: str | None,
     runtime_paths: RuntimePaths,
@@ -107,7 +106,6 @@ def load_scope_session(
         return None
     storage_factory = partial(
         create_scope_session_storage,
-        agent_name=agent_name,
         scope=scope,
         config=config,
         runtime_paths=runtime_paths,
@@ -149,7 +147,6 @@ def load_bound_scope_session(
     if scope is None:
         return None
     return load_scope_session(
-        agent_name=scope.scope_id,
         scope=scope,
         session_id=session_id,
         runtime_paths=runtime_paths,
@@ -161,18 +158,14 @@ def load_bound_scope_session(
 
 def create_scope_session_storage(
     *,
-    agent_name: str,
     scope: HistoryScope,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> ConversationStore:
-    """Open the canonical conversation store of one persisted history scope.
-
-    ``agent_name`` names the agent whose store backs an agent scope; a team scope's store does not depend on it.
-    """
+    """Open the canonical conversation store of one persisted history scope; an agent scope's id is its agent."""
     if scope.kind == "agent":
-        return create_session_storage(agent_name, config, runtime_paths, execution_identity=execution_identity)
+        return create_session_storage(scope.scope_id, config, runtime_paths, execution_identity=execution_identity)
     normalized_scope_id = _TEAM_STORAGE_NAME_PATTERN.sub("_", scope.scope_id).strip("_") or "team"
     storage_name = f"team_{normalized_scope_id}_{hashlib.sha256(scope.key.encode()).hexdigest()[:12]}"
     return create_state_storage(

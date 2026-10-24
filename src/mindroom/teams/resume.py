@@ -404,7 +404,6 @@ async def continue_paused_team_run(
     # label of an ad hoc team's members once they are known.
     entity_name = team_name or configured_team_name
     scope = load_scope_session(
-        agent_name=min(member_names),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,

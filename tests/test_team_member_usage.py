@@ -105,7 +105,6 @@ def _squad(tmp_path: Path, *, leader: list[list[Any]], member: list[list[Any]], 
     )
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     store = create_scope_session_storage(
-        agent_name="worker",
         scope=HistoryScope(kind="team", scope_id="squad"),
         config=config,
         runtime_paths=runtime_paths,

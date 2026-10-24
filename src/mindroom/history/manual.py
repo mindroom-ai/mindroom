@@ -39,7 +39,6 @@ def request_compaction_before_next_reply(
     """
     scope_context = load_scope_session(
         scope=scope,
-        agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,

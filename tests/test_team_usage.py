@@ -122,7 +122,6 @@ def _stored_team(
     )
     session = ConversationSession(session_id="session", kind="team", owner_id=team_id)
     storage = create_scope_session_storage(
-        agent_name="code",
         scope=HistoryScope(kind="team", scope_id=team_id),
         config=config,
         runtime_paths=paths,

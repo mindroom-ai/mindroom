@@ -478,6 +478,8 @@ class Finding(BaseModel):
 
 async def find(question: str) -> Finding | str:
     context = get_tool_runtime_context()
+    if context is None:
+        return "This tool runs only inside an agent's Matrix conversation."
     provider = build_model_provider(
         context.config,
         context.runtime_paths,

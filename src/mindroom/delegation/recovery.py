@@ -227,7 +227,6 @@ async def cancel_approval_delegations(
     storage = await asyncio.to_thread(
         create_scope_session_storage,
         scope=scope,
-        agent_name=continuation.entity_name,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=identity,

@@ -162,7 +162,6 @@ def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: 
         requester_user_id="@alice:localhost",
     )
     writer_storage = create_scope_session_storage(
-        agent_name="shared",
         scope=writer_scope,
         config=config,
         runtime_paths=runtime_paths,

@@ -350,7 +350,6 @@ class _CallResponseTracker:
 
     def _persist(self, state: _CallAgentRunState, spoken_text: str, original_status: RunStatus) -> None:
         scope_context = load_scope_session(
-            agent_name=self.agent_name,
             scope=HistoryScope(kind="agent", scope_id=self.agent_name),
             session_id=state.session_id,
             runtime_paths=self.runtime_paths,
@@ -447,7 +446,6 @@ class _CallAgentCache:
     ) -> AgentBuild:
         """Build the call's agent with canonical prompt-sanitizing history storage."""
         history_storage = create_scope_session_storage(
-            agent_name=self.agent_name,
             scope=HistoryScope(kind="agent", scope_id=self.agent_name),
             config=self.config,
             runtime_paths=self.runtime_paths,
