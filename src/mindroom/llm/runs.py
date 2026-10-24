@@ -1,8 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Run records, tool executions, and pause requirements, with the dict shapes stored in run rows.
 
-Keys and ``RunStatus`` strings are Agno 3's, so existing run rows, summary-row segments, and
-delegation state decode without migration; keys the records do not model are ignored on read.
+Keys and ``RunStatus`` strings are those existing run rows, summary-row segments, and delegation state hold, so they
+decode without migration; keys the records do not model are ignored on read.
 """
 
 from __future__ import annotations
@@ -31,10 +31,9 @@ def _now() -> int:
 class RunStatus(StrEnum):
     """Lifecycle state of a run; the values are the stored ``status`` strings.
 
-    The members keep Agno's lower-case names because ``.name`` is persisted too
-    (``mindroom_original_status`` in run metadata holds ``"cancelled"``, not ``"CANCELLED"``).
-    MindRoom never writes ``PENDING`` or ``REGENERATED``; they are members so a stored row Agno
-    could have written with them still reads.
+    The members have lower-case names because ``.name`` is persisted too (``mindroom_original_status`` in run metadata
+    holds ``"cancelled"``, not ``"CANCELLED"``). MindRoom never writes ``PENDING`` or ``REGENERATED``; they are members
+    so a stored row written with them still reads.
     """
 
     pending = "PENDING"
@@ -72,7 +71,7 @@ class ToolExecution:
         return bool(self.requires_confirmation or self.external_execution_required)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: every field, None included, as Agno wrote it."""
+        """Return the stored dict: every field, None included, kept as main writes it."""
         values = asdict(self)
         values["metrics"] = self.metrics.to_dict() if self.metrics is not None else None
         return values
@@ -177,11 +176,10 @@ class RunRequirement:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> RunRequirement:
-        """Rebuild from a stored dict, ignoring the user-input keys Agno's HITL variants carried.
+        """Rebuild from a stored dict, ignoring keys this type does not model, such as older rows' user-input keys.
 
-        Reads as leniently as Agno's reader: a missing tool execution becomes an ``unknown`` placeholder,
-        an unreadable ``created_at`` becomes now, and a decision recorded only on the requirement reaches
-        its tool execution, which is what a resume runs from.
+        A missing tool execution becomes an ``unknown`` placeholder, an unreadable ``created_at`` becomes now, and a
+        decision recorded only on the requirement reaches its tool execution, which is what a resume runs from.
         """
         # LEGACY_COMPAT: Run requirements stored without a tool execution or with an unreadable timestamp.
         # Legacy format: ``requirements`` entries lacking ``tool_execution``, or whose ``created_at`` is not
@@ -243,12 +241,12 @@ class _RunRecordCommon:
     metadata: dict[str, Any] | None = None
     created_at: int = field(default_factory=_now)
     # Why an ``ERROR`` run failed, credentials redacted, set by the loop that ended it. It is never stored, so a
-    # loaded record has none; ``content`` keeps Agno's stored rule (the error's text only when the model said nothing).
+    # loaded record has none; the stored ``content`` holds the error's text only when the model said nothing.
     error: str | None = field(default=None, compare=False, repr=False)
     # The content a resumed run carried over from its pause, set by the resume (``resumed_record``): a resumed agent
-    # or team member keeps its paused content until it writes text of its own, as Agno's continuation did, while a
-    # resumed team leader starts its text afresh (``continue_team``) and this records what it had at the pause. It is
-    # never stored, so a loaded record has none.
+    # or team member keeps its paused content until it writes text of its own, while a resumed team leader starts its
+    # text afresh (``continue_team``) and this records what it had at the pause. It is never stored, so a loaded
+    # record has none.
     carried_content: str | dict[str, Any] | None = field(default=None, compare=False, repr=False)
 
     @property
@@ -277,7 +275,7 @@ class _RunRecordCommon:
         return None if handover == self.carried_content else handover
 
     def _scalars_dict(self, identity: Mapping[str, str | None]) -> dict[str, Any]:
-        """Return the scalar keys in Agno's order: the run, its agent or team, then the rest."""
+        """Return the scalar keys in stored order: the run, its agent or team, then the rest."""
         values: dict[str, Any] = {
             "run_id": self.run_id,
             **identity,
@@ -292,9 +290,9 @@ class _RunRecordCommon:
         result["created_at"] = self.created_at
         return result
 
-    # ``tools``, ``requirements``, and ``metrics`` are written exactly when set, ``[]`` and ``{}`` included,
-    # as Agno did: its loop left ``tools = []`` on runs without tool calls, and MindRoom's interrupted-turn
-    # records carry no ``metrics`` at all.
+    # ``tools``, ``requirements``, and ``metrics`` are written exactly when set, ``[]`` and ``{}`` included, so a
+    # stored row writes back as it reads: older rows hold ``tools = []`` on runs without tool calls, and
+    # interrupted-turn records carry no ``metrics`` at all.
     def _metrics_dict(self) -> dict[str, Any]:
         return {} if self.metrics is None else {"metrics": self.metrics.to_dict()}
 
@@ -308,9 +306,7 @@ class _RunRecordCommon:
         return {} if self.tools is None else {"tools": [tool.to_dict() for tool in self.tools]}
 
     def _requirements_dict(self) -> dict[str, Any]:
-        if self.requirements is None:
-            return {}
-        return {"requirements": [requirement.to_dict() for requirement in self.requirements]}
+        return {} if self.requirements is None else {"requirements": [item.to_dict() for item in self.requirements]}
 
 
 def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -355,7 +351,7 @@ class RunRecord(_RunRecordCommon):
     agent_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored ``run_data`` dict, keys in the order Agno wrote them."""
+        """Return the stored ``run_data`` dict, keys in stored order."""
         return {
             **self._scalars_dict({"agent_id": self.agent_id, "agent_name": self.agent_name}),
             "status": self.status.value,
@@ -376,9 +372,9 @@ class TeamRunRecord(_RunRecordCommon):
     """A persisted team run; paused member runs ride along in ``member_responses``.
 
     ``ended_member_runs`` holds the terminal record of every member run that ended while the run ran, in the order
-    they first ended, as Agno's live team run held each finished member: a member run stopped with its team run comes
-    last. A mid-turn fold stores them in its segment, and the turn's reply and usage read them. It is never stored,
-    so a loaded record starts without it, while a resume of the live record carries it on.
+    they first ended: a member run stopped with its team run comes last. A mid-turn fold stores them in its segment,
+    and the turn's reply and usage read them. It is never stored, so a loaded record starts without it, while a resume
+    of the live record carries it on.
     """
 
     team_id: str | None = None
@@ -387,7 +383,7 @@ class TeamRunRecord(_RunRecordCommon):
     ended_member_runs: list[RunRecord] = field(default_factory=list, compare=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored ``run_data`` dict, keys in the order Agno wrote them; ``member_responses`` is always present."""
+        """Return the stored ``run_data`` dict, keys in stored order; ``member_responses`` is always present."""
         return {
             **self._scalars_dict({"team_id": self.team_id, "team_name": self.team_name}),
             **self._metrics_dict(),
@@ -416,7 +412,7 @@ def run_record_from_dict(data: Mapping[str, Any]) -> AnyRunRecord:
     """Rebuild whichever record a stored dict holds.
 
     A ``team_id`` key marks a team run; everything else is an agent run, including the usage-only records
-    MindRoom writes without an ``agent_id`` (Agno keyed on ``agent_id`` and would have read those as team runs).
+    MindRoom writes without an ``agent_id``.
     """
     if "team_id" in data:
         return TeamRunRecord.from_dict(data)

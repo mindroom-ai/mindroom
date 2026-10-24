@@ -198,9 +198,8 @@ def resume_planned(
 def resume_request_template(template: ModelRequest) -> ModelRequest:
     """Return the template a resume's requests use: ``template``, streaming.
 
-    Every resume streams its requests, an approval's and a delegation's continuation alike, even when the run it
-    continues did not, as every continuation of the Agno-backed runtime did. ``resume_planned`` and the team
-    runtime's ``continue_team`` apply it, so every resume of an agent, a team, or a team member streams.
+    ``resume_planned`` and the team runtime's ``continue_team`` apply it, so every resume of an agent, a team, or a
+    team member streams, an approval's and a delegation's continuation alike.
     """
     # TODO(simplify): a resume streams even when the run it continues did not. Resume with the run's own template,
     # which removes this function. Models and providers would notice: such a resume would send non-streaming
@@ -221,17 +220,15 @@ def prepare_resume_tools(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> P
 def resumed_record[R: AnyRunRecord](paused: R) -> R:
     """Return the record the resume continues: a running copy of ``paused`` without its messages.
 
-    The copy keeps the paused content, as Agno's continuation did, and records it as what the run carried over
-    (``carried_content``), so a reply the resume continues adds only what the run hands over beyond it
-    (``new_handover_content``). The copy is deep, so no field it carries is shared with ``paused`` and a refused
-    resume changes nothing; a team record keeps its own copy of the member runs that ended before the pause, as
-    Agno's continuation of its live run kept them. The copy's own requirements share their tool entries: Agno's
-    continuation replaced each tool entry by the requirement's execution of the same call, so a decision recorded on
-    a requirement shows on the run's tools too. A team run also holds its members' requirements, whose call ids come
-    from other provider requests and may equal a leader call's id; those belong to the member's run and never
-    replace the leader's entries. A member record resumed on its own owns its requirements too: the team runtime
-    names them with that record's run id (``_plan_member_resumes``), so the ``member_run_id`` half of the check
-    keeps the aliasing on the member's tools.
+    The copy keeps the paused content and records it as what the run carried over (``carried_content``), so a reply
+    the resume continues adds only what the run hands over beyond it (``new_handover_content``). The copy is deep, so
+    no field it carries is shared with ``paused`` and a refused resume changes nothing; a team record keeps its own
+    copy of the member runs that ended before the pause. A tool entry that one of the copy's own requirements waits
+    on is that requirement's execution of the same call, so a decision recorded on a requirement shows on the run's
+    tools too. A team run also holds its members' requirements, whose call ids come from other provider requests and
+    may equal a leader call's id; those belong to the member's run and never replace the leader's entries. A member
+    record resumed on its own owns its requirements too: the team runtime names them with that record's run id
+    (``_plan_member_resumes``), so the ``member_run_id`` half of the check keeps the aliasing on the member's tools.
     """
     if paused.status is not RunStatus.paused:
         msg = f"Only a paused run can be resumed; run {paused.run_id!r} is {paused.status.value}"
@@ -299,7 +296,7 @@ def decide_requirements(
 
 
 def _agent_paused_content(record: AnyRunRecord) -> str:
-    """Return Agno's text for an agent run paused on its own tools."""
+    """Return the content of an agent run paused on its own tools (``paused_content``)."""
     return paused_content(record.tools or ())
 
 
@@ -323,9 +320,9 @@ async def drive_run[R: AnyRunRecord](
     ``entry`` is work the run does before the loop (a team resume's paused members), and ``resumed`` holds a
     resume's decided requirements, which the loop answers before its first request. A run
     that ends paused without text of its own gets ``pause_content(record)`` as its content. The spec's toolkits that
-    hold a connection for one run are connected before ``entry`` and closed after the run reports its end, as Agno's
-    agent closed them after its completed event, once the consumer reads past ``RunFinished`` or closes the stream;
-    a run that fails or is cancelled closes them once its record is stored.
+    hold a connection for one run are connected before ``entry`` and closed after the run reports its end, once the
+    consumer reads past ``RunFinished`` or closes the stream; a run that fails or is cancelled closes them once its
+    record is stored.
     """
     started = time.monotonic()
     paused = False
@@ -365,8 +362,8 @@ async def drive_run[R: AnyRunRecord](
         await _store_interrupted(record, messages, started, persist, error=error)
         raise
     else:
-        # Reported before the toolkits close, as Agno did. A consumer that reads the end of the stream, such as a
-        # delegation's, still waits through a slow close, such as a stdio MCP server's exit.
+        # Reported before the toolkits close, kept as main behaves. A consumer that reads the end of the stream, such
+        # as a delegation's, still waits through a slow close, such as a stdio MCP server's exit.
         yield RunFinished(record)
     finally:
         await close_toolkits(closes)
@@ -384,8 +381,8 @@ async def _store_interrupted[R: AnyRunRecord](
 
     Cancellation wins over a pause: unresolved requirements leave and paused tool entries stop waiting. A failed
     run records why in ``error``, redacted, which is what its caller reports; its stored content is the error's text
-    only when its model said nothing, as Agno stored it. The store finishes even if the waiter is cancelled again,
-    so a record the caller writes for the same run afterwards is never overwritten by this one.
+    only when its model said nothing, kept as main stores it. The store finishes even if the waiter is cancelled
+    again, so a record the caller writes for the same run afterwards is never overwritten by this one.
     """
     if error is None:
         _end(record, messages, started, RunStatus.cancelled)
@@ -400,7 +397,7 @@ async def _store_interrupted[R: AnyRunRecord](
         record.error = redact_sensitive_text(str(error))
         if not record.content:
             record.content = str(error)
-    # TODO(simplify): a failed or cancelled approval resume stores its record over the paused run's row, as Agno did,
+    # TODO(simplify): a failed or cancelled approval resume stores its record over the paused run's row, as main does,
     # so that approval can no longer be resumed. Keep the paused row when a resume ends this way.
     # Users and stored data would notice: the approval could be retried. (#3075)
     if persist is not None:
@@ -437,10 +434,9 @@ def own_answers(record: AnyRunRecord) -> list[str]:
 
 
 def paused_content(tools: Sequence[ToolExecution]) -> str:
-    """Return the text of a paused run that produced none of its own: Agno's text while a call waits for confirmation.
+    """Return the content of a paused run that produced none of its own: a notice while a call waits for confirmation.
 
-    The only externally executed calls, delegations, pause silently and never wait for confirmation, so none of Agno's
-    other paused texts applies.
+    The only externally executed calls, delegations, pause silently and never wait for confirmation, so they add none.
     """
     if any(tool.requires_confirmation is True and not tool.confirmed for tool in tools):
         return "I have tools to execute, but I need confirmation."

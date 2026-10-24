@@ -69,12 +69,8 @@ def current_llm_request_log_context() -> dict[str, JSONValue]:
 @contextmanager
 def bind_llm_request_log_context(**context: object) -> Iterator[None]:
     """Bind per-run request metadata so log entries can be attributed later; None values are left out."""
-    bound_context = dict(_REQUEST_CONTEXT.get() or {})
-    for key, value in context.items():
-        if value is None:
-            continue
-        bound_context[str(key)] = json_safe(value)
-    token = _REQUEST_CONTEXT.set(bound_context or None)
+    bound = {key: json_safe(value) for key, value in context.items() if value is not None}
+    token = _REQUEST_CONTEXT.set({**(_REQUEST_CONTEXT.get() or {}), **bound} or None)
     try:
         yield
     finally:

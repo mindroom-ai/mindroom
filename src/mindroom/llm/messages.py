@@ -1,7 +1,7 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """The conversation message exchanged with models and stored in runs.
 
-Field names are Agno 3's, so stored ``run_data`` messages and summary-row segments decode without
+Field names are the keys stored ``run_data`` messages and summary-row segments hold, so they decode without
 migration. The record is mutable: history replay, compaction, and notices rewrite fields in place.
 """
 
@@ -55,7 +55,7 @@ class ModelProvenance:
 def model_provenance(model_id: str, provider: str) -> dict[str, Any]:
     """Return the provider data recording that ``model_id`` answered a message, under ``MODEL_PROVENANCE_KEY``.
 
-    ``provider`` is the metrics provider string (Agno's ``get_provider()``) that usage rows and pricing key by.
+    ``provider`` is the metrics provider string (``ModelIdentity.provider_name``) that usage rows and pricing key by.
     """
     return {MODEL_PROVENANCE_KEY: {"id": model_id, "provider": provider}}
 
@@ -216,7 +216,7 @@ class Message:
 
 
 def split_thinking(content: str) -> tuple[str | None, str]:
-    """Split ``<think>`` reasoning from a reply that arrived whole, as Agno's ``extract_thinking_content`` callers did.
+    """Split ``<think>`` reasoning from a reply that arrived whole.
 
     A missing opening tag means the reasoning starts the reply. Without a closing tag, or when the reasoning is
     empty, the reply comes back unchanged with no reasoning, so an empty ``<think></think>`` block stays in the text.

@@ -489,7 +489,7 @@ def _build_responses(
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
-        approval_receipt_after_response_id=True,
+        continues_stored_responses=True,
         provider_default_sampling=_provider_default_sampling(model_id),
         streams_only=route_key == "codex",
     )

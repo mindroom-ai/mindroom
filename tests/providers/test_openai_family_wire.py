@@ -1638,7 +1638,7 @@ def test_responses_capabilities_follow_model_and_endpoint(tmp_path: Path) -> Non
         runtime,
     ).capabilities
 
-    assert (gpt6.native_tool_search, gpt6.native_compaction, gpt6.approval_receipt_after_response_id) == (
+    assert (gpt6.native_tool_search, gpt6.native_compaction, gpt6.continues_stored_responses) == (
         True,
         True,
         True,
