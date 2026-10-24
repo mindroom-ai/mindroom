@@ -13,7 +13,7 @@ import yaml
 from mindroom.cli.config import _model_template_block, _write_env_file
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.providers.anthropic.messages import ClaudeProvider, native_compaction_endpoint
+from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.registry import build_model_provider
 from tests.providers.bare_adapter import bare_adapter
 
@@ -77,9 +77,7 @@ def test_generated_vertex_environment_reaches_runtime_endpoint(
     assert model.settings.region == expected_region
     if authored_region is not None and not replace_existing:
         assert model.settings.project_id == "authored-project"
-        assert native_compaction_endpoint("vertexai_claude", model.settings) == (
-            f"{expected_endpoint}|authored-project|{expected_region}"
-        )
+        assert model.identity.endpoint == (f"{expected_endpoint}|authored-project|{expected_region}")
     else:
         # The generated project ID is a starter placeholder, which counts as unset.
         assert model.settings.project_id is None

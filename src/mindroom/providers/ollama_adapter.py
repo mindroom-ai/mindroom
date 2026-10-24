@@ -305,11 +305,23 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ol
     settings = settings_from_extra_kwargs(OllamaSettings, extra_kwargs, provider=model_config.provider)
     if settings.api_key is None and (env_api_key := os.getenv("OLLAMA_API_KEY")):
         settings = replace(settings, api_key=env_api_key)
+    # ``client_params`` wins over every client option, so its ``host`` is the server requests reach.
+    host = str(
+        (settings.client_params or {}).get("host")
+        or model_config.host
+        or get_ollama_host(runtime_paths=runtime_paths)
+        or OLLAMA_HOST_DEFAULT,
+    )
     return OllamaProvider(
-        identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
+        identity=ModelIdentity(
+            id=model_config.id,
+            provider=_PROVIDER,
+            provider_name=_PROVIDER,
+            endpoint=host.rstrip("/"),
+        ),
         capabilities=Capabilities(structured_output="native", omitted_media=frozenset({"audio", "file", "video"})),
         settings=settings,
-        host=model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT,
+        host=host,
     )
 
 

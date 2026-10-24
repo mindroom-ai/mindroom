@@ -125,8 +125,10 @@ _VERTEX_ENDPOINTS = {
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
-def native_compaction_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str:
-    """Return the endpoint identity that binds stored checkpoints to one route, or "" when it has none.
+def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str:
+    """Return the endpoint identity of one Claude route, or "" when it has none.
+
+    Stored native-compaction checkpoints and the media limits learned from provider errors are keyed by it.
 
     Unset Vertex values fall back to the process environment the SDK reads, so the identity matches the
     client the SDK would build.
@@ -221,7 +223,7 @@ class ClaudeProvider:
         route = native_compaction_route(
             provider=self.identity.provider,
             model_id=self.identity.id,
-            endpoint=native_compaction_endpoint(self.route, self.settings),
+            endpoint=self.identity.endpoint or "",
             history_generation=history_generation,
         )
         return NativeCompactionReplay(route=route, threshold=threshold)
@@ -579,7 +581,12 @@ def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
     }
 
 
-def _claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> Capabilities:
+def _claude_capabilities(
+    route: ClaudeRouteKind,
+    model_id: str,
+    settings: ClaudeSettings,
+    endpoint: str,
+) -> Capabilities:
     """Return what one Claude route offers for this model."""
     return Capabilities(
         structured_output="native" if route == "anthropic" and supports_structured_outputs(model_id) else "json_mode",
@@ -589,7 +596,7 @@ def _claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: Claude
             route=route,
             model_id=model_id,
             settings=settings,
-            endpoint=native_compaction_endpoint(route, settings),
+            endpoint=endpoint,
         ),
         # Vertex summaries always keep the provider's sampling default; the newest Claude generations reject
         # non-default sampling on every route.
@@ -698,9 +705,15 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
         authored = _bedrock_kwargs(authored, runtime_paths)
     settings = parse_claude_settings(route, authored)
     provider_name = _PROVIDER_NAMES[route]
-    identity = ModelIdentity(id=model_config.id, provider=provider_name, provider_name=provider_name)
-    capabilities = _claude_capabilities(route, model_config.id, settings)
+    endpoint = _route_endpoint(route, settings)
+    identity = ModelIdentity(
+        id=model_config.id,
+        provider=provider_name,
+        provider_name=provider_name,
+        endpoint=endpoint or None,
+    )
+    capabilities = _claude_capabilities(route, model_config.id, settings, endpoint)
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
 
 
-__all__ = ["ClaudeProvider", "build_provider", "native_compaction_endpoint"]
+__all__ = ["ClaudeProvider", "build_provider"]

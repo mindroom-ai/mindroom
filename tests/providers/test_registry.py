@@ -225,6 +225,40 @@ def test_every_documented_provider_value_gets_its_adapter_and_identity(route: st
     assert provider.model_params == adapter.model_params
 
 
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        ({"provider": "ollama", "id": "llava", "host": "http://gpu.local:11434/"}, "http://gpu.local:11434"),
+        (
+            {
+                "provider": "ollama",
+                "id": "llava",
+                "host": "http://gpu.local:11434",
+                "extra_kwargs": {"client_params": {"host": "http://cpu.local:11434"}},
+            },
+            "http://cpu.local:11434",
+        ),
+        (
+            {
+                "provider": "anthropic",
+                "id": "claude-sonnet-5-5",
+                "extra_kwargs": {"client_params": {"base_url": "https://claude-proxy.example/"}},
+            },
+            "https://claude-proxy.example",
+        ),
+    ],
+)
+def test_the_identity_names_the_server_a_route_reaches(
+    fields: dict[str, Any],
+    expected: str,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Media limits learned from one server's rejections stay with that server, as main kept them per endpoint."""
+    provider = build_model_provider(Config(models={"target": ModelConfig(**fields)}), runtime_paths, "target")
+
+    assert provider.identity.endpoint == expected
+
+
 def test_model_params_record_the_route_settings_without_credentials_or_clients(runtime_paths: RuntimePaths) -> None:
     """Run metadata and the request log get copies of a route's request settings, never its keys, headers, or clients."""
     extra_kwargs = {
