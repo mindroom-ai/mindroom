@@ -140,8 +140,6 @@ def convert_messages(
             text = _extract_content_text(msg.content)
             if text:
                 system_parts.append(text)
-        elif msg.role == "tool":
-            continue
         elif msg.role in ("user", "assistant"):
             text = _extract_content_text(msg.content)
             if text:
@@ -155,11 +153,7 @@ def convert_messages(
                     ),
                 )
 
-    system_prompt = "\n\n".join(system_parts) if system_parts else ""
-
-    if not conversation:
-        return system_prompt, None
-
+    system_prompt = "\n\n".join(system_parts)
     result = _find_last_user_message(conversation)
     if result is None:
         return system_prompt, None
