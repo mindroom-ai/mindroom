@@ -229,7 +229,7 @@ def _has_output_path_argument(function: Function) -> bool:
     return isinstance(properties, dict) and OUTPUT_PATH_ARGUMENT in properties
 
 
-def _with_optional_output_path(parameters: Mapping[str, Any] | None) -> dict[str, Any]:
+def _with_optional_output_path(parameters: Mapping[str, Any]) -> dict[str, Any]:
     """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as an optional property."""
     finished = dict(parameters or AGNO_EMPTY_PARAMETERS)
     properties = dict(finished.get("properties") or {})
