@@ -880,6 +880,14 @@ def _paused_answer() -> PausedAnswer:
     return PausedAnswer(text=segment.text, tool_trace=deepcopy(segment.tool_trace), team_state=segment.team_state)
 
 
+def _continuation_execution_identity(continuation: ApprovalContinuation) -> ToolExecutionIdentity | None:
+    """Return the execution identity an approval continuation recorded when its run paused."""
+    return parse_tool_execution_identity_payload(
+        continuation.execution_identity,
+        error_prefix="Approval continuation execution_identity",
+    )
+
+
 def _paused_presentation(handle: SpanHandle, paused: PausedAttempt, *, waiting_text: str | None) -> Presentation:
     """Return what a span's reply shows while it waits for approval."""
     return handle.presentation(
@@ -1545,6 +1553,13 @@ class ResponseRunner:
         """Return tool-call visibility for this agent."""
         return show_tool_calls_for_agent(self.deps.runtime.config, self.deps.agent_name)
 
+    def _thread_summary_message_count_hint(self, request: ResponseRequest) -> int:
+        """Return a lower bound on the thread's size after this reply, counted from the request's visible history."""
+        return thread_summary_message_count_hint(
+            request.thread_history,
+            trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
+        )
+
     async def _failed_approval_handoff(
         self,
         approval_id: str,
@@ -1684,13 +1699,7 @@ class ResponseRunner:
                     )
                     for message in request.thread_history
                 ),
-                thread_summary_message_count_hint=thread_summary_message_count_hint(
-                    request.thread_history,
-                    trusted_sender_ids=current_internal_sender_ids(
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                    ),
-                ),
+                thread_summary_message_count_hint=self._thread_summary_message_count_hint(request),
                 runtime_generation=(self.deps.approval_runtime_generation if continuation_state == "waiting" else None),
             )
             # Later messages of the conversation wait while the approval is pending, as behind a running reply.
@@ -2523,10 +2532,7 @@ class ResponseRunner:
             agent_name = list(continuation.team_member_names)
         else:
             return None
-        execution_identity = parse_tool_execution_identity_payload(
-            continuation.execution_identity,
-            error_prefix="Approval continuation execution_identity",
-        )
+        execution_identity = _continuation_execution_identity(continuation)
         if execution_identity is None:
             return None
         return self._memory_persistence(
@@ -2588,10 +2594,7 @@ class ResponseRunner:
         continuation: ApprovalContinuation,
     ) -> Callable[[str, str], Awaitable[None]] | None:
         """Return the normal run-to-Matrix event linkage for a resumed response."""
-        execution_identity = parse_tool_execution_identity_payload(
-            continuation.execution_identity,
-            error_prefix="Approval continuation execution_identity",
-        )
+        execution_identity = _continuation_execution_identity(continuation)
         if execution_identity is None:
             return None
         history_scope = continuation.history_scope
@@ -2615,10 +2618,7 @@ class ResponseRunner:
         progress: ProgressPublisher | None,
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
-        execution_identity = parse_tool_execution_identity_payload(
-            continuation.execution_identity,
-            error_prefix="Approval continuation execution_identity",
-        )
+        execution_identity = _continuation_execution_identity(continuation)
         if execution_identity is None:
             msg = f"Approval continuation {continuation.approval_id!r} has no execution identity"
             raise RuntimeError(msg)
@@ -5024,13 +5024,7 @@ class ResponseRunner:
                 response_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
-                thread_summary_message_count_hint=thread_summary_message_count_hint(
-                    request.thread_history,
-                    trusted_sender_ids=current_internal_sender_ids(
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                    ),
-                ),
+                thread_summary_message_count_hint=self._thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
             )
 
@@ -5113,9 +5107,12 @@ class ResponseRunner:
             reply_event=reply_event,
         )
 
+    # TODO(simplify): the span registry keeps each attempt's run id only for its "Hard cancelling" log line.
+    # Drop that field, `_note_run_id`, and `_span_attempt`'s `run_id`; the turn recorders keep their own run ids.
+    # Operators would notice: the Stop log line loses its `run_id`.
     @staticmethod
     def _note_run_id(run_id: str | None) -> None:
-        """Tell the span registry which run the current span's attempt is on, so a Stop cancels it too."""
+        """Tell the span registry which run the current span's attempt is on, for the Stop log."""
         handle = current_span()
         assert handle is not None, "every response attempt runs in a reply span"
         handle.runtime.spans.update_run_id(handle.span_id, run_id)
@@ -6033,13 +6030,7 @@ class ResponseRunner:
                 response_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
-                thread_summary_message_count_hint=thread_summary_message_count_hint(
-                    request.thread_history,
-                    trusted_sender_ids=current_internal_sender_ids(
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                    ),
-                ),
+                thread_summary_message_count_hint=self._thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
             )
 

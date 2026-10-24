@@ -853,8 +853,7 @@ class TurnStore:
                 turn_record,
                 discovery_event_ids=(*turn_record.discovery_event_ids, *additional_discovery_event_ids),
             )
-        metadata = TurnRecordCodec.to_run_metadata(projected_record)
-        return dict(metadata) if metadata else None
+        return TurnRecordCodec.to_run_metadata(projected_record) or None
 
     async def load_turn(self, original_event_id: str) -> TurnRecord | None:
         """Return the settled turn record a message belongs to."""
