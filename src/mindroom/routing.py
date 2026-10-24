@@ -145,6 +145,8 @@ async def suggest_responder_for_message(
             sender = msg.sender
             if sender.startswith("@") and ":" in sender:
                 sender_name = registry.current_entity_name_for_user_id(sender)
+                # TODO(simplify): A human sender reaches the router as its homeserver domain, so every human on one
+                # server reads as the same speaker. Keep the sender's Matrix ID instead. Models routing would notice.
                 sender = sender_name if sender_name is not None else MatrixID.parse(sender).domain
             resolved_context.append(replace_visible_message(msg, sender=sender))
 
