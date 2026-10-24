@@ -36,7 +36,12 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
-from mindroom.teams.delegate_tools import delegate_functions, propagate_member_pause, waited_on_member
+from mindroom.teams.delegate_tools import (
+    delegate_functions,
+    member_requirement,
+    propagate_member_pause,
+    waited_on_member,
+)
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 
 if TYPE_CHECKING:
@@ -291,13 +296,7 @@ def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: _Team
         named = replace(
             member_record,
             requirements=[
-                replace(
-                    requirement,
-                    member_agent_id=member.spec.id,
-                    member_display_name=member.spec.name,
-                    member_run_id=run_id,
-                )
-                for requirement in member_record.requirements or ()
+                member_requirement(requirement, member, run_id) for requirement in member_record.requirements or ()
             ],
         )
         plan = plan_resume(

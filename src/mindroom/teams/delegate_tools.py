@@ -23,7 +23,7 @@ from mindroom.tool_system.tool_function import AdaptedToolkit
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Sequence
 
-    from mindroom.llm.runs import RunRecord, TeamRunRecord, ToolExecution
+    from mindroom.llm.runs import RunRecord, RunRequirement, TeamRunRecord, ToolExecution
     from mindroom.teams.spec import TeamMember
 
 # What the leader reads for a member that paused, per mode, and for one that said nothing.
@@ -178,24 +178,28 @@ def waited_on_member(tool: ToolExecution, member: TeamMember) -> bool:
 
 
 def propagate_member_pause(record: TeamRunRecord, member: TeamMember, child: RunRecord) -> None:
-    """Copy the paused member's requirements onto the team run, naming the member, and keep its run with the team's.
-
-    The copies keep the requirement ids and tool call ids, which approval cards and delegation gates key by
-    (``member_id:call_id``); ``member_run_id`` is how a resume finds the member run among ``member_responses``.
-    """
+    """Copy the paused member's requirements onto the team run, naming the member, and keep its run with the team's."""
     if record.requirements is None:
         record.requirements = []
-    for requirement in child.requirements or ():
-        record.requirements.append(
-            replace(
-                requirement,
-                tool_execution=deepcopy(requirement.tool_execution),
-                member_agent_id=member.spec.id,
-                member_display_name=member.spec.name,
-                member_run_id=child.run_id,
-            ),
-        )
+    record.requirements.extend(
+        member_requirement(requirement, member, child.run_id) for requirement in child.requirements or ()
+    )
     record.member_responses.append(child)
+
+
+def member_requirement(requirement: RunRequirement, member: TeamMember, run_id: str) -> RunRequirement:
+    """Return a copy of ``requirement`` with a call of its own, naming ``member`` and its run ``run_id``.
+
+    The copy keeps the requirement id and tool call id, which approval cards and delegation gates key by
+    (``member_id:call_id``); ``member_run_id`` is how a resume finds the member run among ``member_responses``.
+    """
+    return replace(
+        requirement,
+        tool_execution=deepcopy(requirement.tool_execution),
+        member_agent_id=member.spec.id,
+        member_display_name=member.spec.name,
+        member_run_id=run_id,
+    )
 
 
 __all__ = [
@@ -205,6 +209,7 @@ __all__ = [
     "MemberRunner",
     "collaborate_result_text",
     "delegate_functions",
+    "member_requirement",
     "member_result_text",
     "propagate_member_pause",
     "waited_on_member",
