@@ -1061,6 +1061,55 @@ async def test_editing_a_folded_turn_beside_a_redacted_one_leaves_no_runs_or_sum
 
 
 @pytest.mark.asyncio
+async def test_editing_a_team_turn_removes_the_team_history_of_an_earlier_redacted_turn(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """Editing a team turn removes, from the team's session, the history an earlier redacted turn left there."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$edited")
+    scope = HistoryScope(kind="team", scope_id="team_general")
+
+    def run(event_id: str) -> TeamRunRecord:
+        return TeamRunRecord(
+            run_id=f"{event_id}-run",
+            team_id="team_general",
+            session_id=target.session_id,
+            metadata={
+                constants.MATRIX_EVENT_ID_METADATA_KEY: event_id,
+                constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: [event_id],
+                constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: [event_id],
+            },
+        )
+
+    session = ConversationSession(
+        kind="team",
+        session_id=target.session_id,
+        owner_id="team_general",
+        runs=[run("$redacted"), run("$edited")],
+    )
+    storage = _seeded_storage_with_runs(tmp_path, session)
+    store = await _store_with_storage(journal_store, storage)
+    records = {
+        event_id: TurnRecord.create(
+            [event_id],
+            response_event_id=f"{event_id}-reply",
+            response_owner="agent",
+            requester_id="@user:example.org",
+            history_scope=scope,
+            conversation_target=target,
+        )
+        for event_id in ("$redacted", "$edited")
+    }
+    for record in records.values():
+        await store.record_turn(record)
+    await store.mark_source_redacted("$redacted", room_id=target.room_id)
+
+    await store.remove_stale_runs_for_edit(turn_record=records["$edited"], requester_user_id="@user:example.org")
+
+    assert _stored_run_ids(storage, session) == []
+
+
+@pytest.mark.asyncio
 async def test_edit_then_redaction_never_replays_the_old_causal_suffix(
     journal_store: EventJournalStore,
     tmp_path: Path,
