@@ -880,6 +880,14 @@ def _paused_answer() -> PausedAnswer:
     return PausedAnswer(text=segment.text, tool_trace=deepcopy(segment.tool_trace), team_state=segment.team_state)
 
 
+def _continuation_execution_identity(continuation: ApprovalContinuation) -> ToolExecutionIdentity | None:
+    """Return the execution identity an approval continuation recorded when its run paused."""
+    return parse_tool_execution_identity_payload(
+        continuation.execution_identity,
+        error_prefix="Approval continuation execution_identity",
+    )
+
+
 def _paused_presentation(handle: SpanHandle, paused: PausedAttempt, *, waiting_text: str | None) -> Presentation:
     """Return what a span's reply shows while it waits for approval."""
     return handle.presentation(
@@ -2523,10 +2531,7 @@ class ResponseRunner:
             agent_name = list(continuation.team_member_names)
         else:
             return None
-        execution_identity = parse_tool_execution_identity_payload(
-            continuation.execution_identity,
-            error_prefix="Approval continuation execution_identity",
-        )
+        execution_identity = _continuation_execution_identity(continuation)
         if execution_identity is None:
             return None
         return self._memory_persistence(
@@ -2588,10 +2593,7 @@ class ResponseRunner:
         continuation: ApprovalContinuation,
     ) -> Callable[[str, str], Awaitable[None]] | None:
         """Return the normal run-to-Matrix event linkage for a resumed response."""
-        execution_identity = parse_tool_execution_identity_payload(
-            continuation.execution_identity,
-            error_prefix="Approval continuation execution_identity",
-        )
+        execution_identity = _continuation_execution_identity(continuation)
         if execution_identity is None:
             return None
         history_scope = continuation.history_scope
@@ -2615,10 +2617,7 @@ class ResponseRunner:
         progress: ProgressPublisher | None,
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
-        execution_identity = parse_tool_execution_identity_payload(
-            continuation.execution_identity,
-            error_prefix="Approval continuation execution_identity",
-        )
+        execution_identity = _continuation_execution_identity(continuation)
         if execution_identity is None:
             msg = f"Approval continuation {continuation.approval_id!r} has no execution identity"
             raise RuntimeError(msg)
