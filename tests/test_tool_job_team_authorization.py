@@ -336,7 +336,7 @@ async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Pat
             outcome = await execute_tool_call(
                 job,
                 {"action": "collect"},
-                ToolCallContext(run_id="team-run", session_id=context.session_id, call_id="collect-call"),
+                ToolCallContext(run_id="team-run", session_id=context.session_id, call_id="collect-call", user_id=None),
                 middleware=jobs.middleware,
             )
         assert "`member` (report) completed" in outcome.content
@@ -370,7 +370,7 @@ async def test_only_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path:
         assert jobs is not None
         [job] = jobs.controls.functions
         delegation = adapt_function(Function.from_callable(delegate_task_to_member))
-        call_context = ToolCallContext(run_id="team-run", session_id=context.session_id)
+        call_context = ToolCallContext(run_id="team-run", session_id=context.session_id, user_id=None)
         with tool_runtime_context(context), recording_tool_calls(recorder):
             await execute_tool_call(job, {"action": "list"}, call_context, middleware=jobs.middleware)
             delegated = await execute_tool_call(

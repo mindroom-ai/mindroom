@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import ToolExecution
 from mindroom.llm.usage import ToolCallMetrics
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.invocation import (
@@ -28,6 +27,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.provider import ToolSpec
+    from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
 
@@ -154,21 +154,9 @@ def plan_tool_batch(
                     ),
                 )
                 continue
-        execution = _planned_execution(call_id, function, arguments)
+        execution = function.planned_execution(call_id, arguments)
         planned.append(PlannedCall(call_id=call_id, function=function, arguments=arguments, execution=execution))
     return ToolBatch(planned=tuple(planned), refused=tuple(refused))
-
-
-def _planned_execution(call_id: str | None, function: ToolFunction, arguments: dict[str, Any] | None) -> ToolExecution:
-    execution = ToolExecution(tool_call_id=call_id, tool_name=function.name, tool_args=arguments)
-    if function.requires_confirmation:
-        execution.requires_confirmation = True
-    if function.external_execution:
-        execution.external_execution_required = True
-    if execution.is_paused:
-        execution.approval_type = function.approval_type
-        execution.external_execution_silent = function.external_execution_silent
-    return execution
 
 
 async def dispatch_tool_calls(

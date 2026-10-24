@@ -109,6 +109,8 @@ def test_a_catalog_cannot_be_built_for_a_run_without_a_session(tmp_path: Path) -
             run=RunContext(run_id="run", session=UnstoredSession("session"), user_id="@alice:test"),
             runtime_context=_runtime(tmp_path),
             store=None,
+            middleware=(),
+            max_tool_calls_per_turn=None,
         )
 
 
@@ -302,6 +304,40 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
     events = await _events(catalog, "actions", "action", {"value": 4})
     assert events[-1].kind == "continuation_required"
     assert events[-1].call.result == "4"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("flags", "paused"),
+    [
+        (
+            {"requires_confirmation": True, "approval_type": "audit", "external_execution_silent": True},
+            {"requires_confirmation": True, "external_execution_required": None},
+        ),
+        (
+            {"external_execution": True, "approval_type": "audit", "external_execution_silent": True},
+            {"requires_confirmation": None, "external_execution_required": True},
+        ),
+    ],
+    ids=["confirmation", "external"],
+)
+async def test_a_waiting_cli_call_keeps_its_function_s_approval_type_and_silence(
+    tmp_path: Path,
+    flags: dict[str, object],
+    paused: dict[str, object],
+) -> None:
+    """Whichever way a CLI call pauses, its stored execution names the function's approval type and silence."""
+
+    def action(value: int) -> int:
+        return value
+
+    catalog = await _catalog(tmp_path, [_function(action, **flags)])
+    events = await _events(catalog, "actions", "action", {"value": 3})
+
+    assert [event.kind for event in events] == ["waiting"]
+    stored = events[0].requirement.tool_execution.to_dict()
+    expected = {**paused, "approval_type": "audit", "external_execution_silent": True, "tool_args": {"value": 3}}
+    assert {key: stored[key] for key in expected} == expected
 
 
 @pytest.mark.asyncio

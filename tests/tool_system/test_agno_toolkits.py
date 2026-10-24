@@ -9,10 +9,11 @@ import pytest
 from agno.run import RunContext  # noqa: TC002 - pydantic resolves the annotations at wrap time.
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
+from agno.utils.schema import AGNO_INJECTED_PARAMS, FRAMEWORK_INJECTED_PARAMS
 
 from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system import agno_toolkits
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameter_names
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameters
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from tests.agno_parity import regenerate_tool_goldens
 from tests.agno_parity import tool_argument_probes as probes
@@ -144,6 +145,11 @@ def test_every_field_of_agnos_function_is_named_by_one_row_of_the_adapter_table(
     named = [name for names in agno_toolkits._FUNCTION_FIELDS for name in names]
 
     assert sorted(named) == sorted(Function.model_fields)
+
+
+def test_the_reserved_names_are_every_name_agno_fills_itself() -> None:
+    """A name Agno starts reserving fails here, instead of silently becoming a parameter the model may fill."""
+    assert set(agno_toolkits._RESERVED_NAMES) == {*FRAMEWORK_INJECTED_PARAMS, *AGNO_INJECTED_PARAMS, "fc"}
 
 
 def _lookup_country(country: str) -> str:
@@ -319,7 +325,7 @@ def test_injected_parameters_are_the_names_the_framework_supplies() -> None:
 
     [function] = adapt_toolkit(Toolkit(name="probes", tools=[tool])).functions
 
-    assert function.injected_params == {"agent", "ctx", "fc"}
+    assert function.injected_params == {"agent": "actor", "ctx": "run_context", "fc": "default"}
     assert list(function.parameters["properties"]) == ["query"]
 
 
@@ -336,4 +342,4 @@ def test_unresolvable_annotations_leave_only_the_reserved_names_injected() -> No
         return "ok"
 
     # ``Config`` is imported only for type checking here, so no annotation resolves and ``ctx`` is not recognized.
-    assert injected_parameter_names(tool) == {"run_context", "fc"}
+    assert injected_parameters(tool) == {"run_context": "run_context", "fc": "default"}

@@ -6489,7 +6489,7 @@ async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
             execute_tool_call(
                 read_file,
                 {"file_name": "demo.txt"},
-                ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
+                ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
                 middleware=(middleware,),
             ),
         )

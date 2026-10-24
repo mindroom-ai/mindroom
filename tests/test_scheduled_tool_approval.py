@@ -1087,7 +1087,7 @@ class _LiveRun:
                 if function.owning_toolkit is not None:
                     owners.setdefault(name, function.owning_toolkit)
         policy = bind_live_tools(functions, owners, self.middleware)
-        context = ToolCallContext(run_id="run", session_id="session", call_id="call-1")
+        context = ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None)
         return await run_tool_call(functions[function_name], arguments, context, middleware=policy)
 
 
@@ -2041,7 +2041,7 @@ async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Con
         return await run_tool_call(
             prepare_run_tools(build.spec).functions["run_scheduled_call"],
             {"task_id": _TASK},
-            ToolCallContext(run_id="run", session_id="session", call_id="call-1"),
+            ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
             middleware=agent_tool_middleware(build),
         )
 
@@ -2135,7 +2135,7 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
                 "execute_at": "2030-01-02T09:00:00-05:00",
                 "description": "Morning DM",
             },
-            ToolCallContext(run_id="run", session_id="session", call_id="call-1"),
+            ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
             middleware=agent_tool_middleware(build),
         )
 
@@ -2193,7 +2193,7 @@ async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_nam
             await run_tool_call(
                 prepare_run_tools(build.spec).functions["post_slack_message"],
                 _OTHER_ARGUMENTS,
-                ToolCallContext(run_id="run", session_id="session", call_id="call-2"),
+                ToolCallContext(run_id="run", session_id="session", call_id="call-2", user_id=None),
                 middleware=agent_tool_middleware(build),
             )
 

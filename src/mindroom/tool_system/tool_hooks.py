@@ -14,7 +14,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -148,14 +147,11 @@ def track_sync_tool_completion(tracker: SyncToolCompletionTracker | None) -> Ite
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _ResolvedToolContext:
+    """Who a tool call runs for and what its hooks receive; the room, thread, and requester are its identity's."""
+
     agent_name: str
-    room_id: str | None = None
-    thread_id: str | None = None
+    execution_identity: ToolExecutionIdentity | None
     reply_to_event_id: str | None
-    requester_id: str | None = None
-    session_id: str | None = None
-    channel: str | None = None
-    execution_identity: ToolExecutionIdentity | None = None
     config: Config | None
     runtime_paths: RuntimePaths | None
     correlation_id: str
@@ -166,6 +162,27 @@ class _ResolvedToolContext:
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
     hook_registry_state: HookRegistryState | None = None
+
+    @property
+    def room_id(self) -> str | None:
+        return None if self.execution_identity is None else self.execution_identity.room_id
+
+    @property
+    def thread_id(self) -> str | None:
+        identity = self.execution_identity
+        return None if identity is None else identity.resolved_thread_id or identity.thread_id
+
+    @property
+    def requester_id(self) -> str | None:
+        return None if self.execution_identity is None else self.execution_identity.requester_id
+
+    @property
+    def session_id(self) -> str | None:
+        return None if self.execution_identity is None else self.execution_identity.session_id
+
+    @property
+    def channel(self) -> str | None:
+        return None if self.execution_identity is None else self.execution_identity.channel
 
     def hook_context_kwargs(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -256,13 +273,8 @@ def _resolve_tool_context(
         bindings = resolve_tool_runtime_hook_bindings(runtime_context)
         return _ResolvedToolContext(
             agent_name=agent_name or identity.agent_name,
-            room_id=identity.room_id,
-            thread_id=identity.resolved_thread_id or identity.thread_id,
-            reply_to_event_id=runtime_context.reply_to_event_id,
-            requester_id=identity.requester_id,
-            session_id=identity.session_id,
-            channel=identity.channel,
             execution_identity=identity,
+            reply_to_event_id=runtime_context.reply_to_event_id,
             config=runtime_context.config,
             runtime_paths=runtime_context.runtime_paths,
             correlation_id=_correlation_id_for_runtime_context(runtime_context, origin),
@@ -275,27 +287,16 @@ def _resolve_tool_context(
             hook_registry_state=runtime_context.hook_registry_state,
         )
 
+    identity = None if dispatch_context is None else dispatch_context.execution_identity
     reply_to_event_id = current_llm_request_log_context().get("reply_to_event_id")
-    resolved = _ResolvedToolContext(
-        agent_name=agent_name or "",
+    return _ResolvedToolContext(
+        agent_name=agent_name or (identity.agent_name if identity is not None else ""),
+        execution_identity=identity,
         reply_to_event_id=reply_to_event_id if isinstance(reply_to_event_id, str) else None,
         config=config,
         runtime_paths=runtime_paths,
         correlation_id=_correlation_id_for_runtime_context(None, origin),
         origin=origin,
-    )
-    if dispatch_context is None:
-        return resolved
-    identity = dispatch_context.execution_identity
-    return replace(
-        resolved,
-        agent_name=agent_name or identity.agent_name,
-        room_id=identity.room_id,
-        thread_id=identity.resolved_thread_id or identity.thread_id,
-        requester_id=identity.requester_id,
-        session_id=identity.session_id,
-        channel=identity.channel,
-        execution_identity=identity,
     )
 
 
@@ -690,33 +691,6 @@ async def dispatch_external_tool_hooks(
     return None
 
 
-def build_tool_hook_bridge(
-    hook_registry: HookRegistry,
-    agent_name: str | None,
-    dispatch_context: ToolDispatchContext | None = None,
-    config: Config | None = None,
-    runtime_paths: RuntimePaths | None = None,
-    origin: BackgroundScriptToolOrigin | None = None,
-    approval_gate: _ToolApprovalGate | None = None,
-) -> Callable[..., Any]:
-    """Return the tool-call policy as one ``(name, func, args)`` hook around ``func``, which the middleware wraps.
-
-    ``func`` is the middleware's async continuation, which runs the rest of the call.
-    """
-    return partial(
-        _execute_bridge,
-        hook_registry=hook_registry,
-        agent_name=agent_name,
-        dispatch_context=dispatch_context,
-        config=config,
-        runtime_paths=runtime_paths,
-        has_before_hooks=hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL),
-        has_after_hooks=hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL),
-        origin=origin,
-        approval_gate=approval_gate,
-    )
-
-
 def build_tool_hook_middleware(
     hook_registry: HookRegistry,
     agent_name: str | None,
@@ -733,20 +707,26 @@ def build_tool_hook_middleware(
     script's call passes its ``origin`` and the ``approval_gate`` that asks its requester; a declined call then
     returns ``BackgroundToolApprovalDenied`` without running.
     """
-    bridge = build_tool_hook_bridge(
-        hook_registry,
-        agent_name,
-        dispatch_context,
-        config,
-        runtime_paths,
-        origin=origin,
-        approval_gate=approval_gate,
-    )
+    has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
+    has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
 
     async def middleware(call: ToolCall, call_next: ToolNext) -> object:
         async def run(**arguments: Any) -> object:  # noqa: ANN401 - the hook chain passes arguments as kwargs
             return await call_next(arguments)
 
-        return await bridge(call.function.name, run, call.arguments)
+        return await _execute_bridge(
+            call.function.name,
+            run,
+            call.arguments,
+            hook_registry=hook_registry,
+            agent_name=agent_name,
+            dispatch_context=dispatch_context,
+            config=config,
+            runtime_paths=runtime_paths,
+            has_before_hooks=has_before_hooks,
+            has_after_hooks=has_after_hooks,
+            origin=origin,
+            approval_gate=approval_gate,
+        )
 
     return middleware

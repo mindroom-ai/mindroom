@@ -726,7 +726,7 @@ async def test_matrix_message_team_member_send_follows_the_teams_thread_mode(tmp
         result = await run_tool_call(
             send,
             {"action": "send", "message": "hello", "attachments": ["att_member"]},
-            ToolCallContext(run_id="run-1", session_id="session-1"),
+            ToolCallContext(run_id="run-1", session_id="session-1", user_id=None),
             middleware=(_as_member("general", "default"),),
         )
 

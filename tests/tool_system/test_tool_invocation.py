@@ -17,10 +17,10 @@ from agno.media import Image as AgnoImage
 from agno.media import Video as AgnoVideo
 from agno.run import RunContext
 from agno.tools import Toolkit
-from agno.tools.function import ToolResult
+from agno.tools.function import Function, ToolResult
 
 from mindroom.llm.media import Image, Video
-from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import (
     ToolArgumentError,
     ToolCall,
@@ -54,7 +54,7 @@ def _context(**overrides: object) -> ToolCallContext:
 async def _run(function: ToolFunction, raw_arguments: str, **context: object) -> ToolOutcome:
     parsed = parse_tool_arguments(raw_arguments, function)
     assert not isinstance(parsed, ToolArgumentError)
-    return await execute_tool_call(function, parsed, _context(**context))
+    return await execute_tool_call(function, parsed, _context(**context), middleware=())
 
 
 @pytest.fixture(scope="module")
@@ -147,7 +147,7 @@ async def test_identity_typed_parameters_are_injected_by_annotation() -> None:
     assert list(function.parameters["properties"]) == ["query"]
     parsed = parse_tool_arguments('{"query": "q", "owner": "spoof", "ctx": {"run_id": "spoof"}}', function)
     assert parsed == {"query": "q"}
-    outcome = await execute_tool_call(function, parsed, _context())
+    outcome = await execute_tool_call(function, parsed, _context(), middleware=())
     assert outcome.content == "q"
     assert isinstance(seen["owner"], ToolCallActor)
     assert isinstance(seen["ctx"], RunContext)
@@ -167,7 +167,7 @@ async def test_arguments_that_skip_parsing_cannot_replace_injected_objects() -> 
     spoof = {"run_id": "spoof", "session_id": "spoof", "user_id": "@evil:localhost"}
     arguments = {"query": "q", "run_context": spoof, "ctx": spoof, "owner": "spoof", "_agno_run_context": spoof}
 
-    outcome = await execute_tool_call(function, arguments, _context())
+    outcome = await execute_tool_call(function, arguments, _context(), middleware=())
 
     assert outcome == ToolOutcome(content="q")
     run_context, ctx = seen["run_context"], seen["ctx"]
@@ -176,6 +176,31 @@ async def test_arguments_that_skip_parsing_cannot_replace_injected_objects() -> 
     assert (run_context.run_id, run_context.user_id) == ("run-1", "@user:localhost")
     assert (ctx.run_id, ctx.user_id) == ("run-1", "@user:localhost")
     assert isinstance(seen["owner"], ToolCallActor)
+
+
+@pytest.mark.asyncio
+async def test_a_schema_may_give_the_model_a_media_name_but_never_an_identity_name() -> None:
+    """A wrapper's schema may expose its wrapped tool's own ``files``; a declared ``agent`` still gets the stand-in."""
+    seen: dict[str, object] = {}
+
+    def tool(query: str, agent: object = None, files: list[str] | None = None) -> str:
+        seen.update(agent=agent, files=files)
+        return query
+
+    schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "agent": {"type": "string"}, "files": {"type": "array"}},
+        "required": ["query"],
+    }
+    function = adapt_function(
+        Function(name="tool", entrypoint=tool, parameters=schema, skip_entrypoint_processing=True),
+    )
+
+    outcome = await _run(function, '{"query": "q", "agent": "spoof", "files": ["notes.txt"]}')
+
+    assert outcome == ToolOutcome(content="q")
+    assert isinstance(seen["agent"], ToolCallActor)
+    assert seen["files"] == ["notes.txt"]
 
 
 @pytest.mark.asyncio
@@ -331,7 +356,7 @@ async def test_a_returned_iterator_is_drained_like_a_generator() -> None:
 
     [function] = _functions(letters).values()
 
-    assert await run_tool_call(function, {}, _context()) == "ab"
+    assert await run_tool_call(function, {}, _context(), middleware=()) == "ab"
 
 
 @pytest.mark.asyncio
@@ -414,9 +439,9 @@ async def test_runners_outside_the_loop_get_the_tools_own_value_and_its_exceptio
     functions = _functions(numbers, streams, fails)
 
     assert await run_tool_call(functions["numbers"], {}, _context(), middleware=(record,)) == {"a": 1}
-    assert await run_tool_call(functions["streams"], {}, _context()) == "ab"
+    assert await run_tool_call(functions["streams"], {}, _context(), middleware=()) == "ab"
     with pytest.raises(ValueError, match="boom"):
-        await run_tool_call(functions["fails"], {}, _context())
+        await run_tool_call(functions["fails"], {}, _context(), middleware=())
     assert seen == ["numbers"]
     assert current_tool_call() is None
 

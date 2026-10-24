@@ -322,7 +322,7 @@ async def argument_outcome(case: Mapping[str, Any], functions: Mapping[str, Tool
     if isinstance(parsed, ToolArgumentError):
         return {**outcome, "error_text": normalize_error_text(parsed.error_text)}
     outcome["arguments"] = parsed
-    result = await execute_tool_call(function, parsed, golden_call_context())
+    result = await execute_tool_call(function, parsed, golden_call_context(), middleware=())
     if result.is_error:
         return {**outcome, "error_text": normalize_error_text(result.content)}
     return {**outcome, "kwargs": json.loads(result.content)}

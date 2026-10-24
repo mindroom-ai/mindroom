@@ -44,7 +44,7 @@ async def test_execution_authorizers_are_scoped_to_runtime(tmp_path: Path) -> No
     call = JobCall(
         tool=job_tool(_noop),
         arguments={},
-        context=ToolCallContext(run_id="run", session_id="session"),
+        context=ToolCallContext(run_id="run", session_id="session", user_id=None),
         team=False,
     )
 

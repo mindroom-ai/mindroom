@@ -25,7 +25,7 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.streaming import _queue_delivery_request
 from mindroom.tool_system import tool_hooks as tool_hooks_module
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
+from tests.agent_tool_helpers import tool_policy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -231,7 +231,7 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
             ),
         ],
     )
-    bridge = build_tool_hook_bridge(registry, agent_name="code")
+    bridge = tool_policy(registry, agent_name="code")
 
     async def echo(text: str) -> str:
         return text.upper()
@@ -294,7 +294,7 @@ async def test_tool_hook_bridge_times_blocked_after_hooks_separately(monkeypatch
             ),
         ],
     )
-    bridge = build_tool_hook_bridge(registry, agent_name="code")
+    bridge = tool_policy(registry, agent_name="code")
     next_func = AsyncMock(return_value="should not run")
     perf_counter = Mock(
         side_effect=[

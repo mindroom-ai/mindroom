@@ -55,8 +55,9 @@ from mindroom.tool_system.runtime_context import (
     emit_custom_event,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, build_tool_hook_middleware
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from tests.agent_tool_helpers import tool_policy
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -288,7 +289,7 @@ async def _run_echo_through_middleware(toolkit: Toolkit, registry: HookRegistry)
     return await execute_tool_call(
         adapt_function(_first_function(toolkit)),
         {"text": "hi"},
-        ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1"),
+        ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1", user_id=None),
         middleware=(middleware,),
     )
 
@@ -432,16 +433,11 @@ async def test_emit_gate_fails_open_on_errors_and_timeouts(tmp_path: Path) -> No
     assert context.decline_reason == ""
 
 
-def test_build_tool_hook_bridge_returns_bridge_without_tool_hooks() -> None:
-    """Failure logging should keep the bridge installed even without plugin hooks."""
-    assert build_tool_hook_bridge(HookRegistry.empty(), agent_name="code") is not None
-
-
 @pytest.mark.asyncio
 async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_path: Path) -> None:
     """The bridge should durably record failures and re-raise the original exception."""
     runtime_context = _tool_runtime_context(tmp_path)
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         HookRegistry.empty(),
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
@@ -453,7 +449,6 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
         del kwargs
         raise error
 
-    assert bridge is not None
     with (
         tool_runtime_context(runtime_context),
         tool_execution_identity(_execution_identity()),
@@ -517,6 +512,44 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_call_outside_a_live_turn_reports_its_identity_s_room_resolved_thread_and_channel(
+    tmp_path: Path,
+) -> None:
+    """Without a live turn, the hooks, the failure record, and its log line read the call's own identity."""
+    seen: list[tuple[str | None, ...]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.room_id, ctx.thread_id, ctx.requester_id, ctx.session_id))
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [before])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        runtime_paths=runtime_paths,
+    )
+
+    async def explode(**kwargs: object) -> object:
+        del kwargs
+        msg = "boom"
+        raise ValueError(msg)
+
+    with patch("mindroom.tool_system.tool_hooks.logger.warning") as warning, pytest.raises(ValueError, match="boom"):
+        await bridge("explode", explode, {})
+
+    assert seen == [("!room:localhost", "$resolved-thread", "@user:localhost", _SESSION_ID)]
+    log_path = runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert (record["channel"], record["room_id"], record["thread_id"]) == (
+        "matrix",
+        "!room:localhost",
+        "$resolved-thread",
+    )
+    assert warning.call_args.kwargs["channel"] == "matrix"
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_breaks(tmp_path: Path) -> None:
     """Secondary logging failures should not mask the original tool exception."""
     seen_errors: list[BaseException | None] = []
@@ -526,7 +559,7 @@ async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_
         seen_errors.append(ctx.error)
 
     runtime_context = _tool_runtime_context(tmp_path)
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         HookRegistry.from_plugins([_plugin("tool-policy", [after])]),
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
@@ -538,7 +571,6 @@ async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_
         del kwargs
         raise error
 
-    assert bridge is not None
     with (
         patch("mindroom.tool_system.tool_hooks.record_tool_failure", side_effect=RuntimeError("disk full")),
         patch("mindroom.tool_system.tool_hooks.logger.exception") as mock_logger_exception,
@@ -562,8 +594,7 @@ async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_
 @pytest.mark.asyncio
 async def test_tool_hook_bridge_records_each_call_before_it_runs() -> None:
     """The recorder learns of a call before the tool runs and of its result after; a cancelled call stays started."""
-    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
-    assert bridge is not None
+    bridge = tool_policy(HookRegistry.empty(), agent_name="code")
     events: list[tuple[str, object]] = []
     hanging = asyncio.Event()
 
@@ -630,7 +661,7 @@ async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
         await execute_tool_call(
             adapt_function(Function(name="sync_tool", entrypoint=sync_tool)),
             {},
-            ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1"),
+            ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1", user_id=None),
             middleware=(middleware,),
         )
 
@@ -674,12 +705,11 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
         )
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -722,12 +752,11 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
         ctx.result["mutated"] = True
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [mutate])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -742,14 +771,13 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
 async def test_tool_hook_bridge_does_not_record_success_rows_by_default(tmp_path: Path) -> None:
     """Successful tool calls should not create durable audit rows unless debug logging is enabled."""
     runtime_context = _tool_runtime_context(tmp_path)
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         HookRegistry.empty(),
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
         config=runtime_context.config,
         runtime_paths=runtime_context.runtime_paths,
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -772,14 +800,13 @@ async def test_tool_after_call_hook_error_does_not_lose_debug_success_row(tmp_pa
 
     runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [explode_after])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
         config=runtime_context.config,
         runtime_paths=runtime_context.runtime_paths,
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -810,14 +837,13 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
 
     runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [after_call])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
         config=runtime_context.config,
         runtime_paths=runtime_context.runtime_paths,
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -837,14 +863,13 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
 async def test_oauth_required_tool_result_is_recorded_when_debug_enabled(tmp_path: Path) -> None:
     """OAuth-required structured returns should be logged like other successful tool results."""
     runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         HookRegistry.empty(),
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
         config=runtime_context.config,
         runtime_paths=runtime_context.runtime_paths,
     )
-    assert bridge is not None
 
     async def next_func(**_kwargs: object) -> None:
         msg = "Connect Google"
@@ -878,12 +903,11 @@ async def test_tool_after_call_hooks_cannot_mutate_non_deepcopyable_result(tmp_p
         assert ctx.result == "NonDeepcopyableResult(payload={'echo': 'notes.txt'})"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [mutate])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> NonDeepcopyableResult:
         return NonDeepcopyableResult({"echo": str(kwargs["path"])})
@@ -934,12 +958,11 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
         assert event_id == "$after-event"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -1003,12 +1026,11 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
         assert event_id == "$dispatch-event"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -1079,12 +1101,11 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
         target=target,
         user_id="@user:localhost",
     )
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(execution_identity),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -1133,12 +1154,11 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
         assert event_id == "$dispatch-event"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -1209,12 +1229,11 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
         target=target,
         user_id="@user:localhost",
     )
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(execution_identity),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -1357,12 +1376,11 @@ async def test_a_call_whose_grant_is_revoked_while_its_before_hook_runs_never_en
     runtime = await tool_job_runtime(tmp_path / "jobs", authorize_execution=authorize_execution)
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         HookRegistry.from_plugins([_plugin("tool-policy", [before, after])]),
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     def sync_tool() -> str:
         ran.append("body")
@@ -1371,7 +1389,7 @@ async def test_a_call_whose_grant_is_revoked_while_its_before_hook_runs_never_en
     call = JobCall(
         tool=job_tool(sync_tool),
         arguments={},
-        context=ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1"),
+        context=ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1", user_id=None),
         team=False,
     )
     try:
@@ -1437,15 +1455,13 @@ def _request_network_access_config(runtime_paths: RuntimePaths) -> Config:
 
 
 def _request_network_access_bridge(config: Config, runtime_paths: RuntimePaths) -> Callable[..., Awaitable[object]]:
-    bridge = build_tool_hook_bridge(
+    return tool_policy(
         HookRegistry.empty(),
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
         config=config,
         runtime_paths=runtime_paths,
     )
-    assert bridge is not None
-    return bridge
 
 
 @pytest.mark.asyncio
@@ -1468,7 +1484,7 @@ async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_co
         parent_seen.append(ctx.agent_name)
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [child_before, child_after, parent_before])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="child-agent",
         dispatch_context=_dispatch_context(
@@ -1483,7 +1499,6 @@ async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_co
             ),
         ),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> str:
         return str(kwargs["path"])
@@ -1510,7 +1525,7 @@ async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_id
         seen.append((ctx.room_id, ctx.thread_id, ctx.requester_id, ctx.session_id))
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="child-agent",
         dispatch_context=_dispatch_context(
@@ -1525,7 +1540,6 @@ async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_id
             ),
         ),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> str:
         return str(kwargs["path"])
@@ -1549,7 +1563,7 @@ async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_ru
         seen.append((ctx.room_id, ctx.thread_id, ctx.requester_id, ctx.session_id))
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="child-agent",
         dispatch_context=_dispatch_context(
@@ -1564,7 +1578,6 @@ async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_ru
             ),
         ),
     )
-    assert bridge is not None
 
     async def next_func(**kwargs: object) -> str:
         return str(kwargs["path"])
@@ -1591,12 +1604,11 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
         after_seen.append((ctx.blocked, ctx.result, ctx.error))
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     next_func = AsyncMock(return_value="should not run")
     with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
@@ -1631,7 +1643,7 @@ async def test_cancellation_after_before_hook_is_reported_as_blocked(tmp_path: P
         calls.append("executed")
         return "result"
 
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         HookRegistry.from_plugins([_plugin("cancel-admission", [before, after])]),
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
@@ -1658,12 +1670,11 @@ async def test_tool_hook_bridge_reraises_tool_errors_after_after_call(tmp_path: 
         after_seen.append((ctx.result, ctx.error, ctx.blocked))
 
     registry = HookRegistry.from_plugins([_plugin("tool-audit", [after])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     async def explode(**kwargs: object) -> object:
         del kwargs
@@ -1695,12 +1706,11 @@ async def test_tool_after_call_hooks_cannot_mutate_reraised_non_deepcopyable_err
         ctx.error.args = ("rewritten by hook",)
 
     registry = HookRegistry.from_plugins([_plugin("tool-audit", [rewrite])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     async def explode(**kwargs: object) -> object:
         del kwargs
@@ -1803,7 +1813,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             result = await execute_tool_call(
                 echo,
                 {"text": "hi"},
-                ToolCallContext(run_id="run-1", session_id=target.session_id or "", call_id="call-1"),
+                ToolCallContext(run_id="run-1", session_id=target.session_id or "", call_id="call-1", user_id=None),
                 middleware=agent_tool_middleware(build),
             )
 
@@ -1940,12 +1950,11 @@ async def test_tool_hook_bridge_fails_open_when_before_hook_raises(tmp_path: Pat
         raise RuntimeError(msg)
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [broken])])
-    bridge = build_tool_hook_bridge(
+    bridge = tool_policy(
         registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
     )
-    assert bridge is not None
 
     next_func = AsyncMock(return_value="ok")
     with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
@@ -1980,7 +1989,7 @@ async def test_tool_hook_contexts_track_registry_lifecycle(tmp_path: Path) -> No
         _tool_runtime_context(tmp_path, hook_registry=registry),
         hook_registry_state=registry_state,
     )
-    bridge = build_tool_hook_bridge(registry, agent_name="code")
+    bridge = tool_policy(registry, agent_name="code")
 
     with tool_runtime_context(runtime_context):
         result = await bridge("read_file", AsyncMock(return_value="ok"), {})
@@ -2039,7 +2048,7 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
         outcome = await execute_tool_call(
             echo,
             {"text": "hello"},
-            ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
+            ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
             middleware=agent_tool_middleware(build),
         )
 

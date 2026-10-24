@@ -20,7 +20,7 @@ from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.agent_loop.spec import UnstoredSession
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.llm.events import ReportedCall
-from mindroom.llm.runs import RunRequirement, ToolExecution
+from mindroom.llm.runs import RunRequirement
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import execute_tool_call
@@ -109,8 +109,8 @@ class PreparedAgentToolCatalog:
     run: RunContext
     runtime_context: ToolRuntimeContext
     store: ConversationStore | None
-    middleware: Sequence[ToolMiddleware] = ()
-    max_tool_calls_per_turn: int | None = None
+    middleware: Sequence[ToolMiddleware]
+    max_tool_calls_per_turn: int | None
     record: RunRecord | None = None
     _bindings: dict[ToolKey, PreparedAgentToolBinding] = field(default_factory=dict, init=False)
     _deferred: dict[str, DeferredAgentToolkit] = field(default_factory=dict, init=False)
@@ -216,15 +216,14 @@ class PreparedAgentToolCatalog:
         self,
         toolkit: AdaptedToolkit,
         functions: Sequence[ToolFunction],
-        owners: Mapping[str, str] | None = None,
+        owners: Mapping[str, str],
     ) -> None:
-        """Bind ``functions`` of ``toolkit``, under their owner from ``owners``, or under the toolkit without one."""
+        """Bind ``functions`` of ``toolkit`` under their owner from ``owners``, or as ``agent`` when it names none."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
         instructions = (toolkit.guidance,) if toolkit.guidance else ()
         for function in functions:
-            authored = owners is None or function.name in owners
-            namespace = ((owners or {}).get(function.name) or toolkit.name) if authored else "agent"
-            if namespace == "agent" and authored:
+            namespace = owners.get(function.name, "agent")
+            if namespace == "agent" and function.name in owners:
                 msg = "The agent toolkit namespace is reserved for generated functions"
                 raise ValueError(msg)
             key = ToolKey(namespace, function.name)
@@ -267,7 +266,9 @@ class PreparedAgentToolCatalog:
                 with self.execution_context():
                     toolkit = await deferred.materialize()
                 await connect_toolkits((toolkit,), self._closes)
-                self._prepare(replace(toolkit, name=deferred.name), toolkit.functions)
+                # Every function a deferred toolkit materializes is authored in it.
+                owners = dict.fromkeys((function.name for function in toolkit.functions), deferred.name)
+                self._prepare(toolkit, toolkit.functions, owners)
                 del self._deferred[key.toolkit]
             binding = self._bindings.get(key)
             if binding is None:
@@ -333,20 +334,6 @@ def _check_resolves(
     ):
         msg = "Approval does not resolve this exact prepared call"
         raise ValueError(msg)
-
-
-def _paused_execution(function: ToolFunction, call_id: str, arguments: dict[str, object]) -> ToolExecution | None:
-    """Return the waiting execution of a call its function pauses for a decision, or None when it runs now."""
-    if not (function.requires_confirmation or function.external_execution):
-        return None
-    execution = ToolExecution(tool_call_id=call_id, tool_name=function.name, tool_args=deepcopy(arguments))
-    if function.requires_confirmation:
-        execution.requires_confirmation = True
-        execution.approval_type = function.approval_type
-    if function.external_execution:
-        execution.external_execution_required = True
-        execution.external_execution_silent = function.external_execution_silent
-    return execution
 
 
 def execute_agent_tool_call(
@@ -420,16 +407,17 @@ async def _execute_agent_tool_call(
         if limit is not None and catalog._call_count >= limit:
             yield _failure(binding, call_id, arguments, "Tool call limit reached")
             return
-        paused = None if requirement is not None else _paused_execution(binding.function, call_id, arguments)
-        if paused is not None:
-            if paused.external_execution_required:
+        # A call that resumes from its decision runs now, so only a fresh call plans its execution.
+        execution = binding.function.planned_execution(call_id, arguments) if requirement is None else None
+        if execution is not None and execution.is_paused:
+            if execution.external_execution_required:
                 catalog._call_count += 1
             yield AgentToolCallEvent(
                 "waiting",
                 call_id,
                 binding.key,
-                call=paused.call,
-                requirement=RunRequirement(paused),
+                call=execution.call,
+                requirement=RunRequirement(execution),
             )
             return
         catalog._call_count += 1

@@ -150,7 +150,7 @@ async def test_an_sdk_function_inside_a_stopped_job_never_runs(tmp_path: Path, s
     control = JobControl()
     if stopped_by == "cancel":
         control.cancel()
-    run = ToolCallContext(run_id="job-run", session_id="session", call_id="sdk-call")
+    run = ToolCallContext(run_id="job-run", session_id="session", call_id="sdk-call", user_id=None)
     job_call = JobCall(tool=job_tool(search), arguments={}, context=run, team=False)
     generated = adapt_function(Function.from_callable(search))
     (admit,) = with_job_admission(job_actor(), ())
