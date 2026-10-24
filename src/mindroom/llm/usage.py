@@ -288,8 +288,7 @@ def _signed_model(entry: ModelMetrics, sign: int) -> ModelMetrics:
         provider=entry.provider,
         provider_metrics=None if entry.provider_metrics is None else _scaled(entry.provider_metrics, sign),
     )
-    for name in _TOKEN_FIELDS:
-        setattr(signed, name, sign * getattr(entry, name))
+    _add_token_counts(signed, entry, sign=sign)
     return signed
 
 
