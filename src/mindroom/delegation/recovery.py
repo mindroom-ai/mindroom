@@ -12,8 +12,7 @@ from mindroom.delegation.lifecycle import child_execution_identity, finish_child
 from mindroom.delegation.sessions import load_retained_subagent_turn, load_subagent, subagent_recovery_lock
 from mindroom.delegation.state import DELEGATION_STATE_KEY, TERMINAL_CHILD_STATUSES, DelegationChild, DelegationState
 from mindroom.delegation.storage import delegation_storage_config
-from mindroom.history.session_context import create_scope_session_storage
-from mindroom.history.storage import new_scope_session
+from mindroom.history.session_context import load_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -26,7 +25,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
@@ -153,31 +151,20 @@ async def interrupt_child(
             tool.external_execution_required = False
 
         def persist() -> None:
-            storage = create_session_storage(
-                child.child_agent_name,
-                config,
-                runtime_paths,
+            context = load_scope_session(
+                scope=HistoryScope(kind="agent", scope_id=child.child_agent_name),
+                session_id=child.session_id,
+                runtime_paths=runtime_paths,
+                config=config,
                 execution_identity=child_execution_identity(child),
             )
-            _rewrite_stored_run(
-                storage,
-                HistoryScope(kind="agent", scope_id=child.child_agent_name),
-                child.session_id,
-                response,
-            )
+            # A named scope and session always load a context.
+            assert context is not None
+            # The run exists; this rewrites its row without touching the usage ledger.
+            context.storage.save_runs(context.stored_or_first_session(), [response])
 
         await asyncio.to_thread(persist)
     await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
-
-
-def _rewrite_stored_run(storage: ConversationStore, scope: HistoryScope, session_id: str, run: AnyRunRecord) -> None:
-    """Rewrite the stored row of ``run``, which exists, in session ``session_id``, leaving the usage ledger untouched."""
-    session = storage.load_session(session_id, scope.kind) or new_scope_session(
-        session_id=session_id,
-        scope_id=scope.scope_id,
-        is_team=scope.kind == "team",
-    )
-    storage.save_runs(session, [run])
 
 
 async def _cancel_delegations(
@@ -234,14 +221,18 @@ async def cancel_approval_delegations(
         scope = HistoryScope(kind="agent", scope_id=continuation.entity_name)
     if scope.kind == "agent" and continuation.entity_name not in config.agents:
         return
-    storage = await asyncio.to_thread(
-        create_scope_session_storage,
+    context = await asyncio.to_thread(
+        load_scope_session,
         scope=scope,
-        config=config,
+        session_id=continuation.session_id,
         runtime_paths=runtime_paths,
+        config=config,
         execution_identity=identity,
     )
-    response = await asyncio.to_thread(storage.get_run, continuation.run_id)
+    # A named scope and session always load a context.
+    assert context is not None
+    response = await asyncio.to_thread(context.storage.get_run, continuation.run_id)
     if response is not None and bool((response.metadata or {}).get(DELEGATION_STATE_KEY)):
         await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-        await asyncio.to_thread(_rewrite_stored_run, storage, scope, continuation.session_id, response)
+        # The run exists; this rewrites its row without touching the usage ledger.
+        await asyncio.to_thread(context.storage.save_runs, context.stored_or_first_session(), [response])
