@@ -305,10 +305,6 @@ def _resolve_tool_context(
     )
 
 
-def _format_declined_result(tool_name: str, reason: str) -> str:
-    return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
-
-
 async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _ToolHookResult:
     """Run one synchronous tool call off the event loop, retained by any completion owner."""
     tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
@@ -440,7 +436,7 @@ async def _run_before_hooks(
     )
     if not before_context.declined:
         return None
-    return _format_declined_result(tool_name, before_context.decline_reason)
+    return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=before_context.decline_reason)
 
 
 @dataclass(slots=True)
@@ -621,7 +617,7 @@ async def _execute_bridge(  # noqa: C901
         decision = await approval_gate(origin, tool_name, deepcopy(args))
         if not decision.approved:
             reason = denial_note_for(decision.reason)
-            declined_result = _format_declined_result(tool_name, reason)
+            declined_result = _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
             duration_ms = timing.mark_result_ready()
             await finish("blocked_approval", duration_ms=duration_ms, result=declined_result, blocked=True)
             return BackgroundToolApprovalDenied(reason=reason)
