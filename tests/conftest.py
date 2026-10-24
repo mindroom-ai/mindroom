@@ -3252,31 +3252,6 @@ def _refused_dials() -> Generator[list[_RefusedDial], None, None]:
         pytest.fail(failure, pytrace=False)
 
 
-def pytest_configure(config: pytest.Config) -> None:
-    """Keep Google client libraries from authenticating as the developer.
-
-    With no credentials named, google-auth reads gcloud's application default credentials file and asks the GCE
-    metadata server, and it refreshes tokens through ``requests``, which the network guard does not cover. An
-    empty gcloud config directory, ``NO_GCE_CHECK``, and no inherited ``GOOGLE_APPLICATION_CREDENTIALS`` make a
-    test that builds a Google client without credentials fail instead, and no inherited Google API key is used.
-    """
-    gcloud_config = tempfile.mkdtemp(prefix="mindroom-test-gcloud-")
-    config.add_cleanup(lambda: shutil.rmtree(gcloud_config, ignore_errors=True))
-    hide_developer_google_credentials(os.environ, gcloud_config)
-
-
-def hide_developer_google_credentials(environ: MutableMapping[str, str], gcloud_config: str) -> None:
-    """Point google-auth at an empty gcloud config, skip the GCE metadata server, and drop inherited Google keys.
-
-    google-genai reads ``GOOGLE_API_KEY`` and ``GEMINI_API_KEY`` itself, and its async client uses aiohttp, which the
-    network guard does not see either.
-    """
-    environ["CLOUDSDK_CONFIG"] = gcloud_config
-    environ["NO_GCE_CHECK"] = "true"
-    for name in ("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_API_KEY", "GEMINI_API_KEY"):
-        environ.pop(name, None)
-
-
 @pytest.fixture(autouse=True)
 def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Generator[None, None, None]:
     """Fail a test whose HTTP client made a dial that ``_dial_leaves_the_test`` rejects.
@@ -3291,6 +3266,39 @@ def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Ge
     failure = _report_test_dials(_refused_dials, start, threading.current_thread().name)
     if failure is not None:
         pytest.fail(failure, pytrace=False)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Keep Google client libraries from authenticating as the developer.
+
+    With no credentials named, google-auth reads gcloud's application default credentials file and asks the GCE
+    metadata server, and it refreshes tokens through ``requests``, which the network guard does not cover. An
+    empty gcloud config directory, ``NO_GCE_CHECK``, and no inherited ``GOOGLE_APPLICATION_CREDENTIALS`` make a
+    test that builds a Google client without credentials fail instead, and no inherited Google API key is used.
+    This is a configure hook, not a fixture, because google-auth reads ``NO_GCE_CHECK`` once, when collection first
+    imports ``google.auth.compute_engine``.
+    """
+    gcloud_config = tempfile.mkdtemp(prefix="mindroom-test-gcloud-")
+    config.add_cleanup(lambda: shutil.rmtree(gcloud_config, ignore_errors=True))
+    hide_developer_google_credentials(os.environ, gcloud_config)
+
+
+def hide_developer_google_credentials(environ: MutableMapping[str, str], gcloud_config: str) -> None:
+    """Point google-auth at an empty gcloud config, skip the GCE metadata server, and drop inherited Google keys.
+
+    google-genai reads ``GOOGLE_API_KEY`` and ``GEMINI_API_KEY`` itself, and its async client uses aiohttp, which the
+    network guard does not see either; MindRoom also reads their ``_FILE`` variants.
+    """
+    environ["CLOUDSDK_CONFIG"] = gcloud_config
+    environ["NO_GCE_CHECK"] = "true"
+    for name in (
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_API_KEY",
+        "GOOGLE_API_KEY_FILE",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEY_FILE",
+    ):
+        environ.pop(name, None)
 
 
 @pytest.fixture(autouse=True)

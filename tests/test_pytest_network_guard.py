@@ -127,8 +127,11 @@ def test_google_default_credentials_are_not_this_machines(tmp_path: Path, monkey
     key_file = tmp_path / "key.json"
     key_file.write_text(json.dumps(login), encoding="utf-8")
     monkeypatch.setenv("CLOUDSDK_CONFIG", str(gcloud))
-    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(key_file))
     assert google.auth.default()[0] is not None
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(key_file))
+    gcloud.joinpath("application_default_credentials.json").unlink()
+    assert google.auth.default()[0] is not None
+    (gcloud / "application_default_credentials.json").write_text(json.dumps(login), encoding="utf-8")
 
     def refuse_metadata_server(*_args: object, **_kwargs: object) -> bool:
         msg = "the GCE metadata server was asked"
@@ -145,7 +148,13 @@ def test_google_default_credentials_are_not_this_machines(tmp_path: Path, monkey
 
 def test_inherited_google_keys_are_dropped() -> None:
     """A Google API key or key file the developer exported never reaches a test."""
-    environ = {"GOOGLE_APPLICATION_CREDENTIALS": "key.json", "GOOGLE_API_KEY": "test", "GEMINI_API_KEY": "test"}
+    environ = {
+        "GOOGLE_APPLICATION_CREDENTIALS": "key.json",
+        "GOOGLE_API_KEY": "test",
+        "GOOGLE_API_KEY_FILE": "google-key",
+        "GEMINI_API_KEY": "test",
+        "GEMINI_API_KEY_FILE": "gemini-key",
+    }
 
     conftest.hide_developer_google_credentials(environ, "empty")
 
