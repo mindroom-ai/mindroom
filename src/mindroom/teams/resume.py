@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import ResolvedReplayPlan
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
-    from mindroom.llm.runs import AnyRunRecord, RunRequirement
+    from mindroom.llm.runs import RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
@@ -97,21 +97,13 @@ def _approval_history_scope(
 
 
 def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
-    """Return the paused team run the approval names, from the loaded session or the store.
+    """Return the paused team run the approval names from the session ``scope`` loaded, which holds its paused runs.
 
-    A run the store holds for another session of the scope than the one ``scope`` was loaded for is refused, as the
-    agent path refuses it.
+    A run of another session of the scope, or of a session with no stored row, is refused, as the agent path refuses it.
     """
-    persisted: AnyRunRecord | None = None
-    if scope.session is not None:
-        persisted = next((run for run in scope.session.runs if run.run_id == run_id), None)
-    if persisted is None:
-        persisted = scope.storage.get_run(run_id)
-    if (
-        not isinstance(persisted, TeamRunRecord)
-        or persisted.session_id != scope.session_id
-        or persisted.status is not RunStatus.paused
-    ):
+    runs = scope.session.runs if scope.session is not None else ()
+    persisted = next((run for run in runs if run.run_id == run_id), None)
+    if not isinstance(persisted, TeamRunRecord) or persisted.status is not RunStatus.paused:
         msg = f"Paused team run {run_id!r} is no longer available"
         raise RuntimeError(msg)
     return persisted
