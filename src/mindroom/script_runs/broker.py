@@ -1056,7 +1056,7 @@ def _launch_function_owners(run: ScriptRunRecord) -> dict[str, frozenset[str]]:
 
 
 def _toolkit_function(toolkit: Toolkit, function_name: str) -> Function:
-    function = toolkit.async_functions.get(function_name) or toolkit.functions.get(function_name)
+    function = toolkit.get_async_functions().get(function_name)
     if function is None:
         msg = "The requested tool is no longer available to this script run."
         raise ScriptCapabilityError(msg)
