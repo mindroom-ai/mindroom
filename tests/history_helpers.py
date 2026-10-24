@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +53,7 @@ from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
     ModelRequest,
+    NativeCompactionReplay,
     StreamEvent,
     TextDelta,
     ToolCallReady,
@@ -62,6 +63,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.message_target import MessageTarget
+from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -145,6 +147,18 @@ def checkpointed_answer(item: dict[str, object], basis: str, *, from_history: bo
             },
         },
     )
+
+
+def record_native_checkpoint(
+    message: Message,
+    items: Sequence[dict[str, Any]],
+    settings: NativeCompactionReplay | None,
+) -> None:
+    """Record on ``message`` the native-compaction state a completed response with output ``items`` stores."""
+    message.provider_data = {
+        **(message.provider_data or {}),
+        NATIVE_CHECKPOINT_KEY: native_checkpoint_state(items, settings),
+    }
 
 
 def _summarizer(

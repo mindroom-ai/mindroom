@@ -52,7 +52,6 @@ from mindroom.llm.provider import (
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.model_usage import response_context_tokens
-from mindroom.native_compaction import record_native_checkpoint
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -74,6 +73,7 @@ from tests.history_helpers import (
     _session,
     folded_run_ids,
     log_of,
+    record_native_checkpoint,
     seed_summary,
     seeded_storage,
     segments_of,

@@ -23,7 +23,7 @@ from mindroom.llm.provider import (
     hosted_tool_started,
 )
 from mindroom.llm.usage import MessageMetrics
-from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
+from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state, native_replay_messages
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
@@ -409,13 +409,6 @@ class ResponsesTurnParts:
     incomplete_reason: str | None = None
 
 
-@dataclass(slots=True)
-class _ProviderDataRecord:
-    """The ``provider_data`` holder the shared native-compaction recorder writes into."""
-
-    provider_data: dict[str, Any] | None
-
-
 def _record_tool_search_items(parts: ResponsesTurnParts, output_items: Sequence[Any]) -> None:
     items = [item.model_dump(exclude_none=True) for item in output_items if item.type in _TOOL_SEARCH_ITEM_TYPES]
     if items:
@@ -455,9 +448,7 @@ def _read_ended_response(
     if response.status != "completed":
         return
     parts.provider_data[_PORTABLE_KEY] = portable_replay
-    record = _ProviderDataRecord(provider_data=parts.provider_data)
-    record_native_checkpoint(record, items, native_compaction)
-    parts.provider_data = record.provider_data or {}
+    parts.provider_data[NATIVE_CHECKPOINT_KEY] = native_checkpoint_state(items, native_compaction)
     if (store is False or portable_replay) and any(item.get("type") == "reasoning" for item in items):
         parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
 

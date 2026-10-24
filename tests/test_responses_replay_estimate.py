@@ -28,12 +28,12 @@ from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistoryS
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import NativeCompactionReplay
-from mindroom.native_compaction import checkpoint_estimated_tokens, record_native_checkpoint
+from mindroom.native_compaction import checkpoint_estimated_tokens
 from mindroom.providers.openai.responses_wire import responses_input
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 from tests.conftest import seed_session
-from tests.history_helpers import _completed_run, _make_config, _session
+from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint
 from tests.providers.golden_support import pipeline_provider
 from tests.providers.openai_family_support import responses_adapter
 

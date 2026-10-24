@@ -14,11 +14,11 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES
 from mindroom.native_compaction import (
+    NATIVE_CHECKPOINT_KEY,
     checkpoint_items,
+    native_checkpoint_state,
     native_replay_messages,
     native_replay_route_matches,
-    record_native_checkpoint,
-    record_native_request_prefix,
 )
 
 if TYPE_CHECKING:
@@ -176,21 +176,18 @@ def record_native_checkpoint_on(
     *,
     checkpoint_prefix: bool,
 ) -> None:
-    """Record ``mindroom_native_compaction`` on one completed assistant message.
-
-    Every response records its route, None included, because approval rebuilds and signed-thinking replay
-    need the provenance even when nothing compacted. A checkpoint in the output means the provider compacted
-    on this request, so the items from that checkpoint on are stored for replay; ``checkpoint_prefix`` marks
-    output produced from a request that itself replayed a checkpoint.
-    """
+    """Record ``mindroom_native_compaction`` on one completed assistant message, from its response blocks."""
+    provider_data = message.provider_data or {}
     # The API serializes a no-op compaction with a null summary, which the stored blocks omit; restore the
     # explicit marker so the shared selector sees the no-op rather than an opaque payload.
     items = [
         {**block, "content": block.get("content")} if block.get("type") == "compaction" else block
-        for block in (message.provider_data or {}).get("content_blocks", [])
+        for block in provider_data.get("content_blocks", [])
     ]
-    record_native_checkpoint(message, items, replay)
-    record_native_request_prefix(message, checkpoint_prefix=checkpoint_prefix)
+    message.provider_data = {
+        **provider_data,
+        NATIVE_CHECKPOINT_KEY: native_checkpoint_state(items, replay, checkpoint_prefix=checkpoint_prefix),
+    }
 
 
 __all__ = [

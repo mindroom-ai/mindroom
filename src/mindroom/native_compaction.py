@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import PROMPT_MESSAGE_ROLES
 from mindroom.llm.provider import NativeCompactionReplay
@@ -22,13 +22,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_NATIVE_CHECKPOINT_KEY = "mindroom_native_compaction"
-
-
-class _ProviderDataHolder(Protocol):
-    """A completed response, or the record of one, whose ``provider_data`` carries the checkpoint state."""
-
-    provider_data: dict[str, Any] | None
+# The ``provider_data`` key under which a completed assistant response stores its native-compaction state.
+NATIVE_CHECKPOINT_KEY = "mindroom_native_compaction"
 
 
 def native_compaction_route(*, provider: str, model_id: str, endpoint: str, history_generation: str) -> str:
@@ -36,51 +31,42 @@ def native_compaction_route(*, provider: str, model_id: str, endpoint: str, hist
     return hashlib.sha256(json.dumps([provider, model_id, endpoint, history_generation]).encode()).hexdigest()
 
 
-def record_native_checkpoint(
-    response: _ProviderDataHolder,
+def native_checkpoint_state(
     items: Sequence[dict[str, Any]],
     settings: NativeCompactionReplay | None,
-) -> None:
-    """Record effective replay settings and, when present, the latest checkpoint.
+    *,
+    checkpoint_prefix: bool = False,
+) -> dict[str, Any] | None:
+    """Return the state a completed response stores under ``NATIVE_CHECKPOINT_KEY``: its settings and latest checkpoint.
 
-    Every completed response records its route, including explicit native-off
-    state. Approval rebuilds and signed-thinking replay need this even when the
-    provider did not compact on this request. A checkpoint in the output means the
-    provider compacted on this request, which no other MindRoom log reports.
+    Every completed response records its route, None when native compaction is off, because approval rebuilds and
+    signed-thinking replay need it even when the provider did not compact on this request. A checkpoint in ``items``
+    means the provider compacted on this request, which no other MindRoom log reports. ``checkpoint_prefix`` marks
+    output whose own request replayed a checkpoint.
     """
-    state: dict[str, Any] | None = None
-    if settings is not None:
-        state = {"route": settings.route, "threshold": settings.threshold}
-        if settings.basis is not None:
-            state["basis"] = settings.basis
-        last = next(
-            (index for index in range(len(items) - 1, -1, -1) if _is_checkpoint(items[index])),
-            None,
+    if settings is None:
+        return None
+    state: dict[str, Any] = {"route": settings.route, "threshold": settings.threshold}
+    if settings.basis is not None:
+        state["basis"] = settings.basis
+    last = next(
+        (index for index in range(len(items) - 1, -1, -1) if _is_checkpoint(items[index])),
+        None,
+    )
+    state["checkpoint_prefix"] = checkpoint_prefix or last is not None
+    if last is not None:
+        state["items"] = list(items[last:])
+        logger.info(
+            "Native compaction checkpoint",
+            threshold_tokens=settings.threshold,
+            checkpoint_tokens=checkpoint_estimated_tokens([items[last]]),
         )
-        state["checkpoint_prefix"] = last is not None
-        if last is not None:
-            state["items"] = list(items[last:])
-            logger.info(
-                "Native compaction checkpoint",
-                threshold_tokens=settings.threshold,
-                checkpoint_tokens=checkpoint_estimated_tokens([items[last]]),
-            )
-    response.provider_data = {
-        **(response.provider_data or {}),
-        _NATIVE_CHECKPOINT_KEY: state,
-    }
-
-
-def record_native_request_prefix(response: _ProviderDataHolder, *, checkpoint_prefix: bool) -> None:
-    """Mark completed output that inherited a checkpoint from its actual request."""
-    state = (response.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
-    if checkpoint_prefix and isinstance(state, dict):
-        state["checkpoint_prefix"] = True
+    return state
 
 
 def recorded_native_settings(message: Message) -> NativeCompactionReplay | None:
     """Read the effective native policy from one completed assistant response."""
-    state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
+    state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
     if message.role != "assistant" or not isinstance(state, dict):
         return None
     route, threshold = state.get("route"), state.get("threshold")
@@ -95,9 +81,9 @@ def recorded_native_settings(message: Message) -> NativeCompactionReplay | None:
 def native_replay_route_matches(message: Message, route: str | None) -> bool | None:
     """Compare effective prefix provenance; None means legacy history without it."""
     data = message.provider_data or {}
-    if _NATIVE_CHECKPOINT_KEY not in data:
+    if NATIVE_CHECKPOINT_KEY not in data:
         return None
-    state = data[_NATIVE_CHECKPOINT_KEY]
+    state = data[NATIVE_CHECKPOINT_KEY]
     if state is None:
         return route is None
     if not isinstance(state, dict) or not isinstance(state.get("route"), str):
@@ -120,7 +106,7 @@ def checkpoint_items(message: Message, route: str | None) -> list[dict[str, Any]
     """Read compatible, structurally valid checkpoint data from persisted input."""
     if route is None or not message.provider_data or message.role != "assistant":
         return []
-    checkpoint = message.provider_data.get(_NATIVE_CHECKPOINT_KEY)
+    checkpoint = message.provider_data.get(NATIVE_CHECKPOINT_KEY)
     if not isinstance(checkpoint, dict) or checkpoint.get("route") != route:
         return []
     items = checkpoint.get("items")
@@ -131,7 +117,7 @@ def checkpoint_items(message: Message, route: str | None) -> list[dict[str, Any]
 
 def native_checkpoint_id(message: Message) -> str | None:
     """Return the message's id when the provider compacted on it, whatever its route, else None."""
-    state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
+    state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
     if not isinstance(state, dict) or not checkpoint_items(message, state.get("route")):
         return None
     return message.id
@@ -152,7 +138,7 @@ def request_replay_basis(summary: str | None, runs: Sequence[AnyRunRecord], rout
     for index in range(len(runs) - 1, -1, -1):
         for message in reversed(runs[index].messages):
             if checkpoint_items(message, route):
-                recorded = (message.provider_data or {})[_NATIVE_CHECKPOINT_KEY].get("basis")
+                recorded = (message.provider_data or {})[NATIVE_CHECKPOINT_KEY].get("basis")
                 covering = recorded is None or recorded == replay_basis(summary, runs[:index])
                 return replay_basis(summary, runs) if covering else ""
     return replay_basis(summary, runs)
@@ -163,7 +149,7 @@ def checkpoint_summary(message: Message, basis: str) -> str | None:
 
     Encrypted checkpoints have no readable text, and checkpoints of unknown history never match.
     """
-    state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
+    state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
     if not isinstance(state, dict) or state.get("basis") != basis:
         return None
     items = checkpoint_items(message, state.get("route"))
