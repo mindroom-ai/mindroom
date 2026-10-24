@@ -85,7 +85,6 @@ from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
 from . import constants
-from .agents import show_tool_calls_for_agent
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing.batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
 from .coalescing.gate import CoalescingGate
@@ -1264,11 +1263,6 @@ class AgentBot:
             stop_reason=stop_reason,
         )
         await emit(self.hook_registry, event_name, context)
-
-    @property
-    def show_tool_calls(self) -> bool:
-        """Whether to show tool call details inline in responses."""
-        return show_tool_calls_for_agent(self.config, self.agent_name)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""

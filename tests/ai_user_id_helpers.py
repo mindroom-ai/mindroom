@@ -279,7 +279,6 @@ def _build_response_runner(
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
     bot.enable_streaming = enable_streaming
-    bot.show_tool_calls = False
     bot.orchestrator = orchestrator
     bot._conversation_resolver = MagicMock()
     bot._conversation_resolver.build_message_target = MagicMock(
