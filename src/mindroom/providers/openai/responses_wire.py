@@ -79,7 +79,6 @@ class ResponsesWire:
     """How one Responses route shapes requests: its storage setting and prompt-cache behavior."""
 
     route: Literal["openai", "codex"]
-    provider_name: str
     store: bool | None
     explicit_breakpoint: bool
     default_instructions: str | None = None
@@ -473,10 +472,11 @@ class ResponsesStream:
 
     An output item other than the model's own message, reasoning, or function call is a hosted tool at work, and
     its start is reported as such. ``text_as_reasoning`` also records the output text in the stored reasoning, in
-    event order with any summary text, kept as main behaves.
+    event order with any summary text, kept as main behaves. ``provider`` is the metrics provider name a failed
+    response's error carries.
     """
 
-    wire: ResponsesWire
+    provider: str
     store: bool | None
     portable_replay: bool
     native_compaction: NativeCompactionReplay | None
@@ -491,12 +491,12 @@ class ResponsesStream:
 
     def _failure(self, event: Any) -> ProviderError:  # noqa: ANN401 - SDK error event
         if event.type == "error":
-            return _response_error(event.code, event.message, provider=self.wire.provider_name)
+            return _response_error(event.code, event.message, provider=self.provider)
         failure = event.response.error
         return _response_error(
             failure.code if failure is not None else None,
             failure.message if failure is not None else None,
-            provider=self.wire.provider_name,
+            provider=self.provider,
         )
 
     def add(self, event: ResponseStreamEvent) -> list[StreamEvent]:  # noqa: C901 - one branch per event type
@@ -595,19 +595,19 @@ def _reasoning_summary(response: Response) -> str:
 def parse_response(
     response: Response,
     *,
-    wire: ResponsesWire,
+    provider: str,
     store: bool | None,
     portable_replay: bool,
     native_compaction: NativeCompactionReplay | None,
     text_as_reasoning: bool,
 ) -> ResponsesTurnParts:
-    """Read one non-streamed response into a finished turn.
+    """Read one non-streamed response into a finished turn; ``provider`` is the metrics provider name of its error.
 
     ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary, kept as
     main behaves.
     """
     if response.error:
-        raise _response_error(response.error.code, response.error.message, provider=wire.provider_name)
+        raise _response_error(response.error.code, response.error.message, provider=provider)
     parts = ResponsesTurnParts()
     # The SDK's output union does not narrow on ``type``.
     for output in cast("list[Any]", response.output):

@@ -724,6 +724,7 @@ async def test_responses_error_event_is_classified_by_its_code(tmp_path: Path) -
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert (info.value.status_code, info.value.code, str(info.value)) == (None, "server_error", "boom")
+    assert info.value.provider == "OpenAI Responses"
 
 
 @pytest.mark.asyncio
@@ -776,7 +777,7 @@ async def test_a_non_streamed_failed_response_raises_its_error(tmp_path: Path) -
     with pytest.raises(ProviderUnavailable, match="The server had an error") as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()], stream=False))
 
-    assert (info.value.status_code, info.value.code) == (None, "server_error")
+    assert (info.value.status_code, info.value.code, info.value.provider) == (None, "server_error", "OpenAI Responses")
 
 
 @pytest.mark.asyncio

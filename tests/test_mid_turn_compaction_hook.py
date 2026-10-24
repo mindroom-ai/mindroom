@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider, StreamEvent
 
 _NATIVE = NativeCompactionReplay(route="test-route", threshold=2000)
-_RESPONSES_WIRE = ResponsesWire(route="openai", provider_name="openai", store=True, explicit_breakpoint=False)
+_RESPONSES_WIRE = ResponsesWire(route="openai", store=True, explicit_breakpoint=False)
 
 
 def probe() -> str:

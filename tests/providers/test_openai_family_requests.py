@@ -104,7 +104,7 @@ def _parsed(adapter: ResponsesAdapter, output: list[dict[str, Any]], **message: 
     """Return the stored assistant message of one response, parsed as the route parses it without native replay."""
     parts = parse_response(
         _response(output),
-        wire=adapter.wire,
+        provider=adapter.identity.provider_name,
         store=adapter.wire.store,
         portable_replay=False,
         native_compaction=adapter.native_compaction_settings(threshold=1024),
@@ -528,7 +528,7 @@ def test_only_a_completed_response_records_its_replay_policy(tmp_path: Path, *, 
     adapter = responses_adapter(tmp_path, store=True)
     parts = parse_response(
         _response([_ANSWER], status=status),
-        wire=adapter.wire,
+        provider=adapter.identity.provider_name,
         store=True,
         portable_replay=portable,
         native_compaction=None,
@@ -795,7 +795,7 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
         adapter = responses_adapter(tmp_path)
         usage = parse_response(
             response,
-            wire=adapter.wire,
+            provider=adapter.identity.provider_name,
             store=None,
             portable_replay=False,
             native_compaction=None,

@@ -501,7 +501,6 @@ def _build_responses(
     )
     wire = ResponsesWire(
         route=route_key,
-        provider_name=provider_name,
         store=store,
         explicit_breakpoint=route_key == "openai" and _supports_explicit_breakpoint(model_id, endpoint),
         default_instructions=settings.default_instructions or runtime.codex_default_instructions,

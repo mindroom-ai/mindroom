@@ -157,7 +157,7 @@ class ResponsesAdapter:
         # summaries. Stored data and anything that replays or shows reasoning.
         if request.stream or self.capabilities.streams_only:
             accumulator = ResponsesStream(
-                wire=self.wire,
+                provider=self.identity.provider_name,
                 store=store,
                 portable_replay=request.portable_replay,
                 native_compaction=request.native_compaction,
@@ -179,7 +179,7 @@ class ResponsesAdapter:
                 raise provider_error(error, provider=self.identity.provider_name) from error
             parts = parse_response(
                 response,
-                wire=self.wire,
+                provider=self.identity.provider_name,
                 store=store,
                 portable_replay=request.portable_replay,
                 native_compaction=request.native_compaction,
