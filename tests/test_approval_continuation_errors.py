@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.approval.execution import _collect_agent_continuation
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
@@ -59,7 +60,13 @@ async def test_a_failed_resume_keeps_its_error_and_runs_the_approved_tool_once(t
     )
     agent = spec(model, gated(run_shell_command))
     _events, paused = await collect(
-        run_agent(agent, [Message(role="user", content="Execute the approved tool")], ctx=context(), persist=persist),
+        run_agent(
+            agent,
+            [Message(role="user", content="Execute the approved tool")],
+            ctx=context(),
+            persist=persist,
+            request_template=EMPTY_REQUEST,
+        ),
     )
     assert paused.status is RunStatus.paused
     assert executed == []
@@ -80,8 +87,12 @@ async def test_a_failed_resume_keeps_its_error_and_runs_the_approved_tool_once(t
                 paused,
                 build_resume_request(paused=paused.messages, summary=None, history=[]),
                 approved=[approved],
-                ctx=context(),
+                denied={},
+                external_results={},
+                context=lambda run_id: context(run_id=run_id),
+                hooks=NO_HOOKS,
                 persist=persist,
+                request_template=EMPTY_REQUEST,
             ),
             presentation,
             run_id="run",

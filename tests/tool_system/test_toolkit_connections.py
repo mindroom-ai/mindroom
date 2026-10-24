@@ -300,7 +300,6 @@ async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tm
                 build,
                 run=RunContext(
                     run_id="run",
-                    session_id=runtime.session_id,
                     user_id=runtime.requester_id,
                     session=session,
                 ),

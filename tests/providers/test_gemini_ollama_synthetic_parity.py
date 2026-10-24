@@ -120,7 +120,15 @@ async def test_stream_events_match_the_finished_message(
 # shell call id.
 # ---------------------------------------------------------------------------
 
-SHELL = ToolSpec(name="run_shell_command", description="Run a shell command.", parameters={"type": "object"})
+SHELL = ToolSpec(
+    name="run_shell_command",
+    description="Run a shell command.",
+    parameters={"type": "object"},
+    strict=None,
+    requires_confirmation=None,
+    external_execution=None,
+    approval_type=None,
+)
 FORCED_SHELL = {"seed": 17, "min_response_chars": 128, "max_response_chars": 128, "chunk_chars": 17}
 FORCED_CALL_ID = "synthetic-11187ef3211f722f"
 

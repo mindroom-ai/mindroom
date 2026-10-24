@@ -164,13 +164,22 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
             system_message=None,
             toolkits=tuple(adapt_toolkit(toolkit) for toolkit in toolkits),
         ),
-        prompt=PromptSpec(role=role),
+        prompt=PromptSpec(role=role, instructions=()),
         request_template=ModelRequest(messages=()),
         history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         store=None,
         tool_owners={},
-        surface=AgentSurface(mode="standard", cli_shell=False),
+        surface=AgentSurface(
+            mode="standard",
+            cli_shell=False,
+            deferred=(),
+            context_documents=(),
+            context_files=(),
+            knowledge_sources=(),
+            output_file_policy=None,
+        ),
         tool_policy=policy,
+        tool_jobs=None,
     )
 
 

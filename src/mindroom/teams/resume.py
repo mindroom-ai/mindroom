@@ -218,9 +218,8 @@ class TeamResume:
             approved=routed.approved,
             denied=routed.denied,
             external_results=routed.external_results,
-            ctx=RunContext(
-                run_id=paused.run_id,
-                session_id=session.session_id,
+            context=lambda run_id: RunContext(
+                run_id=run_id,
                 user_id=self.user_id,
                 metadata=deepcopy(paused.metadata),
                 session=session,

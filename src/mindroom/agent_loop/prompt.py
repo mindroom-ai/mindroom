@@ -36,8 +36,8 @@ class PromptSpec:
     """
 
     persona: str | None = None
-    role: str | None = None
-    instructions: tuple[str, ...] = ()
+    role: str | None
+    instructions: tuple[str, ...]
     markdown: bool = False
     tool_instructions: tuple[str, ...] = ()
     turn_context: str | None = None

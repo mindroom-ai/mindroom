@@ -13,8 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
-from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import create_agent
 from mindroom.ai import _prepare_agent_and_prompt, ai_response
@@ -657,7 +658,9 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
         async for event in run_agent(
             prepared_run.spec,
             prepared_run.run_input(MediaInputs()),
-            ctx=RunContext(run_id="run-3", session_id="session-1"),
+            ctx=RunContext(run_id="run-3", session=UnstoredSession("session-1")),
+            persist=None,
+            request_template=EMPTY_REQUEST,
         )
     ]
 

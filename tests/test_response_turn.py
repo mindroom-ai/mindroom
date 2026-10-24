@@ -292,6 +292,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
         status=RunStatus.paused,
         tools=[],
         requirements=[requirement],
+        team_id=None,
     )
 
     paused = response_turn_module.paused_attempt_from_response(

@@ -186,6 +186,8 @@ async def run_bash_batch(owner: LiveTurnTools, *commands: str) -> RunRecord:
         [Message(role="user", content="run")],
         ctx=catalog.run,
         hooks=LoopHooks(before_dispatch=owner.checkpoint.capture),
+        persist=None,
+        request_template=EMPTY_REQUEST,
     )
     async for event in events:
         if isinstance(event, RunFinished):

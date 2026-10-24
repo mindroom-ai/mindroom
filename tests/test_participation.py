@@ -73,6 +73,7 @@ async def _reply(
             ctx=context(run_id=run_id),
             hooks=LoopHooks(before_request=(participation_hook(gate, model),)),
             request_template=request_template,
+            persist=None,
         ),
     )
 

@@ -1351,7 +1351,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
     # fails hard on the fallback.
     summary_mock = AsyncMock(
         side_effect=[
-            ModelSafeguardRefusal(provider="fake"),
+            ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()),
             first_summary_text,
             RuntimeError("summary failed"),
         ],

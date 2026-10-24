@@ -819,7 +819,17 @@ async def test_a_malformed_tool_call_is_answered_once_with_guidance_that_is_not_
     wire.replies.extend([_gemini_malformed, _gemini_text])
     provider = build_model_provider(_gemini_config(wire), runtime_paths, "gemini")
     messages = [_user("Weather in Paris?")]
-    tools = [ToolSpec(name="get_weather", description="Weather.", parameters=_SCHEMA)]
+    tools = [
+        ToolSpec(
+            name="get_weather",
+            description="Weather.",
+            parameters=_SCHEMA,
+            strict=None,
+            requires_confirmation=None,
+            external_execution=None,
+            approval_type=None,
+        ),
+    ]
 
     turn = await complete(provider, ModelRequest(messages=messages, tools=tools))
 

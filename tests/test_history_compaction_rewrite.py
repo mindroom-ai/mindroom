@@ -56,6 +56,7 @@ from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_na
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError, RateLimited
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics
 from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import replay_basis
 from mindroom.providers.anthropic.wire import format_claude_messages
@@ -517,7 +518,7 @@ async def test_a_fallback_too_small_for_the_checkpoint_summarizes_the_history_it
     fallback = SummaryModel(summary_model(model_id="fallback-model-id"), "fallback", 4_000)
     summary_mock = AsyncMock(
         side_effect=[
-            ModelSafeguardRefusal(provider="fake"),
+            ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()),
             "fallback summary",
             "final summary",
         ],
@@ -662,7 +663,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     fallback = summary_model(model_id="fallback-model-id")
     summary_mock = AsyncMock(
         side_effect=[
-            ModelSafeguardRefusal(provider="fake"),
+            ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()),
             "first chunk summary",
             "merged summary",
         ],
@@ -727,7 +728,7 @@ async def test_rewrite_propagates_fallback_refusal_without_persisting(tmp_path: 
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = _session("session-1", runs=[_completed_run("run-1")])
     summary_mock = AsyncMock(
-        side_effect=ModelSafeguardRefusal(provider="fake"),
+        side_effect=ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()),
     )
     retry_sleep = AsyncMock()
 
@@ -814,7 +815,7 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
     ("error", "expected_attempts", "expected_delay"),
     [
         pytest.param(
-            ModelSafeguardRefusal(provider="fake"),
+            ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()),
             1,
             False,
             id="unshrinkable-refusal",
@@ -2176,7 +2177,7 @@ async def test_run_local_summary_switches_to_fallback_for_later_chunks() -> None
     fallback = summary_model(model_id="fallback-model-id")
     summary_mock = AsyncMock(
         side_effect=[
-            ModelSafeguardRefusal(provider="fake"),
+            ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()),
             "first chunk summary",
             "merged summary",
         ],
@@ -2226,7 +2227,7 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
     summary_mock = AsyncMock(
         side_effect=[
             "first chunk summary",
-            ModelSafeguardRefusal(provider="fake"),
+            ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()),
             "merged summary",
         ],
     )

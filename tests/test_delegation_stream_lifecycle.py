@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
-from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agents import create_agent
 from mindroom.approval.resume import ResumeRunner
 from mindroom.config.agent import AgentConfig
@@ -239,7 +239,7 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
     store = create_session_storage("leader", config, paths, identity)
     build = create_agent("leader", config, paths, identity, history_storage=store, supports_native_tool_approval=True)
     session = new_scope_session(session_id=identity.session_id or "", scope_id="leader", is_team=False)
-    ctx = RunContext(run_id="parent-run", session_id=session.session_id, user_id=identity.requester_id)
+    ctx = RunContext(run_id="parent-run", session=UnstoredSession(session.session_id), user_id=identity.requester_id)
     request = [prompt_for_turn(build), Message(role="user", content="Delegate")]
 
     async def unused_child(**_kwargs: object) -> str:
@@ -251,7 +251,15 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
             raise failure(message)
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-        _events, paused = await collect(run_agent(build.spec, request, ctx=ctx, persist=persist_to(store, session)))
+        _events, paused = await collect(
+            run_agent(
+                build.spec,
+                request,
+                ctx=ctx,
+                persist=persist_to(store, session),
+                request_template=build.request_template,
+            ),
+        )
         assert paused.status is RunStatus.paused
         runner = ResumeRunner(
             build=build,

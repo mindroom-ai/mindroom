@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request, scope_history_messages
@@ -202,7 +203,15 @@ async def test_a_resumed_legacy_run_is_stored_in_the_current_shape() -> None:
 
     model = ScriptedModel([calls(tool_call("run_shell_command", "call-1", args=["echo", "hi"])), answer("Done.")])
     agent = spec(model, gated(run_shell_command))
-    _events, paused = await collect(run_agent(agent, [Message(role="user", content="Run it")], ctx=context()))
+    _events, paused = await collect(
+        run_agent(
+            agent,
+            [Message(role="user", content="Run it")],
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
     assert paused.status is RunStatus.paused
     call_message = next(message for message in paused.messages if message.tool_calls)
     call_message.tool_calls = [_PLACEHOLDER, _BARE_CALL, *(call_message.tool_calls or [])]
@@ -228,7 +237,12 @@ async def test_a_resumed_legacy_run_is_stored_in_the_current_shape() -> None:
             paused,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
             approved=[approved],
-            ctx=context(),
+            denied={},
+            external_results={},
+            context=lambda run_id: context(run_id=run_id),
+            hooks=NO_HOOKS,
+            persist=None,
+            request_template=EMPTY_REQUEST,
         ),
     )
 

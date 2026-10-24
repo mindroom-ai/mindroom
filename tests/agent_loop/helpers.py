@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
-from mindroom.agent_loop.spec import AgentSpec, RunContext
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
@@ -89,7 +89,12 @@ def spec(
 
 def context(run_id: str = "run-1", session_id: str = "session-1") -> RunContext:
     """Return a run context for Alice's run."""
-    return RunContext(run_id=run_id, session_id=session_id, user_id="@alice:example.org", metadata={"room_id": "!r"})
+    return RunContext(
+        run_id=run_id,
+        session=UnstoredSession(session_id),
+        user_id="@alice:example.org",
+        metadata={"room_id": "!r"},
+    )
 
 
 async def collect(events: AsyncIterator[RunEvent]) -> tuple[list[RunEvent], RunRecord]:

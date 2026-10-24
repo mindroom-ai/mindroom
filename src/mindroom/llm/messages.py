@@ -129,7 +129,7 @@ class Message:
                 return ""
             first = self.content[0]
             if isinstance(first, dict) and "text" in first:
-                return first.get("text", "")
+                return first["text"]
             return json.dumps(self.content, ensure_ascii=False)
         return ""
 

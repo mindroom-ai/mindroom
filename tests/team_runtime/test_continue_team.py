@@ -42,6 +42,9 @@ from tests.team_runtime.squad import (
 )
 
 if TYPE_CHECKING:
+    from agno.run import RunContext as AgnoRunContext
+
+    from mindroom.agent_loop.spec import RunContext
     from mindroom.llm.messages import Message
 
 pytestmark = pytest.mark.asyncio
@@ -77,7 +80,7 @@ async def test_an_approved_member_call_resumes_into_agno_s_team_approved_rows() 
             approved={
                 ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
             },
-            ctx=run_context("team-approved", SQUAD_APPROVED, golden_metadata(team_row)),
+            context=lambda run_id: run_context(run_id, SQUAD_APPROVED, golden_metadata(team_row)),
             persist=store,
         ),
     )
@@ -123,7 +126,7 @@ async def test_a_member_that_pauses_again_keeps_the_team_paused_without_a_leader
             approved={
                 ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
             },
-            ctx=run_context("team-approved", SQUAD_APPROVED),
+            context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
             persist=store,
         ),
     )
@@ -158,7 +161,7 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
             paused,
             _resume_request(paused),
             denied={("checker", APPROVED_CALL): "Alice declined."},
-            ctx=run_context("team-approved", SQUAD_APPROVED),
+            context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
             persist=store,
         ),
     )
@@ -193,7 +196,7 @@ async def test_a_team_resume_streams_the_leader_s_and_the_resumed_member_s_reque
             approved={
                 ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
             },
-            ctx=run_context("team-approved", SQUAD_APPROVED),
+            context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
             request_template=ModelRequest(messages=(), stream=stream),
         ),
     )
@@ -234,7 +237,7 @@ async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_re
             paused,
             _resume_request(paused),
             approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
-            ctx=run_context("r", SQUAD),
+            context=lambda run_id: run_context(run_id, SQUAD),
             persist=store,
         ),
     )
@@ -291,7 +294,7 @@ async def test_a_resume_keeps_the_members_that_ended_before_the_pause_with_the_r
             paused,
             _resume_request(paused),
             approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
-            ctx=run_context("r", SQUAD),
+            context=lambda run_id: run_context(run_id, SQUAD),
         ),
     )
 
@@ -328,7 +331,7 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
             paused,
             _resume_request(paused),
             approved={(None, "call-echo"): approval("call-echo", "echo", {"text": "hello"}, agent="squad")},
-            ctx=run_context("r", SQUAD),
+            context=lambda run_id: run_context(run_id, SQUAD),
             persist=store,
         ),
     )
@@ -343,6 +346,71 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
     ]
     assert store.members == []
     assert leader.requests[-1].messages[-1].content == "hello"
+
+
+async def test_a_resume_refuses_an_approved_leader_call_the_team_no_longer_offers() -> None:
+    gated_team = squad(
+        scripted("leader-model", calls(tool_call("echo", "call-echo", text="hello"))),
+        scripted("writer-model"),
+        scripted("checker-model"),
+        leader_toolkits=(gated(echo, name="job_controls"),),
+    )
+    _, paused = await collect(
+        run_team(gated_team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    assert paused.status is RunStatus.paused
+    before = paused.to_dict()
+    leader = scripted("leader-model")
+    ungated_team = squad(leader, scripted("writer-model"), scripted("checker-model"))
+
+    with pytest.raises(ValueError, match="no longer offered"):
+        continue_team(
+            ungated_team,
+            paused,
+            _resume_request(paused),
+            approved={(None, "call-echo"): approval("call-echo", "echo", {"text": "hello"}, agent="squad")},
+            context=lambda run_id: run_context(run_id, SQUAD),
+        )
+
+    assert paused.to_dict() == before
+    assert leader.requests == []
+
+
+def calling_run(run_context: AgnoRunContext) -> str:
+    """Return the id of the run that makes the call.
+
+    Args:
+        run_context: The run's context, which the loop injects.
+
+    """
+    return run_context.run_id
+
+
+async def test_a_resumed_leader_s_calls_run_under_the_paused_team_run_s_id() -> None:
+    leader = scripted("leader-model", calls(tool_call("calling_run", "call-run")), answer("Done."))
+    team = squad(
+        leader,
+        scripted("writer-model"),
+        scripted("checker-model"),
+        leader_toolkits=(gated(calling_run, name="job_controls"),),
+    )
+    _, paused = await collect(
+        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    assert paused.status is RunStatus.paused
+
+    _, record = await collect(
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={(None, "call-run"): approval("call-run", "calling_run", {}, agent="squad")},
+            context=lambda run_id: run_context(run_id, SQUAD),
+        ),
+    )
+
+    assert record.tools is not None
+    assert (record.run_id, record.tools[0].result) == ("r", "r")
 
 
 async def test_a_leader_level_approval_whose_call_stops_the_run_sends_the_leader_no_request() -> None:
@@ -367,7 +435,7 @@ async def test_a_leader_level_approval_whose_call_stops_the_run_sends_the_leader
             paused,
             _resume_request(paused),
             approved={(None, "call-echo"): approval("call-echo", "echo", {"text": "hello"}, agent="squad")},
-            ctx=run_context("r", SQUAD),
+            context=lambda run_id: run_context(run_id, SQUAD),
         ),
     )
 
@@ -415,7 +483,7 @@ async def test_an_external_result_resumes_the_member_that_waits_for_it() -> None
             paused,
             _resume_request(paused),
             external_results={("checker", "call-sub"): "Helper says 42"},
-            ctx=run_context("r", SQUAD),
+            context=lambda run_id: run_context(run_id, SQUAD),
             persist=store,
         ),
     )
@@ -435,11 +503,13 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
     before = paused.to_dict()
     leader, writer, checker = scripted("leader-model"), scripted("writer-model"), scripted("checker-model")
     team = squad(leader, writer, checker)
-    ctx = run_context("team-approved", SQUAD_APPROVED)
     decision = approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker")
 
+    def context(run_id: str) -> RunContext:
+        return run_context(run_id, SQUAD_APPROVED)
+
     with pytest.raises(ValueError, match="Decisions do not cover exactly the calls"):
-        continue_team(team, paused, _resume_request(paused), ctx=ctx)
+        continue_team(team, paused, _resume_request(paused), context=context)
     with pytest.raises(ValueError, match="name calls the team does not wait for"):
         continue_team(
             team,
@@ -449,7 +519,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
                 ("checker", APPROVED_CALL): decision,
                 (None, "call-unknown"): approval("call-unknown", "add", {"a": 1, "b": 2}, agent="squad"),
             },
-            ctx=ctx,
+            context=context,
         )
     # A decision on the right call id but the wrong member leaves the checker's call undecided.
     with pytest.raises(ValueError, match="Decisions do not cover exactly the calls"):
@@ -458,7 +528,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
             paused,
             _resume_request(paused),
             approved={("writer", APPROVED_CALL): decision},
-            ctx=ctx,
+            context=context,
         )
     with pytest.raises(ValueError, match="name calls the team does not wait for"):
         continue_team(
@@ -467,7 +537,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
             _resume_request(paused),
             approved={("checker", APPROVED_CALL): decision},
             denied={("writer", "call-elsewhere"): "no"},
-            ctx=ctx,
+            context=context,
         )
     without_checker = replace(team, members=team.members[:1])
     with pytest.raises(ValueError, match="not a member of team 'squad'"):
@@ -476,15 +546,27 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
             paused,
             _resume_request(paused),
             approved={("checker", APPROVED_CALL): decision},
-            ctx=ctx,
+            context=context,
         )
     orphaned = replace(paused, member_responses=[])
     with pytest.raises(ValueError, match="no longer holds member run"):
-        continue_team(team, orphaned, _resume_request(paused), approved={("checker", APPROVED_CALL): decision}, ctx=ctx)
+        continue_team(
+            team,
+            orphaned,
+            _resume_request(paused),
+            approved={("checker", APPROVED_CALL): decision},
+            context=context,
+        )
     assert paused.requirements is not None
     unbound = replace(paused, requirements=[replace(paused.requirements[0], member_run_id=None)])
     with pytest.raises(ValueError, match="has no paused run identity"):
-        continue_team(team, unbound, _resume_request(paused), approved={("checker", APPROVED_CALL): decision}, ctx=ctx)
+        continue_team(
+            team,
+            unbound,
+            _resume_request(paused),
+            approved={("checker", APPROVED_CALL): decision},
+            context=context,
+        )
     completed = replace(paused, status=RunStatus.completed)
     with pytest.raises(ValueError, match="Only a paused run can be resumed"):
         continue_team(
@@ -492,7 +574,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
             completed,
             _resume_request(paused),
             approved={("checker", APPROVED_CALL): decision},
-            ctx=ctx,
+            context=context,
         )
 
     assert paused.to_dict() == before
@@ -544,7 +626,7 @@ async def test_a_collaborate_resume_routes_each_approval_to_the_member_that_wait
                 ("writer", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="writer"),
                 ("checker", "call-mul"): approval("call-mul", "multiply", {"a": 7, "b": 6}, agent="checker"),
             },
-            ctx=run_context("r", SQUAD),
+            context=lambda run_id: run_context(run_id, SQUAD),
             persist=store,
         ),
     )
@@ -617,7 +699,7 @@ async def test_a_coordinate_resume_answers_each_waiting_delegation_with_the_resu
             paused,
             _resume_request(paused),
             approved=approved,
-            ctx=run_context("r", SQUAD),
+            context=lambda run_id: run_context(run_id, SQUAD),
             persist=store,
         ),
     )
@@ -683,7 +765,7 @@ async def test_a_member_approval_that_shares_an_id_with_a_leader_call_resumes_th
             paused,
             _resume_request(paused),
             approved={("checker", "call-w"): approval("call-w", "multiply", {"a": 7, "b": 6}, agent="checker")},
-            ctx=run_context("r", SQUAD),
+            context=lambda run_id: run_context(run_id, SQUAD),
             persist=store,
         ),
     )
@@ -741,7 +823,7 @@ async def test_a_finished_member_whose_answer_mentions_human_input_keeps_its_ans
             paused,
             _resume_request(paused),
             approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
-            ctx=run_context("r", SQUAD),
+            context=lambda run_id: run_context(run_id, SQUAD),
         ),
     )
 
@@ -790,7 +872,7 @@ async def test_a_resume_with_member_and_leader_decisions_runs_both_and_hands_the
                 ("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker"),
                 (None, "call-echo"): approval("call-echo", "echo", {"text": "hello"}, agent="squad"),
             },
-            ctx=run_context("r", SQUAD),
+            context=lambda run_id: run_context(run_id, SQUAD),
         ),
     )
 
@@ -826,7 +908,7 @@ async def test_a_member_whose_resumed_run_fails_reaches_the_leader_as_its_redact
             approved={
                 ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
             },
-            ctx=run_context("team-approved", SQUAD_APPROVED),
+            context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
             persist=store,
         ),
     )
@@ -864,7 +946,7 @@ async def test_a_failed_resume_stores_its_error_over_the_paused_team_row_as_agno
         paused,
         _resume_request(paused),
         approved={("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker")},
-        ctx=run_context("team-approved", SQUAD_APPROVED),
+        context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
         persist=store,
     )
 
@@ -903,7 +985,7 @@ async def test_cancelling_a_resume_stores_cancelled_rows_over_the_paused_ones_as
             approved={
                 ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
             },
-            ctx=run_context("team-approved", SQUAD_APPROVED),
+            context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
             persist=store,
         )
         async for _ in events:

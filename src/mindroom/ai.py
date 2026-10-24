@@ -777,7 +777,6 @@ async def _start_agent_run(
     build = prepared.build
     run = RunContext(
         run_id=attempt.run_id,
-        session_id=run_context.session_id,
         user_id=run_context.turn.requester_id,
         metadata=run_context.metadata,
         session=storage.session,

@@ -577,14 +577,51 @@ def _run_metrics_cases() -> list[dict[str, Any]]:
     ]
 
 
-def test_session_metrics_count_runs_as_agno_accumulated_them() -> None:
+def _counted_totals(totals: dict[str, Any]) -> dict[str, Any]:
+    """Return the token counters of stored session totals, in total and for each model entry."""
+    counters = set(llm_usage.TOKEN_FIELDS)
+    counted: dict[str, Any] = {key: value for key, value in totals.items() if key in counters}
+    if "details" in totals:
+        counted["details"] = {
+            model_type: [
+                {key: value for key, value in entry.items() if key in counters | {"id", "provider"}}
+                for entry in entries
+            ]
+            for model_type, entries in totals["details"].items()
+        }
+    return counted
+
+
+def test_session_metrics_count_token_counters_as_agno_accumulated_them() -> None:
+    """The session totals add each run's token counters, in total and per model, as Agno summed them."""
     totals = agno("session_metrics_totals")
     owned = SessionMetrics()
     for case, agno_totals in zip(_run_metrics_cases(), totals, strict=True):
-        owned.count_run(RunMetrics.from_dict(case))
+        owned.count_run(RunMetrics.from_dict(case), replacing=None)
 
-        assert owned.to_dict() == agno_totals
+        assert owned.to_dict() == _counted_totals(agno_totals)
     assert SessionMetrics.from_dict(totals[-1]).to_dict() == totals[-1]
+
+
+def test_session_metrics_count_token_counters_only() -> None:
+    """A run's cost, timing, and provider metrics never reach the session totals, in total or per model."""
+    counters = TokenCounts(input_tokens=2, total_tokens=2)
+    run = RunMetrics(
+        tokens=counters,
+        cost=1.5,
+        duration=3.0,
+        details={"model": [ModelMetrics(tokens=counters, cost=1.5, id="m", provider="P", provider_metrics={"x": 1})]},
+        additional_metrics={"y": 1},
+    )
+    totals = SessionMetrics()
+
+    totals.count_run(run, replacing=None)
+
+    assert totals.to_dict() == {
+        "input_tokens": 2,
+        "total_tokens": 2,
+        "details": {"model": [{"input_tokens": 2, "total_tokens": 2, "id": "m", "provider": "P"}]},
+    }
 
 
 def test_session_metrics_count_a_saved_again_run_once() -> None:
@@ -592,28 +629,19 @@ def test_session_metrics_count_a_saved_again_run_once() -> None:
     paused = RunMetrics.from_dict(agno("run_metrics"))
     finished = RunMetrics.from_dict(agno("run_metrics"))
     finished.add(
-        MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10), cost=0.25),
+        MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10)),
         model_id="m",
         provider="P",
     )
     once = SessionMetrics()
-    once.count_run(finished)
+    once.count_run(finished, replacing=None)
 
     twice = SessionMetrics()
-    twice.count_run(paused)
+    twice.count_run(paused, replacing=None)
     twice.count_run(finished, replacing=paused)
 
     assert twice.tokens.input_tokens == finished.tokens.input_tokens
-    # Undoing a model entry that reported an empty ``provider_metrics`` leaves that empty dict, as Agno's merge would.
-    assert _without_empty_provider_metrics(twice.to_dict()) == _without_empty_provider_metrics(once.to_dict())
-
-
-def _without_empty_provider_metrics(totals: dict[str, Any]) -> dict[str, Any]:
-    details = {
-        model_type: [{key: value for key, value in entry.items() if value != {}} for entry in entries]
-        for model_type, entries in totals.get("details", {}).items()
-    }
-    return {**totals, "details": details}
+    assert twice.to_dict() == once.to_dict()
 
 
 def test_session_metrics_from_dict_ignores_unreadable_details() -> None:

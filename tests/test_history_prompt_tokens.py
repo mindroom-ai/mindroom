@@ -40,6 +40,10 @@ _SEARCH_DOCS = ToolSpec(
     name="search_docs",
     description="Search the engineering docs for a matching answer.",
     parameters=_SEARCH_PARAMETERS,
+    strict=None,
+    requires_confirmation=None,
+    external_execution=None,
+    approval_type=None,
 )
 _EXPORT_NOTES = ToolSpec(
     name="export_notes",
@@ -47,6 +51,8 @@ _EXPORT_NOTES = ToolSpec(
     parameters=_EXPORT_PARAMETERS,
     strict=True,
     requires_confirmation=True,
+    external_execution=None,
+    approval_type=None,
 )
 
 

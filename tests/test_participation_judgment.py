@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
-from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
@@ -97,6 +97,8 @@ async def _reply(
             list(messages),
             ctx=context(run_id=run_id),
             hooks=LoopHooks(before_request=(participation_hook(gate, model),)),
+            persist=None,
+            request_template=EMPTY_REQUEST,
         ),
     )
     return record

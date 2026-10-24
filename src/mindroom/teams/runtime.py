@@ -19,10 +19,10 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopHooks
 from mindroom.agent_loop.run import (
     Persist,
     ResumePlan,
+    check_approved_tools_offered,
     decide_requirements,
     drive_run,
     plan_resume,
-    prepare_resume_tools,
     resume_planned,
     resume_request_template,
     resumed_record,
@@ -109,14 +109,15 @@ def continue_team(
     approved: Mapping[TeamCallKey, ApprovedCall] = {},
     denied: Mapping[TeamCallKey, str | None] = {},
     external_results: Mapping[TeamCallKey, str] = {},
-    ctx: RunContext,
+    context: Callable[[str], RunContext],
     hooks: LoopHooks = NO_HOOKS,
     persist: Persist[AnyRunRecord] | None = None,
     request_template: ModelRequest = EMPTY_REQUEST,
 ) -> AsyncIterator[TeamRunEvent]:
     """Resume a paused team run: its paused members with the decisions on their calls, then the leader.
 
-    ``messages`` is the leader's resume request, built from ``paused`` as ``build_resume_request`` builds it.
+    ``messages`` is the leader's resume request, built from ``paused`` as ``build_resume_request`` builds it, and
+    ``context`` returns the context of the run with a given id, which the resume calls with ``paused``'s.
     Decisions are keyed by ``TeamCallKey``: the member whose run waits for the call, None for the leader's own
     calls. Every call the team waits for must be covered exactly, as ``resume_agent`` requires, and every decision
     must name a waiting call, else ``ValueError`` here before anything runs.
@@ -143,7 +144,7 @@ def continue_team(
         denied=leader.denied,
         external_results=leader.external_results,
     )
-    prepare_resume_tools(_base_leader_spec(spec), leader.approved)
+    check_approved_tools_offered(_base_leader_spec(spec), leader.approved)
     decisions.require_consumed()
 
     async def entry(members: _MemberRuns) -> None:
@@ -166,7 +167,7 @@ def continue_team(
         spec,
         record,
         messages,
-        ctx=ctx,
+        ctx=context(record.run_id),
         hooks=hooks,
         persist=persist,
         template=resume_request_template(request_template),
@@ -407,7 +408,7 @@ class _MemberRuns:
             member.spec,
             plan,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
-            ctx=self._member_context(paused.run_id),
+            context=self._member_context,
             hooks=member.hooks(paused.run_id),
             persist=self._persist,
             request_template=self._request_template(member),
@@ -479,7 +480,6 @@ async def _drive_team(
             leader,
             record,
             messages,
-            prepare_run_tools(leader),
             ctx=ctx,
             hooks=hooks,
             persist=persist,

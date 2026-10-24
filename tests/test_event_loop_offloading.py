@@ -204,13 +204,23 @@ def _prompt_preparation_config(memory_backend: str = "mem0") -> Config:
 def _build(turn_context: str | None = None) -> AgentBuild:
     """Return a minimal agent build whose prompt carries ``turn_context`` as the build's own context."""
     return AgentBuild(
-        spec=AgentSpec(id="general", name="General", model=ScriptedModel([]), system_message=None),
-        prompt=PromptSpec(role="test", turn_context=turn_context),
+        spec=AgentSpec(id="general", name="General", model=ScriptedModel([]), system_message=None, toolkits=()),
+        prompt=PromptSpec(role="test", turn_context=turn_context, instructions=()),
         request_template=ModelRequest(messages=()),
         history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         store=None,
         tool_owners={},
-        surface=AgentSurface(mode="standard", cli_shell=False),
+        surface=AgentSurface(
+            mode="standard",
+            cli_shell=False,
+            deferred=(),
+            context_documents=(),
+            context_files=(),
+            knowledge_sources=(),
+            output_file_policy=None,
+        ),
+        tool_policy=(),
+        tool_jobs=None,
     )
 
 

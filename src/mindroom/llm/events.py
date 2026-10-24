@@ -18,7 +18,7 @@ class ReportedCall:
 
     tool_call_id: str | None
     tool_name: str | None
-    tool_args: dict[str, Any] | None = None
+    tool_args: dict[str, Any] | None
     result: str | None = None
     is_error: bool | None = None
 
@@ -51,8 +51,6 @@ class ToolCompleted:
 class RequestCompleted:
     """One provider request finished with the usage it reported."""
 
-    model_id: str
-    provider: str
     usage: MessageMetrics
 
 

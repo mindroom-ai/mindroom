@@ -18,7 +18,7 @@ from agno.tools.function import ToolResult
 from structlog.testing import capture_logs
 
 from mindroom import ai_runtime
-from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai_runtime import (
@@ -3210,6 +3210,8 @@ async def test_notice_follows_a_tool_batch_media_follow_up_message() -> None:
                 [OwnedMessage(role="user", content="hello")],
                 ctx=context(),
                 hooks=LoopHooks(after_tool_batch=(queued_notice_after_tool_batch(QUEUED_MESSAGE_NOTICE_TEXT),)),
+                persist=None,
+                request_template=EMPTY_REQUEST,
             ),
         )
 
@@ -3740,6 +3742,7 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
                 ),
                 ctx=context(run_id="run-2", session_id="session-1"),
                 persist=persist_to(store, session),
+                request_template=EMPTY_REQUEST,
             ),
         )
         seen = list(model.requests[0].messages)
@@ -3860,6 +3863,8 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
                 [OwnedMessage(role="user", content="Do the task")],
                 ctx=context(),
                 hooks=LoopHooks(after_tool_batch=(queued_notice_after_tool_batch("WRAP UP NOW"),)),
+                persist=None,
+                request_template=EMPTY_REQUEST,
             ),
         )
         return "$response"

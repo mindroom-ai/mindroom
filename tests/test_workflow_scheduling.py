@@ -18,6 +18,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, ProviderError
+from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
@@ -65,7 +66,7 @@ async def _fail_parse() -> None:
 
 
 async def _refuse_parse() -> None:
-    raise ModelSafeguardRefusal(provider="Anthropic")
+    raise ModelSafeguardRefusal(provider="Anthropic", usage=MessageMetrics())
 
 
 def _mid(name: str) -> MatrixID:

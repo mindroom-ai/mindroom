@@ -18,8 +18,8 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
+from mindroom.agent_loop.tools import offered_functions, prepare_run_tools
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import is_own_model_message
@@ -34,11 +34,10 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.spec import AgentSpec, RunContext
-    from mindroom.agent_loop.tools import PreparedTools
     from mindroom.llm.events import RunEvent
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
-    from mindroom.llm.runs import AnyRunRecord, RunRequirement, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord, RunRequirement
     from mindroom.tool_system.tool_function import ToolkitClose
 
 logger = get_logger(__name__)
@@ -69,9 +68,9 @@ def run_agent(
     run_input: Sequence[Message],
     *,
     ctx: RunContext,
+    persist: Persist[RunRecord] | None,
+    request_template: ModelRequest,
     hooks: LoopHooks = NO_HOOKS,
-    persist: Persist[RunRecord] | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
 ) -> AsyncIterator[RunEvent]:
     """Run one agent turn: the spec's system message, then ``run_input`` as the history subsystem built it.
 
@@ -99,7 +98,6 @@ def run_agent(
         spec,
         record,
         messages,
-        prepare_run_tools(spec),
         ctx=ctx,
         hooks=hooks,
         persist=persist,
@@ -112,17 +110,18 @@ def resume_agent(
     paused: RunRecord,
     messages: list[Message],
     *,
-    approved: Sequence[ApprovedCall] = (),
-    denied: Mapping[str, str | None] = {},
-    external_results: Mapping[str, str] = {},
-    ctx: RunContext,
-    hooks: LoopHooks = NO_HOOKS,
-    persist: Persist[RunRecord] | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
+    approved: Sequence[ApprovedCall],
+    denied: Mapping[str, str | None],
+    external_results: Mapping[str, str],
+    context: Callable[[str], RunContext],
+    hooks: LoopHooks,
+    persist: Persist[RunRecord] | None,
+    request_template: ModelRequest,
 ) -> AsyncIterator[RunEvent]:
     """Resume a paused run with the decisions on exactly the calls it waits for, then continue its loop.
 
-    ``messages`` is the resume request the history subsystem built from ``paused``. Every call the record waits for
+    ``messages`` is the resume request the history subsystem built from ``paused``, and ``context`` returns the
+    context of the run with a given id, which the resume calls with ``paused``'s. Every call the record waits for
     must be covered once: a confirmation by one approved call whose name and argument digest match or by a denial,
     an external execution by its result; anything else raises ``ValueError`` here, before any call runs, and
     ``paused`` is left unchanged. Approved calls run from their stored arguments and announce themselves as tool
@@ -135,7 +134,7 @@ def resume_agent(
         spec,
         plan,
         messages,
-        ctx=ctx,
+        context=context,
         hooks=hooks,
         persist=persist,
         request_template=request_template,
@@ -144,20 +143,19 @@ def resume_agent(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResumePlan:
-    """A resume whose decisions were checked and recorded: the record to continue, what it answers, what it offers."""
+    """A resume whose decisions were checked and recorded: the record to continue and the calls it answers."""
 
     record: RunRecord
     decided: tuple[RunRequirement, ...]
-    prepared: PreparedTools
 
 
 def plan_resume(
     spec: AgentSpec,
     paused: RunRecord,
     *,
-    approved: Sequence[ApprovedCall] = (),
-    denied: Mapping[str, str | None] = {},
-    external_results: Mapping[str, str] = {},
+    approved: Sequence[ApprovedCall],
+    denied: Mapping[str, str | None],
+    external_results: Mapping[str, str],
 ) -> ResumePlan:
     """Check and record the decisions for a resume of ``paused`` without running anything; see ``resume_agent``.
 
@@ -165,7 +163,8 @@ def plan_resume(
     """
     record = resumed_record(paused)
     decided = decide_requirements(record, approved=approved, denied=denied, external_results=external_results)
-    return ResumePlan(record=record, decided=tuple(decided), prepared=prepare_resume_tools(spec, approved))
+    check_approved_tools_offered(spec, approved)
+    return ResumePlan(record=record, decided=tuple(decided))
 
 
 def resume_planned(
@@ -173,21 +172,20 @@ def resume_planned(
     plan: ResumePlan,
     messages: list[Message],
     *,
-    ctx: RunContext,
-    hooks: LoopHooks = NO_HOOKS,
-    persist: Persist[RunRecord] | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
+    context: Callable[[str], RunContext],
+    hooks: LoopHooks,
+    persist: Persist[RunRecord] | None,
+    request_template: ModelRequest,
 ) -> AsyncIterator[RunEvent]:
     """Run a planned resume: answer the decided calls, then continue the loop over ``messages``.
 
-    The requests stream (``resume_request_template``).
+    The run's context is ``context`` of the planned record's run id. The requests stream (``resume_request_template``).
     """
     return drive_run(
         spec,
         plan.record,
         messages,
-        plan.prepared,
-        ctx=ctx,
+        ctx=context(plan.record.run_id),
         hooks=hooks,
         persist=persist,
         template=resume_request_template(request_template),
@@ -207,14 +205,13 @@ def resume_request_template(template: ModelRequest) -> ModelRequest:
     return replace(template, stream=True)
 
 
-def prepare_resume_tools(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> PreparedTools:
-    """Prepare the tools a resume offers, refusing an approved call whose tool the spec no longer offers."""
-    prepared = prepare_run_tools(spec)
+def check_approved_tools_offered(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> None:
+    """Refuse a resume with an approved call whose tool the spec no longer offers."""
+    offered = {function.name for _toolkit, function in offered_functions(spec)}
     for call in approved:
-        if call.tool_name not in prepared.functions:
+        if call.tool_name not in offered:
             msg = f"Approved tool {call.tool_name!r} is no longer offered to agent {spec.id!r}"
             raise ValueError(msg)
-    return prepared
 
 
 def resumed_record[R: AnyRunRecord](paused: R) -> R:
@@ -295,16 +292,20 @@ def decide_requirements(
     return [requirement for call_id, requirement in requirements.items() if call_id in waited_for]
 
 
-def _agent_paused_content(record: AnyRunRecord) -> str:
-    """Return the content of an agent run paused on its own tools (``paused_content``)."""
-    return paused_content(record.tools or ())
+def paused_content(record: AnyRunRecord) -> str:
+    """Return the content of an agent run paused without text of its own: a notice while a call waits for confirmation.
+
+    The only externally executed calls, delegations, pause silently and never wait for confirmation, so they add none.
+    """
+    if any(tool.requires_confirmation is True and not tool.confirmed for tool in record.tools or ()):
+        return "I have tools to execute, but I need confirmation."
+    return ""
 
 
 async def drive_run[R: AnyRunRecord](
     spec: AgentSpec,
     record: R,
     messages: list[Message],
-    prepared: PreparedTools,
     *,
     ctx: RunContext,
     hooks: LoopHooks,
@@ -312,14 +313,14 @@ async def drive_run[R: AnyRunRecord](
     template: ModelRequest,
     entry: Callable[[], Awaitable[None]] | None = None,
     resumed: Sequence[RunRequirement] | None = None,
-    pause_content: Callable[[R], str] = _agent_paused_content,
+    pause_content: Callable[[R], str] = paused_content,
 ) -> AsyncIterator[RunEvent]:
     """Run ``entry`` and then the loop over ``messages``, ending the record exactly once however the run ends.
 
-    ``spec`` supplies the model and the tool-call limit; ``record`` is the agent or team run the loop fills;
-    ``entry`` is work the run does before the loop (a team resume's paused members), and ``resumed`` holds a
-    resume's decided requirements, which the loop answers before its first request. A run
-    that ends paused without text of its own gets ``pause_content(record)`` as its content. The spec's toolkits that
+    ``spec`` supplies the model, the tools (``prepare_run_tools``), and the tool-call limit; ``record`` is the agent
+    or team run the loop fills; ``entry`` is work the run does before the loop (a team resume's paused members), and
+    ``resumed`` holds a resume's decided requirements, which the loop answers before its first request. A run that
+    ends paused without text of its own gets ``pause_content(record)`` as its content. The spec's toolkits that
     hold a connection for one run are connected before ``entry`` and closed after the run reports its end, once the
     consumer reads past ``RunFinished`` or closes the stream; a run that fails or is cancelled closes them once its
     record is stored.
@@ -334,7 +335,7 @@ async def drive_run[R: AnyRunRecord](
         loop = run_model_loop(
             spec.model,
             messages,
-            prepared,
+            prepare_run_tools(spec),
             record=record,
             run=ctx,
             hooks=hooks,
@@ -433,27 +434,17 @@ def own_answers(record: AnyRunRecord) -> list[str]:
     return [message.get_content_string() for message in own_model_messages(record) if message.content]
 
 
-def paused_content(tools: Sequence[ToolExecution]) -> str:
-    """Return the content of a paused run that produced none of its own: a notice while a call waits for confirmation.
-
-    The only externally executed calls, delegations, pause silently and never wait for confirmation, so they add none.
-    """
-    if any(tool.requires_confirmation is True and not tool.confirmed for tool in tools):
-        return "I have tools to execute, but I need confirmation."
-    return ""
-
-
 __all__ = [
     "ApprovedCall",
     "Persist",
     "ResumePlan",
+    "check_approved_tools_offered",
     "decide_requirements",
     "drive_run",
     "own_answers",
     "own_model_messages",
     "paused_content",
     "plan_resume",
-    "prepare_resume_tools",
     "resume_agent",
     "resume_planned",
     "resume_request_template",

@@ -158,9 +158,9 @@ async def run_model_loop(
     *,
     record: AnyRunRecord,
     run: RunContext,
-    hooks: LoopHooks = NO_HOOKS,
-    max_tool_calls_per_turn: int | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
+    hooks: LoopHooks,
+    max_tool_calls_per_turn: int | None,
+    request_template: ModelRequest,
     resumed: Sequence[RunRequirement] | None = None,
 ) -> AsyncIterator[LoopEvent]:
     """Request, run the requested tools, and repeat until the run completes or pauses; ``LoopEnded`` comes last.
@@ -210,8 +210,8 @@ async def run_model_loop(
                     yield event
         assert turn is not None
         message = turn.message
-        _accept_turn(message, state, progress, metrics, identity)
-        yield RequestCompleted(model_id=identity.id, provider=identity.provider_name, usage=message.metrics)
+        _accept_turn(message, state, progress, identity)
+        yield RequestCompleted(message.metrics)
         if not message.tool_calls:
             break
         async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn):
@@ -251,7 +251,6 @@ def _accept_turn(
     message: Message,
     state: LoopState,
     progress: _Progress,
-    metrics: RunMetrics,
     identity: ModelIdentity,
 ) -> None:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
@@ -261,6 +260,8 @@ def _accept_turn(
     until the model says something new. Empty content, which a reply that does not stream can carry, is blank text;
     its member results tell blank text from none.
     """
+    metrics = state.record.metrics
+    assert metrics is not None
     state.messages.append(message)
     _count_request(metrics, message.metrics, identity)
     state.request_index += 1

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agent_loop.spec import AgentSpec, RunContext
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -74,8 +74,8 @@ class _Squad:
         report = collect_admin_usage(config=self.config, runtime_paths=self.runtime_paths)
         return {row.model: row.totals.total_tokens for row in report.model_breakdown}
 
-    def ctx(self) -> RunContext:
-        return RunContext(run_id="team-run", session_id="session", user_id="@alice:localhost")
+    def ctx(self, run_id: str = "team-run") -> RunContext:
+        return RunContext(run_id=run_id, session=UnstoredSession("session"), user_id="@alice:localhost")
 
     async def run(self) -> TeamRunRecord:
         """Run the team to its end and return the stored team record."""
@@ -218,7 +218,7 @@ async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path) -> 
             stored,
             _GO,
             approved={("worker", "call-publish"): approval("call-publish", "publish", {}, agent="worker")},
-            ctx=squad.ctx(),
+            context=squad.ctx,
             persist=persist_to(squad.store, squad.session),
         ),
     )

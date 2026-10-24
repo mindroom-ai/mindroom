@@ -24,6 +24,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
+from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.errors import missing_api_key_error
 
@@ -80,7 +81,7 @@ def test_generic_api_word_not_false_positive() -> None:
 
 def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
     """An explicit safeguard stop should not look like an empty model response."""
-    error = ModelSafeguardRefusal(provider="Anthropic")
+    error = ModelSafeguardRefusal(provider="Anthropic", usage=MessageMetrics())
     assert is_model_safeguard_refusal(error)
 
     message = get_user_friendly_error_message(error, "mind")

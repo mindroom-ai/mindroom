@@ -106,7 +106,15 @@ async def test_standard_minimal_standard_requests_keep_paired_history(
     tool_names = ("read_file", "bash", "read_file")
 
     for name in tool_names:
-        tool = ToolSpec(name=name, description="available", parameters={"type": "object", "properties": {}})
+        tool = ToolSpec(
+            name=name,
+            description="available",
+            parameters={"type": "object", "properties": {}},
+            strict=None,
+            requires_confirmation=None,
+            external_execution=None,
+            approval_type=None,
+        )
         await complete(provider, ModelRequest(messages=history, tools=[tool]))
         assert history == before
 

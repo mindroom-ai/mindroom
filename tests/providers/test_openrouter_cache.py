@@ -21,8 +21,24 @@ _ONE_HOUR = {"type": "ephemeral", "ttl": "1h"}
 _FIVE_MINUTES = {"type": "ephemeral"}
 _SHARED = "Shared agent instructions.\n"
 _TOOLS = [
-    ToolSpec(name="first", description="First.", parameters={"type": "object"}),
-    ToolSpec(name="second", description="Second.", parameters={"type": "object"}),
+    ToolSpec(
+        name="first",
+        description="First.",
+        parameters={"type": "object"},
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    ),
+    ToolSpec(
+        name="second",
+        description="Second.",
+        parameters={"type": "object"},
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    ),
 ]
 _USAGE = {
     "prompt_tokens": 5000,

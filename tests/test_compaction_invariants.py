@@ -56,6 +56,7 @@ from mindroom.history.types import (
 from mindroom.llm.errors import ContextWindowExceeded, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.session_storage import store as store_module
@@ -544,7 +545,7 @@ def test_retry_policy_propagates_second_typed_context_window_error() -> None:
 
 def test_retry_policy_does_not_shrink_safeguard_refusal() -> None:
     """A safeguard refusal is a content decision, not a size problem: no shrink retry."""
-    error = ModelSafeguardRefusal(provider="fake")
+    error = ModelSafeguardRefusal(provider="fake", usage=MessageMetrics())
 
     assert DEFAULT_SUMMARY_RETRY_POLICY.should_shrink(error) is False
     assert (
@@ -1197,7 +1198,7 @@ async def test_summary_chunk_switches_to_fallback_once_with_unchanged_prompt_and
     fallback = summary_model(model_id="fallback-model-id")
     recovered_summary = "recovered summary"
     generate_summary = AsyncMock(
-        side_effect=[ModelSafeguardRefusal(provider="fake"), recovered_summary],
+        side_effect=[ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()), recovered_summary],
     )
     retry_sleep = AsyncMock()
     logger_mock = MagicMock()
@@ -1265,7 +1266,7 @@ async def test_summary_chunk_switches_to_fallback_once_with_unchanged_prompt_and
 @pytest.mark.parametrize(
     "fallback_error",
     [
-        pytest.param(ModelSafeguardRefusal(provider="fake"), id="fallback-refusal"),
+        pytest.param(ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()), id="fallback-refusal"),
         pytest.param(
             classify_provider_error("invalid request", provider="fake", status_code=400),
             id="fallback-failure",
@@ -1278,7 +1279,7 @@ async def test_summary_chunk_propagates_fallback_refusal_or_failure(fallback_err
     primary = summary_model()
     fallback = summary_model(model_id="fallback-model-id")
     generate_summary = AsyncMock(
-        side_effect=[ModelSafeguardRefusal(provider="fake"), fallback_error],
+        side_effect=[ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()), fallback_error],
     )
 
     with (
@@ -1312,7 +1313,7 @@ async def test_summary_chunk_refusal_after_transient_retry_propagates_within_att
     run = _completed_run("run-1")
     primary = summary_model()
     fallback = summary_model(model_id="fallback-model-id")
-    refusal = ModelSafeguardRefusal(provider="fake")
+    refusal = ModelSafeguardRefusal(provider="fake", usage=MessageMetrics())
     generate_summary = AsyncMock(
         side_effect=[classify_provider_error("temporary provider failure", provider="fake", status_code=503), refusal],
     )
@@ -1366,7 +1367,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
     async def flaky_summary(*, model: ModelProvider, summary_input: str, **_kwargs: object) -> str:
         attempts.append((model.identity.id, summary_input))
         if len(attempts) == 1:
-            raise ModelSafeguardRefusal(provider="fake")
+            raise ModelSafeguardRefusal(provider="fake", usage=MessageMetrics())
         return "recovered summary"
 
     with patch(
@@ -1429,7 +1430,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
 
     async def refuse_summary(*, summary_input: str, **_kwargs: object) -> str:
         attempts.append(summary_input)
-        raise ModelSafeguardRefusal(provider="fake")
+        raise ModelSafeguardRefusal(provider="fake", usage=MessageMetrics())
 
     with (
         patch(

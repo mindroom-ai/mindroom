@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.model_loop import (
+    EMPTY_REQUEST,
     NO_HOOKS,
     EndRun,
     LoopEnded,
@@ -58,13 +59,10 @@ async def _run(
     *,
     hooks: LoopHooks = NO_HOOKS,
     record: RunRecord | None = None,
-    request_template: ModelRequest | None = None,
+    request_template: ModelRequest = EMPTY_REQUEST,
     resumed: Sequence[RunRequirement] | None = None,
 ) -> tuple[list[LoopEvent], RunRecord]:
     record = record or _record()
-    kwargs: dict[str, Any] = {} if request_template is None else {"request_template": request_template}
-    if resumed is not None:
-        kwargs["resumed"] = resumed
     events = [
         event
         async for event in run_model_loop(
@@ -75,7 +73,8 @@ async def _run(
             run=context(),
             hooks=hooks,
             max_tool_calls_per_turn=agent.max_tool_calls_per_turn,
-            **kwargs,
+            request_template=request_template,
+            resumed=resumed,
         )
     ]
     return events, record
@@ -97,7 +96,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     assert events[0] == ReasoningDelta("hmm")
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hello, Alice."
     assert events[-2:] == [
-        RequestCompleted(model_id="scripted-model", provider="Synthetic", usage=usage(12, 3, time_to_first_token=0.25)),
+        RequestCompleted(usage(12, 3, time_to_first_token=0.25)),
         LoopEnded(paused=False),
     ]
     assert record.content == "Hello, Alice."
@@ -740,7 +739,7 @@ async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> 
 
     events, record = await _run(spec(model), messages)
 
-    assert events[-2] == RequestCompleted(model_id="m", provider="OpenAI Chat", usage=usage(1, 1))
+    assert events[-2] == RequestCompleted(usage(1, 1))
     assert record.metrics is not None
     assert record.metrics.details == {
         "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI Chat")],

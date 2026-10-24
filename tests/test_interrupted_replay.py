@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from copy import deepcopy
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -573,7 +574,7 @@ def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_te
         if is_team
         else ConversationSession(kind="agent", session_id="session-1", owner_id="test_scope")
     )
-    run_type = TeamRunRecord if is_team else RunRecord
+    run_type = partial(TeamRunRecord, team_id=None) if is_team else RunRecord
     metered_run = run_type(
         run_id="interrupted-run",
         session_id="session-1",

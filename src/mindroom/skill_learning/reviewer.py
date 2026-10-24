@@ -22,7 +22,7 @@ from pydantic import validate_call
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, EndRun, LoopHooks, SendRequest, run_model_loop
 from mindroom.agent_loop.output_limit import output_limit_answers
 from mindroom.agent_loop.run import own_model_messages
-from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.custom_tools.skill_manage import SkillManageTools
@@ -389,7 +389,7 @@ async def review_conversation(
             messages,
             review.tools,
             record=record,
-            run=RunContext(run_id=invocation_id, session_id=session_id),
+            run=RunContext(run_id=invocation_id, session=UnstoredSession(session_id)),
             hooks=_review_hooks(config, review, metrics),
             max_tool_calls_per_turn=_REVIEW_MAX_TOOL_CALLS,
             request_template=review.settings,

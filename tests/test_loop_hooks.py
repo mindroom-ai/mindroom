@@ -51,8 +51,8 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
     model = ScriptedModel([], capabilities=Capabilities(claude_family=True))
     settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
     build = AgentBuild(
-        spec=AgentSpec(id="general", name="General", model=model, system_message=None),
-        prompt=PromptSpec(role="test"),
+        spec=AgentSpec(id="general", name="General", model=model, system_message=None, toolkits=()),
+        prompt=PromptSpec(role="test", instructions=()),
         request_template=ModelRequest(
             messages=(),
             deferred_tools=DeferredTools(names=frozenset({"deferred_tool"}), portable=True),
@@ -60,7 +60,15 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         history_settings=settings,
         store=None,
         tool_owners={},
-        surface=AgentSurface(mode="standard", cli_shell=False),
+        surface=AgentSurface(
+            mode="standard",
+            cli_shell=False,
+            deferred=(),
+            context_documents=(),
+            context_files=(),
+            knowledge_sources=(),
+            output_file_policy=None,
+        ),
         tool_policy=(_middleware,),
         tool_jobs=JobActor(name="general", team=False, depth=0, tools={}),
     )

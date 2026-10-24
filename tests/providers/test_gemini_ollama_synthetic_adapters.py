@@ -60,6 +60,10 @@ WEATHER = ToolSpec(
     name="get_weather",
     description="Return the forecast.",
     parameters={"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    strict=None,
+    requires_confirmation=None,
+    external_execution=None,
+    approval_type=None,
 )
 PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
@@ -1455,7 +1459,15 @@ async def test_ollama_api_key_and_timeout_reach_the_http_client(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_ollama_tools_are_sorted_and_leave_out_empty_descriptions(tmp_path: Path) -> None:
     """Tools go out sorted by name, and a tool without a description sends none, as Agno's did."""
-    quiet = ToolSpec(name="a_tool", description=None, parameters={"type": "object", "properties": {}})
+    quiet = ToolSpec(
+        name="a_tool",
+        description=None,
+        parameters={"type": "object", "properties": {}},
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    )
 
     request, _ = await run_adapter(OLLAMA, _request(tools=[WEATHER, quiet]), tmp_path, ollama_ndjson(_ollama_done()))
 
@@ -1704,7 +1716,15 @@ async def test_a_whole_synthetic_reply_yields_only_its_finished_turn(tmp_path: P
     """``stream=False`` gets the planned text and shell call on the finished turn, without deltas, as on every route."""
     config = _synthetic_config(chars_per_second=0, tool_call_probability=1.0)
     provider = build_synthetic_provider(config, runtime_paths_for(tmp_path))
-    shell = ToolSpec(name="run_shell_command", description="Run a shell command.", parameters={"type": "object"})
+    shell = ToolSpec(
+        name="run_shell_command",
+        description="Run a shell command.",
+        parameters={"type": "object"},
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    )
 
     [completed] = [event async for event in provider.stream(_request(tools=[shell], stream=False))]
 

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import execution_preparation
-from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
@@ -209,7 +209,7 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
     events = run_team(
         built.spec,
         [Message(role="user", content="Current prompt")],
-        ctx=RunContext(run_id="run-1", session_id="session-1"),
+        ctx=RunContext(run_id="run-1", session=UnstoredSession("session-1")),
     )
     async with closing_async_stream(events):
         async for _event in events:

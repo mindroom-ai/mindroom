@@ -126,7 +126,6 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         raise ValueError(msg)
     run = RunContext(
         run_id=continuation.run_id,
-        session_id=continuation.session_id,
         user_id=continuation.requester_id,
         session=session,
         metadata=deepcopy(persisted.metadata),

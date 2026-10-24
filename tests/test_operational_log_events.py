@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.event_loop_stall import EventLoopStallDetector
 from mindroom.matrix.sync_diagnostics import SyncStallDiagnostics
@@ -84,7 +85,15 @@ async def test_tool_call_limit_reached_keeps_its_name_and_fields() -> None:
     model = ScriptedModel([calls(tool_call("probe", f"call_{index}")) for index in range(3)])
 
     with capture_logs() as logs:
-        await collect(run_agent(spec(model, toolkit(probe), max_tool_calls_per_turn=0), [], ctx=context()))
+        await collect(
+            run_agent(
+                spec(model, toolkit(probe), max_tool_calls_per_turn=0),
+                [],
+                ctx=context(),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            ),
+        )
 
     assert len(model.requests) == 2
     assert _emitted_fields(logs, "tool_call_limit_reached") == _STABLE_EVENTS["tool_call_limit_reached"]

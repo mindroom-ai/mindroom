@@ -72,25 +72,26 @@ class ToolSpec:
     name: str
     description: str | None
     parameters: Mapping[str, Any]
-    strict: bool | None = None
+    strict: bool | None
     # TODO(simplify): the approval flags exist only so OpenAI-family wires send them in each function definition,
     # as main does. Stop sending them and drop them here. Models would notice: tool definitions change once. (#3075)
-    requires_confirmation: bool | None = None
-    external_execution: bool | None = None
-    approval_type: str | None = None
+    requires_confirmation: bool | None
+    external_execution: bool | None
+    approval_type: str | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestOverrides:
-    """Per-request knobs that override the adapter's configured defaults; None leaves a default untouched.
+    """Per-request knobs that override the adapter's configured defaults; a None temperature leaves it untouched.
 
     ``caller_retries`` says the caller retries a failed request itself, so nothing below it may: neither the SDK's
-    own HTTP retries nor the pipeline's stream retry reissues the request.
+    own HTTP retries nor the pipeline's stream retry reissues the request. ``prompt_cache=False`` turns the route's
+    configured prompt caching off for the request.
     """
 
     temperature: float | None = None
     caller_retries: bool = False
-    prompt_cache: bool | None = None
+    prompt_cache: bool = True
     disable_thinking: bool = False
 
 
@@ -118,7 +119,7 @@ class NativeCompactionReplay:
     """
 
     route: str
-    threshold: int | None = None
+    threshold: int | None
     basis: str | None = None
 
 
@@ -266,7 +267,7 @@ class ModelTurn:
     """One finished model turn, as ``complete`` returns it."""
 
     message: Message
-    stop_reason: StopReason | None = None
+    stop_reason: StopReason | None
 
     @property
     def content(self) -> str:

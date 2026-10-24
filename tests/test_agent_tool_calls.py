@@ -17,7 +17,7 @@ from agno.run import RunContext as AgnoRunContext  # noqa: TC002 - Agno resolves
 from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
-from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -79,7 +79,7 @@ async def _catalog(
     session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
     catalog = agent_tool_calls.PreparedAgentToolCatalog(
         agent_name="helper",
-        run=RunContext(run_id="run", session_id="session", user_id="@alice:test", session=session),
+        run=RunContext(run_id="run", user_id="@alice:test", session=session),
         runtime_context=_runtime(tmp_path),
         store=None,
         middleware=middleware,
@@ -103,10 +103,10 @@ async def _events(
 
 def test_a_catalog_cannot_be_built_for_a_run_without_a_session(tmp_path: Path) -> None:
     """A run outside the session its catalog's checkpoints and delegations write fails at once."""
-    with pytest.raises(ValueError, match="belongs to a session"):
+    with pytest.raises(TypeError, match="belongs to a session"):
         agent_tool_calls.PreparedAgentToolCatalog(
             agent_name="helper",
-            run=RunContext(run_id="run", session_id="session", user_id="@alice:test"),
+            run=RunContext(run_id="run", session=UnstoredSession("session"), user_id="@alice:test"),
             runtime_context=_runtime(tmp_path),
             store=None,
         )
