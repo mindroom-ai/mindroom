@@ -1074,6 +1074,9 @@ def _requested_by_a_person(origin: TurnOrigin) -> bool:
     )
 
 
+# TODO(simplify): ResponseRunner mixes the agent and team turn drivers, approval pause, resume, and recovery,
+# inbox ownership with its shutdown recovery proofs, and the locked span lifecycle. Split approval handling and
+# the team driver into focused modules, as teams/ was. Contributors only; no behavior change (#3075).
 @dataclass
 class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
