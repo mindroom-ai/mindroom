@@ -2846,7 +2846,7 @@ class ResponseRunner:
         if response_event_id:
             recorder.set_response_event_id(response_event_id)
         # TODO(simplify): `is_team` travels beside `session_scope`; agent paths pass False with `history_scope()`,
-        # a team scope on a team bot. Derive the row kind from `session_scope.kind` and drop `is_team` here.
+        # a team scope on a team bot. Derive the row kind from `session_scope.kind` and drop the `is_team` parameters.
         # Stored data would notice: a team bot's agent-path turn would store its interrupted row as a team run (#3075).
         persist_interrupted_replay_snapshot(
             storage=self.deps.state_writer.create_storage(execution_identity, scope=session_scope),
