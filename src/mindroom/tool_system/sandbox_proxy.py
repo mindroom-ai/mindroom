@@ -380,21 +380,20 @@ def _build_worker_routing_payload(
         msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
         raise RuntimeError(msg)
 
-    if worker_scope == "user_agent":
-        worker_key, resolved_private_agent_names = _resolve_user_agent_worker_payload(
-            tool_name=tool_name,
-            function_name=function_name,
-            worker_target=worker_target,
+    if worker_scope == "user_agent" and worker_target.private_agent_names is None:
+        msg = (
+            f"Worker-routed tool '{tool_name}.{function_name}' with scope 'user_agent' "
+            "requires explicit private visibility."
         )
-    else:
-        resolved_private_agent_names = None
-        worker_key = worker_target.worker_key
-        if worker_key is None:
-            msg = (
-                f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
-                "could not be resolved from the current execution identity."
-            )
-            raise RuntimeError(msg)
+        raise RuntimeError(msg)
+    worker_key = worker_target.worker_key
+    if worker_key is None:
+        msg = (
+            f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
+            "could not be resolved from the current execution identity."
+        )
+        raise RuntimeError(msg)
+    resolved_private_agent_names = worker_target.private_agent_names if worker_scope == "user_agent" else None
     worker_handle = resolved_worker_manager.ensure_worker(
         WorkerSpec(worker_key, private_agent_names=resolved_private_agent_names),
         progress_sink=progress_sink,
@@ -411,28 +410,6 @@ def _build_worker_routing_payload(
         },
         worker_handle,
     )
-
-
-def _resolve_user_agent_worker_payload(
-    *,
-    tool_name: str,
-    function_name: str,
-    worker_target: ResolvedWorkerTarget,
-) -> tuple[str, frozenset[str]]:
-    if worker_target.private_agent_names is None:
-        msg = (
-            f"Worker-routed tool '{tool_name}.{function_name}' with scope 'user_agent' "
-            "requires explicit private visibility."
-        )
-        raise RuntimeError(msg)
-    worker_key = worker_target.worker_key
-    if worker_key is None:
-        msg = (
-            f"Worker scope 'user_agent' for tool '{tool_name}.{function_name}' "
-            "could not be resolved from the current execution identity."
-        )
-        raise RuntimeError(msg)
-    return worker_key, worker_target.private_agent_names
 
 
 def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWorkerManagerContext:
