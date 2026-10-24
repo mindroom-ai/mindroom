@@ -28,8 +28,9 @@ from mindroom.desktop.credentials import (
 )
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
+from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
     defer_toolkit,
@@ -1596,16 +1597,11 @@ def test_call_tool_schema_accepts_arbitrary_argument_values() -> None:
 
 def test_call_tool_schema_converts_to_a_plain_gemini_object() -> None:
     """Gemini conversion must not invent placeholder argument keys."""
-    convert_schema = pytest.importorskip("agno.utils.gemini").convert_schema
-    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
-    function.process_entrypoint(strict=False)
-
-    converted = convert_schema(function.parameters)
+    converted = gemini_wire.convert_schema(adapt_function(_search_toolkit().functions["call_tool"]).parameters)
 
     assert converted is not None
     assert "example_key" not in str(converted)
-    assert converted.properties is not None
-    assert "JSON object" in (converted.properties["arguments"].description or "")
+    assert "JSON object" in converted["properties"]["arguments"]["description"]
 
 
 class _DualTools(Toolkit):
