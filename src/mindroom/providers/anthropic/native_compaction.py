@@ -55,7 +55,7 @@ def native_compaction_supported(
     route: ClaudeRouteKind,
     model_id: str,
     settings: ClaudeSettings,
-    endpoint: str,
+    endpoint: str | None,
 ) -> bool:
     """Return whether MindRoom may add its own compaction trigger on this route.
 

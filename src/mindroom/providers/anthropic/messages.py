@@ -125,8 +125,8 @@ _VERTEX_ENDPOINTS = {
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
-def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str:
-    """Return the endpoint identity of one Claude route, or "" when it has none.
+def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | None:
+    """Return the endpoint identity of one Claude route, or None on Bedrock, which has none.
 
     Stored native-compaction checkpoints and the media limits learned from provider errors are keyed by it.
 
@@ -147,7 +147,7 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str:
             or _VERTEX_ENDPOINTS.get(region or "", f"https://{region}-aiplatform.googleapis.com/v1")
         )
         return f"{str(base_url).rstrip('/')}|{project}|{region}"
-    return ""
+    return None
 
 
 def _route_client_kwargs(route: ClaudeRouteKind, settings: ClaudeSettings) -> dict[str, Any]:
@@ -235,10 +235,12 @@ class ClaudeProvider:
             if not allow_authored or not authored_native_compaction_supported(route=self.route, settings=self.settings):
                 return None
             threshold = None
+        # Only Bedrock has no endpoint identity, and it compacts neither way.
+        assert self.identity.endpoint is not None
         route = native_compaction_route(
             provider=self.identity.provider,
             model_id=self.identity.id,
-            endpoint=self.identity.endpoint or "",
+            endpoint=self.identity.endpoint,
             history_generation=history_generation,
         )
         return NativeCompactionReplay(route=route, threshold=threshold)
@@ -585,7 +587,7 @@ def _claude_capabilities(
     route: ClaudeRouteKind,
     model_id: str,
     settings: ClaudeSettings,
-    endpoint: str,
+    endpoint: str | None,
 ) -> Capabilities:
     """Return what one Claude route offers for this model."""
     return Capabilities(
@@ -710,7 +712,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
         id=model_config.id,
         provider=provider_name,
         provider_name=provider_name,
-        endpoint=endpoint or None,
+        endpoint=endpoint,
     )
     capabilities = _claude_capabilities(route, model_config.id, settings, endpoint)
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
