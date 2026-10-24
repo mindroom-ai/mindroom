@@ -1150,7 +1150,7 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.providers.model_loading"
+path = "mindroom.providers.credentials"
 depends_on = [
     "mindroom.constants",
     "mindroom.credentials.manager",
@@ -2015,8 +2015,8 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.logging_config",
+    "mindroom.providers.credentials",
     "mindroom.providers.key_checks",
-    "mindroom.providers.model_loading",
 ]
 
 [[modules]]
@@ -2781,11 +2781,11 @@ depends_on = [
     "mindroom.providers.anthropic.wire",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.claude_wire_blocks",
+    "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
     "mindroom.providers.model_http_client",
-    "mindroom.providers.model_loading",
     "mindroom.providers.names",
     "mindroom.runtime_env_policy",
     "mindroom.tool_system.dependencies",
@@ -4807,9 +4807,9 @@ depends_on = [
     "mindroom.config.yaml_includes",
     "mindroom.constants",
     "mindroom.credentials.sync",
-    # Deferred import in the missing-env check.
-    "mindroom.providers.model_loading",
     "mindroom.path_confinement",
+    # Deferred import in the missing-env check.
+    "mindroom.providers.credentials",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]
@@ -4880,9 +4880,9 @@ depends_on = [
     "mindroom.matrix.provisioning_env",
     "mindroom.matrix.state",
     "mindroom.model_defaults",
+    "mindroom.providers.credentials",
     "mindroom.providers.key_checks",
     "mindroom.providers.model_http_client",
-    "mindroom.providers.model_loading",
     "mindroom.providers.names",
     "mindroom.runtime_env_policy",
     "mindroom.startup_errors",
@@ -6008,10 +6008,10 @@ depends_on = [
     "mindroom.prompts",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.cache_ladder",
+    "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.model_http_client",
-    "mindroom.providers.model_loading",
     "mindroom.providers.names",
     "mindroom.providers.prompt_cache_key",
     "mindroom.providers.tool_policy",
@@ -6422,7 +6422,7 @@ from = ["mindroom.ai"]
 
 [[interfaces]]
 expose = ["dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential", "uses_alternative_auth"]
-from = ["mindroom.providers.model_loading"]
+from = ["mindroom.providers.credentials"]
 
 [[interfaces]]
 expose = ["valid_matrix_server_name"]
@@ -7932,8 +7932,8 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.settings",
+    "mindroom.providers.credentials",
     "mindroom.providers.gemini",
-    "mindroom.providers.model_loading",
     "mindroom.providers.names",
     "mindroom.providers.ollama_adapter",
     "mindroom.providers.openai",
@@ -7965,9 +7965,9 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
+    "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
-    "mindroom.providers.model_loading",
     "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]

@@ -36,9 +36,9 @@ from mindroom.matrix.provisioning_env import (
     registration_token_from_env,
 )
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.providers.credentials import model_uses_own_credential
 from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
 from mindroom.providers.model_http_client import closing_model_connections
-from mindroom.providers.model_loading import model_uses_own_credential
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError

@@ -128,7 +128,7 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     # provider, storage, or other feature-specific dependency.
     "mindroom.cli.doctor": _CLI_ROOTS | _REGISTRY_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
-    "mindroom.providers.model_loading": _CONFIG_LAYER_ROOTS,
+    "mindroom.providers.credentials": _CONFIG_LAYER_ROOTS,
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
     # The owned tool values import no Agno module; agno_toolkits builds them from Agno's tool objects.
     "mindroom.tool_system.tool_function": frozenset({"dotenv"}),

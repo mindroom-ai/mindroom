@@ -15,8 +15,8 @@ from pydantic import BaseModel
 from mindroom.api import config_lifecycle
 from mindroom.api.credentials import save_dashboard_api_key
 from mindroom.logging_config import get_logger
+from mindroom.providers.credentials import missing_model_api_key_provider
 from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
-from mindroom.providers.model_loading import missing_model_api_key_provider
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

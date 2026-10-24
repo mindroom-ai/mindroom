@@ -229,7 +229,7 @@ Matrix sync callback
 | `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
-| `providers/model_loading.py` | Which key a configured model authenticates with: the dashboard key and the missing-key checks the CLI and dashboard report |
+| `providers/credentials.py` | Which key a configured model authenticates with: the dashboard key and the missing-key checks the CLI and dashboard report |
 | `providers/key_checks.py` | The request that proves a provider API key valid, which `mindroom doctor` and the dashboard's provider setup send |
 | `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, and `canonical_provider`, its normalized spelling, in a module that imports nothing |
 | `providers/anthropic/messages.py` | The Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |

@@ -27,10 +27,10 @@ from mindroom.model_defaults import (
     ZAI_BASE_URL_DEFAULT,
 )
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
+from mindroom.providers.credentials import uses_alternative_auth
 from mindroom.providers.errors import CliLoginError, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.providers.model_loading import uses_alternative_auth
 from mindroom.providers.names import provider_route
 from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
