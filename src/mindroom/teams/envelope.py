@@ -672,14 +672,14 @@ class _TeamTurn:
                         self.sync_live_turn_recorder(run, attempt)
         except Exception as error:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
-            partial = attempt.partial_snapshot()
+            snapshot = attempt.partial_snapshot()
             return ExcludedAttempt(
                 original_status=RunStatus.error,
                 response_text=self.error_text(error),
                 reason=str(error),
-                partial_text=partial.assistant_text,
-                completed_tools=partial.completed_tools,
-                interrupted_tools=partial.interrupted_tools,
+                partial_text=snapshot.assistant_text,
+                completed_tools=snapshot.completed_tools,
+                interrupted_tools=snapshot.interrupted_tools,
                 run_id=attempt.run_id,
                 metadata_content=self.run_metadata_content(attempt, RunStatus.error),
             )
@@ -760,13 +760,13 @@ class _TeamTurn:
 
     def sync_live_turn_recorder(self, run: TurnRunState, attempt: TeamAttempt) -> None:
         """Refresh the live turn state from the attempt, so an interruption records its text and its tool calls."""
-        partial = attempt.partial_snapshot()
+        snapshot = attempt.partial_snapshot()
         run.turn_state.sync_partial(
             self.turn_recorder,
             run_metadata=run.run_metadata,
-            assistant_text=partial.assistant_text,
-            completed_tools=partial.completed_tools,
-            interrupted_tools=partial.interrupted_tools,
+            assistant_text=snapshot.assistant_text,
+            completed_tools=snapshot.completed_tools,
+            interrupted_tools=snapshot.interrupted_tools,
         )
 
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord, *, blocking: bool) -> PausedAttempt:

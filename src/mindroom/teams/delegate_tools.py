@@ -2,9 +2,9 @@
 """The leader's delegation tools and what they tell the leader about a member's run.
 
 A coordinate team offers ``delegate_task_to_member(member_id, task)``, a collaborate team
-``delegate_task_to_members(task)``. Both are authored as Agno functions, as every MindRoom tool is, and both close
-over the team run they serve: a member's paused requirements are copied onto that run, naming the member, which
-pauses the leader's loop after the batch.
+``delegate_task_to_members(task)``. Both are authored as Agno functions so Agno derives their schemas, and both
+close over the team run they serve: a member's paused requirements are copied onto that run, naming the member,
+which pauses the leader's loop after the batch.
 """
 
 from __future__ import annotations
