@@ -961,6 +961,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         state="claimed",
         show_tool_calls=True,
         request_body="recover actual request",
+        runtime_model_name="default",
         calls=(
             ApprovalCall(
                 "hidden",
@@ -1111,6 +1112,8 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     if nested == "suspend":
         assert len(pauses) == 1
         assert result == pauses[0]
+        # The recovered run keeps the model its approval was saved with, which a second approval saves again.
+        assert result.runtime_model_name == "default"
         assert result.cli_call["parent_bash_call_id"] == "old-bash"
         assert result.cli_call["toolkit"] == "media"
         assert result.cli_call["arguments"] == {"value": "nested media"}
