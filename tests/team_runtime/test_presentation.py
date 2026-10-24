@@ -144,7 +144,8 @@ def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> N
     )
 
     assert finished_run_text(scout) == "Three vendors.\n\nTwo more."
-    assert format_team_response(TeamRunRecord(run_id="team-run", content="Five in all."), [scout]) == (
+    team = TeamRunRecord(run_id="team-run", content="Five in all.", ended_member_runs=[scout])
+    assert format_team_response(team) == (
         "**Scout**: Three vendors.\n\nTwo more.\n\n\n**Team Consensus**:\n\nFive in all."
     )
 
@@ -169,7 +170,7 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
         error=reason if source == "live" else None,
     )
 
-    document = format_team_response(TeamRunRecord(run_id="team-run", content="Unchecked."), [checker])
+    document = format_team_response(TeamRunRecord(run_id="team-run", content="Unchecked.", ended_member_runs=[checker]))
 
     assert document == f"**Checker**: {reason}\n\n\n**Team Consensus**:\n\nUnchecked."
     assert "example-secret" not in document

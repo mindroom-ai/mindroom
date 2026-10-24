@@ -19,14 +19,14 @@ if TYPE_CHECKING:
 
     from mindroom.teams.spec import TeamMember
 
-TEAM_OPENING_PROMPT = (
+_TEAM_OPENING_PROMPT = (
     "You coordinate this team to fulfill the user's request. "
     "You have a team of specialists, listed below. "
     "Delegate to members when their expertise or tools are needed; "
     "answer directly — including with your own tools — when they are not.\n"
 )
 
-TEAM_COORDINATE_DELEGATION_TEMPLATE = (
+_TEAM_COORDINATE_DELEGATION_TEMPLATE = (
     "You work in coordinate mode: you hand sub-tasks to members with "
     "`delegate_task_to_member` and write the answer yourself.\n\n"
     "- Match each sub-task to the member whose role and description fit it best. When sub-tasks do not "
@@ -41,7 +41,7 @@ TEAM_COORDINATE_DELEGATION_TEMPLATE = (
     "state the basis for it. Never concatenate member outputs.\n"
 )
 
-TEAM_COLLABORATE_DELEGATION_TEMPLATE = (
+_TEAM_COLLABORATE_DELEGATION_TEMPLATE = (
     "You work in broadcast mode: one call puts the same task to every member, then you write the "
     "answer yourself.\n\n"
     "- Call `delegate_task_to_members` exactly once. One call reaches every member; do not call it "
@@ -56,13 +56,13 @@ TEAM_COLLABORATE_DELEGATION_TEMPLATE = (
     "thematically — never list the responses in sequence.\n"
 )
 
-TEAM_MEMBERS_CONTEXT_NOTE = (
+_TEAM_MEMBERS_CONTEXT_NOTE = (
     "\nMembers do not see this conversation. Each one gets only the text you write for it, so "
     "carry over every name, number and earlier answer it needs, and say what a good result looks "
     "like.\n"
 )
 
-TEAM_MEMBER_IDS_NOTE = "Member ids are the ids shown in the roster above, used exactly as written.\n"
+_TEAM_MEMBER_IDS_NOTE = "Member ids are the ids shown in the roster above, used exactly as written.\n"
 
 TEAM_MEMBER_NOT_FOUND_TEMPLATE = (
     "Member with ID {member_id} not found in the team or any subteams. "
@@ -81,9 +81,9 @@ def render_members_roster(members: Sequence[TeamMember]) -> str:
 def _delegation_block(mode: TeamMode) -> str:
     content = "\n<delegation>\n"
     if mode is TeamMode.COLLABORATE:
-        content += TEAM_COLLABORATE_DELEGATION_TEMPLATE + TEAM_MEMBERS_CONTEXT_NOTE
+        content += _TEAM_COLLABORATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE
     else:
-        content += TEAM_COORDINATE_DELEGATION_TEMPLATE + TEAM_MEMBERS_CONTEXT_NOTE + TEAM_MEMBER_IDS_NOTE
+        content += _TEAM_COORDINATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE + _TEAM_MEMBER_IDS_NOTE
     return content + "</delegation>\n"
 
 
@@ -103,7 +103,7 @@ def render_leader_system_message(
     """
     content = (
         "<team>\n"
-        f"{TEAM_OPENING_PROMPT}"
+        f"{_TEAM_OPENING_PROMPT}"
         "\n<team_members>\n"
         f"{render_members_roster(members)}"
         "</team_members>\n"
@@ -117,12 +117,7 @@ def render_leader_system_message(
 
 
 __all__ = [
-    "TEAM_COLLABORATE_DELEGATION_TEMPLATE",
-    "TEAM_COORDINATE_DELEGATION_TEMPLATE",
-    "TEAM_MEMBERS_CONTEXT_NOTE",
-    "TEAM_MEMBER_IDS_NOTE",
     "TEAM_MEMBER_NOT_FOUND_TEMPLATE",
-    "TEAM_OPENING_PROMPT",
     "render_leader_system_message",
     "render_members_roster",
 ]

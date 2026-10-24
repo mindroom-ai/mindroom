@@ -25,7 +25,6 @@ from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
@@ -70,6 +69,7 @@ from mindroom.response_turn import (
 )
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
+from mindroom.teams.formation import team_member_name
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     allow_direct_private_team_agents,
@@ -128,19 +128,13 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Message length limits for team context and logging
-_MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
 _MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
 _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
     max_messages=30,
-    max_message_length=_MAX_CONTEXT_MESSAGE_LENGTH,
+    max_message_length=200,
     missing_sender_label="Unknown",
 )
 type TeamStreamChunk = str | StructuredStreamChunk
-
-
-def _team_run_input_text(run_input: Sequence[Message]) -> str:
-    return render_prepared_team_messages_text(run_input)
 
 
 def _team_request_log_context(
@@ -163,7 +157,7 @@ def _team_request_log_context(
         ),
         prompt=prompt,
         model_prompt=None,
-        full_prompt=_team_run_input_text(run_input),
+        full_prompt=render_prepared_team_messages_text(run_input),
         metadata=metadata,
     )
 
@@ -191,7 +185,7 @@ class PreparedTeamExecution:
     @property
     def prompt_text(self) -> str:
         """Return the prompt-visible text derived from the turn's messages."""
-        return _team_run_input_text(self.turn.in_request_order())
+        return render_prepared_team_messages_text(self.turn.in_request_order())
 
     def run_input(self, media: MediaInputs) -> list[Message]:
         """Return one attempt's request body, media on the prompt: the summary, the replayed history, then the turn."""
@@ -202,24 +196,6 @@ class PreparedTeamExecution:
         prompt.files = media.files or None
         prompt.videos = media.videos or None
         return build_request(system=(), summary=self.summary, history=deepcopy(self.history), turn=turn)
-
-
-def _replayed_team_history(
-    scope_context: ScopeSessionContext | None,
-    prepared_history: PreparedHistoryState,
-    *,
-    config: Config,
-    configured_team_name: str | None,
-) -> tuple[list[Message], ScopeSummary | None]:
-    """Return the stored team history this request replays under the resolved plan, and the scope summary."""
-    if scope_context is None:
-        return [], None
-    return replayed_history(
-        scope_context.session,
-        scope_context.scope,
-        team_history_settings(config, configured_team_name),
-        prepared_history.replay_plan,
-    )
 
 
 async def prepare_materialized_team_execution(
@@ -282,11 +258,16 @@ async def prepare_materialized_team_execution(
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)
-    history, summary = _replayed_team_history(
-        scope_context,
-        prepared_history,
-        config=config,
-        configured_team_name=configured_team_name,
+    # The stored team history this request replays under the resolved plan, and the scope summary.
+    history, summary = (
+        replayed_history(
+            scope_context.session,
+            scope_context.scope,
+            team_history_settings(config, configured_team_name),
+            prepared_history.replay_plan,
+        )
+        if scope_context is not None
+        else ([], None)
     )
     run_extra_content = build_prepared_history_metadata_content(prepared_history)
     run_metadata = build_matrix_run_metadata(
@@ -313,17 +294,6 @@ async def prepare_materialized_team_execution(
 # ---------------------------------------------------------------------------
 # Running the leader and storing the turn
 # ---------------------------------------------------------------------------
-
-
-def _team_storage(run: TurnRunState) -> TeamStorage | None:
-    """Return where one attempt's team run is stored; the turn's scope context keeps the session a run first gave it.
-
-    A team without a bound scope stores nothing, as Agno's team ran without a database then.
-    """
-    if run.scope_context is None:
-        return None
-    run.scope_context = run.scope_context.with_session()
-    return scope_storage(run.scope_context)
 
 
 @dataclass(frozen=True)
@@ -462,9 +432,7 @@ async def _persist_bound_seen_event_ids(*, scope_context: ScopeSessionContext | 
 
 
 def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[str]:
-    if not isinstance(run_metadata, dict):
-        return []
-    raw_event_ids = run_metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
+    raw_event_ids = (run_metadata or {}).get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
     if not isinstance(raw_event_ids, list):
         return []
     return [event_id for event_id in raw_event_ids if isinstance(event_id, str) and event_id]
@@ -619,7 +587,6 @@ class _TeamTurn:
             run_id=continuation_state.active_run_id or str(uuid4()),
             members=members,
             presentation=presentation,
-            show_tool_calls=self.show_tool_calls,
             stream=stream,
             team_name=self.entity_name,
             runtime_model_name=prepared.runtime_model_name,
@@ -630,7 +597,11 @@ class _TeamTurn:
         logger.info("executing_team_response", agent_count=len(members.builds), mode=self.mode.value)
         run_input = prepared.run_input(self.media)
         logger.info("team_prompt_preview", agents=members.display_names, prompt_preview=prepared.prompt_text[:500])
-        storage = _team_storage(run)
+        # The turn's scope context keeps the session a run first gave it; a team without a bound scope stores nothing.
+        storage: TeamStorage | None = None
+        if run.scope_context is not None:
+            run.scope_context = run.scope_context.with_session()
+            storage = scope_storage(run.scope_context)
         leader = _leader_run(
             built,
             prepared,
@@ -812,7 +783,7 @@ class _TeamTurn:
                 record.ended_member_runs,
                 config_names=attempt.members.requested_agent_names,
                 display_names=attempt.members.display_names,
-                show_tool_calls=attempt.show_tool_calls,
+                show_tool_calls=attempt.presentation.show_tool_calls,
             )
             if blocking
             else continued_team_pause(attempt.presentation, paused)
@@ -841,8 +812,7 @@ class _TeamTurn:
                 scope_context=run.scope_context,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
-        members = record.ended_member_runs
-        tool_executions = team_tool_executions(record, members)
+        tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
         # its trace through its chunks. A blocking reply renders the finished runs, as Agno's did; a streamed one
@@ -850,12 +820,12 @@ class _TeamTurn:
         # The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
             leader_text = finished_run_text(record)
-            has_visible_output = bool(format_team_response(record, members)) or bool(leader_text.strip())
-            rendered = header + team_response_text(record, members)
+            has_visible_output = bool(format_team_response(record)) or bool(leader_text.strip())
+            rendered = header + team_response_text(record)
             silent = (
                 self.ctx.allow_no_report_response
                 and is_silent_schedule_no_report_response(leader_text)
-                and not any(finished_run_text(member).strip() for member in members)
+                and not any(finished_run_text(member).strip() for member in record.ended_member_runs)
             )
             # A quiet scheduled reply delivers and records the bare token, not the team document.
             response_text = leader_text.strip() if silent else rendered
@@ -1144,7 +1114,7 @@ async def team_response_stream(
     knowledge-availability enrichment before the turn runs.
     """
     assert orchestrator.config is not None
-    registry = orchestrator.config
+    config = orchestrator.config
     turn = await asyncio.to_thread(
         _team_turn,
         ctx,
@@ -1152,7 +1122,7 @@ async def team_response_stream(
         execution_identity=execution_identity,
         mode=mode,
         requested_agent_names=requested_team_agent_names(
-            [_member_name(member_id, registry, orchestrator.runtime_paths) for member_id in agent_ids],
+            [team_member_name(member_id, config, orchestrator.runtime_paths) for member_id in agent_ids],
         ),
         thread_history=thread_history,
         model_name=model_name,
@@ -1199,17 +1169,6 @@ async def team_response_stream(
     async with aclosing(response_stream) as closing_stream:
         async for chunk in closing_stream:
             yield chunk
-
-
-def _member_name(agent_id: MatrixID, config: Config, runtime_paths: RuntimePaths) -> str:
-    """Return the config name of the agent behind one Matrix id."""
-    return (
-        entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
-            agent_id.full_id,
-            include_router=True,
-        )
-        or agent_id.username
-    )
 
 
 __all__ = [

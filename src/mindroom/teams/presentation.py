@@ -33,29 +33,18 @@ from mindroom.tool_system.events import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.llm.runs import AnyRunRecord, RunRecord, TeamRunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord, TeamRunRecord, ToolExecution
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamRunEvent
 
 
 def url_safe_member_id(input_string: str) -> str:
-    """Return Agno's ``url_safe_string`` of a member's config name, the member id of stored reply snapshots."""
-    # Replace spaces with dashes
-    safe_string = input_string.replace(" ", "-")
+    """Return Agno's ``url_safe_string`` of a member's config name, the member id of stored reply snapshots.
 
-    # Convert camelCase to kebab-case
-    safe_string = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", safe_string).lower()
-
-    # Convert snake_case to kebab-case
-    safe_string = safe_string.replace("_", "-")
-
-    # Remove special characters, keeping alphanumeric, dashes, and dots
-    safe_string = re.sub(r"[^\w\-.]", "", safe_string)
-
-    # Ensure no consecutive dashes
-    safe_string = re.sub(r"-+", "-", safe_string)
-
-    return safe_string  # noqa: RET504 - kept as Agno's ``url_safe_string`` reads, statement for statement.
+    Spaces, camelCase boundaries, and underscores become dashes, punctuation other than dots goes, dash runs collapse.
+    """
+    kebab = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", input_string.replace(" ", "-")).lower().replace("_", "-")
+    return re.sub(r"-+", "-", re.sub(r"[^\w\-.]", "", kebab))
 
 
 _TEAM_HEADER_PREFIX = "🤝 **Team Response** ("
@@ -65,15 +54,7 @@ NO_TEAM_RESPONSE = "No team response generated."
 
 
 def format_team_header(agent_names: list[str]) -> str:
-    """Format the team response header.
-
-    Args:
-        agent_names: List of agent names in the team
-
-    Returns:
-        Formatted header string
-
-    """
+    """Return the team reply's header naming ``agent_names``."""
     return f"{_TEAM_HEADER_PREFIX}{', '.join(agent_names)}{_TEAM_HEADER_END}"
 
 
@@ -129,51 +110,41 @@ def finished_run_text(record: AnyRunRecord) -> str:
     return "\n\n".join(own_answers(record))
 
 
-def format_team_response(record: TeamRunRecord, members: Sequence[RunRecord]) -> str:
+def format_team_response(record: TeamRunRecord) -> str:
     """Return a finished team run's text as Agno's blocking team reply rendered it, without the header.
 
-    ``members`` are the member runs that ended, in the order they ended; each contributes its ``finished_run_text``,
+    Each member run that ended (``ended_member_runs``, in the order they ended) contributes its ``finished_run_text``,
     so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
     credentials redacted, even when it wrote text first. What the leader's run hands over (``handover_content``) is
     the consensus, so a leader that failed shows that reason too. A run in which nobody wrote anything renders as
     empty text.
     """
+    # TODO(simplify): A blocking reply lists member runs in the order they ended, one entry per delegation, while a
+    # streamed reply shows one slot per member in configured order. Render both from the member slots in configured
+    # order. Users, API clients, and replayed history would notice.
     contributions = [
         _format_member_contribution(member.agent_name or "Team Member", text)
-        for member in members
+        for member in record.ended_member_runs
         if (text := finished_run_text(member)).strip()
     ]
     return "\n\n".join(_with_consensus(contributions, str(record.handover_content or "")))
 
 
-def team_response_text(record: TeamRunRecord, members: Sequence[RunRecord]) -> str:
+def team_response_text(record: TeamRunRecord) -> str:
     """Return a finished team run's reply without the header: its runs' text, else the leader's, else the no-reply note."""
-    return format_team_response(record, members) or finished_run_text(record) or NO_TEAM_RESPONSE
+    return format_team_response(record) or finished_run_text(record) or NO_TEAM_RESPONSE
 
 
-def _restore_hidden_team_separators(
-    state: Mapping[str, object],
-    *,
-    valid_tool_scopes: set[str],
-    show_tool_calls: bool,
-    per_member: Mapping[str, str],
-    consensus: str,
-) -> set[str]:
-    """Restore validated hidden-tool boundaries from a durable team snapshot."""
-    stored = state.get("separate_next_scopes", [])
-    if (
-        not isinstance(stored, list)
-        or any(not isinstance(scope, str) or scope not in valid_tool_scopes for scope in stored)
-        or len(stored) != len(set(stored))
-        or (show_tool_calls and stored)
-    ):
-        msg = "Team continuation presentation snapshot is invalid"
-        raise RuntimeError(msg)
-    scopes = cast("list[str]", stored)
-    if any(not (consensus if scope == "team" else per_member[scope.removeprefix("agent:")]) for scope in scopes):
-        msg = "Team continuation presentation snapshot is invalid"
-        raise RuntimeError(msg)
-    return set(scopes)
+_INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
+
+
+def _is_snapshot_member(member: object) -> bool:
+    """Return whether one stored member slot holds text fields, its id and config name non-empty."""
+    if not isinstance(member, dict):
+        return False
+    fields = cast("dict[str, object]", member)
+    keys = ("id", "config_name", "display_name", "content")
+    return all(isinstance(fields.get(key), str) for key in keys) and bool(fields["id"]) and bool(fields["config_name"])
 
 
 @dataclass
@@ -199,11 +170,6 @@ class TeamStreamPresentation:
             if pending.scope_key is not None and self._slot_text(pending.scope_key)
         }
 
-    @property
-    def display_names(self) -> list[str]:
-        """Return immutable rendering labels in frozen member order."""
-        return [self.display_names_by_id[member_id] for member_id in self.member_ids]
-
     @classmethod
     def new(
         cls,
@@ -213,21 +179,14 @@ class TeamStreamPresentation:
         show_tool_calls: bool,
     ) -> TeamStreamPresentation:
         """Create an empty presentation for a new team run."""
-        frozen_config_names = list(config_names)
-        ids = [url_safe_member_id(config_name) for config_name in frozen_config_names]
-        names = list(display_names)
-        if (
-            len(ids) != len(names)
-            or len(ids) != len(frozen_config_names)
-            or len(ids) != len(set(ids))
-            or any(not member_id for member_id in ids)
-        ):
+        ids = [url_safe_member_id(config_name) for config_name in config_names]
+        if len(ids) != len(display_names) or len(ids) != len(set(ids)) or not all(ids):
             msg = "Team presentation member identities are invalid"
             raise RuntimeError(msg)
         return cls(
             member_ids=ids,
-            config_names_by_id=dict(zip(ids, frozen_config_names, strict=True)),
-            display_names_by_id=dict(zip(ids, names, strict=True)),
+            config_names_by_id=dict(zip(ids, config_names, strict=True)),
+            display_names_by_id=dict(zip(ids, display_names, strict=True)),
             show_tool_calls=show_tool_calls,
             per_member=dict.fromkeys(ids, ""),
         )
@@ -241,76 +200,54 @@ class TeamStreamPresentation:
         state: Mapping[str, object] | None,
         tool_trace: Sequence[ToolTraceEntry],
     ) -> TeamStreamPresentation:
-        """Restore a durable structured snapshot without interpreting its rendered Markdown."""
+        """Restore a durable structured snapshot without interpreting its rendered Markdown.
+
+        The snapshot must hold the slots of ``config_names`` in order, and every tool call of ``tool_trace`` one of
+        them; a hidden tool call separates only slot text written before it.
+        """
         if state is None or state.get("kind") != "team_stream" or state.get("version") != 2:
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)
+            raise RuntimeError(_INVALID_SNAPSHOT)
         stored_members = state.get("members")
-        if not isinstance(stored_members, list):
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)  # noqa: TRY004
-        restored_ids: list[str] = []
-        config_names_by_id: dict[str, str] = {}
-        display_names_by_id: dict[str, str] = {}
-        per_member: dict[str, str] = {}
-        for member in stored_members:
-            if not isinstance(member, dict):
-                msg = "Team continuation presentation snapshot is invalid"
-                raise RuntimeError(msg)  # noqa: TRY004
-            stored_member = cast("dict[str, object]", member)
-            member_id = stored_member.get("id")
-            config_name = stored_member.get("config_name")
-            display_name = stored_member.get("display_name")
-            content = stored_member.get("content")
-            if (
-                not isinstance(member_id, str)
-                or not member_id
-                or member_id in per_member
-                or not isinstance(config_name, str)
-                or not config_name
-                or not isinstance(display_name, str)
-                or not isinstance(content, str)
-            ):
-                msg = "Team continuation presentation snapshot is invalid"
-                raise RuntimeError(msg)
-            restored_ids.append(member_id)
-            config_names_by_id[member_id] = config_name
-            display_names_by_id[member_id] = display_name
-            per_member[member_id] = content
-        expected_config_names = list(config_names)
-        expected_ids = [url_safe_member_id(config_name) for config_name in expected_config_names]
+        if not isinstance(stored_members, list) or not all(_is_snapshot_member(member) for member in stored_members):
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        members = cast("list[dict[str, str]]", stored_members)
+        member_ids = [member["id"] for member in members]
         if (
-            restored_ids != expected_ids
-            or len(expected_ids) != len(set(expected_ids))
-            or [config_names_by_id[member_id] for member_id in restored_ids] != expected_config_names
+            member_ids != [url_safe_member_id(config_name) for config_name in config_names]
+            or len(member_ids) != len(set(member_ids))
+            or [member["config_name"] for member in members] != list(config_names)
         ):
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)
-        valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in restored_ids)}
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in member_ids)}
         if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace):
             msg = "Team continuation durable tool scope is not a frozen presentation slot"
             raise RuntimeError(msg)
+        per_member = {member["id"]: member["content"] for member in members}
         consensus = state.get("consensus")
-        if not isinstance(consensus, str):
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)  # noqa: TRY004
-        restored_separators = _restore_hidden_team_separators(
-            state,
-            valid_tool_scopes=valid_tool_scopes,
-            show_tool_calls=show_tool_calls,
-            per_member=per_member,
-            consensus=consensus,
-        )
+        separators = state.get("separate_next_scopes", [])
+        if (
+            not isinstance(consensus, str)
+            or not isinstance(separators, list)
+            or any(not isinstance(scope, str) or scope not in valid_tool_scopes for scope in separators)
+        ):
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        scopes = cast("list[str]", separators)
+        if (
+            len(scopes) != len(set(scopes))
+            or (show_tool_calls and scopes)
+            or any(not (consensus if scope == "team" else per_member[scope.removeprefix("agent:")]) for scope in scopes)
+        ):
+            raise RuntimeError(_INVALID_SNAPSHOT)
         restored = cls(
-            member_ids=restored_ids,
-            config_names_by_id=config_names_by_id,
-            display_names_by_id=display_names_by_id,
+            member_ids=member_ids,
+            config_names_by_id={member["id"]: member["config_name"] for member in members},
+            display_names_by_id={member["id"]: member["display_name"] for member in members},
             show_tool_calls=show_tool_calls,
             per_member=per_member,
             consensus=consensus,
             tool_trace=list(deepcopy(tool_trace)),
         )
-        restored.separate_next_scopes.update(restored_separators)
+        restored.separate_next_scopes.update(scopes)
         return restored
 
     def to_state(self) -> dict[str, object]:
@@ -346,36 +283,23 @@ class TeamStreamPresentation:
 
         ``separate`` starts the content in a paragraph of its own when the slot already holds text.
         """
-        scope_key = f"agent:{member_id}"
-        self.per_member[member_id] = append_stream_text(
-            self.per_member[member_id],
-            content,
-            separate=separate or scope_key in self.separate_next_scopes,
-        )
-        if content:
-            self.separate_next_scopes.discard(scope_key)
+        self._append_text(f"agent:{member_id}", content, separate=separate)
 
     def append_consensus(self, content: object | None, *, separate: bool = False) -> None:
         """Append a coordinator content delta to the consensus slot; ``separate`` as for ``append_member``."""
-        self.consensus = append_stream_text(
-            self.consensus,
-            content,
-            separate=separate or "team" in self.separate_next_scopes,
-        )
-        if content:
-            self.separate_next_scopes.discard("team")
+        self._append_text("team", content, separate=separate)
 
-    def _append_tool_marker(self, scope_key: str, marker: str) -> None:
-        if scope_key == "team":
-            self.consensus += marker
-            return
-        member_id = scope_key.removeprefix("agent:")
-        self.per_member[member_id] += marker
+    def _append_text(self, scope_key: str, content: object | None, *, separate: bool) -> None:
+        """Append to a slot; text after a hidden tool call in that slot starts a paragraph of its own."""
+        separate = separate or scope_key in self.separate_next_scopes
+        self._set_slot_text(scope_key, append_stream_text(self._slot_text(scope_key), content, separate=separate))
+        if content:
+            self.separate_next_scopes.discard(scope_key)
 
     def _slot_text(self, scope_key: str) -> str:
         if scope_key == "team":
             return self.consensus
-        return self.per_member.get(scope_key.removeprefix("agent:"), "")
+        return self.per_member[scope_key.removeprefix("agent:")]
 
     def _set_slot_text(self, scope_key: str, text: str) -> None:
         if scope_key == "team":
@@ -411,7 +335,7 @@ class TeamStreamPresentation:
         trace_entry.scope_key = scope_key
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self._append_tool_marker(scope_key, marker)
+            self._set_slot_text(scope_key, self._slot_text(scope_key) + marker)
         elif self._slot_text(scope_key):
             self.separate_next_scopes.add(scope_key)
         self._align_tool_trace_with_document()
@@ -451,7 +375,8 @@ class TeamStreamPresentation:
             per_member=self.per_member,
             consensus=self.consensus,
         )
-        return format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
+        header = format_team_header([self.display_names_by_id[member_id] for member_id in self.member_ids])
+        return header + "\n\n".join(parts) if parts else ""
 
 
 def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) -> None:

@@ -339,7 +339,6 @@ def test_releasing_a_spent_attempt_s_members_drops_its_partial_output(
         run_id="run-1",
         members=members,
         presentation=presentation,
-        show_tool_calls=False,
         stream=True,
         team_name="team",
         runtime_model_name="default",
