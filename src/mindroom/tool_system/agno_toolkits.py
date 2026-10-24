@@ -2,12 +2,9 @@
 
 Agno stays the tool authoring library: tools subclass ``agno.tools.Toolkit``, and Agno's public ``process_entrypoint``
 derives each schema and wraps each entrypoint in pydantic coercion.
-This module is where the owned loop meets those objects, in both directions: it turns a toolkit's functions into
-``ToolFunction`` values once, and at call time it builds the Agno-shaped arguments an entrypoint declares and reads
-the Agno ``ToolResult`` it returns back into owned values.
-Those owned values, ``ToolFunction``, ``AdaptedToolkit``, and ``ToolValue``, live in ``tool_function``, so a module
-that only handles them imports no Agno module.
-It is also the one place MindRoom modules outside the tool and toolkit packages import Agno's tool types from.
+At call time this module builds the Agno-shaped arguments an entrypoint declares and reads the ``ToolResult`` it
+returns as owned values, which live in ``tool_function`` so a module that only handles them imports no Agno module.
+MindRoom modules outside the tool and toolkit packages import Agno's tool types only from here.
 """
 
 from __future__ import annotations
@@ -120,10 +117,7 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
 
 
 def adapt_toolkit(toolkit: Toolkit) -> AdaptedToolkit:
-    """Adapt every function of ``toolkit`` in the order Agno prepares them for an async run.
-
-    The functions share one ``actor_state``, as the functions of one toolkit shared the Agno agent that ran them.
-    """
+    """Adapt the functions of ``toolkit`` in Agno's async-run order; they share one ``actor_state``."""
     functions = toolkit.get_async_functions().values()
     actor_state: dict[str, Any] = {}
     return AdaptedToolkit(
@@ -231,8 +225,7 @@ def framework_arguments(function: ToolFunction, context: ToolCallContext) -> dic
         "_agno_agent": actor,
         "_agno_team": actor,
         "_agno_run_context": run_context,
-        # Agno passed the run's input media to these names; the owned loop gives a tool none, so each receives None,
-        # as under Agno for a run without media.
+        # The owned loop gives a tool no run media, so each media name receives None.
         **dict.fromkeys(MEDIA_INJECTED_PARAMS),
     }
     arguments = {name: by_name[name] for name in function.injected_params if name in by_name}
@@ -260,7 +253,7 @@ def warm_agno_tool_imports() -> None:
 
 
 def model_arguments(arguments: Mapping[str, Any], function: ToolFunction) -> dict[str, Any]:
-    """Drop model-sent values for parameters the framework supplies, as Agno does before a call runs.
+    """Drop model-sent values for parameters the framework supplies.
 
     A media name the schema declares stays the model's, because a wrapper may expose a wrapped tool's own ``files``
     argument; identity names never do, whatever the schema says.
@@ -286,7 +279,7 @@ def model_arguments(arguments: Mapping[str, Any], function: ToolFunction) -> dic
 
 @dataclass(slots=True)
 class StreamCollector:
-    """Accumulate what a generator tool yields the way Agno's loop reads it: text joins, ``ToolResult`` media merge."""
+    """Accumulate what a generator tool yields: text joins, and ``ToolResult`` media and metadata merge."""
 
     _chunks: list[str] = field(default_factory=list)
     _merged: ToolResult | None = None
@@ -315,7 +308,7 @@ class StreamCollector:
 
 
 def tool_value(result: object) -> ToolValue:
-    """Read a tool's return value as Agno's loop does: a ``ToolResult`` carries text and media, anything else is text.
+    """Read a tool's return value: a ``ToolResult`` carries text and media, anything else is its text.
 
     A value already in owned terms, as a tool job's saved result or minimal mode's Bash facade returns, stands as it is.
     """

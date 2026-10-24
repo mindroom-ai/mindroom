@@ -25,19 +25,17 @@ class ToolFunction:
     """One callable tool with its model-facing definition and the flags the loop reads.
 
     ``parameters`` is the final JSON schema the model receives; readers must not mutate it.
-    ``description``, ``strict``, ``requires_confirmation``, and ``external_execution`` keep Agno's tri-state: None
-    means the tool never set the value, which the loop reads as False and the wire omits.
+    ``description``, ``strict``, ``requires_confirmation``, and ``external_execution`` are None when the tool never
+    set them, which the loop reads as False and the wire omits.
     ``external_execution_silent`` marks an externally executed call whose pause the run reports without text.
     ``injected_params`` names the entrypoint parameters the framework supplies at call time, which the model never
     sees and whose model-sent values are dropped.
-    ``entrypoint_processed`` marks a function whose entrypoint Agno would process again: one that does not set
-    ``skip_entrypoint_processing``, as MCP tools and the ``@tool`` methods a toolkit registers do to keep the schema
-    they were built with. Realtime calls repeat the second processing pass Agno ran on a marked function.
-    ``actor_state`` is what the function keeps on the agent or team Agno would inject into it: one dict per adapted
-    toolkit, shared by its functions and calls and never stored.
+    ``entrypoint_processed`` marks a function that does not set ``skip_entrypoint_processing`` (MCP tools and a
+    toolkit's ``@tool`` methods set it); realtime calls repeat the second schema pass main ran on such a function.
+    ``actor_state`` is what an Agno toolkit keeps on its injected agent or team (``ToolCallActor``): one dict per
+    adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
-    caller runs (the computer announcement of the browser that gives an agent its worker computer), as Agno ran a
-    function's ``tool_hooks`` inside the agent's.
+    caller runs, such as the computer announcement of the browser that gives an agent its worker computer.
     """
 
     name: str
@@ -56,10 +54,10 @@ class ToolFunction:
     middleware: tuple[ToolMiddleware, ...] = ()
 
     # TODO(simplify): The definition carries the pause flags only because Chat and Responses send them on the wire,
-    # as Agno did. Dropping them here and from ``ToolSpec`` leaves name, description, schema, and strict.
+    # as main does. Dropping them here and from ``ToolSpec`` leaves name, description, schema, and strict.
     # Models would notice: Chat and Responses requests stop sending them for the tools that set them (#3075).
     def definition(self) -> ToolSpec:
-        """Return the model-facing definition a provider adapter formats: every field Agno serialized, None kept."""
+        """Return the model-facing definition a provider adapter formats, with the flags the tool never set as None."""
         return ToolSpec(
             name=self.name,
             description=self.description,
@@ -73,7 +71,7 @@ class ToolFunction:
 
 @dataclass(frozen=True, slots=True)
 class AdaptedToolkit:
-    """One Agno toolkit as the owned loop sees it; ``instructions`` is set only when Agno would add it to the prompt.
+    """One Agno toolkit as the owned loop sees it; ``instructions`` is set only when ``add_instructions`` asks for it.
 
     ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
     it describes the toolkit's functions and minimal mode offers as a context document.
@@ -95,7 +93,7 @@ def first_of_each_name[T](
 ) -> Iterator[tuple[T, ToolFunction]]:
     """Yield the pairs whose function is the first of its name, in order, the selection a run offers.
 
-    Each later pair of a taken name is dropped, as Agno dropped it, and passed to ``on_dropped``.
+    Each later pair of a taken name is dropped, kept as main behaves, and passed to ``on_dropped``.
     """
     names: set[str] = set()
     for source, function in pairs:

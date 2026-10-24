@@ -1,10 +1,10 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Connect the Agno toolkits that hold a connection for one run, as Agno 3.0.9's agent did around each of its runs.
+"""Connect the Agno toolkits that hold a connection for one run around each run that offers them.
 
 An Agno ``MCPTools`` registers its functions only once its session is connected, and a toolkit that sets
-``requires_connect``, such as Postgres or Redshift, holds a connection its run must close. Before each run Agno's
-agent connected every such toolkit, an MCP session only when it was not connected already, and after the run it
-closed what that run had connected; a failure either way was logged as a warning and the run went on.
+``requires_connect``, such as Postgres or Redshift, holds a connection its run must close. A run connects every such
+toolkit first, an MCP session only when it is not connected already, and closes what it connected once it ends; a
+failure either way is logged as a warning and the run goes on.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ class _McpToolkit(Protocol):
 
 def _mcp_toolkit(toolkit: Toolkit) -> _McpToolkit | None:
     """Return ``toolkit`` as an Agno MCP toolkit, or None for any other toolkit."""
-    # Agno recognizes its MCP toolkits by class name so the optional MCP SDK is never imported.
+    # By class name, so the optional MCP SDK is never imported.
     if any(base.__name__ == "MCPTools" for base in type(toolkit).__mro__):
         return cast("_McpToolkit", toolkit)
     return None
