@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 
     from google.genai import Client
 
-# The interval between checks while the Files API processes an upload.
 _PROCESSING_POLL_SECONDS = 2.0
 # The Gemini API answers 403 for a file name that does not exist in the project.
 _MISSING_FILE_STATUSES = frozenset({403, 404})

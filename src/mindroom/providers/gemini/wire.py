@@ -573,17 +573,17 @@ def read_chunk(
 
     Gemini repeats the reply's cumulative usage on every chunk, so each chunk that carries usage reports it first, as
     a partial report that replaces the one before. Only a finished candidate's usage, the reply's total, counts toward
-    the reply's own usage. A candidate that ended in a malformed tool call reports its usage and nothing else;
-    ``malformed_tool_call_error`` then ends the reply. A chunk that shows Google Search grounding or code execution
-    at work reports that hosted tool's start.
+    the reply's own usage, apart from a whole response without candidates (see the TODO below). A candidate that ended
+    in a malformed tool call reports its usage and nothing else; ``malformed_tool_call_error`` then ends the reply. A
+    chunk that shows Google Search grounding or code execution at work reports that hosted tool's start.
     """
     if not chunk.candidates:
         if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason is not None:
             # A blocked prompt gets feedback instead of a candidate, which ends the reply.
             reply.prompt_blocked = True
-        # TODO(simplify): a blocked prompt's usage counts only when the reply arrives whole. Count a chunk without
-        # candidates only when it blocks the prompt, in both modes, and drop ``whole_response``. Operators would see
-        # the usage of streamed blocked prompts.
+        # TODO(simplify): a chunk without candidates counts its usage only when the reply arrives whole, blocked or
+        # not, so a streamed blocked prompt reports none. Also count a streamed chunk that blocks the prompt.
+        # Operators would see the usage of streamed blocked prompts.
         if not whole_response or chunk.usage_metadata is None:
             return []
         reply.usage = _usage_metrics(chunk.usage_metadata)
