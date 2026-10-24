@@ -35,7 +35,7 @@ from mindroom.script_runs.store import (
 )
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
-from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeContext,
@@ -1069,7 +1069,7 @@ async def _close_toolkit(toolkit: Toolkit) -> None:
 
 
 def _strict_json_result(result: object) -> object:
-    normalized = to_json_compatible(result)
+    normalized = to_json_compatible(client_tool_result(result))
     try:
         json.dumps(
             normalized,

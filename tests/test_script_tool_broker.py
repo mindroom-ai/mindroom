@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime.
 from agno.tools import Toolkit
+from agno.tools.function import ToolResult
 
 import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
@@ -930,6 +931,29 @@ async def test_script_broker_records_background_origin_and_durable_request_prove
     assert record["arguments"] == {"a": 1, "b": 2}
     assert record["correlation_id"] == "background-script:run-1:audited-call"
     assert token not in json.dumps(record)
+
+
+@pytest.mark.asyncio
+async def test_script_call_result_is_the_text_of_a_tool_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool that returns a tool result, as MCP-backed tools do, gives the script its text, not the object's repr."""
+
+    class ToolResultCalculator(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def add(self, a: int, b: int) -> ToolResult:
+            return ToolResult(content=f"sum={a + b}")
+
+    _replace_calculator_toolkit(monkeypatch, ToolResultCalculator)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(), token)
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert receipt.result == "sum=3"
 
 
 @pytest.mark.asyncio

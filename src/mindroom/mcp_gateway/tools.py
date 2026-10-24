@@ -32,7 +32,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
@@ -363,7 +363,7 @@ async def invoke_tool(
             )
         except Exception as exc:
             raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE) from exc
-        result = to_json_compatible(value)
+        result = to_json_compatible(client_tool_result(value))
         if _connection_required(result):
             raise GatewayError(code=GatewayErrorCode.CONNECTION_REQUIRED)
         payload: InvocationResponse = {"result": result}

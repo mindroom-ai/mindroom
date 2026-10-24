@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 from dataclasses import replace
@@ -13,7 +14,7 @@ import pytest
 from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime.
 from agno.tools import Toolkit
 from agno.tools.function import Function
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from mindroom import agents, constants
 from mindroom.api.config_lifecycle import ApiSnapshot
@@ -1271,6 +1272,56 @@ async def test_mcp_selected_catalog_preserves_filters_and_never_initializes_othe
         assert "hello" in json.dumps(result)
     finally:
         await manager.shutdown()
+
+
+async def _invoke_mcp_echo(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+    planned: CallToolResult,
+) -> InvocationResult:
+    """Invoke the MCP server's ``echo`` tool through the gateway, the server answering with ``planned``."""
+    _patch_manager(monkeypatch)
+    monkeypatch.setattr(_FakeClientSession, "tool_list", [_tool("echo")])
+    monkeypatch.setattr(_FakeClientSession, "planned_tool_pages", [])
+    monkeypatch.setattr(_FakeClientSession, "planned_tool_results", [planned])
+    context = _mcp_context(context)
+    manager = MCPServerManager(context.runtime_paths)
+    try:
+        await manager.sync_servers(context.config, discover=False)
+        return await gateway.invoke_tool(
+            context,
+            toolkit="mcp_example",
+            function="example_echo",
+            arguments={},
+            manager=manager,
+        )
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_mcp_tool_hands_the_gateway_client_its_text(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An MCP-backed tool returns a tool result; the gateway client gets its text, not the result object's repr."""
+    planned = CallToolResult(content=[TextContent(type="text", text="hello")])
+
+    assert await _invoke_mcp_echo(context, monkeypatch, planned) == {"result": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_a_tool_image_reaches_the_gateway_client_as_a_reference_beside_the_text(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An image result fits the result limit: the client gets the text and a reference to the image, not its bytes."""
+    image = ImageContent(type="image", data=base64.b64encode(b"\x89PNG" * 20000).decode(), mime_type="image/png")
+    planned = CallToolResult(content=[TextContent(type="text", text="captured"), image])
+
+    assert await _invoke_mcp_echo(context, monkeypatch, planned) == {
+        "result": {"content": "captured", "attachments": [{"kind": "image", "mime_type": "image/png"}]},
+    }
 
 
 @pytest.mark.asyncio
