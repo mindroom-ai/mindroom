@@ -1,22 +1,18 @@
 """Shared helpers for the history test modules."""
-# ruff: noqa: D102, ANN201, TC003
+# ruff: noqa: D102, TC003
 
 from __future__ import annotations
 
 import asyncio
 import json
 import sqlite3
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
-
-from agno.agent import Agent
-from agno.models.base import Model
-from agno.models.response import ModelResponse
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -83,44 +79,11 @@ from tests.fakes.summary_model import summary_model
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agno.models.message import Message as AgnoMessage
-
     from mindroom.history.types import ScopeSummary
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-
-
-class FakeModel(Model):
-    """Minimal model returning one canned response, for deterministic agent tests."""
-
-    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        """Return one successful fake response."""
-        return ModelResponse(content="ok")
-
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        """Return one successful fake async response."""
-        return ModelResponse(content="ok")
-
-    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
-        """Yield one successful fake streaming response."""
-        yield ModelResponse(content="ok")
-
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        """Yield one successful fake async streaming response."""
-        yield ModelResponse(content="ok")
-
-    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
-        return response
-
-    def _parse_provider_response_delta(
-        self,
-        response: ModelResponse,
-        *_args: object,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        return response
 
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
@@ -190,42 +153,6 @@ def _summarizer(
 async def _reported(outcome: CompactionOutcome) -> CompactionOutcome:
     """Stand in for the reply lifecycle's success report."""
     return outcome
-
-
-@dataclass
-class RecordingModel(Model):
-    """Model that records the final prompt message list."""
-
-    seen_messages: list[AgnoMessage] = field(default_factory=list)
-
-    def invoke(self, *_args: object, **kwargs: object) -> ModelResponse:
-        messages = kwargs.get("messages")
-        if isinstance(messages, list):
-            self.seen_messages = list(messages)
-        return ModelResponse(content="ok")
-
-    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
-        messages = kwargs.get("messages")
-        if isinstance(messages, list):
-            self.seen_messages = list(messages)
-        return ModelResponse(content="ok")
-
-    def invoke_stream(self, *_args: object, **_kwargs: object):
-        yield ModelResponse(content="ok")
-
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object):
-        yield ModelResponse(content="ok")
-
-    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
-        return response
-
-    def _parse_provider_response_delta(
-        self,
-        response: ModelResponse,
-        *_args: object,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        return response
 
 
 @dataclass
@@ -390,27 +317,6 @@ def _team_session(
         summary=summary,
         created_at=1,
         updated_at=1,
-    )
-
-
-def _agent(
-    *,
-    agent_id: str = "test_agent",
-    name: str = "Test Agent",
-    model: Model | None = None,
-    db: object | None = None,
-    num_history_runs: int | None = None,
-    num_history_messages: int | None = None,
-) -> Agent:
-    return Agent(
-        id=agent_id,
-        name=name,
-        model=model or FakeModel(id="fake-model", provider="fake"),
-        db=db,
-        add_history_to_context=True,
-        num_history_runs=num_history_runs,
-        num_history_messages=num_history_messages,
-        store_history_messages=False,
     )
 
 

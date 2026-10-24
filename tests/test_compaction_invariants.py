@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from agno.agent import Agent
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -66,7 +65,6 @@ from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import bind_runtime_paths, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model, summary_turn
 from tests.history_helpers import (
-    FakeModel,
     _reported,
     _summarizer,
     compact_runs,
@@ -170,17 +168,6 @@ def _session(runs: list[RunRecord]) -> ConversationSession:
         metadata=None,
         created_at=1,
         updated_at=1,
-    )
-
-
-def _agent(db: object) -> Agent:
-    return Agent(
-        id="test_agent",
-        name="Test Agent",
-        model=FakeModel(id="fake-model", provider="fake"),
-        db=db,
-        add_history_to_context=True,
-        store_history_messages=False,
     )
 
 
