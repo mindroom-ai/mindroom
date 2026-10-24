@@ -1,4 +1,4 @@
-"""Tests for the pytest guard that refuses network dials."""
+"""Tests for the pytest guards that keep tests off the network and away from the developer's credentials."""
 
 import asyncio
 import json
@@ -141,3 +141,12 @@ def test_google_default_credentials_are_not_this_machines(tmp_path: Path, monkey
 
     with pytest.raises(google.auth.exceptions.DefaultCredentialsError):
         google.auth.default()
+
+
+def test_inherited_google_keys_are_dropped() -> None:
+    """A Google API key or key file the developer exported never reaches a test."""
+    environ = {"GOOGLE_APPLICATION_CREDENTIALS": "key.json", "GOOGLE_API_KEY": "test", "GEMINI_API_KEY": "test"}
+
+    conftest.hide_developer_google_credentials(environ, "empty")
+
+    assert environ == {"CLOUDSDK_CONFIG": "empty", "NO_GCE_CHECK": "true"}
