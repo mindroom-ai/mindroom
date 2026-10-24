@@ -58,17 +58,22 @@ def scope_history_messages(
     """Return the stored history one request of ``scope`` replays, oldest first.
 
     ``runs`` are the session's runs in stored order. The two limits are the request's own, which a replay plan may
-    narrow from the configured policy. Each message is a copy marked ``from_history``, so a request never changes a
-    stored run and is never stored again. Prompt messages never replay. Tool calls are read in the shape current
-    releases store before the message and tool-call limits count them, and those beyond ``max_tool_calls_from_history``
-    are left out, as is every media item except the newest viewed images.
+    narrow from the configured policy. The run limit applies before the message limit, which counts only messages that
+    replay, so a legacy placeholder and its orphan result take no message of it; a tool result whose call the message
+    limit cut off is dropped, since it cannot replay without that call. Each message is a copy marked
+    ``from_history``, so a request never changes a stored run and is never stored again. Prompt messages never replay.
+    Tool calls are read in the shape current releases store before the message and tool-call limits count them, and
+    those beyond ``max_tool_calls_from_history`` are left out, as is every media item except the newest viewed images.
     """
-    selected = _selected_messages(
-        runs,
-        scope,
-        num_history_runs=num_history_runs,
-        num_history_messages=num_history_messages,
-    )
+    replayed = [run for run in runs if replays_in_scope(run, scope)]
+    if num_history_runs is not None:
+        if num_history_runs <= 0:
+            return []
+        replayed = replayed[-num_history_runs:]
+    selected = replayable_messages(replayed)
+    if num_history_messages is not None:
+        newest = selected[-num_history_messages:] if num_history_messages > 0 else []
+        selected = list(dropwhile(lambda message: message.role == "tool", newest))
     history = [_history_copy(message) for message in selected]
     if max_tool_calls_from_history is not None:
         history = filter_tool_calls(history, max_tool_calls_from_history)
@@ -113,31 +118,6 @@ def replayable_messages(runs: Iterable[AnyRunRecord]) -> list[Message]:
             if not message.from_history and message.role not in PROMPT_MESSAGE_ROLES
         ],
     )
-
-
-def _selected_messages(
-    runs: Sequence[AnyRunRecord],
-    scope: HistoryScope,
-    *,
-    num_history_runs: int | None,
-    num_history_messages: int | None,
-) -> list[Message]:
-    """Select the scope's replayable messages within the replay limits.
-
-    The run limit applies before the message limit, which counts only messages that replay, so a legacy placeholder
-    and its orphan result take no message of it. A tool result whose call the message limit cut off is dropped, since
-    it cannot replay without that call.
-    """
-    replayed = [run for run in runs if replays_in_scope(run, scope)]
-    if num_history_runs is not None:
-        if num_history_runs <= 0:
-            return []
-        replayed = replayed[-num_history_runs:]
-    messages = replayable_messages(replayed)
-    if num_history_messages is None:
-        return messages
-    newest = messages[-num_history_messages:] if num_history_messages > 0 else []
-    return list(dropwhile(lambda message: message.role == "tool", newest))
 
 
 def _history_copy(message: Message) -> Message:
