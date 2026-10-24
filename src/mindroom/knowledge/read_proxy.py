@@ -73,6 +73,6 @@ class ChromaReadProxy:
 
         async def prepare_request() -> ReadRequest:
             embedding = (await self.embedder.aembed([query], purpose="query"))[0]
-            return replace(self._request(), query=query, embedding=embedding, limit=limit)
+            return replace(self._request(), embedding=embedding, limit=limit)
 
         return (await read_chroma_async(prepare_request)).hits

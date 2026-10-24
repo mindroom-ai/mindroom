@@ -221,7 +221,7 @@ async def record_call_token_usage(
 ) -> None:
     """Upsert a realtime call's speech-model tokens for the caller, one request per response.
 
-    The call's model has its entry under ``details`` even before any response, as Agno's record kept it.
+    The call's model has its entry under ``details`` even before any response, kept as main stores it.
     """
     metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider="OpenAI")]})
     messages: list[Message] = []
@@ -413,7 +413,6 @@ class _CallAgentCache:
 
         return await self.run(
             knowledge=resolution.knowledge,
-            knowledge_identity=knowledge_runtime_identity(resolution.knowledge),
             refresh_scheduler=scheduler,
             active_model_name=self.active_model_name,
             operation=render,
@@ -423,12 +422,12 @@ class _CallAgentCache:
         self,
         *,
         knowledge: AgentKnowledge | None,
-        knowledge_identity: tuple[int, ...],
         refresh_scheduler: KnowledgeRefreshScheduler | None,
         active_model_name: str | None,
         operation: Callable[[AgentBuild], Awaitable[str]],
     ) -> str:
         """Run one turn, rebuilding only when call dependencies or the turn's model change."""
+        knowledge_identity = knowledge_runtime_identity(knowledge)
         async with self.lock:
             build = self.build
             if (
@@ -829,7 +828,6 @@ async def _run_authorized_call_agent(
 
         response = await agent_cache.run(
             knowledge=knowledge_resolution.knowledge,
-            knowledge_identity=knowledge_runtime_identity(knowledge_resolution.knowledge),
             refresh_scheduler=refresh_scheduler,
             active_model_name=active_model_name,
             operation=_run_with_build,

@@ -372,7 +372,6 @@ async def test_call_agent_cache_build_cancellation_waits_for_the_build(
     run_task = asyncio.create_task(
         cache.run(
             knowledge=None,
-            knowledge_identity=(),
             refresh_scheduler=None,
             active_model_name=cache.active_model_name,
             operation=render,

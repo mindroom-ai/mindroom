@@ -17,7 +17,7 @@ import sqlite3
 import uuid
 from contextlib import closing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final
 
 from chromadb.errors import InternalError, NotFoundError
 
@@ -56,13 +56,6 @@ _VECTOR_DELETE_BATCH = 128
 #: The distance every knowledge collection is created with; collections written before MindRoom owned this store
 #: carry the same setting, so they stay readable as they are.
 _COLLECTION_METADATA: Final = {"hnsw:space": "cosine"}
-
-
-@runtime_checkable
-class _NamedCollection(Protocol):
-    """Collection object shape returned by Chroma clients."""
-
-    name: str
 
 
 @dataclass(frozen=True)
@@ -415,10 +408,4 @@ def cleanup_superseded_collections(
 
 
 def _listed_collection_names(client: Client) -> tuple[str, ...]:
-    names: list[str] = []
-    for collection in client.list_collections():
-        if isinstance(collection, str):
-            names.append(collection)
-        elif isinstance(collection, _NamedCollection):
-            names.append(collection.name)
-    return tuple(dict.fromkeys(names))
+    return tuple(collection.name for collection in client.list_collections())

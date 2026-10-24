@@ -25,8 +25,6 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
-    from agno.tools.function import Function
-
     from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
@@ -41,9 +39,9 @@ _UNAVAILABLE = (
 )
 
 
-def is_job_function(function: Function | ToolFunction) -> bool:
+def is_job_function(function: ToolFunction) -> bool:
     """Recognize the reserved implementation through SDK and MindRoom output wrappers, never a same-named plugin."""
-    entrypoint = tool_schema_source(inspect.unwrap(function.entrypoint)) if function.entrypoint is not None else None
+    entrypoint = tool_schema_source(inspect.unwrap(function.entrypoint))
     return (
         inspect.ismethod(entrypoint)
         and isinstance(entrypoint.__self__, JobTools)

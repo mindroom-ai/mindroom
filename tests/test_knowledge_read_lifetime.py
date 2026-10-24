@@ -345,7 +345,7 @@ elif len(sys.argv) > 1 and sys.argv[1] == "parent":
             [sys.executable, __file__, "worker"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         )
     async def request():
-        return ReadRequest(str(root), "published", "query", [1.0])
+        return ReadRequest(str(root), "published", [1.0])
     read_process._spawn_reader = launch
     asyncio.run(read_process.read_chroma_async(request, timeout=2))
 else:
@@ -360,7 +360,7 @@ else:
     try:
         if not orphan:
             process.stdin.write(('0.3\\n{"path":' + __import__('json').dumps(str(root)) +
-                ',"collection":"published","query":"query","embedding":[1.0]}').encode())
+                ',"collection":"published","embedding":[1.0]}').encode())
             process.stdin.close()
         deadline = time.monotonic() + 15
         while not (pid_path.exists() and pid_path.read_text()):
