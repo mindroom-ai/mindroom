@@ -1073,7 +1073,7 @@ def _build_agent_tool_middleware(
     config: Config,
     runtime_paths: constants.RuntimePaths,
 ) -> ToolMiddleware:
-    """Return the tool-call policy as the middleware the owned loop runs around every call of this agent."""
+    """Return the tool-call policy as the middleware the agent loop runs around every call of this agent."""
     active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
     return build_tool_hook_middleware(
         active_hook_registry,
@@ -1729,7 +1729,7 @@ def _job_controls_entry(controls: Toolkit) -> _ToolkitEntry:
 
 @dataclass(frozen=True)
 class LeaderJobs:
-    """A team leader's job controls as the owned loop offers them, the tool-call policy they run under, and the team.
+    """A team leader's job controls as the agent loop offers them, the tool-call policy they run under, and the team.
 
     ``middleware`` runs outermost first, job admission before the hook bridge, which only the job controls' calls
     pass; ``actor`` is the team as tool jobs see it, whose leader hears of the jobs that ended.
@@ -1915,7 +1915,7 @@ def create_agent(
             attaches directly instead of through mindroom-agent.
 
     Returns:
-        The agent as the owned loop runs it.
+        The agent build the agent loop runs.
 
     Raises:
         ValueError: If agent_name is not found in configuration

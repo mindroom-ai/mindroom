@@ -1,7 +1,6 @@
 """Shared token estimation and compaction budget helpers.
 
 Kept deliberately narrow: only generic token math lives here.
-Agno replay helpers and compaction serialization stay in their own modules.
 """
 
 from __future__ import annotations

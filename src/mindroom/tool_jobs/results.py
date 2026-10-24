@@ -128,7 +128,7 @@ def _decode(value: Any) -> Any:  # noqa: ANN401, PLR0911 - One explicit branch p
 
 
 def _media(kind: type[Image | Audio | Video | File], saved: dict[str, Any]) -> Image | Audio | Video | File:
-    """Rebuild one medium from the fields its type models, ignoring the rest, as every owned codec does."""
+    """Rebuild one medium from the fields its type models, ignoring the rest, as every ``mindroom.llm`` codec does."""
     return kind(**{item.name: saved[item.name] for item in dataclass_fields(kind) if saved.get(item.name) is not None})
 
 

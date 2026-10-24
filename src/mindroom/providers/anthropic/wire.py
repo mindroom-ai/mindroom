@@ -1,4 +1,4 @@
-"""Claude Messages API wire format: owned messages and tools in, request blocks out, responses parsed back.
+"""Claude Messages API wire format: messages and tools in, request blocks out, responses parsed back.
 
 The formatter echoes a stored assistant turn's ``content_blocks`` verbatim, because the API signs thinking
 blocks and verifies the sequence on replay; everything else is rebuilt from the message fields. The parser

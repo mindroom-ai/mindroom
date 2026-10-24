@@ -1,4 +1,4 @@
-"""Values the owned conversation store reads and writes."""
+"""Values the conversation store reads and writes."""
 
 from __future__ import annotations
 

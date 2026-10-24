@@ -60,7 +60,7 @@ class ToolArgumentError:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolCallContext:
-    """The run a tool call belongs to, in owned terms.
+    """The run a tool call belongs to.
 
     ``session_state`` is shared with the tool, which may mutate it in place; the caller persists it afterwards.
     ``call_id`` is the provider's id of the tool call being run, when the call came from a model.

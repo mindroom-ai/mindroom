@@ -1,4 +1,4 @@
-"""Tool calls that run as background jobs on the owned loop.
+"""Tool calls that run as background jobs on the agent loop.
 
 ``with_job_admission`` admits each call one actor makes: it runs in its reply, as a managed job the reply waits for
 within the call's ``background_after`` budget, or not at all when a job-gated call cannot become a job, which also

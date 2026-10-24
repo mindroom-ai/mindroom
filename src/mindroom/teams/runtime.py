@@ -1,5 +1,5 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Team runs and resumes over the owned loop.
+"""Team runs and resumes over the agent loop.
 
 A team run is the leader's loop over its own tools plus the delegation tool for the team's mode. Members run as
 children of the team run, each ending in a record of its own with ``parent_run_id``, and their events reach the
@@ -156,8 +156,8 @@ def continue_team(
                 # TODO(simplify): A resumed member's result is its raw content, or ``Task completed`` without any,
                 # unlike a first run's (``member_result_text``). Use that rule for both. Models would notice.
                 # TODO(simplify): A resumed member that wrote nothing hands over its carried pause notice ("I have
-                # tools to execute, but I need confirmation.") after its call ran, as main did. Hand over only what the
-                # resume added (``new_handover_content``) or a completion note. The leader model would notice.
+                # tools to execute, but I need confirmation.") after its call ran. Hand over only what the resume
+                # added (``new_handover_content``) or a completion note. The leader model would notice.
                 results.append(f"[{plan.member.spec.name}]: {resumed.handover_content or 'Task completed'}")
         if plans and all(r.is_resolved() for r in record.requirements or ()):
             _answer_delegations(record, messages, [plan.member for plan in plans], results)

@@ -1,4 +1,4 @@
-"""Team turns on the owned runtime: prepare a turn, run its leader, and render the reply through the turn drivers.
+"""Team turns: prepare a turn, run its leader, and render the reply through the turn drivers.
 
 ``team_response`` and ``team_response_stream`` are the team envelopes the response runner drives through the shared
 turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply, its

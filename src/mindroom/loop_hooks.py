@@ -1,4 +1,4 @@
-"""The hooks an agent or team-leader run or resume installs on the owned loop, in the order the turn applies them.
+"""The hooks an agent or team-leader run or resume installs on the agent loop, in the order the turn applies them.
 
 An agent turn, an approval resume, a delegated child's resume, a team member's run or resume, and a team leader's
 turn or resume install the hooks ``_loop_hooks`` composes once: the wait budget of managed tool-job calls, the

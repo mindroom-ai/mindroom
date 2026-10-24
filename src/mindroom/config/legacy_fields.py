@@ -166,7 +166,7 @@ class _RetiredModelSettings:
     reason: str
 
 
-# Routes, as ``provider_route`` names them, by the Agno model class main built for them.
+# Routes, as ``provider_route`` names them, by the Agno model class that took their ``extra_kwargs``.
 _OPENAI_CHAT_PROVIDERS = frozenset({"openai", "azure", "openrouter", "deepseek", "llama_cpp", "zai", "kimi"})
 _CLAUDE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", "bedrock_claude"})
 _GEMINI_PROVIDERS = frozenset({"google"})

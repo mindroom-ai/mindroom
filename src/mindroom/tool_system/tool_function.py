@@ -1,4 +1,4 @@
-"""The tool values the owned loop sees: ``ToolFunction``, the toolkits that group them, and the values tools return.
+"""The tool values the agent loop sees: ``ToolFunction``, the toolkits that group them, and the values tools return.
 
 They import no Agno module; ``agno_toolkits`` builds them from Agno's tool objects.
 """
@@ -72,7 +72,7 @@ class ToolFunction:
 
 @dataclass(frozen=True, slots=True)
 class AdaptedToolkit:
-    """One Agno toolkit as the owned loop sees it; ``instructions`` is set only when ``add_instructions`` asks for it.
+    """One Agno toolkit as the agent loop sees it; ``instructions`` is set only when ``add_instructions`` asks for it.
 
     ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
     it describes the toolkit's functions and minimal mode offers as a context document.
@@ -127,7 +127,7 @@ async def close_toolkits(closes: list[ToolkitClose]) -> None:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolValue:
-    """A finished tool value in owned terms: the text the model reads and the media the tool produced."""
+    """A finished tool value: the text the model reads and the media the tool produced."""
 
     content: str
     images: tuple[Image, ...] = ()

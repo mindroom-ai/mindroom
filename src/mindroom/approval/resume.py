@@ -1,4 +1,4 @@
-"""Resume a persisted paused agent run on the owned loop, as an approval or a delegation continues it.
+"""Resume a persisted paused agent run on the agent loop, as an approval or a delegation continues it.
 
 A resume replays the stored history a replay plan selects and continues the paused request with the decisions on
 exactly the calls it waits for; the loop refuses anything but exact coverage of those calls before it runs any of

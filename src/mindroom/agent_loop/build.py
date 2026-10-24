@@ -1,4 +1,4 @@
-"""What ``create_agent`` builds for the owned loop: the agent's spec, prompt, request settings, store, and surface."""
+"""What ``create_agent`` builds for the agent loop: the agent's spec, prompt, request settings, store, and surface."""
 
 from __future__ import annotations
 
