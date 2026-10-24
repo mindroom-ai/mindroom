@@ -2,9 +2,9 @@
 """Gemini provider adapter over google-genai, for the Gemini API and Vertex AI (``vertexai: true``).
 
 The SDK is imported on first use, so importing this module stays cheap.
-Credentials resolve to the configured or shared Google key, then ``GOOGLE_API_KEY``, and on Vertex AI
-``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_LOCATION``, and the SDK's application default credentials from the
-process environment.
+The key is the configured or shared Google key; google-genai reads what the settings leave unset from the
+process environment: ``GOOGLE_API_KEY``, and on Vertex AI ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_LOCATION``,
+and application default credentials.
 """
 
 from __future__ import annotations
@@ -245,12 +245,12 @@ class GeminiProvider:
         if self.vertexai:
             params: dict[str, Any] = {
                 "vertexai": True,
-                "project": settings.project_id or os.getenv("GOOGLE_CLOUD_PROJECT"),
-                "location": settings.location or os.getenv("GOOGLE_CLOUD_LOCATION"),
+                "project": settings.project_id,
+                "location": settings.location,
                 "credentials": settings.credentials,
             }
         else:
-            params = {"api_key": settings.api_key or os.getenv("GOOGLE_API_KEY")}
+            params = {"api_key": settings.api_key}
         params = {key: value for key, value in params.items() if value is not None}
         if settings.timeout is not None:
             params["http_options"] = {"timeout": int(settings.timeout * 1000)}
