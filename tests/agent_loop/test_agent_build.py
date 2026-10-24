@@ -131,8 +131,8 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
     assert "<name>expense-report</name>" in build.prompt.skills_block
     assert build.prompt.tool_instructions == ()
     assert build.prompt.model_note == CLAUDE_TOOLS_NOTE
-    assert build.prompt.additional_context is not None
-    assert build.prompt.additional_context.startswith("<mindroom_session_context>")
+    assert build.prompt.turn_context is not None
+    assert build.prompt.turn_context.startswith("<mindroom_session_context>")
     assert build.request_template == ModelRequest(messages=())
     assert build.history_settings == config.resolve_entity("assistant").history_settings
     assert isinstance(build.store, ConversationStore)
@@ -205,11 +205,11 @@ def test_prompt_for_turn_appends_the_turns_context_blocks(tmp_path: Path) -> Non
     """Each turn block follows the context so far after one blank line; empty blocks and trailing whitespace drop out."""
     config, runtime_paths = _config(tmp_path)
     build = _build(config, runtime_paths, persist_runtime_state=False)
-    base = build.prompt.additional_context
+    base = build.prompt.turn_context
     assert base is not None
 
     assert prompt_for_turn(build).content == render_system_message(build.prompt).content
-    expected = replace(build.prompt, additional_context=f"{base.strip()}\n\nmemory\n\n<ctx>")
+    expected = replace(build.prompt, turn_context=f"{base.strip()}\n\nmemory\n\n<ctx>")
     assert prompt_for_turn(build, "memory\n", "", "<ctx>").content == render_system_message(expected).content
 
 
@@ -417,7 +417,7 @@ def test_a_persona_build_offers_only_its_tools_and_speaks_with_its_prompt(tmp_pa
 
     assert set(_offered(build)) == _CALCULATOR_FUNCTIONS
     assert build.tool_owners == dict.fromkeys(_CALCULATOR_FUNCTIONS, "calculator")
-    assert build.prompt.description == "You are the reviewer."
+    assert build.prompt.persona == "You are the reviewer."
     assert "Answer questions about the team handbook." not in (build.prompt.role or "")
     assert (build.prompt.knowledge_block, build.prompt.skills_block) == (None, None)
     assert build.surface.knowledge_sources == ()

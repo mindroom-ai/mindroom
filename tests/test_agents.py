@@ -26,9 +26,9 @@ from mindroom import path_confinement, prompts
 from mindroom.agent_loop.build import AgentBuild, prompt_for_turn
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import (
-    _AdditionalContextChunk,
     _apply_preload_cap,
     _load_context_files,
+    _PreloadChunk,
     _prune_toolkit_functions,
     _render_tool_execution_environment,
     _trim_chunk_tails,
@@ -3416,14 +3416,14 @@ def test_agent_context_files_are_loaded_into_role(tmp_path: Path) -> None:
     assert "Canonical soul directive." in _role(updated_agent)
 
 
-def _preload_chunks() -> list[_AdditionalContextChunk]:
+def _preload_chunks() -> list[_PreloadChunk]:
     return [
-        _AdditionalContextChunk(title="/ws/FIRST.md", body="FIRST_START " + "A" * 600),
-        _AdditionalContextChunk(title="/ws/SECOND.md", body="SECOND_START " + "B" * 600),
+        _PreloadChunk(title="/ws/FIRST.md", body="FIRST_START " + "A" * 600),
+        _PreloadChunk(title="/ws/SECOND.md", body="SECOND_START " + "B" * 600),
     ]
 
 
-def _apply_test_preload_cap(chunks: list[_AdditionalContextChunk], max_preload_chars: int) -> tuple[str, int]:
+def _apply_test_preload_cap(chunks: list[_PreloadChunk], max_preload_chars: int) -> tuple[str, int]:
     return _apply_preload_cap(
         chunks,
         max_preload_chars,
@@ -3435,7 +3435,7 @@ def _apply_test_preload_cap(chunks: list[_AdditionalContextChunk], max_preload_c
 
 def test_trim_chunk_tails_counts_whitespace_removed_by_cleanup() -> None:
     """Tail trimming must count whitespace removed after the requested slice."""
-    chunk = _AdditionalContextChunk(title="/ws/SOUL.md", body="alpha   beta")
+    chunk = _PreloadChunk(title="/ws/SOUL.md", body="alpha   beta")
 
     omitted_chars = _trim_chunk_tails(
         [chunk],
@@ -3476,7 +3476,7 @@ def test_preload_cap_keeps_the_dropped_file_path_visible() -> None:
 def test_preload_cap_rejects_budget_too_small_for_required_markers() -> None:
     """A hard cap must fail explicitly rather than slice away required file markers."""
     chunks = [
-        _AdditionalContextChunk(
+        _PreloadChunk(
             title=f"/workspace/context/file-{index}.md",
             body="x" * 700,
         )

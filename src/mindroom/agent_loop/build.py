@@ -64,7 +64,7 @@ class AgentBuild:
     """One configured agent as ``create_agent`` built it.
 
     ``spec`` carries no system message: ``prompt_for_turn`` renders one per turn from ``prompt``, whose
-    ``additional_context`` is the build's own context, the date and session context. ``request_template`` holds the
+    ``turn_context`` is the build's own context, the date and session context. ``request_template`` holds the
     settings of every request of a run, such as the deferred tool names; ``tool_owners``, which approvals check, maps
     each function a run offers from a configured toolkit to that toolkit's authored name, and leaves out the functions
     generated for the agent, such as the knowledge search. ``tool_policy`` is the agent's tool-call policy, outermost
@@ -98,10 +98,10 @@ def prompt_for_turn(build: AgentBuild, *context: str) -> Message:
     Each block follows the context so far after one blank line, trailing whitespace of the earlier text dropped;
     an empty block adds nothing.
     """
-    additional_context = build.prompt.additional_context
+    turn_context = build.prompt.turn_context
     for block in context:
-        additional_context = appended_context(additional_context, block)
-    return render_system_message(replace(build.prompt, additional_context=additional_context))
+        turn_context = appended_context(turn_context, block)
+    return render_system_message(replace(build.prompt, turn_context=turn_context))
 
 
 def appended_context[Context: (str, str | None)](existing: Context, block: str) -> Context:

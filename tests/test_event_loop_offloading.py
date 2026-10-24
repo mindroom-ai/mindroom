@@ -201,11 +201,11 @@ def _prompt_preparation_config(memory_backend: str = "mem0") -> Config:
     )
 
 
-def _build(additional_context: str | None = None) -> AgentBuild:
-    """Return a minimal agent build whose prompt carries ``additional_context`` as the build's own context."""
+def _build(turn_context: str | None = None) -> AgentBuild:
+    """Return a minimal agent build whose prompt carries ``turn_context`` as the build's own context."""
     return AgentBuild(
         spec=AgentSpec(id="general", name="General", model=ScriptedModel([]), system_message=None),
-        prompt=PromptSpec(role="test", additional_context=additional_context),
+        prompt=PromptSpec(role="test", turn_context=turn_context),
         request_template=ModelRequest(messages=()),
         history_settings=ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
         store=None,
@@ -522,7 +522,7 @@ async def test_prepare_agent_and_prompt_file_memory_preserves_reusable_build(
     assert prepared.spec.system_message is not None
     assert str(prepared.spec.system_message.content).endswith("caller context\n\nsession memory")
     # The build's own prompt is never changed by a turn.
-    assert reusable_build.prompt.additional_context == "caller context"
+    assert reusable_build.prompt.turn_context == "caller context"
     assert prepared.unseen_event_ids == ["$memory"]
     assert prepared.prepared_history.prepared_context_tokens == 42
     create_agent_mock.assert_not_called()

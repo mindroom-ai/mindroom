@@ -25,18 +25,22 @@ CLAUDE_TOOLS_NOTE = "Do not reflect on the quality of the returned search result
 class PromptSpec:
     """Every input of one agent's system message, in the order the message renders them.
 
+    ``persona`` is an authored prompt that leads the message in place of the agent's identity.
+    ``role`` fills ``<your_role>``: an agent's identity, runtime facts, preloaded files, and authored role (only the
+    runtime facts under a persona), or a helper's task.
+    ``turn_context`` is the date and session context, plus the blocks a turn appends (``build.prompt_for_turn``).
     ``markdown`` adds the markdown line; callers with an output schema leave it False, as main does.
     ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered.
     ``model_note`` is the text the provider family adds (``model_note_for``), and ``output_format_prompt`` the JSON
     prompt a structured-output request needs (``structured.select_response_format``).
     """
 
-    description: str | None = None
+    persona: str | None = None
     role: str | None = None
     instructions: tuple[str, ...] = ()
     markdown: bool = False
     tool_instructions: tuple[str, ...] = ()
-    additional_context: str | None = None
+    turn_context: str | None = None
     skills_block: str | None = None
     knowledge_block: str | None = None
     model_note: str | None = None
@@ -78,8 +82,8 @@ def render_system_message(spec: PromptSpec) -> Message:
 def _agent_sections(spec: PromptSpec) -> str:
     """Render the agent's own sections: persona, role, instructions, the markdown line, and tool instructions."""
     content = ""
-    if spec.description is not None:
-        content += f"{spec.description}\n"
+    if spec.persona is not None:
+        content += f"{spec.persona}\n"
     if spec.role is not None:
         content += f"\n<your_role>\n{spec.role}\n</your_role>\n\n"
     if spec.instructions:
@@ -92,8 +96,8 @@ def _agent_sections(spec: PromptSpec) -> str:
 def _context_sections(spec: PromptSpec) -> str:
     """Render the per-turn context, skills, knowledge, and provider sections that follow the agent's own."""
     content = ""
-    if spec.additional_context is not None:
-        content += f"{spec.additional_context}\n"
+    if spec.turn_context is not None:
+        content += f"{spec.turn_context}\n"
     if spec.skills_block:
         content += f"\n{spec.skills_block}\n"
     if spec.knowledge_block is not None:

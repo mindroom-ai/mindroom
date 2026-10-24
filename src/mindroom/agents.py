@@ -133,12 +133,10 @@ _MAX_WORKSPACE_CONTEXT_FILE_BYTES = 1 << 20
 
 
 @dataclass
-class _AdditionalContextChunk:
-    """Chunk of preload context with omission metadata.
+class _PreloadChunk:
+    """One preloaded context file: its path as ``title``, its text, and what the preload cap removed from it.
 
-    ``omitted_chars`` records what the preload cap removed from this chunk so
-    the rendered section can tell the model which file was cut and by how much,
-    instead of letting a dropped file vanish without a trace.
+    The rendered section names each file the cap cut and by how much, so a dropped file never vanishes without a trace.
     """
 
     title: str
@@ -221,7 +219,7 @@ class _AgentRoleContext:
     """The fully rendered role prompt for one agent instance and the preload files it was rendered from."""
 
     role: str
-    context_documents: tuple[_AdditionalContextChunk, ...]
+    context_documents: tuple[_PreloadChunk, ...]
 
     def workspace_context_files(self, workspace_root: Path | None) -> list[str]:
         """List loaded context files that Bash can read relative to its workspace."""
@@ -287,9 +285,9 @@ def _load_context_files(
     agent_name: str | None = None,
     storage_path: Path | None = None,
     workspace_root: Path | None = None,
-) -> list[_AdditionalContextChunk]:
+) -> list[_PreloadChunk]:
     """Load configured context files; ``Path`` entries and agent-owned strings are workspace files."""
-    loaded_parts: list[_AdditionalContextChunk] = []
+    loaded_parts: list[_PreloadChunk] = []
     for raw_path in context_files:
         owning_workspace: Path | None = None
         if isinstance(raw_path, Path):
@@ -317,7 +315,7 @@ def _load_context_files(
         loaded_parts.append(
             # The title is the full path so the rendered prompt tells the
             # model exactly which file on disk each part came from.
-            _AdditionalContextChunk(
+            _PreloadChunk(
                 title=str(resolved_path),
                 body=body,
             ),
@@ -350,7 +348,7 @@ def _read_context_file(resolved_path: Path, *, workspace_root: Path | None, agen
     return payload.decode("utf-8", errors="replace").strip()
 
 
-def _render_context_chunk(chunk: _AdditionalContextChunk, *, chunk_marker_template: str) -> str:
+def _render_context_chunk(chunk: _PreloadChunk, *, chunk_marker_template: str) -> str:
     """Render one chunk under its source path, marking what the cap removed."""
     body = chunk.body.strip()
     if not chunk.omitted_chars:
@@ -364,7 +362,7 @@ def _render_context_chunk(chunk: _AdditionalContextChunk, *, chunk_marker_templa
 
 
 def _render_context_chunks(
-    chunks: list[_AdditionalContextChunk],
+    chunks: list[_PreloadChunk],
     *,
     section_heading: str,
     chunk_marker_template: str,
@@ -381,10 +379,10 @@ def _render_context_chunks(
 
 
 def _drop_whole_chunks(
-    chunks: list[_AdditionalContextChunk],
+    chunks: list[_PreloadChunk],
     max_preload_chars: int,
     *,
-    render: Callable[[list[_AdditionalContextChunk]], str],
+    render: Callable[[list[_PreloadChunk]], str],
 ) -> int:
     """Drop entire chunk bodies (least critical first) until under the cap."""
     omitted = 0
@@ -404,10 +402,10 @@ def _drop_whole_chunks(
 
 
 def _trim_chunk_tails(
-    chunks: list[_AdditionalContextChunk],
+    chunks: list[_PreloadChunk],
     max_preload_chars: int,
     *,
-    render: Callable[[list[_AdditionalContextChunk]], str],
+    render: Callable[[list[_PreloadChunk]], str],
 ) -> int:
     """Trim from the *end* of chunks to preserve headers/identity at the top."""
     omitted = 0
@@ -426,7 +424,7 @@ def _trim_chunk_tails(
 
 
 def _apply_preload_cap(
-    personality_chunks: list[_AdditionalContextChunk],
+    personality_chunks: list[_PreloadChunk],
     max_preload_chars: int,
     *,
     section_heading: str,
@@ -493,8 +491,8 @@ def _apply_preload_cap(
     return rendered.rstrip("\n") + marker_block, omitted_chars
 
 
-@timed("system_prompt_assembly.agent_create.additional_context")
-def _build_additional_context(
+@timed("system_prompt_assembly.agent_create.preloaded_files")
+def _render_preloaded_files(
     agent_name: str,
     agent_config: AgentConfig,
     max_preload_chars: int,
@@ -504,18 +502,18 @@ def _build_additional_context(
     chunk_marker_template: str,
     workspace_context_files: tuple[Path, ...] = (),
     workspace_root: Path | None = None,
-    context_documents: list[_AdditionalContextChunk],
+    context_documents: list[_PreloadChunk],
     storage_path: Path,
     runtime_paths: constants.RuntimePaths,
 ) -> str:
-    """Build additional role context from configured files/directories.
+    """Render the configured and workspace context files as the role's preload section, within ``max_preload_chars``.
 
     This is evaluated each time one agent instance is created.
     The normal Matrix and OpenAI-compatible request paths build fresh agent
     instances per reply/request, so edits in the canonical agent workspace are
     reflected on the next reply without a process restart.
     """
-    personality_chunks: list[_AdditionalContextChunk] = []
+    personality_chunks: list[_PreloadChunk] = []
     context_files: list[Path | str] = [*agent_config.context_files, *workspace_context_files]
     if context_files:
         personality_chunks = _load_context_files(
@@ -529,7 +527,7 @@ def _build_additional_context(
     # Preload truncation mutates chunks; keep complete files for CLI reads.
     context_documents.extend(replace(chunk) for chunk in personality_chunks)
 
-    additional_context, omitted_chars = _apply_preload_cap(
+    rendered, omitted_chars = _apply_preload_cap(
         personality_chunks,
         max_preload_chars,
         section_heading=personality_section_heading,
@@ -542,7 +540,7 @@ def _build_additional_context(
             omitted_chars=omitted_chars,
             max_preload_chars=max_preload_chars,
         )
-    return additional_context
+    return rendered
 
 
 def _file_mode_knowledge_instruction_block(
@@ -1616,13 +1614,13 @@ def _build_agent_role_context(
         )
 
     full_context = identity_context + runtime_facts
-    context_documents: list[_AdditionalContextChunk] = []
+    context_documents: list[_PreloadChunk] = []
     if not disable_runtime_capabilities:
         workspace = agent_runtime.workspace
         # TODO(simplify): The tool-environment section ends without a newline, so the "## Personality Context"
         # heading lands on its last line. End the section with a newline so the heading starts its own line.
         # Models would notice: it changes system prompt bytes (#3075).
-        full_context += _build_additional_context(
+        full_context += _render_preloaded_files(
             agent_name,
             agent_config,
             config.defaults.max_preload_chars,
@@ -2102,12 +2100,12 @@ def create_agent(
     prepared = prepare_run_tools(spec)
     prompt = PromptSpec(
         # An authored prompt leads the system message in place of the agent's identity.
-        description=persona_prompt,
+        persona=persona_prompt,
         role=role_context.role,
         instructions=tuple(instructions),
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         tool_instructions=prepared.instructions,
-        additional_context=render_session_context(
+        turn_context=render_session_context(
             render_date_context(
                 config.timezone,
                 datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
