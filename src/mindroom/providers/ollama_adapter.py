@@ -2,7 +2,7 @@
 """Ollama provider adapter over the ollama SDK's native ``/api/chat`` endpoint.
 
 The native endpoint keeps Ollama's ``options`` and ``keep_alive`` settings.
-The SDK is imported on first use, so importing this module stays cheap.
+The provider registry imports this module, and with it the SDK, when it builds an Ollama model.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from uuid import uuid4
+
+from ollama import AsyncClient, ResponseError
 
 from mindroom.credentials.sync import get_ollama_host
 from mindroom.llm.errors import InvalidRequest, ProviderError
@@ -41,7 +43,7 @@ from mindroom.providers.tool_policy import provider_tools_disabled
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 
-    from ollama import AsyncClient, ChatResponse
+    from ollama import ChatResponse
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
@@ -159,8 +161,6 @@ class OllamaProvider:
 
     def _sdk_client(self) -> AsyncClient:
         if self._client is None:
-            from ollama import AsyncClient  # noqa: PLC0415 - provider SDK loads on first request
-
             self._client = AsyncClient(**self._client_params())
         return self._client
 
@@ -176,8 +176,6 @@ class OllamaProvider:
 
 def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the normalized error for one failed request; any other exception propagates as it is."""
-    from ollama import ResponseError  # noqa: PLC0415 - provider SDK loads on first request
-
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
     if isinstance(error, ResponseError):

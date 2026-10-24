@@ -964,7 +964,8 @@ async def _arun_agent(context: ToolRuntimeContext, build: AgentBuild, prompt: st
 
     Like every agent turn it streams, which the Anthropic and Vertex SDKs require of a request whose budget could
     exceed 10 minutes. The participant keeps no history, so the usage of its turn, however the turn ends, counts
-    against the conversation that runs the workflow.
+    against the conversation that runs the workflow. Its build offers no tools, so the turn runs without loop
+    hooks: it makes no tool call for a tool policy to wrap or a notice to follow.
     """
     usage_owner = get_helper_usage_owner()
     invocation_id = uuid4().hex

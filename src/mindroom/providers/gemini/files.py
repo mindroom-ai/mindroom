@@ -11,6 +11,9 @@ import asyncio
 import hashlib
 from typing import TYPE_CHECKING
 
+from google.genai.errors import APIError
+from google.genai.types import FileState
+
 from mindroom.llm.errors import InvalidRequest
 
 if TYPE_CHECKING:
@@ -40,9 +43,6 @@ async def uploaded_file_uri(client: Client, path: Path, mime_type: str, *, provi
     (aiohttp raises both as ``OSError``) stays retryable; an upload the Files API cannot process, or a file that
     disappears before it is sent, raises ``InvalidRequest``.
     """
-    from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
-    from google.genai.types import FileState  # noqa: PLC0415 - provider SDK loads on first request
-
     try:
         name = await asyncio.to_thread(_content_name, path, mime_type)
     except OSError as error:

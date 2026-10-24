@@ -569,8 +569,12 @@ def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatA
 
     ``provider: openai`` uses Responses when ``api: responses`` is set, or when ``api`` is unset and the
     model and endpoint support native tool search; otherwise Chat Completions.
+    The SDK loads here, with the model, so the model's first request does not import it.
     Raises ``ValueError`` for providers outside the family and for ``extra_kwargs`` the route does not accept.
     """
+    # The registry reads this module's route tables when it is imported, so the SDK cannot load with the module.
+    import openai  # noqa: F401, PLC0415 - keep the SDK out of module import time
+
     route_key = provider_route(model_config.provider)
     if route_key == "codex":
         return _build_responses("codex", model_config, runtime)
