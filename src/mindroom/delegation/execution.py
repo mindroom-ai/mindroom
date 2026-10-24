@@ -393,8 +393,6 @@ async def _execute_child(
             run_child,
             child,
             persisted,
-            config=config,
-            runtime_paths=runtime_paths,
             identity=identity,
             refresh_scheduler=refresh_scheduler,
             decisions=decisions,
@@ -472,15 +470,13 @@ async def _continue_child(
     child: DelegationChild,
     persisted: RunRecord,
     *,
-    config: Config,
-    runtime_paths: RuntimePaths,
     identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None] | None,
     approval_calls: Sequence[ApprovalCall],
 ) -> RunRecord:
-    """Apply child decisions and drive any further nested delegations."""
+    """Apply child decisions and drive any further nested delegations under the config ``runner`` resumes with."""
 
     async def continue_run(paused: RunRecord, resume: ResumeDecisions, _on_event: ResumeEvents | None) -> RunRecord:
         return await forward_resume(_observed_child_events(runner.events(paused, resume)), None, paused=paused)
@@ -501,8 +497,8 @@ async def _continue_child(
         continue_parent=continue_run,
         agent_name=child.child_agent_name,
         run_child=run_child,
-        config=config,
-        runtime_paths=runtime_paths,
+        config=runner.config,
+        runtime_paths=runner.runtime_paths,
         execution_identity=identity,
         delegation_depth=child.depth,
         refresh_scheduler=refresh_scheduler,
