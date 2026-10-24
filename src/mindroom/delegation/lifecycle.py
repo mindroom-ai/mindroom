@@ -267,7 +267,7 @@ async def child_run_context(
 
 
 def _report_child_activity(observation: _ChildRunObservation, event: TextDelta | ToolStarted) -> None:
-    text = event.text if isinstance(event, TextDelta) else f"\nCalling {event.tool.tool_name}\n"
+    text = event.text if isinstance(event, TextDelta) else f"\nCalling {event.call.tool_name}\n"
     if text:
         observation.activity = cap_progress(observation.activity + text)
         report_tool_progress(observation.activity)

@@ -50,20 +50,20 @@ async def test_stream_processing_marks_tool_call_started() -> None:
             tool_args={"cmd": "date +%s.%N"},
             tool_call_id="call-1",
         )
-        yield ToolStarted(tool=tool)
+        yield ToolStarted(call=tool.call)
         yield ToolStarted(
-            tool=ToolExecution(
+            call=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
-            ),
+            ).call,
         )
         yield ToolCompleted(
-            tool=ToolExecution(
+            call=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
                 tool_call_id="call-1",
                 result="ok",
-            ),
+            ).call,
         )
 
     with patch(

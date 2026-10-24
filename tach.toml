@@ -321,7 +321,7 @@ visibility = [
 from = ["mindroom.agent_cli.lifetime"]
 expose = [
     "CliTurnLifetime",
-    "cli_control_executions",
+    "cli_control_calls",
     "current_cli_lifetime",
     "response_cli_lifetime",
 ]
@@ -7195,9 +7195,9 @@ expose = [
     "renumbered_tool_trace",
     "render_tool_trace_for_context",
     "serialize_tool_trace",
+    "stable_call_id",
     "strip_visible_tool_markers",
     "tool_marker_text",
-    "tool_execution_call_id",
     "tool_markers_match_trace",
 ]
 from = ["mindroom.tool_system.events"]

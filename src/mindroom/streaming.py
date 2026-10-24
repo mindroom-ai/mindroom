@@ -1764,7 +1764,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 continue
 
             tool_index = len(streaming.tool_trace) + 1
-            text_chunk, trace_entry = tool_tracker.start(chunk.tool, tool_index=tool_index, origin=chunk.origin)
+            text_chunk, trace_entry = tool_tracker.start(chunk.call, tool_index=tool_index, origin=chunk.origin)
             if trace_entry is not None:
                 streaming.tool_trace.append(trace_entry)
             await _apply_visible_text_chunk(
@@ -1779,7 +1779,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             )
             continue
         elif isinstance(chunk, ToolCompleted):
-            tool_name, result, pending_tool, completed_trace = tool_tracker.complete(chunk.tool, origin=chunk.origin)
+            tool_name, result, pending_tool, completed_trace = tool_tracker.complete(chunk.call, origin=chunk.origin)
             if not streaming.show_tool_calls:
                 _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue

@@ -315,7 +315,7 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
         if member_delegation_card(requirement, member_names):
             continue
         scope, _ = _waiting_slot(presentation, requirement)
-        presentation.start_tool(scope, requirement.tool_execution)
+        presentation.start_tool(scope, requirement.tool_execution.call)
     return replace(
         paused,
         response_text=presentation.render_body(),
@@ -348,9 +348,9 @@ def blocking_team_pause(
         presentation.append_member(member_id, finished_run_text(member))
         calls.extend((f"agent:{member_id}", tool) for tool in member.tools or ())
     for scope, tool in calls:
-        presentation.start_tool(scope, tool)
+        presentation.start_tool(scope, tool.call)
         if (scope, tool.tool_call_id) not in waiting:
-            presentation.complete_tool(scope, tool)
+            presentation.complete_tool(scope, tool.call)
     return continued_team_pause(presentation, paused)
 
 

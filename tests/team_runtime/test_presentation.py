@@ -181,7 +181,7 @@ def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_s
     presentation = _presentation(show_tool_calls=False)
     tool = ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={"q": "seats"}, result="4")
     apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Looking.")))
-    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ToolStarted(tool)))
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ToolStarted(tool.call)))
     state = presentation.to_state()
     assert state["separate_next_scopes"] == ["agent:scout"]
 
@@ -191,7 +191,7 @@ def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_s
         state=state,
         tool_trace=presentation.tool_trace,
     )
-    apply_team_event(restored, MemberEvent("scout", "Scout", "run-2", ToolCompleted(tool)))
+    apply_team_event(restored, MemberEvent("scout", "Scout", "run-2", ToolCompleted(tool.call)))
     apply_team_event(restored, MemberEvent("scout", "Scout", "run-2", TextDelta("Four seats.")))
 
     assert restored.per_member["scout"] == "Looking.\n\nFour seats."
@@ -205,11 +205,11 @@ def test_an_empty_delta_keeps_the_paragraph_break_a_hidden_call_left_for_the_nex
     member_tool = ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={"q": "seats"})
     leader_tool = ToolExecution(tool_call_id="call-2", tool_name="lookup", tool_args={"q": "total"})
     apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Looking.")))
-    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ToolStarted(member_tool)))
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ToolStarted(member_tool.call)))
     apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("")))
     apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Four seats.")))
     apply_team_event(presentation, TextDelta("Summing up."))
-    apply_team_event(presentation, ToolStarted(leader_tool))
+    apply_team_event(presentation, ToolStarted(leader_tool.call))
     apply_team_event(presentation, TextDelta(""))
     apply_team_event(presentation, TextDelta("Four in all."))
 
@@ -234,7 +234,10 @@ def test_members_with_the_same_display_name_keep_their_own_slots() -> None:
 
     presentation.append_member("member-a", "First answer.")
     presentation.append_member("member-b", "Second answer.")
-    presentation.start_member_tool("member-b", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}))
+    presentation.start_member_tool(
+        "member-b",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}).call,
+    )
 
     assert presentation.per_member == {
         "member-a": "First answer.",
@@ -249,8 +252,8 @@ def test_a_pause_renumbers_interleaved_member_calls_in_document_order() -> None:
     presentation = TeamStreamPresentation.new(["first", "second"], ["First", "Second"], show_tool_calls=True)
     first = ToolExecution(tool_call_id="call-first", tool_name="inspect_first", requires_confirmation=True)
     second = ToolExecution(tool_call_id="call-second", tool_name="inspect_second", requires_confirmation=True)
-    presentation.start_member_tool("second", second)
-    presentation.start_member_tool("first", first)
+    presentation.start_member_tool("second", second.call)
+    presentation.start_member_tool("first", first.call)
     paused = PausedAttempt(
         session_id="session-1",
         run_id="run-1",
@@ -272,7 +275,7 @@ def test_a_pause_renumbers_interleaved_member_calls_in_document_order() -> None:
     assert "🔧 `inspect_second` [2] ⏳" in presentation.per_member["second"]
     presentation.complete_member_tool(
         "second",
-        ToolExecution(tool_call_id="call-second", tool_name="inspect_second", result="done"),
+        ToolExecution(tool_call_id="call-second", tool_name="inspect_second", result="done").call,
     )
     assert [entry.type for entry in presentation.tool_trace] == ["tool_call_started", "tool_call_completed"]
     assert "🔧 `inspect_second` [2]\n\n" in presentation.per_member["second"]
@@ -284,7 +287,7 @@ def test_a_hidden_snapshot_keeps_the_call_identity_without_markers() -> None:
     presentation.append_member("general", "Before.")
     presentation.start_member_tool(
         "general",
-        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"query": "value"}),
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"query": "value"}).call,
     )
 
     restored = TeamStreamPresentation.restore(
@@ -293,7 +296,10 @@ def test_a_hidden_snapshot_keeps_the_call_identity_without_markers() -> None:
         state=presentation.to_state(),
         tool_trace=presentation.tool_trace,
     )
-    restored.complete_member_tool("general", ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done"))
+    restored.complete_member_tool(
+        "general",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done").call,
+    )
     restored.append_member("general", " After.")
 
     assert "🔧" not in restored.render_body()
@@ -305,15 +311,15 @@ def test_two_members_may_reuse_one_call_id() -> None:
     presentation = TeamStreamPresentation.new(["first", "second"], ["First", "Second"], show_tool_calls=True)
     presentation.start_member_tool(
         "first",
-        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "first"}),
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "first"}).call,
     )
     presentation.start_member_tool(
         "second",
-        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "second"}),
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "second"}).call,
     )
     presentation.complete_member_tool(
         "first",
-        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="first done"),
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="first done").call,
     )
 
     assert [(entry.scope_key, entry.type) for entry in presentation.tool_trace] == [
@@ -330,7 +336,7 @@ def test_a_hidden_leader_call_separates_the_consensus_that_follows_it(*, restore
     presentation = TeamStreamPresentation.new([], [], show_tool_calls=False)
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
     apply_team_event(presentation, TextDelta("Before approval."))
-    apply_team_event(presentation, ToolStarted(tool))
+    apply_team_event(presentation, ToolStarted(tool.call))
     if restored:
         presentation = TeamStreamPresentation.restore(
             config_names=[],
@@ -340,7 +346,7 @@ def test_a_hidden_leader_call_separates_the_consensus_that_follows_it(*, restore
         )
     apply_team_event(
         presentation,
-        ToolCompleted(ToolExecution(tool_call_id="call-1", tool_name="inspect", result="ok")),
+        ToolCompleted(ToolExecution(tool_call_id="call-1", tool_name="inspect", result="ok").call),
     )
     apply_team_event(presentation, TextDelta("After approval."))
 
@@ -351,10 +357,10 @@ def test_a_chained_pause_keeps_the_hidden_separators_of_every_slot() -> None:
     """A pause in one member's slot keeps the pending separator another member's finished call left."""
     prior = TeamStreamPresentation.new(["first", "second"], ["First", "Second"], show_tool_calls=False)
     prior.append_member("first", "Before tool.")
-    prior.start_member_tool("first", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}))
-    prior.complete_member_tool("first", ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done"))
+    prior.start_member_tool("first", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}).call)
+    prior.complete_member_tool("first", ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done").call)
     prior.append_member("second", "Waiting.")
-    prior.start_member_tool("second", ToolExecution(tool_call_id="call-2", tool_name="approve", tool_args={}))
+    prior.start_member_tool("second", ToolExecution(tool_call_id="call-2", tool_name="approve", tool_args={}).call)
 
     restored = TeamStreamPresentation.restore(
         config_names=["first", "second"],
@@ -371,7 +377,7 @@ def test_a_restored_visible_marker_keeps_one_paragraph_break_before_the_consensu
     """Completing a restored leader marker and continuing the consensus adds no second blank paragraph."""
     prior = TeamStreamPresentation.new([], [], show_tool_calls=True)
     prior.append_consensus("Before approval.")
-    prior.start_tool("team", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}))
+    prior.start_tool("team", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}).call)
     presentation = TeamStreamPresentation.restore(
         config_names=[],
         show_tool_calls=True,
@@ -381,7 +387,7 @@ def test_a_restored_visible_marker_keeps_one_paragraph_break_before_the_consensu
 
     apply_team_event(
         presentation,
-        ToolCompleted(ToolExecution(tool_call_id="call-1", tool_name="inspect", result="ok")),
+        ToolCompleted(ToolExecution(tool_call_id="call-1", tool_name="inspect", result="ok").call),
     )
     apply_team_event(presentation, TextDelta("After approval."))
 

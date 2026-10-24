@@ -25,15 +25,15 @@ async def test_collect_streamed_response_preserves_tool_marker_order() -> None:
     async def stream() -> AsyncGenerator[object, None]:
         yield TextDelta("Before tool.\n")
         yield ToolStarted(
-            tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "git status"}),
+            call=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "git status"}).call,
         )
         yield TextDelta("\nAfter tool.")
         yield ToolCompleted(
-            tool=ToolExecution(
+            call=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "git status"},
                 result="clean",
-            ),
+            ).call,
         )
 
     body, trace = await collect_streamed_response_content(
@@ -58,9 +58,9 @@ async def test_collect_streamed_response_can_hide_tool_markers() -> None:
 
     async def stream() -> AsyncGenerator[object, None]:
         yield TextDelta("Before.")
-        yield ToolStarted(tool=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}))
+        yield ToolStarted(call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}).call)
         yield ToolCompleted(
-            tool=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}, result="content"),
+            call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}, result="content").call,
         )
         yield TextDelta(" After.")
 
@@ -87,20 +87,20 @@ async def test_collect_streamed_response_resumes_pending_tool_by_exact_id() -> N
 
     async def stream() -> AsyncGenerator[object, None]:
         yield ToolCompleted(
-            tool=ToolExecution(
+            call=ToolExecution(
                 tool_call_id="call-1",
                 tool_name="inspect",
                 tool_args={"path": "report.txt"},
                 result="details",
-            ),
+            ).call,
         )
         yield TextDelta("\nAfter approval.")
         yield ToolStarted(
-            tool=ToolExecution(
+            call=ToolExecution(
                 tool_call_id="call-2",
                 tool_name="inspect",
                 tool_args={"path": "report.txt"},
-            ),
+            ).call,
         )
 
     body, trace = await collect_streamed_response_content(
@@ -125,11 +125,11 @@ async def test_collect_streamed_response_does_not_merge_equal_calls_with_distinc
     async def stream() -> AsyncGenerator[object, None]:
         for call_id in ("call-1", "call-2"):
             yield ToolStarted(
-                tool=ToolExecution(
+                call=ToolExecution(
                     tool_call_id=call_id,
                     tool_name="inspect",
                     tool_args={},
-                ),
+                ).call,
             )
 
     body, trace = await collect_streamed_response_content(
@@ -150,9 +150,9 @@ async def test_collect_streamed_response_ignores_repeated_start_for_restored_cal
 
     async def stream() -> AsyncGenerator[object, None]:
         tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
-        yield ToolStarted(tool=tool)
+        yield ToolStarted(call=tool.call)
         yield ToolCompleted(
-            tool=ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}, result="done"),
+            call=ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}, result="done").call,
         )
 
     body, trace = await collect_streamed_response_content(
@@ -180,9 +180,9 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
     async def fake_stream_agent_response(_ctx: object, **kwargs: object) -> AsyncGenerator[object, None]:
         seen_kwargs.update(kwargs)
         yield TextDelta("Before.")
-        yield ToolStarted(tool=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}))
+        yield ToolStarted(call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}).call)
         yield ToolCompleted(
-            tool=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}, result="content"),
+            call=ToolExecution(tool_name="read_file", tool_args={"path": "README.md"}, result="content").call,
         )
         yield TextDelta(" After.")
 

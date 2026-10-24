@@ -460,7 +460,7 @@ def _ordered_pause(paused: PausedAttempt) -> PausedAttempt:
     body = ""
     trace: list[ToolTraceEntry] = []
     for index, tool in enumerate(paused.tools, start=1):
-        marker, entry = format_tool_started_event(tool, tool_index=index)
+        marker, entry = format_tool_started_event(tool.call, tool_index=index)
         assert entry is not None
         body += marker
         trace.append(entry)
@@ -8223,7 +8223,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
     async def attempt(_run, _continuation):  # noqa: ANN001, ANN202
         attempts.append(True)
         if len(attempts) <= spent:
-            return CompletedAttempt(control_executions=(_model_switch_execution("next-turn"),))
+            return CompletedAttempt(control_calls=(_model_switch_execution("next-turn").call,))
         lifetime = current_cli_lifetime()
         assert lifetime is not None
         lifetime.grant_expires_at_ns = 1

@@ -1914,8 +1914,8 @@ class TestStreamingCompletion:
 
         async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
             yield TextDelta("Let me search. ")
-            yield ToolStarted(tool_started)
-            yield ToolCompleted(tool_completed)
+            yield ToolStarted(tool_started.call)
+            yield ToolCompleted(tool_completed.call)
             yield TextDelta("Found it!")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -1962,8 +1962,8 @@ class TestStreamingCompletion:
         )
 
         async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
-            yield ToolStarted(tool_started)
-            yield ToolCompleted(tool_completed)
+            yield ToolStarted(tool_started.call)
+            yield ToolCompleted(tool_completed.call)
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -2024,10 +2024,10 @@ class TestStreamingCompletion:
 
         async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
             yield TextDelta("Start ")
-            yield ToolStarted(first_started)
-            yield ToolCompleted(first_completed)
-            yield ToolStarted(second_started)
-            yield ToolCompleted(second_completed)
+            yield ToolStarted(first_started.call)
+            yield ToolCompleted(first_completed.call)
+            yield ToolStarted(second_started.call)
+            yield ToolCompleted(second_completed.call)
             yield TextDelta("End")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -3934,7 +3934,9 @@ class TestTeamCompletion:
 
         async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
             yield TextDelta("Team started. ")
-            yield ToolStarted(ToolExecution(tool_name="run_shell", tool_args={"cmd": "ls"}, tool_call_id="tc-pending"))
+            yield ToolStarted(
+                ToolExecution(tool_name="run_shell", tool_args={"cmd": "ls"}, tool_call_id="tc-pending").call,
+            )
             msg = "Internal Server Error"
             raise RuntimeError(msg)
 
@@ -4400,11 +4402,11 @@ class TestTeamCompletion:
             patch(
                 "mindroom.teams.envelope.run_team",
                 new=_team_events(
-                    ToolStarted(delegation()),
+                    ToolStarted(delegation().call),
                     member(TextDelta("member noise")),
-                    member(ToolStarted(search())),
-                    member(ToolCompleted(search("3 results"))),
-                    ToolCompleted(delegation("Found 3")),
+                    member(ToolStarted(search().call)),
+                    member(ToolCompleted(search("3 results").call)),
+                    ToolCompleted(delegation("Found 3").call),
                     TextDelta("Final answer"),
                     _finished("Final answer"),
                 ),

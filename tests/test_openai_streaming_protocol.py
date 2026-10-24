@@ -93,8 +93,8 @@ class TestToolCallDeltas:
         started = ToolExecution(tool_name="search", tool_args={"query": "X"}, tool_call_id="tc-1")
         completed = ToolExecution(tool_name="search", tool_args={"query": "X"}, tool_call_id="tc-1", result="3 results")
 
-        start_text = format_stream_tool_event(ToolStarted(started), tool_state)
-        done_text = format_stream_tool_event(ToolCompleted(completed), tool_state)
+        start_text = format_stream_tool_event(ToolStarted(started.call), tool_state)
+        done_text = format_stream_tool_event(ToolCompleted(completed.call), tool_state)
 
         assert start_text == '<tool id="1" state="start">search(query=X)</tool>'
         assert done_text == '<tool id="1" state="done">search(query=X)\n3 results</tool>'
@@ -106,8 +106,8 @@ class TestToolCallDeltas:
         first = ToolExecution(tool_name="search", tool_args={}, tool_call_id="tc-1")
         second = ToolExecution(tool_name="fetch", tool_args={}, tool_call_id="tc-2")
 
-        first_text = format_stream_tool_event(ToolStarted(first), tool_state)
-        second_text = format_stream_tool_event(ToolStarted(second), tool_state)
+        first_text = format_stream_tool_event(ToolStarted(first.call), tool_state)
+        second_text = format_stream_tool_event(ToolStarted(second.call), tool_state)
 
         assert '<tool id="1" state="start">' in first_text
         assert '<tool id="2" state="start">' in second_text
@@ -116,7 +116,7 @@ class TestToolCallDeltas:
         """A completion that was never announced still gets a usable tool ID."""
         tool_state = ToolStreamState()
         completed = ToolExecution(tool_name="search", tool_args={}, tool_call_id="tc-9", result="ok")
-        text = format_stream_tool_event(ToolCompleted(completed), tool_state)
+        text = format_stream_tool_event(ToolCompleted(completed.call), tool_state)
         assert '<tool id="1" state="done">' in text
 
     def test_tool_payload_is_escaped(self) -> None:
@@ -128,7 +128,7 @@ class TestToolCallDeltas:
             tool_call_id="tc-1",
             result="</tool><i>boom</i>",
         )
-        text = format_stream_tool_event(ToolCompleted(completed), tool_state)
+        text = format_stream_tool_event(ToolCompleted(completed.call), tool_state)
         assert "</tool><b>pwn</b>" not in text
         assert "&lt;/tool&gt;&lt;b&gt;pwn&lt;/b&gt;" in text
         assert "&lt;/tool&gt;&lt;i&gt;boom&lt;/i&gt;" in text
@@ -137,7 +137,7 @@ class TestToolCallDeltas:
         """Started-but-never-completed calls are closed with an interrupted done tag."""
         tool_state = ToolStreamState()
         started = ToolExecution(tool_name="search", tool_args={}, tool_call_id="tc-1")
-        format_stream_tool_event(ToolStarted(started), tool_state)
+        format_stream_tool_event(ToolStarted(started.call), tool_state)
 
         pending = finalize_pending_tools(tool_state)
         assert pending == '<tool id="1" state="done">(interrupted)</tool>'
@@ -159,7 +159,7 @@ class TestStreamTextExtraction:
     def test_tool_event_becomes_tool_trace(self) -> None:
         """Tool events are encoded as inline tool traces."""
         started = ToolExecution(tool_name="search", tool_args={}, tool_call_id="tc-1")
-        text = extract_stream_text(ToolStarted(started), ToolStreamState())
+        text = extract_stream_text(ToolStarted(started.call), ToolStreamState())
         assert text == '<tool id="1" state="start">search()</tool>'
 
     def test_finished_run_yields_nothing(self) -> None:

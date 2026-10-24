@@ -308,8 +308,8 @@ async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tm
                 assert EVENTS == ["database connect"]
                 binding = await catalog.bind(ToolKey("mcp_server", "lookup"))
                 events = [event async for event in execute_agent_tool_call(binding, "call_lookup", {"term": "x"})]
-                assert events[-1].execution is not None
-                assert events[-1].execution.result == "lookup found x"
+                assert events[-1].call is not None
+                assert events[-1].call.result == "lookup found x"
             finally:
                 await catalog.close()
 

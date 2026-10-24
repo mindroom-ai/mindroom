@@ -489,7 +489,7 @@ async def test_approval_settlement_preserves_tool_boundary(
         ),
         track_hidden_tools=True,
     )
-    events = [ToolStarted(tool), ToolCompleted(tool)] if boundary == "new" else []
+    events = [ToolStarted(tool.call), ToolCompleted(tool.call)] if boundary == "new" else []
     events.append(_finished(content="After approval.", tools=[tool]))
 
     collected = await _collect_agent_continuation(_events(*events), presentation, progress=None)
@@ -591,7 +591,7 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
     parent_tools = [tool]
     events: list[RunEvent] = []
     if source == "projected_child":
-        events.append(ToolCompleted(replace(tool, tool_call_id="delegate:old-continue")))
+        events.append(ToolCompleted(replace(tool, tool_call_id="delegate:old-continue").call))
         parent_tools = [ToolExecution(tool_call_id="delegate", tool_name="run_subagent", result="Child finished.")]
     events.append(_finished(run_id="parent", content="Final parent answer.", tools=parent_tools))
 
@@ -600,6 +600,21 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
     assert presentation.final_text() == ""
     assert collected.terminal_content == "Final parent answer."
     assert collected.tool_executions == ()
+
+
+@pytest.mark.asyncio
+async def test_the_calls_a_continuation_completed_are_its_runs_own_entries() -> None:
+    """The continuation reports the parent's calls it completed as the run's record holds them."""
+    earlier = ToolExecution(tool_call_id="earlier", tool_name="inspect", result="before")
+    current = ToolExecution(tool_call_id="current", tool_name="inspect", result="after")
+    finished = _finished(run_id="parent", content="Done.", tools=[earlier, current])
+    events = [ToolStarted(current.call), ToolCompleted(current.call), finished]
+
+    presentation = CollectedStreamPresentation(show_tool_calls=False)
+    collected = await _collect_agent_continuation(_events(*events), presentation, progress=None)
+
+    assert len(collected.tool_executions) == 1
+    assert collected.tool_executions[0] is current
 
 
 @pytest.mark.asyncio
@@ -647,7 +662,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
     paused = await _paused_turn(config, paths, identity, "Add, then keep going.")
     saved = CollectedStreamPresentation(show_tool_calls=True, response_text="Adding first.")
-    saved.start_tool(paused.tools[0])
+    saved.start_tool(paused.tools[0].call)
     continuation = approval_continuation(
         approval_id="approval-progress",
         run_id=paused.run_id,
@@ -871,7 +886,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
 
     async def stream(_ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[object]:
         yield TextDelta(" Next, publishing.")
-        yield ToolStarted(gated)
+        yield ToolStarted(gated.call)
         raise ResponsePausedForApproval(
             PausedAttempt(session_id="session", run_id="run-fresh", tools=(gated,), toolkit_owners={}),
         )

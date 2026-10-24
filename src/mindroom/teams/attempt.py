@@ -153,8 +153,8 @@ class TeamAttempt:
                 team_name=self.team_name,
                 tool_scope="member" if member is not None else "team",
                 agent_name=member.member_name if member is not None else None,
-                tool_name=inner.tool.tool_name,
-                tool_call_id=inner.tool.tool_call_id,
+                tool_name=inner.call.tool_name,
+                tool_call_id=inner.call.tool_call_id,
                 show_tool_calls=self.presentation.show_tool_calls,
             )
         elif not isinstance(inner, TextDelta):

@@ -325,7 +325,9 @@ async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: P
         cast("Callable[[str], None]", kwargs["run_id_callback"])("child-run")
         await observe_child_event(TextDelta("Reading "))
         await observe_child_event(TextDelta("the logs."))
-        await observe_child_event(ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={})))
+        await observe_child_event(
+            ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={}).call),
+        )
         return "done"
 
     with (

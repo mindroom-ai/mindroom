@@ -195,12 +195,14 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
         "RequestCompleted",
         "LoopEnded",
     ]
-    started = [event.tool for event in events if isinstance(event, ToolStarted)]
-    completed = [event.tool for event in events if isinstance(event, ToolCompleted)]
-    assert [tool.tool_call_id for tool in started] == ["c1", "c2"] == [tool.tool_call_id for tool in completed]
+    started = [event.call for event in events if isinstance(event, ToolStarted)]
+    completed = [event.call for event in events if isinstance(event, ToolCompleted)]
+    assert [call.tool_call_id for call in started] == ["c1", "c2"] == [call.tool_call_id for call in completed]
     assert record.tools is not None
-    assert [tool is entry for tool, entry in zip(started, record.tools, strict=True)]
-    assert [(tool.result, tool.is_error) for tool in completed] == [('{"sum": 5}', False), ("yo", False)]
+    # A start reports the call before it ran; its completion reports the call as the run's record holds it.
+    assert started == [replace(entry.call, result=None, is_error=None) for entry in record.tools]
+    assert completed == [entry.call for entry in record.tools]
+    assert [(call.result, call.is_error) for call in completed] == [('{"sum": 5}', False), ("yo", False)]
     assert record.content == "Checking. 2 + 3 = 5."
     assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool", "assistant"]
     assert [m.tool_call_id for m in messages if m.role == "tool"] == ["c1", "c2"]
@@ -232,7 +234,7 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_with_agno_texts(
     assert "validation error" in str(tool_messages[1].content)
     assert tool_messages[2].content == '{"sum": 7}'
     # Only resolved calls are announced; the unknown one was answered without running.
-    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c2", "c3"]
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c2", "c3"]
     assert record.tools is not None
     assert [tool.tool_call_id for tool in record.tools] == ["c2", "c3"]
     assert model.requests[1].messages[-3:] == tuple(tool_messages)
@@ -262,7 +264,7 @@ async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests()
         ("c4", limit_text),
     ]
     # Refused calls are neither announced nor recorded as executions.
-    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1"]
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1"]
     assert record.tools is not None
     assert len(record.tools) == 1
     assert len(model.requests) == 3
@@ -356,8 +358,8 @@ async def test_a_confirmation_pause_announces_the_call_records_a_requirement_and
     events, record = await _run(spec(model, toolkit(echo), gated(add)), messages)
 
     assert events[-1] == LoopEnded(paused=True)
-    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1", "c2"]
-    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1"]
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1", "c2"]
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1"]
     assert len(model.requests) == 1
     assert record.tools is not None
     assert record.requirements is not None
@@ -566,7 +568,7 @@ async def test_rewritten_tool_calls_are_what_runs_and_what_the_message_stores() 
     assert record.tools is not None
     assert (record.tools[0].tool_name, record.tools[0].result) == ("echo", "real")
     assert messages[2].tool_calls == [tool_call("echo", "c1", text="real")]
-    assert [event.tool.tool_name for event in events if isinstance(event, ToolStarted)] == ["echo"]
+    assert [event.call.tool_name for event in events if isinstance(event, ToolStarted)] == ["echo"]
 
 
 async def test_a_tool_exception_is_an_error_result_not_a_failed_loop() -> None:

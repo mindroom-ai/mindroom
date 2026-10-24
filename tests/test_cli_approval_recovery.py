@@ -439,7 +439,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
 
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
     presentation.start_tool(
-        requirement.tool_execution,
+        requirement.tool_execution.call,
         origin=ToolCallOrigin("bash-parent", "actions"),
     )
     published = []
@@ -629,7 +629,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
         RunRecord(run_id="run", session_id="session", agent_id="helper", status=RunStatus.cancelled),
     )
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
-    presentation.start_tool(requirement.tool_execution, origin=ToolCallOrigin("bash", "shell"))
+    presentation.start_tool(requirement.tool_execution.call, origin=ToolCallOrigin("bash", "shell"))
     continuation = approval_continuation(
         run_id="run",
         session_id="session",
@@ -716,9 +716,9 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
     for execution, parent in ((folded, None), (nested, "folded-bash")):
         origin = ToolCallOrigin(parent, "shell")
-        presentation.start_tool(execution, origin=origin)
-        presentation.complete_tool(execution, origin=origin)
-    presentation.start_tool(requirement.tool_execution, origin=ToolCallOrigin("bash", "shell"))
+        presentation.start_tool(execution.call, origin=origin)
+        presentation.complete_tool(execution.call, origin=origin)
+    presentation.start_tool(requirement.tool_execution.call, origin=ToolCallOrigin("bash", "shell"))
     continuation = approval_continuation(
         run_id="run",
         session_id="session",
@@ -926,7 +926,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     tool = ToolExecution(tool_call_id="hidden", tool_name=name, tool_args=arguments, requires_confirmation=True)
     requirement = RunRequirement(tool)
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
-    presentation.start_tool(tool, origin=ToolCallOrigin("old-bash", namespace))
+    presentation.start_tool(tool.call, origin=ToolCallOrigin("old-bash", namespace))
     store = create_session_storage(
         "helper",
         runtime.config,

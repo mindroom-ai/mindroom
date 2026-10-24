@@ -404,7 +404,11 @@ async def _execute_child(
         )
 
     if response.status == RunStatus.completed:
-        decision = continuation_decision_from_tools(response.tools, original_prompt=child.task, continuation_count=0)
+        decision = continuation_decision_from_tools(
+            [tool.call for tool in response.tools or ()],
+            original_prompt=child.task,
+            continuation_count=0,
+        )
         if decision.next_prompt is not None:
             model_name = (
                 decision.model_switch_name
@@ -554,9 +558,7 @@ async def _complete_approved_child_tools(
         response = await read_child_run(source.child, config, runtime_paths)
         for tool in (response.tools or ()) if response is not None else ():
             if tool.tool_call_id == source.tool_call_id and not tool.is_paused:
-                projected = deepcopy(tool)
-                projected.tool_call_id = call_id
-                on_event(ToolCompleted(projected))
+                on_event(ToolCompleted(replace(tool.call, tool_call_id=call_id)))
                 break
 
 
@@ -568,12 +570,7 @@ def _settle_pending_child_tools(
 ) -> None:
     """Close the current approval generation's visible tools after an interruption."""
     for pending_tool in pending_tools:
-        cancelled_tool = ToolExecution.from_dict(pending_tool)
-        cancelled_tool.requires_confirmation = False
-        cancelled_tool.external_execution_required = False
-        cancelled_tool.result = reason
-        cancelled_tool.is_error = True
-        on_event(ToolCompleted(cancelled_tool))
+        on_event(ToolCompleted(replace(ToolExecution.from_dict(pending_tool).call, result=reason, is_error=True)))
 
 
 def _prepare_delegation_output(
@@ -627,7 +624,7 @@ def _resolve_delegation_requirement(
     """
     result = _finalize_delegation_output(result, output_request)
     requirement.set_external_execution_result(result)
-    emit_call(ToolCompleted(replace(requirement.tool_execution, external_execution_required=False)))
+    emit_call(ToolCompleted(requirement.tool_execution.call))
     return result
 
 
@@ -1030,7 +1027,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if on_event is not None:
             on_event(tag_call_event(requirement, event))
 
-    emit_call(ToolStarted(deepcopy(tool)))
+    emit_call(ToolStarted(tool.call))
     # A team member's id is its config name, so its delegations run as that member.
     caller = agent_name if requirement.member_agent_id is None else requirement.member_agent_id
     caller_identity = replace(execution_identity, agent_name=caller)

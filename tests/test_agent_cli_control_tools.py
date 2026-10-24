@@ -181,7 +181,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         assert "continuation" in second["outcome"].lower()
         assert second["parent_bash_call_id"] == "bash-0"
         decision = continuation_decision_from_tools(
-            owner.control_executions,
+            owner.control_calls,
             original_prompt="task",
             continuation_count=0,
         )
@@ -189,7 +189,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         assert decision.model_switch_name == (None if raises else "next")
     else:
         assert effects == ["outer-0", "outer-1"]
-        assert not owner.control_executions
+        assert not owner.control_calls
         assert record.content == "done"
     assert all(item.tool_name == "bash" for item in results)
     await owner.close()
@@ -511,11 +511,11 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
 
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
             presentation.start_tool(
-                requirement.tool_execution,
+                requirement.tool_execution.call,
                 origin=ToolCallOrigin("bash-parent", "delegate"),
             )
             for tool in paused.tools:
-                presentation.start_tool(tool, origin=ToolCallOrigin("bash-parent", "report"))
+                presentation.start_tool(tool.call, origin=ToolCallOrigin("bash-parent", "report"))
             continuation = approval_continuation(
                 continuation_count=2,
                 run_id="run",
@@ -674,7 +674,7 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
         event
         async for event in execute_agent_tool_call(binding, "memory-write", {"content": "Canonical hidden memory"})
     ]
-    assert events[-1].execution.result == "Memorized: Canonical hidden memory"
+    assert events[-1].call.result == "Memorized: Canonical hidden memory"
     memories = await search_agent_memories("Canonical hidden", "helper", paths.storage_root, config, paths, limit=5)
     assert any(item["memory"] == "Canonical hidden memory" for item in memories.results)
     catalog.run.session_state["sentinel"] = "kept"
@@ -682,7 +682,7 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     compact_binding = await catalog.bind(ToolKey("compact_context", "compact_context"))
     events = [event async for event in execute_agent_tool_call(compact_binding, "compact", {})]
     assert events[-1].kind == "completed"
-    assert "before the next reply" in events[-1].execution.result
+    assert "before the next reply" in events[-1].call.result
     assert catalog.run.session_state is original
     assert catalog.run.session_state["sentinel"] == "kept"
     await catalog.close()
@@ -731,7 +731,7 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     catalog = await _catalog(tmp_path, [skills], owners={})
     binding = await catalog.bind(ToolKey("agent", "get_skill_instructions"))
     events = [event async for event in execute_agent_tool_call(binding, "skill-read", {"skill_name": "local-guide"})]
-    assert "Use the original session." in events[-1].execution.result
+    assert "Use the original session." in events[-1].call.result
     script = tmp_path / "server.py"
     script.write_text(
         'from mcp.server.mcpserver import MCPServer\nserver = MCPServer("echo")\n@server.tool()\ndef echo(text: str) -> str:\n    return "echo:" + text\nserver.run()\n',
@@ -757,7 +757,7 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     binding = await catalog.bind(ToolKey("upstream", "echo_echo"))
     events = [event async for event in execute_agent_tool_call(binding, "mcp-call", {"text": "same-owner"})]
     assert events[-1].kind == "completed"
-    assert "echo:same-owner" in events[-1].execution.result
+    assert "echo:same-owner" in events[-1].call.result
     assert binding.catalog is catalog
     assert materialized == [True]
     await catalog.close()

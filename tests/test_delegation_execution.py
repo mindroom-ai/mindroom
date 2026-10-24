@@ -711,7 +711,7 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
 
     assert denied == "Delegation denied by requester; child was not executed."
     assert state.children == []
-    assert [event.tool.result for event in events if isinstance(event, ToolCompleted)] == [denied]
+    assert [event.call.result for event in events if isinstance(event, ToolCompleted)] == [denied]
 
 
 @pytest.mark.asyncio

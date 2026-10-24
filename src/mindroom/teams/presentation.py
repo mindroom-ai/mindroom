@@ -33,7 +33,8 @@ from mindroom.tool_system.events import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from mindroom.llm.runs import AnyRunRecord, TeamRunRecord, ToolExecution
+    from mindroom.llm.events import ReportedCall
+    from mindroom.llm.runs import AnyRunRecord, TeamRunRecord
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamRunEvent
 
@@ -318,10 +319,10 @@ class TeamStreamPresentation:
             self.consensus = remap_visible_tool_marker_indices(self.consensus, index_map)
         self.tool_tracker.sync_visible_indices(self.tool_trace)
 
-    def start_tool(self, scope_key: str, tool: ToolExecution) -> None:
+    def start_tool(self, scope_key: str, call: ReportedCall) -> None:
         """Record a tool start in its exact member or coordinator slot."""
         tool_index = len(self.tool_trace) + 1
-        marker, trace_entry = self.tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
+        marker, trace_entry = self.tool_tracker.start(call, scope_key=scope_key, tool_index=tool_index)
         if trace_entry is None:
             return
         trace_entry.scope_key = scope_key
@@ -332,9 +333,9 @@ class TeamStreamPresentation:
             self.separate_next_scopes.add(scope_key)
         self._align_tool_trace_with_document()
 
-    def complete_tool(self, scope_key: str, tool: ToolExecution) -> None:
+    def complete_tool(self, scope_key: str, call: ReportedCall) -> None:
         """Complete only the pending slot identified by this tool event."""
-        tool_name, result, pending_tool, completed_trace = self.tool_tracker.complete(tool, scope_key=scope_key)
+        tool_name, result, pending_tool, completed_trace = self.tool_tracker.complete(call, scope_key=scope_key)
         if pending_tool is None or pending_tool.visible_tool_index is None:
             return
         completed_trace.scope_key = scope_key
@@ -348,13 +349,13 @@ class TeamStreamPresentation:
             self._set_slot_text(scope_key, updated_text)
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
 
-    def start_member_tool(self, member_id: str, tool: ToolExecution) -> None:
+    def start_member_tool(self, member_id: str, call: ReportedCall) -> None:
         """Record a tool start in the slot of ``member_id``, which ``resolve_member_id`` returned."""
-        self.start_tool(f"agent:{member_id}", tool)
+        self.start_tool(f"agent:{member_id}", call)
 
-    def complete_member_tool(self, member_id: str, tool: ToolExecution) -> None:
+    def complete_member_tool(self, member_id: str, call: ReportedCall) -> None:
         """Record a tool completion in the slot of ``member_id``, which ``resolve_member_id`` returned."""
-        self.complete_tool(f"agent:{member_id}", tool)
+        self.complete_tool(f"agent:{member_id}", call)
 
     def render_body(self) -> str:
         """Render the current structured document."""
@@ -376,15 +377,15 @@ def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) 
         if isinstance(inner, TextDelta):
             presentation.append_member(member_id, inner.text)
         elif isinstance(inner, ToolStarted):
-            presentation.start_member_tool(member_id, inner.tool)
+            presentation.start_member_tool(member_id, inner.call)
         elif isinstance(inner, ToolCompleted):
-            presentation.complete_member_tool(member_id, inner.tool)
+            presentation.complete_member_tool(member_id, inner.call)
     elif isinstance(event, TextDelta):
         presentation.append_consensus(event.text)
     elif isinstance(event, ToolStarted):
-        presentation.start_tool("team", event.tool)
+        presentation.start_tool("team", event.call)
     elif isinstance(event, ToolCompleted):
-        presentation.complete_tool("team", event.tool)
+        presentation.complete_tool("team", event.call)
 
 
 async def publish_team_presentation(

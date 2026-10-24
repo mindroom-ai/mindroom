@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.hooks import EnrichmentItem
+    from mindroom.llm.events import ReportedCall
     from mindroom.llm.request_context import RequestAttribution
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.participation import ParticipationGate
@@ -413,8 +414,9 @@ class CompletedAttempt:
     attempt_run_id: str | None = None
     runtime_model_name: str | None = None
     output_tokens: int | None = None
+    # The run's own calls, read from its record, and the control calls its hidden CLI calls made.
     tool_executions: tuple[ToolExecution, ...] = ()
-    control_executions: tuple[ToolExecution, ...] = ()
+    control_calls: tuple[ReportedCall, ...] = ()
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     metadata_content: dict[str, Any] | None = None
     status: RunStatus = RunStatus.completed
@@ -1185,7 +1187,7 @@ def _settle_completed_attempt(
             response_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
         )
     decision = continuation_decision_from_tools(
-        (*resolution.tool_executions, *resolution.control_executions),
+        (*(tool.call for tool in resolution.tool_executions), *resolution.control_calls),
         original_prompt=continuation.original_prompt,
         continuation_count=continuation_count,
     )

@@ -487,7 +487,7 @@ async def test_an_approved_call_resumes_into_agno_s_approved_row() -> None:
     assert paused.to_dict() == before
     assert [type(event).__name__ for event in events[:2]] == ["ToolStarted", "ToolCompleted"]
     assert isinstance(events[0], ToolStarted)
-    assert events[0].tool is record.tools[0]  # type: ignore[index]
+    assert events[0].call == replace(record.tools[0].call, result=None, is_error=None)  # type: ignore[index]
     # The resume request repeats the paused request, system message first.
     assert [message.role for message in model.requests[0].messages] == ["system", "user", "assistant", "tool"]
     assert model.requests[0].messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
@@ -664,7 +664,7 @@ async def test_a_second_resume_answers_only_the_calls_it_decided(second_decision
     assert [message.tool_call_id for message in tool_messages] == ["c1", "c2"]
     assert tool_messages[0].content == "3"
     assert tool_messages[1].content == ("7" if second_decision == "approve" else "no")
-    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolStarted | ToolCompleted)] == (
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted | ToolCompleted)] == (
         ["c2", "c2"] if second_decision == "approve" else []
     )
     assert [(r.tool_execution.tool_call_id, r.confirmation) for r in third.requirements or ()] == [
@@ -794,7 +794,7 @@ async def test_resume_entry_hooks_run_after_the_decided_results_and_the_loop_con
     assert record.content == "Seven."
     assert record.tools is not None
     assert [tool.tool_call_id for tool in record.tools] == ["c1", "c2"]
-    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1", "c2"]
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1", "c2"]
     assert record.metrics is not None
     assert record.metrics.total_tokens == 6
 

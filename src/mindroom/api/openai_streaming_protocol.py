@@ -244,7 +244,7 @@ def sse_chunk(
 
 def format_stream_tool_event(event: ToolStarted | ToolCompleted, tool_state: ToolStreamState) -> str:
     """Format one tool event as an inline tool block whose id the call's start and completion share."""
-    tool_call_id = str(event.tool.tool_call_id).strip()
+    tool_call_id = str(event.call.tool_call_id).strip()
     if not tool_call_id:
         msg = "Streaming tool events require a non-empty tool_call_id"
         raise ValueError(msg)
@@ -257,7 +257,7 @@ def format_stream_tool_event(event: ToolStarted | ToolCompleted, tool_state: Too
         tool_state.next_tool_id += 1
         if started:
             ids[tool_call_id] = tool_id
-    _, trace = format_tool_started_event(event.tool) if started else format_tool_completed_event(event.tool)
+    _, trace = format_tool_started_event(event.call) if started else format_tool_completed_event(event.call)
     message = f"{escape(trace.tool_name, quote=True)}({escape(trace.args_preview or '', quote=True)})"
     if not started:
         message += f"\n{escape(trace.result_preview or '', quote=True)}"

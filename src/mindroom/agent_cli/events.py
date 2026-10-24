@@ -42,12 +42,12 @@ def emit_cli_tool_event(event: AgentToolCallEvent, parent: str | None) -> None:
     if (
         sink is None
         or event.call_id == parent
-        or event.execution is None
+        or event.call is None
         or event.kind not in {"started", "completed", "failed", "continuation_required"}
     ):
         return
     cls = ToolStarted if event.kind == "started" else ToolCompleted
-    emit_cli_run_event(cls(event.execution), parent=parent, toolkit_name=event.key.toolkit)
+    emit_cli_run_event(cls(event.call), parent=parent, toolkit_name=event.key.toolkit)
 
 
 def emit_cli_run_event(

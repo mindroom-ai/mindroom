@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.llm.events import ReportedCall
 from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
@@ -86,7 +87,7 @@ class AgentToolCallEvent:
     kind: Literal["started", "media", "waiting", "continuation_required", "completed", "failed"]
     call_id: str
     key: ToolKey
-    execution: ToolExecution | None = None
+    call: ReportedCall | None = None
     requirement: RunRequirement | None = None
     media: ToolValue | None = None
 
@@ -304,18 +305,8 @@ def _failure(
     arguments: dict[str, object],
     message: str,
 ) -> AgentToolCallEvent:
-    return AgentToolCallEvent(
-        "failed",
-        call_id,
-        binding.key,
-        execution=ToolExecution(
-            tool_call_id=call_id,
-            tool_name=binding.key.function,
-            tool_args=arguments,
-            is_error=True,
-            result=message,
-        ),
-    )
+    call = ReportedCall(call_id, binding.key.function, arguments, result=message, is_error=True)
+    return AgentToolCallEvent("failed", call_id, binding.key, call=call)
 
 
 def _check_resolves(
@@ -435,13 +426,14 @@ async def _execute_agent_tool_call(
                 "waiting",
                 call_id,
                 binding.key,
-                execution=paused,
+                call=paused.call,
                 requirement=RunRequirement(paused),
             )
             return
         catalog._call_count += 1
-        execution = ToolExecution(tool_call_id=call_id, tool_name=binding.key.function, tool_args=deepcopy(arguments))
-        yield AgentToolCallEvent("started", call_id, binding.key, execution=deepcopy(execution))
+        call = ReportedCall(call_id, binding.key.function, deepcopy(arguments))
+        # The start reports a copy, so a consumer that edits its arguments changes neither the call nor its completion.
+        yield AgentToolCallEvent("started", call_id, binding.key, call=deepcopy(call))
         function = binding.function
         if shell_leaf is not None:
 
@@ -468,13 +460,11 @@ async def _execute_agent_tool_call(
                 )
         finally:
             await _settle_call(binding, tracker)
-        execution.result = outcome.content
-        execution.is_error = outcome.is_error
-        execution.stop_after_call = outcome.stop_after_call
         if outcome.images or outcome.audios or outcome.videos or outcome.files:
             yield AgentToolCallEvent("media", call_id, binding.key, media=outcome)
         kind = "continuation_required" if outcome.stop_after_call else "failed" if outcome.is_error else "completed"
-        yield AgentToolCallEvent(kind, call_id, binding.key, execution=execution)
+        call = replace(call, result=outcome.content, is_error=outcome.is_error)
+        yield AgentToolCallEvent(kind, call_id, binding.key, call=call)
 
 
 async def _settle_call(binding: PreparedAgentToolBinding, tracker: SyncToolCompletionTracker) -> None:

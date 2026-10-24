@@ -12,8 +12,7 @@ from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from mindroom.llm.events import ToolCallOrigin
-    from mindroom.llm.runs import ToolExecution
+    from mindroom.llm.events import ReportedCall, ToolCallOrigin
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 2
@@ -76,19 +75,19 @@ class StreamingToolTracker:
 
     def start(
         self,
-        tool: ToolExecution,
+        call: ReportedCall,
         *,
         scope_key: str = "",
         tool_index: int | None = None,
         origin: ToolCallOrigin | None = None,
     ) -> tuple[str, ToolTraceEntry | None]:
         """Record one started tool call and return its visible marker, or no trace entry for a call already pending."""
-        call_id = tool_execution_call_id(tool)
+        call_id = stable_call_id(call)
         if call_id is not None and any(
             pending.scope_key == scope_key and pending.tool_call_id == call_id for pending in self.pending_tools
         ):
             return "", None
-        visible_text, trace_entry = format_tool_started_event(tool, tool_index=tool_index, origin=origin)
+        visible_text, trace_entry = format_tool_started_event(call, tool_index=tool_index, origin=origin)
         self.pending_tools.append(
             _PendingStreamingTool(
                 scope_key=scope_key,
@@ -103,17 +102,17 @@ class StreamingToolTracker:
 
     def complete(
         self,
-        tool: ToolExecution,
+        call: ReportedCall,
         *,
         scope_key: str = "",
         origin: ToolCallOrigin | None = None,
     ) -> tuple[str, object | None, _PendingStreamingTool | None, ToolTraceEntry]:
         """Record one completed tool call and return the matched pending state."""
-        pending_pos = self._find_pending_tool_index(scope_key=scope_key, tool=tool)
+        pending_pos = self._find_pending_tool_index(scope_key=scope_key, call=call)
         pending_tool = self.pending_tools.pop(pending_pos) if pending_pos is not None else None
-        _, completed_trace = format_tool_completed_event(tool, origin=origin)
+        _, completed_trace = format_tool_completed_event(call, origin=origin)
         self.completed_tools.append(completed_trace)
-        return completed_trace.tool_name, tool.result, pending_tool, completed_trace
+        return completed_trace.tool_name, call.result, pending_tool, completed_trace
 
     def update_visible_trace_entry(
         self,
@@ -160,14 +159,14 @@ class StreamingToolTracker:
             synchronized.append(replace(pending_tool, visible_tool_index=tool_index))
         self.pending_tools = synchronized
 
-    def _find_pending_tool_index(self, *, scope_key: str, tool: ToolExecution) -> int | None:
-        call_id = tool_execution_call_id(tool)
+    def _find_pending_tool_index(self, *, scope_key: str, call: ReportedCall) -> int | None:
+        call_id = stable_call_id(call)
         if call_id is not None:
             for pos in range(len(self.pending_tools) - 1, -1, -1):
                 pending_tool = self.pending_tools[pos]
                 if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call_id:
                     return pos
-        tool_name = tool.tool_name or "tool"
+        tool_name = call.tool_name or "tool"
         for pos in range(len(self.pending_tools) - 1, -1, -1):
             pending_tool = self.pending_tools[pos]
             if (
@@ -206,12 +205,12 @@ class CollectedStreamPresentation:
         if content:
             self.separate_next_text = False
 
-    def start_tool(self, tool: ToolExecution, *, scope_key: str = "", origin: ToolCallOrigin | None = None) -> None:
+    def start_tool(self, call: ReportedCall, *, scope_key: str = "", origin: ToolCallOrigin | None = None) -> None:
         """Record one tool start and append its marker when visible."""
         if not self.show_tool_calls and not self.track_hidden_tools:
             return
         tool_index = len(self.tool_trace) + 1
-        text, trace_entry = self.tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index, origin=origin)
+        text, trace_entry = self.tool_tracker.start(call, scope_key=scope_key, tool_index=tool_index, origin=origin)
         if trace_entry is None:
             return
         trace_entry.scope_key = scope_key or None
@@ -221,12 +220,12 @@ class CollectedStreamPresentation:
         elif self.response_text:
             self.separate_next_text = True
 
-    def complete_tool(self, tool: ToolExecution, *, scope_key: str = "", origin: ToolCallOrigin | None = None) -> None:
+    def complete_tool(self, call: ReportedCall, *, scope_key: str = "", origin: ToolCallOrigin | None = None) -> None:
         """Complete the exact pending slot represented by a provider event."""
         if not self.show_tool_calls and not self.track_hidden_tools:
             return
         tool_name, result, pending_tool, completed_trace = self.tool_tracker.complete(
-            tool,
+            call,
             scope_key=scope_key,
             origin=origin,
         )
@@ -252,9 +251,9 @@ class CollectedStreamPresentation:
             await progress(StructuredStreamChunk(content=self.response_text, tool_trace=self.tool_trace))
 
 
-def tool_execution_call_id(tool: ToolExecution) -> str | None:
+def stable_call_id(call: ReportedCall) -> str | None:
     """Return the call's provider id without surrounding whitespace, or None when it has none."""
-    return (tool.tool_call_id or "").strip() or None
+    return (call.tool_call_id or "").strip() or None
 
 
 def _to_compact_text(value: object) -> str:
@@ -796,13 +795,13 @@ def complete_pending_tool_block(
     return updated, trace
 
 
-def _tool_args(tool: ToolExecution) -> dict[str, object]:
-    return {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
+def _tool_args(call: ReportedCall) -> dict[str, object]:
+    return {str(k): v for k, v in call.tool_args.items()} if isinstance(call.tool_args, dict) else {}
 
 
-def _identified(trace: ToolTraceEntry, tool: ToolExecution, origin: ToolCallOrigin | None) -> ToolTraceEntry:
+def _identified(trace: ToolTraceEntry, call: ReportedCall, origin: ToolCallOrigin | None) -> ToolTraceEntry:
     """Stamp a trace entry with its call's identity, and with where a hidden CLI call ran."""
-    trace.tool_call_id = tool_execution_call_id(tool)
+    trace.tool_call_id = stable_call_id(call)
     if origin is not None:
         trace.parent_bash_call_id = origin.parent_bash_call_id
         trace.toolkit_name = origin.toolkit_name
@@ -810,25 +809,25 @@ def _identified(trace: ToolTraceEntry, tool: ToolExecution, origin: ToolCallOrig
 
 
 def format_tool_started_event(
-    tool: ToolExecution,
+    call: ReportedCall,
     tool_index: int | None = None,
     *,
     origin: ToolCallOrigin | None = None,
 ) -> tuple[str, ToolTraceEntry]:
     """Format a tool-call start into display text and trace metadata."""
-    text, trace = _format_tool_started(tool.tool_name or "tool", _tool_args(tool), tool_index=tool_index)
-    return text, _identified(trace, tool, origin)
+    text, trace = _format_tool_started(call.tool_name or "tool", _tool_args(call), tool_index=tool_index)
+    return text, _identified(trace, call, origin)
 
 
 def format_tool_completed_event(
-    tool: ToolExecution,
+    call: ReportedCall,
     tool_index: int | None = None,
     *,
     origin: ToolCallOrigin | None = None,
 ) -> tuple[str, ToolTraceEntry]:
     """Format a tool-call completion into display text and trace metadata."""
-    text, trace = format_tool_combined(tool.tool_name or "tool", _tool_args(tool), tool.result, tool_index=tool_index)
-    return text, _identified(trace, tool, origin)
+    text, trace = format_tool_combined(call.tool_name or "tool", _tool_args(call), call.result, tool_index=tool_index)
+    return text, _identified(trace, call, origin)
 
 
 def serialize_tool_trace(

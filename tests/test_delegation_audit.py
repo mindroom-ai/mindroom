@@ -411,11 +411,11 @@ async def test_live_observer_records_matching_child_events_once(tmp_path: Path) 
         result="live result",
     )
     async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
-        await observe_child_event(ToolStarted(tool))
+        await observe_child_event(ToolStarted(tool.call))
         await observe_child_event(TextDelta("visible "))
         await observe_child_event(TextDelta("chunk"))
-        await observe_child_event(ToolCompleted(tool))
-        await observe_child_event(ToolCompleted(tool))
+        await observe_child_event(ToolCompleted(tool.call))
+        await observe_child_event(ToolCompleted(tool.call))
 
     events = _events(await _record_dir(child, config, runtime_paths))
     assert [(event["kind"], event["event_id"]) for event in events[1:]] == [
@@ -473,7 +473,7 @@ async def test_live_observer_distinguishes_retried_attempt_tool_ids(tmp_path: Pa
     first_metrics = RunMetrics(input_tokens=9, output_tokens=3)
 
     async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
-        await observe_child_event(ToolStarted(tool))
+        await observe_child_event(ToolStarted(tool.call))
         await observe_child_event(
             RunFinished(
                 RunRecord(
@@ -486,7 +486,7 @@ async def test_live_observer_distinguishes_retried_attempt_tool_ids(tmp_path: Pa
             ),
         )
         child.run_id = "retried-run"
-        await observe_child_event(ToolStarted(tool))
+        await observe_child_event(ToolStarted(tool.call))
 
     events = _events(await _record_dir(child, config, runtime_paths))
     assert [event["event_id"] for event in events if event["kind"] == "tool_call"] == [
@@ -517,11 +517,11 @@ async def test_live_observer_numbers_a_resumed_run_past_its_earlier_leg(tmp_path
     gated = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, requires_confirmation=True)
     async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
         await observe_child_event(TextDelta("first leg"))
-        await observe_child_event(ToolStarted(gated))
+        await observe_child_event(ToolStarted(gated.call))
     done = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, result="ok")
     async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
         await observe_child_event(TextDelta("final answer"))
-        await observe_child_event(ToolCompleted(done))
+        await observe_child_event(ToolCompleted(done.call))
 
     events = _events(await _record_dir(child, config, runtime_paths))
     assert [(event["event_id"], event["data"]["content"]) for event in events if event["kind"] == "output"] == [

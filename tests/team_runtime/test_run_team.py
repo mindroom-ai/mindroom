@@ -144,8 +144,8 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> 
     ]
     assert all(event.run_id == member.run_id for event in events if isinstance(event, MemberEvent))
     completed = next(event for event in writer_events if isinstance(event, ToolCompleted))
-    assert completed.tool.tool_name == "add"
-    leader_tools = [event.tool.tool_name for event in events if isinstance(event, ToolStarted | ToolCompleted)]
+    assert completed.call.tool_name == "add"
+    leader_tools = [event.call.tool_name for event in events if isinstance(event, ToolStarted | ToolCompleted)]
     assert leader_tools == ["delegate_task_to_member", "delegate_task_to_member"]
     # The member's terminal record is stored before the leader's delegation completes, and the team ends last.
     assert stored_when_the_delegation_completed == [[("writer", "COMPLETED")]]

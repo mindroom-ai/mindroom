@@ -2158,7 +2158,7 @@ class TestUserIdPassthrough:
 
         async def paused_stream() -> AsyncIterator[object]:
             yield TextDelta("Before approval.")
-            yield ToolStarted(tool=tool)
+            yield ToolStarted(call=tool.call)
             raise pause
 
         with pytest.raises(ResponsePausedForApproval) as raised:

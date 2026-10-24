@@ -15,6 +15,7 @@ from time import time
 from typing import Any
 from uuid import uuid4
 
+from mindroom.llm.events import ReportedCall
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import RunMetrics, ToolCallMetrics
 from mindroom.redaction import redact_sensitive_text
@@ -76,6 +77,11 @@ class ToolExecution:
     def is_paused(self) -> bool:
         """Whether the run must wait before this call runs or resumes."""
         return bool(self.requires_confirmation or self.external_execution_required)
+
+    @property
+    def call(self) -> ReportedCall:
+        """The call as a tool event reports it now: id, name, arguments, and any result."""
+        return ReportedCall(self.tool_call_id, self.tool_name, self.tool_args, self.result, self.is_error)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict: every field, None included, under its stored key, kept as main writes it."""

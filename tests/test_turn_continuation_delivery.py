@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import pytest
-from agno.models.response import ToolExecution
 
 from mindroom.delivery_gateway import (
     DeliveryGateway,
@@ -29,6 +28,7 @@ from mindroom.delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.llm.runs import ToolExecution
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingTurnAdapter,
@@ -63,7 +63,7 @@ def _continuing_tool_execution() -> ToolExecution:
         result=json.dumps(
             {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
         ),
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
 

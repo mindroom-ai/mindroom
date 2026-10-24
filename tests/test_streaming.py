@@ -193,11 +193,11 @@ async def test_lifecycle_suspension_captures_last_committed_presentation(config:
         yield TextDelta("I checked the input.")
         await gateway.wait_for_ops(1)
         yield ToolStarted(
-            tool=ToolExecution(
+            call=ToolExecution(
                 tool_call_id="call-1",
                 tool_name="inspect",
                 tool_args={"path": "report.txt"},
-            ),
+            ).call,
         )
         await gateway.wait_for_ops(2)
         raise suspension
@@ -263,10 +263,10 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
         await gateway.wait_for_ops(1)
         yield "Hello"
         await gateway.wait_for_ops(2)
-        yield ToolStarted(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
+        yield ToolStarted(call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}).call)
         await gateway.wait_for_ops(3)
         yield ToolCompleted(
-            tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}, result="ok"),
+            call=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}, result="ok").call,
         )
         await gateway.wait_for_ops(4)
         yield " Done."
@@ -1255,9 +1255,9 @@ async def test_a_resumed_stream_continues_below_the_stopped_text(config: Config)
 
     async def continuation() -> AsyncIterator[object]:
         yield TextDelta("The second half.")
-        yield ToolStarted(tool=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}))
+        yield ToolStarted(call=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}).call)
         yield ToolCompleted(
-            tool=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}, result="ok"),
+            call=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}, result="ok").call,
         )
 
     with patch("mindroom.streaming.edit_message_result", new=gateway.edit):

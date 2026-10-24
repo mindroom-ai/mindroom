@@ -96,7 +96,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                     payload = json.loads(str(tool.result))
                     assert payload["status"] == "ok"
                     decision = continuation_decision_from_tools(
-                        response.tools,
+                        [tool.call for tool in response.tools],
                         original_prompt="Switch",
                         continuation_count=0,
                     )

@@ -359,7 +359,7 @@ async def test_agent_approval_completion_preserves_recovered_same_name_trace(com
         ],
     )
     tool = ToolExecution(tool_call_id="current-call", tool_name="inspect", result="current result")
-    events = [ToolCompleted(tool)] if completion_source == "stream" else []
+    events = [ToolCompleted(tool.call)] if completion_source == "stream" else []
     events.append(_finished(run_id="current-run", tools=[tool]))
 
     await _collect_agent_continuation(_events(*events), presentation, progress=None)
@@ -467,8 +467,8 @@ async def test_hidden_agent_continuation_separates_text_across_a_new_tool_bounda
 
     collected = await _collect_agent_continuation(
         _events(
-            ToolStarted(ToolExecution(tool_call_id="call-2", tool_name="inspect", tool_args={})),
-            ToolCompleted(tool),
+            ToolStarted(ToolExecution(tool_call_id="call-2", tool_name="inspect", tool_args={}).call),
+            ToolCompleted(tool.call),
             _finished(content="After tool.", tools=[tool]),
         ),
         presentation,

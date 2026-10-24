@@ -299,11 +299,11 @@ async def _run_tool_batch(
     if hooks.before_dispatch is not None:
         await hooks.before_dispatch(state, batch.planned)
     for call in batch.planned:
-        yield ToolStarted(call.execution)
+        yield ToolStarted(call.execution.call)
     executed = await dispatch_tool_calls(batch.planned, run=state.run, middleware=hooks.tool_middleware)
     for call in batch.planned:
         if not call.execution.is_paused:
-            yield ToolCompleted(call.execution)
+            yield ToolCompleted(call.execution.call)
     results = [*batch.refused, *executed]
     progress.calls_so_far += len(results)
     progress.stopped = await _answer_batch(state.messages, results, hooks.after_tool_batch)
@@ -337,9 +337,9 @@ async def _answer_resumed(
                 arguments=execution.tool_args,
                 execution=execution,
             )
-            yield ToolStarted(execution)
+            yield ToolStarted(execution.call)
             results.extend(await dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware))
-            yield ToolCompleted(execution)
+            yield ToolCompleted(execution.call)
         elif requirement.confirmation is False:
             execution.is_error = True
             execution.requires_confirmation = False

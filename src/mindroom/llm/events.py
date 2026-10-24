@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.provider import ReasoningDelta, TextDelta
 
 if TYPE_CHECKING:
-    from mindroom.llm.runs import AnyRunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
+
+
+@dataclass(frozen=True, slots=True)
+class ReportedCall:
+    """One tool call as its tool event reports it, fixed when the event is made; a run's record keeps the call itself."""
+
+    tool_call_id: str | None
+    tool_name: str | None
+    tool_args: dict[str, Any] | None = None
+    result: str | None = None
+    is_error: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +35,7 @@ class ToolCallOrigin:
 class ToolStarted:
     """A tool call was admitted; paused calls are announced too. ``origin`` is set for a hidden CLI call."""
 
-    tool: ToolExecution
+    call: ReportedCall
     origin: ToolCallOrigin | None = None
 
 
@@ -32,7 +43,7 @@ class ToolStarted:
 class ToolCompleted:
     """A tool call finished. ``origin`` is set for a hidden CLI call."""
 
-    tool: ToolExecution
+    call: ReportedCall
     origin: ToolCallOrigin | None = None
 
 
@@ -56,6 +67,7 @@ type RunEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | Reque
 
 __all__ = [
     "ReasoningDelta",
+    "ReportedCall",
     "RequestCompleted",
     "RunEvent",
     "RunFinished",

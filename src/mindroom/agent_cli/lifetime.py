@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__all__ = ["CliTurnLifetime", "cli_control_executions", "current_cli_lifetime", "response_cli_lifetime"]
+__all__ = ["CliTurnLifetime", "cli_control_calls", "current_cli_lifetime", "response_cli_lifetime"]
 
 import asyncio
 from contextlib import asynccontextmanager, contextmanager
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_cli.turn import LiveTurnTools
-    from mindroom.llm.runs import ToolExecution
+    from mindroom.llm.events import ReportedCall
 
 _CURRENT: ContextVar[CliTurnLifetime | None] = ContextVar("cli_turn_lifetime", default=None)
 
@@ -92,10 +92,10 @@ async def response_cli_lifetime() -> AsyncIterator[CliTurnLifetime]:
             await lifetime.close()
 
 
-def cli_control_executions(run_id: str) -> tuple[ToolExecution, ...]:
+def cli_control_calls(run_id: str) -> tuple[ReportedCall, ...]:
     """Read trusted attempt controls only for the catalog of run ``run_id``."""
     lifetime = current_cli_lifetime()
     owner = lifetime.owner if lifetime is not None else None
     if owner is None or owner.catalog.run.run_id != run_id:
         return ()
-    return tuple(owner.control_executions)
+    return tuple(owner.control_calls)
