@@ -659,7 +659,7 @@ class _TeamTurn:
             # The run stores its record before its events end, however they end, so a stop from here until the turn
             # settles records the run's records.
             self.sync_live_turn_recorder(run, attempt)
-        record = attempt.records.terminal(self.entity_name)
+        record = attempt.terminal_record()
         if record.status is RunStatus.paused:
             return self.resolve_paused(attempt, record, blocking=True)
         return await self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
@@ -688,7 +688,7 @@ class _TeamTurn:
             yield self.error_text(error)
             yield AttemptResolved(HandledAttempt(metadata_content=self.run_metadata_content(attempt, RunStatus.error)))
             return
-        record = attempt.records.terminal(self.entity_name)
+        record = attempt.terminal_record()
         # A failed member run's deltas never show why it failed; the document adds its reason now the team run ended.
         shown_reasons = attempt.show_failure_reasons(record)
         if shown_reasons:

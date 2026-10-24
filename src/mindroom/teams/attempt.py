@@ -99,7 +99,7 @@ class TeamReplyText:
 
 @dataclass
 class TeamAttempt:
-    """One attempt of a team turn: its prepared input, its document, and what the run produced so far."""
+    """One attempt of a team turn or resumed run: its members, its document, and what the run produced so far."""
 
     run_id: str
     members: ResolvedExactTeamMembers
@@ -117,6 +117,10 @@ class TeamAttempt:
     def __post_init__(self) -> None:
         """Start the reply's text from the presentation's member slots."""
         self.reply = TeamReplyText(self.presentation)
+
+    def terminal_record(self) -> TeamRunRecord:
+        """Return the team run's terminal record, which the run hands over before its events end."""
+        return self.records.terminal(self.team_name)
 
     def partial_snapshot(self) -> TurnPartialSnapshot:
         """Return the live partial-output view of this attempt: what a stopped or failed turn records."""
@@ -214,7 +218,7 @@ class TeamAttempt:
         status: RunStatus,
     ) -> dict[str, Any]:
         """Return the stored run's metadata payload: the leader's identity, the team's usage, and the prepared history."""
-        record = self.records.terminal(self.team_name)
+        record = self.terminal_record()
         prepared_history = self.prepared_history
         return build_ai_run_metadata_content(
             config=config,

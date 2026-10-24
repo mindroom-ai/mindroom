@@ -517,7 +517,7 @@ async def continue_paused_team_run(
                 async for event in events:
                     if attempt.apply(event):
                         await publish_team_presentation(progress, presentation)
-        continued = attempt.records.terminal(entity_name)
+        continued = attempt.terminal_record()
         # Each resumed run's slot shows what the run hands over beyond what it carried over from the pause and its
         # events did not show: a paused notice, or a failed member run's reason.
         for run in (continued, *continued.ended_member_runs):
