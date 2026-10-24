@@ -147,12 +147,12 @@ class ResponsesAdapter:
         started = time.monotonic()
         first_token: float | None = None
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
-        client = await self.clients.client(request.overrides)
         store = request_store(self.wire, request)
         # TODO(simplify): With `reasoning` authored, the reply text is also stored as its reasoning (streamed only
         # without `reasoning_summary`, blocking only without a returned summary). Store only returned reasoning
         # summaries. Stored data and anything that replays or shows reasoning.
         try:
+            client = await self.clients.client(request.overrides)
             if request.stream or self.capabilities.streams_only:
                 accumulator = ResponsesStream(
                     provider=self.identity.provider_name,
