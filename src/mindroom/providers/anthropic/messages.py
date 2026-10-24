@@ -429,7 +429,7 @@ class ClaudeProvider:
             deferred_tool_names=request.deferred_tools.names,
             tool_choice=request.tool_choice,
             extended_cache_time=settings.extended_cache_time,
-            cache_system_prompt=settings.cache_system_prompt and overrides.prompt_cache is not False,
+            cache_system_prompt=settings.cache_system_prompt and overrides.prompt_cache,
         )
         return _PreparedRequest(
             client=self._client(caller_retries=overrides.caller_retries),

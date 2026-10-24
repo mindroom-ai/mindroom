@@ -74,7 +74,7 @@ class ChatAdapter:
         # OpenRouter forwards Claude cache breakpoints to Anthropic upstreams; the ladder runs on the final body.
         cache_control = openrouter_prompt_cache_control(
             self.identity.id,
-            cache_system_prompt=self.settings.cache_system_prompt and request.overrides.prompt_cache is not False,
+            cache_system_prompt=self.settings.cache_system_prompt and request.overrides.prompt_cache,
             extended_cache_time=self.settings.extended_cache_time,
         )
         return kwargs if cache_control is None else request_kwargs_with_prompt_cache(kwargs, cache_control)
