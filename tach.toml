@@ -6360,7 +6360,6 @@ expose = [
     "runtime.MemberEvent",
     "runtime.team_usage_runs",
     "spec.TeamMode",
-    "storage.TeamRunRecords",
 ]
 from = ["mindroom.teams"]
 
