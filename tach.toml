@@ -8698,6 +8698,7 @@ depends_on = [
     "mindroom.tool_system.tool_access",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_loop",
+    "mindroom.agent_loop.build",
     "mindroom.llm",
     "mindroom.session_storage.store",
 ]

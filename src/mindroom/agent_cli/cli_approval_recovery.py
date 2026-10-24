@@ -12,6 +12,7 @@ from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.minimal_agent import bind_minimal_owner, minimal_context_documents, prepare_minimal_catalog
 from mindroom.agent_cli.projection import register_cli_media
+from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.approval.tool_owners import validate_approval_tool_owners
 from mindroom.delegation.state import DelegationState
@@ -102,8 +103,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     state = DelegationState.from_metadata(persisted.metadata)
     if state.pending_child_id is None and payload.toolkit != "agent":
         # Generated functions have no configured toolkit; the rebuilt binding's authorization checks them.
-        owners = {(build.spec.id, name): toolkit for name, toolkit in build.tool_owners.items()}
-        validate_approval_tool_owners(owners, approved, payload.requirements)
+        validate_approval_tool_owners(tool_owners_by_agent(build), approved, payload.requirements)
     requirements = apply_exact_approval_decisions(
         list(payload.requirements),
         decisions=decisions,
