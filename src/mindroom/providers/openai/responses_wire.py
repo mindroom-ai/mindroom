@@ -9,7 +9,7 @@ replay a tool loop exactly. A streamed turn counts only when ``response.complete
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel
@@ -51,12 +51,14 @@ if TYPE_CHECKING:
     from mindroom.providers.openai.settings import ResponsesSettings
 
 __all__ = [
+    "ResponsesReplay",
     "ResponsesStream",
     "ResponsesTurnParts",
     "ResponsesWire",
     "parse_response",
     "request_store",
     "responses_input",
+    "responses_replay",
     "responses_request_kwargs",
     "responses_stop_reason",
     "usage_report",
@@ -93,27 +95,55 @@ def request_store(wire: ResponsesWire, request: ModelRequest) -> bool | None:
 # --- Input ----------------------------------------------------------------------------------------------------
 
 
-def _latest_response_data(messages: Sequence[Message]) -> dict[str, Any] | None:
-    for message in reversed(messages):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ResponsesReplay:
+    """How one request continues its history, decided once for both its parameters and its input.
+
+    A request chaining to ``previous_response_id`` sends only ``history[sent_from:]``, the messages after that
+    response; any other request sends all of ``history``, with its stored reasoning when ``replay_reasoning``.
+    ``history`` is already projected to the latest checkpoint on ``native_route``.
+    """
+
+    history: list[Message]
+    sent_from: int
+    previous_response_id: str | None
+    replay_reasoning: bool
+    native_route: str | None
+
+
+def _latest_response(messages: Sequence[Message]) -> tuple[int, dict[str, Any]] | None:
+    """Return the index and provider data of the latest assistant message that records a response id."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
         if message.role == "assistant" and message.provider_data and message.provider_data.get("response_id"):
-            return message.provider_data
+            return index, message.provider_data
     return None
 
 
-def _prepare_continuation(messages: Sequence[Message], *, explicit_replay: bool) -> tuple[list[Message], bool]:
-    """Avoid chaining to an unstored response or to an older server context the history no longer matches."""
-    latest = _latest_response_data(messages)
-    if not explicit_replay and (latest is None or latest.get(_STORED_KEY) is not False):
-        return list(messages), False
-    return [
-        replace(
-            message,
-            provider_data={key: value for key, value in message.provider_data.items() if key != "response_id"},
-        )
-        if message.provider_data and "response_id" in message.provider_data
-        else message
-        for message in messages
-    ], True
+def responses_replay(
+    messages: Sequence[Message],
+    *,
+    store: bool | None,
+    portable_replay: bool,
+    native_compaction: NativeCompactionReplay | None,
+) -> ResponsesReplay:
+    """Decide whether a request with storage setting ``store`` continues the latest stored response in ``messages``.
+
+    Portable replay, an unstored request, and a history whose latest response was not stored send the history
+    explicitly with its reasoning; a stored request without a stored response sends it without.
+    """
+    route = native_compaction.route if native_compaction is not None else None
+    history = native_replay_messages(messages, route)
+    latest = _latest_response(history)
+    replay_reasoning = portable_replay or store is False or (latest is not None and latest[1].get(_STORED_KEY) is False)
+    chained = None if replay_reasoning else latest
+    return ResponsesReplay(
+        history=history,
+        sent_from=0 if chained is None else chained[0] + 1,
+        previous_response_id=None if chained is None else chained[1]["response_id"],
+        replay_reasoning=replay_reasoning,
+        native_route=route,
+    )
 
 
 def _prompt_item(message: Message) -> dict[str, Any]:
@@ -148,16 +178,6 @@ def _function_call_items(message: Message) -> list[dict[str, Any]]:
     ]
 
 
-def _continued_messages(messages: list[Message], *, store: bool | None) -> tuple[list[Message], bool]:
-    """Return the messages after the last stored response, and whether such a response continues the request."""
-    if store is not False:
-        for index in range(len(messages) - 1, -1, -1):
-            message = messages[index]
-            if message.role == "assistant" and message.provider_data and "response_id" in message.provider_data:
-                return messages[index + 1 :], True
-    return messages, False
-
-
 def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
     """Map each function-call item id (``fc_``) to the ``call_`` id its result must reference."""
     call_ids: dict[str, str] = {}
@@ -169,13 +189,12 @@ def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
     return call_ids
 
 
-def _input_items(messages: Sequence[Message], *, store: bool | None) -> list[Any]:
-    """Convert canonical messages to Responses input items, continuing after the last stored response."""
-    canonical = reformat_tool_call_ids(messages, "responses")
-    to_format, continued = _continued_messages(canonical, store=store)
+def _input_items(replay: ResponsesReplay) -> list[Any]:
+    """Convert the messages a request sends to Responses input items."""
+    canonical = reformat_tool_call_ids(replay.history, "responses")
     call_ids = _call_ids(canonical)
     items: list[Any] = []
-    for message in to_format:
+    for message in canonical[replay.sent_from :]:
         if message.role in {"user", "system"}:
             items.append(_prompt_item(message))
         elif message.role == "tool":
@@ -184,12 +203,12 @@ def _input_items(messages: Sequence[Message], *, store: bool | None) -> list[Any
                 items.append({"type": "function_call_output", "call_id": call_id, "output": message.content})
         elif message.tool_calls:
             # A continued response already holds its calls; only their results are sent.
-            if not continued:
+            if replay.previous_response_id is None:
                 items.extend(_function_call_items(message))
         elif message.role == "assistant":
             items.append({"role": "assistant", "content": message.content if message.content is not None else ""})
             reasoning = (message.provider_data or {}).get("reasoning_output")
-            if store is False and reasoning is not None:
+            if replay.replay_reasoning and reasoning is not None:
                 items.append(copy.deepcopy(reasoning))
     return items
 
@@ -215,32 +234,18 @@ def _with_shared_system_prefix(formatted_input: list[Any], *, explicit_breakpoin
     ]
 
 
-def responses_input(
-    messages: Sequence[Message],
-    *,
-    store: bool | None,
-    portable_replay: bool,
-    native_compaction: NativeCompactionReplay | None,
-    cache_system_prompt: bool,
-    explicit_breakpoint: bool,
-) -> list[Any]:
+def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, explicit_breakpoint: bool) -> list[Any]:
     """Return the ``input`` items for one request.
 
     Explicit replay rebuilds stored tool loops from their ordered output items, so encrypted reasoning
     stays attached to the calls it produced even when the next response is stored again.
     """
-    prepared, explicit = _prepare_continuation(messages, explicit_replay=portable_replay)
-    route = native_compaction.route if native_compaction is not None else None
-    prepared = native_replay_messages(prepared, route)
-    replay_store = False if explicit else store
-    formatted = _input_items(prepared, store=replay_store)
     # Ordered output is restored only for the spans the request still sends.
-    prepared, _ = _continued_messages(prepared, store=replay_store)
     formatted = formatted_input_with_provider_items(
-        prepared,
-        formatted,
-        native_route=route,
-        replay_reasoning=replay_store is False,
+        replay.history[replay.sent_from :],
+        _input_items(replay),
+        native_route=replay.native_route,
+        replay_reasoning=replay.replay_reasoning,
     )
     if cache_system_prompt:
         formatted = _with_shared_system_prefix(formatted, explicit_breakpoint=explicit_breakpoint)
@@ -321,19 +326,18 @@ def _base_params(settings: ResponsesSettings, request: ModelRequest) -> dict[str
     return {key: value for key, value in params.items() if value is not None}
 
 
-def _add_continuation(params: dict[str, Any], request: ModelRequest, store: bool | None) -> None:
+def _add_continuation(params: dict[str, Any], store: bool | None, replay: ResponsesReplay) -> None:
     """Continue the last stored response, or replay with encrypted reasoning when nothing is stored."""
     params["store"] = store is not False
     if store is False:
         _with_encrypted_reasoning(params)
-        return
-    prepared, _ = _prepare_continuation(request.messages, explicit_replay=request.portable_replay)
-    if (latest := _latest_response_data(prepared)) is not None:
-        params["previous_response_id"] = latest["response_id"]
+    elif replay.previous_response_id is not None:
+        params["previous_response_id"] = replay.previous_response_id
 
 
 def _add_replay_policy(params: dict[str, Any], request: ModelRequest) -> None:
     if request.portable_replay:
+        # An authored ``previous_response_id`` would chain a request that replays its history explicitly.
         params.pop("previous_response_id", None)
         if isinstance(extra_body := params.get("extra_body"), dict):
             params["extra_body"] = {key: value for key, value in extra_body.items() if key != "previous_response_id"}
@@ -356,12 +360,18 @@ def responses_request_kwargs(
     Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
     store = request_store(wire, request)
+    replay = responses_replay(
+        request.messages,
+        store=store,
+        portable_replay=request.portable_replay,
+        native_compaction=request.native_compaction,
+    )
     params = _base_params(settings, request)
     if tools := _tool_dicts(request.tools):
         params["tools"] = tools
     if request.tool_choice is not None:
         params["tool_choice"] = request.tool_choice
-    _add_continuation(params, request, store)
+    _add_continuation(params, store, replay)
     # ``store`` in request_params already became the route's storage setting.
     params.update({key: value for key, value in (settings.request_params or {}).items() if key != "store"})
     _add_replay_policy(params, request)
@@ -369,10 +379,7 @@ def responses_request_kwargs(
     if wire.route == "codex":
         _codex_params(params, settings, wire)
     formatted_input = responses_input(
-        request.messages,
-        store=store,
-        portable_replay=request.portable_replay,
-        native_compaction=request.native_compaction,
+        replay,
         cache_system_prompt=settings.cache_system_prompt,
         explicit_breakpoint=wire.explicit_breakpoint,
     )

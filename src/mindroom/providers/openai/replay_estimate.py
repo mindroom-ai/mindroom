@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.history.message_content import image_content_for_token_estimation
 from mindroom.model_defaults import OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, OPENAI_IMAGE_PATCH_MODEL_PREFIXES
-from mindroom.providers.openai.responses_wire import responses_input
+from mindroom.providers.openai.responses_wire import responses_input, responses_replay
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
@@ -44,10 +44,7 @@ def estimate_responses_replay_tokens(
 ) -> int:
     """Count the ``input`` an explicitly replayed Responses request sends for ``messages``."""
     formatted = responses_input(
-        messages,
-        store=False,
-        portable_replay=True,
-        native_compaction=None,
+        responses_replay(messages, store=False, portable_replay=True, native_compaction=None),
         cache_system_prompt=cache_system_prompt,
         explicit_breakpoint=explicit_breakpoint,
     )
