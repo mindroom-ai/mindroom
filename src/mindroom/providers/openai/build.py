@@ -100,13 +100,13 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         provider="OpenAI",
         provider_name="OpenAI Chat",
         base_url=OPENAI_BASE_URL_DEFAULT,
-        api_key_env="OPENAI_API_KEY",
+        api_key_env=PROVIDER_ENV_KEYS["openai"],
         base_url_variable="OPENAI_BASE_URL",
     ),
     "azure": _ChatRoute(
         provider="Azure",
         provider_name="Azure",
-        api_key_env=AZURE_OPENAI_ENV_BY_KEY["api_key"],
+        api_key_env=PROVIDER_ENV_KEYS["azure"],
         accepted=CHAT_FIELDS
         | {"api_version", "azure_endpoint", "azure_deployment", "azure_ad_token", "azure_ad_token_provider"},
     ),
@@ -114,14 +114,14 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         provider="OpenRouter",
         provider_name="OpenRouter",
         base_url=OPENROUTER_BASE_URL_DEFAULT,
-        api_key_env="OPENROUTER_API_KEY",
+        api_key_env=PROVIDER_ENV_KEYS["openrouter"],
         accepted=CHAT_FIELDS | {"models", "cache_system_prompt", "extended_cache_time"},
     ),
     "deepseek": _ChatRoute(
         provider="DeepSeek",
         provider_name="DeepSeek",
         base_url=DEEPSEEK_BASE_URL_DEFAULT,
-        api_key_env="DEEPSEEK_API_KEY",
+        api_key_env=PROVIDER_ENV_KEYS["deepseek"],
         accepted=CHAT_FIELDS | {"use_thinking"},
         structured_output="json_mode",
     ),
@@ -142,7 +142,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
     "groq": _ChatRoute(
         provider="Groq",
         provider_name="Groq",
-        api_key_env="GROQ_API_KEY",
+        api_key_env=PROVIDER_ENV_KEYS["groq"],
         dialect="groq",
         accepted=GROQ_FIELDS,
         structured_output="json_mode",
@@ -152,7 +152,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
     "cerebras": _ChatRoute(
         provider="Cerebras",
         provider_name="Cerebras",
-        api_key_env="CEREBRAS_API_KEY",
+        api_key_env=PROVIDER_ENV_KEYS["cerebras"],
         dialect="cerebras",
         accepted=CEREBRAS_FIELDS,
         structured_output="json_schema",
@@ -164,7 +164,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
 ENDPOINT_VARIABLES = {key: route.base_url_variable for key, route in _CHAT_ROUTES.items() if route.base_url_variable}
 # Every route this module builds, as ``provider_route`` names it.
 OPENAI_FAMILY_PROVIDERS = frozenset(_CHAT_ROUTES) | {"codex"}
-_ROUTE_KEY_VARIABLES = {"azure": AZURE_OPENAI_ENV_BY_KEY["api_key"], "zai": PROVIDER_ENV_KEYS["zai"]}
+_ROUTE_KEY_VARIABLES = {"azure": PROVIDER_ENV_KEYS["azure"], "zai": PROVIDER_ENV_KEYS["zai"]}
 # Providers whose models authenticate without the shared key.
 _NO_SHARED_KEY = frozenset({"llama_cpp", "kimi"})
 
@@ -287,6 +287,31 @@ def _route_base_url(
     return configured or route.base_url or ""
 
 
+def _keyed_client_factory(
+    route_key: str,
+    settings: ChatSettings | ResponsesSettings,
+    *,
+    api_key: str | None,
+    options: Mapping[str, Any],
+    provider_name: str,
+    runtime: ProviderRuntime,
+) -> Callable[[], AsyncOpenAI]:
+    """Return the factory of a client keyed by ``api_key``, else by the route's key variable, else failing."""
+    api_key_env = _CHAT_ROUTES[route_key].api_key_env
+    process_env = runtime.runtime_paths.process_env
+
+    def client() -> AsyncOpenAI:
+        key = api_key or (process_env.get(api_key_env) if api_key_env else None)
+        if not key:
+            if api_key_env is not None:
+                raise missing_api_key_error(api_key_env, provider=provider_name)
+            # The SDK client requires a key, so keyless OpenAI-compatible endpoints get a placeholder.
+            key = "not-provided"
+        return _openai_client(key, options, settings, runtime.http_client)
+
+    return client
+
+
 def _chat_client_factory(
     route_key: str,
     settings: ChatSettings,
@@ -316,7 +341,7 @@ def _chat_client_factory(
         def azure_client() -> AsyncOpenAI:
             from openai import AsyncAzureOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
-            key = api_key or process_env.get(AZURE_OPENAI_ENV_BY_KEY["api_key"])
+            key = api_key or process_env.get(PROVIDER_ENV_KEYS["azure"])
             if not (key or alternative_auth):
                 msg = (
                     "Azure OpenAI authentication not configured. Please provide one of: "
@@ -340,17 +365,14 @@ def _chat_client_factory(
             return AsyncAzureOpenAI(**_sdk_client_kwargs(azure, settings, http_client))
 
         return azure_client
-
-    def client() -> AsyncOpenAI:
-        key = api_key or (process_env.get(route.api_key_env) if route.api_key_env else None)
-        if not key:
-            if route.api_key_env is not None:
-                raise missing_api_key_error(route.api_key_env, provider=route.provider_name)
-            # The SDK client requires a key, so keyless OpenAI-compatible endpoints get a placeholder.
-            key = "not-provided"
-        return _openai_client(key, options, settings, http_client)
-
-    return client
+    return _keyed_client_factory(
+        route_key,
+        settings,
+        api_key=api_key,
+        options=options,
+        provider_name=route.provider_name,
+        runtime=runtime,
+    )
 
 
 def _with_agent_cache_key(extra_kwargs: dict[str, Any], runtime: ProviderRuntime) -> None:
@@ -520,15 +542,16 @@ def _build_responses(
 
         clients = SDKClients(codex_client, per_request=True)
     else:
-        api_key_env = "OPENAI_API_KEY"
-        api_key = _configured_key("openai", model_config, runtime) or runtime.runtime_paths.process_env.get(api_key_env)
-
-        def openai_client() -> AsyncOpenAI:
-            if not api_key:
-                raise missing_api_key_error(api_key_env, provider=provider_name)
-            return _openai_client(api_key, options, settings, http_client)
-
-        clients = SDKClients(openai_client)
+        clients = SDKClients(
+            _keyed_client_factory(
+                "openai",
+                settings,
+                api_key=_configured_key("openai", model_config, runtime),
+                options=options,
+                provider_name=provider_name,
+                runtime=runtime,
+            ),
+        )
     return ResponsesAdapter(identity=identity, capabilities=capabilities, wire=wire, settings=settings, clients=clients)
 
 
