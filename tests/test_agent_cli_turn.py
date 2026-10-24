@@ -358,6 +358,52 @@ async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_a_cli_approval_pause_records_its_run_and_that_run_s_model(tmp_path: Path) -> None:
+    """The approval a CLI call waits on names its run and that run's model, which the approved call's recovery resumes."""
+    pauses: list[tuple[str | None, str | None, str | None]] = []
+
+    async def run_shell_command(args: str, timeout: float | None = None) -> str:  # noqa: ASYNC109
+        await _start_call(owner, "actions", "action", value="sent")
+        return "waiting"
+
+    def action(value: str) -> str:
+        return value
+
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("shell", run_shell_command), _function(action, requires_confirmation=True)],
+    )
+    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.run = replace(catalog.run, model_name="run-model")
+
+    async def approve(paused):
+        pauses.append((paused.session_id, paused.run_id, paused.runtime_model_name))
+        requirement = paused.requirements[0]
+        requirement.confirm()
+        return (requirement,)
+
+    # The ambient model of the tool runtime is not the run's.
+    catalog.runtime_context = replace(
+        catalog.runtime_context,
+        cli_approval_handler=approve,
+        active_model_name="ambient-model",
+    )
+    owner = LiveTurnTools(
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+    )
+    owner.shell_env = _SHELL_ENV
+
+    async with response_cli_lifetime():
+        await capture_bash_batch(owner, ("outer", {"command": "work"}))
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "work"}, "outer")
+    assert pauses == [("session", "run", "run-model")]
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_native_shell_keeps_its_media_from_the_next_result(tmp_path: Path) -> None:
     """Media a failed command's CLI calls returned is dropped with it, not attached to the next command."""
 

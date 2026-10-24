@@ -20,8 +20,9 @@ from mindroom.agent_cli import cli_approval_recovery
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls_for_cli_pause
 from mindroom.agent_cli.events import stream_cli_events
+from mindroom.agent_cli.lifetime import cli_control_calls, response_cli_lifetime
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
-from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner
+from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai import collect_streamed_response_content, run_delegated_child_response
@@ -32,7 +33,7 @@ from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.delegation.state import DelegationState
 from mindroom.interactive import parse_and_format_interactive
-from mindroom.llm.events import ToolCallOrigin
+from mindroom.llm.events import ReportedCall, ToolCallOrigin
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
@@ -195,6 +196,20 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         assert record.content == "done"
     assert all(item.tool_name == "bash" for item in results)
     await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_later_attempt_never_reads_the_controls_of_an_earlier_run(tmp_path) -> None:
+    """The response's owner outlives its attempts, so a control belongs only to the run whose catalog ran it."""
+    owner = _owner(await _catalog(tmp_path, []))
+    control = ReportedCall("control-call", "switch_thread_model", {}, result="switched")
+    owner.control_calls.append(control)
+    async with response_cli_lifetime() as lifetime:
+        lifetime.register(owner, TurnToolRegistry())
+        assert cli_control_calls("run") == (control,)
+        # The next attempt retires this catalog, but binds none of its own, as when its CLI is unavailable.
+        await lifetime.retire_attempt()
+        assert cli_control_calls("next-run") == ()
 
 
 def _delegation_config(**helper) -> Config:
@@ -440,6 +455,8 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             assert report.written == []
             assert paused.approval_agent_name == "code"
             assert paused.toolkit_owners == {("code", "write_report"): "report"}
+            # The parent run's model, which the approved child's follow-up continues the parent on.
+            assert paused.runtime_model_name == "parent-model"
             approval_ids.extend(str(tool.tool_call_id) for tool in paused.tools)
             if mode == "control":
                 switched = await owner.operation(
@@ -470,6 +487,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             ],
             approval_handler=approve,
         )
+        catalog.run = replace(catalog.run, model_name="parent-model")
 
         async def child_response(child, **kwargs):
             child_ids.append(
@@ -508,6 +526,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 )
             assert isinstance(paused, PausedAttempt)
             assert paused.cli_call is not None
+            assert paused.runtime_model_name == "parent-model"
             approval_calls = approval_calls_for_cli_pause(paused, "helper")
             decisions = {call.tool_call_id: True for call in approval_calls}
 

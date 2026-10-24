@@ -489,6 +489,13 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     assert trace[0].tool_call_id == "hidden"
     assert trace[0].parent_bash_call_id == "bash-parent"
     assert trace[0].toolkit_name == "actions"
+    # The turn's completed tools keep where the recovered call ran as well.
+    [completed] = follow_up.presentation.tool_tracker.completed_tools
+    assert (completed.tool_call_id, completed.parent_bash_call_id, completed.toolkit_name) == (
+        "hidden",
+        "bash-parent",
+        "actions",
+    )
     assert "⏳" not in follow_up.presentation.final_text()
     if not approved:
         assert trace[0].result_preview == denial
