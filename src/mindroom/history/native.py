@@ -93,15 +93,19 @@ def with_native_history(template: ModelRequest, native: NativeHistory | None) ->
 
 
 def _restored_portable_replay(message: Message | None) -> bool:
-    """Return the replay policy the paused request ran with, from the provenance its last response recorded.
-
-    Legacy responses cannot always reveal the original budget, so stored continuation is kept unless canonical
-    replay has its own provenance.
-    """
+    """Return the replay policy the paused request ran with, from the provenance its last response recorded."""
     data = (message.provider_data or {}) if message is not None else {}
     saved = data.get("mindroom_portable_replay")
     if isinstance(saved, bool):
         return saved
+    # LEGACY_COMPAT: Responses replies stored without their replay policy.
+    # Legacy format: an assistant message whose ``provider_data`` has no boolean ``mindroom_portable_replay``; a reply
+    # that did not complete is still stored that way.
+    # Last legacy release: v2026.9.134; replacement: v2026.9.135 records the policy on every completed reply.
+    # Handling: the original budget cannot always be recovered, so the resume replays portably only when the reply
+    # was not stored, recorded native-compaction settings, or holds encrypted reasoning among its ordered output
+    # items, and otherwise continues the stored response.
+    # Coverage: tests/test_native_compaction_history.py::test_restore_portable_policy_requires_latest_provenance
     items = data.get("mindroom_response_output")
     has_ordered_reasoning = (
         isinstance(items, list)
