@@ -74,11 +74,8 @@ def _read(request: ReadRequest) -> ReadResult:
         read_collection(request) as collection_name,
         closing(KnowledgeCollection(path=request.path, name=collection_name)) as collection,
     ):
-        if request.query is None:
-            return ReadResult(exists=collection.exists())
         if request.embedding is None:
-            message = "A search requires a query embedding"
-            raise ValueError(message)
+            return ReadResult(exists=collection.exists())
         # ``get_collection`` raises for a vanished collection instead of recreating it.
         hits = _query_collection(collection.collection(), request.embedding, limit=request.limit)
         return ReadResult(exists=True, hits=hits)

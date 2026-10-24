@@ -16,7 +16,7 @@ class ReadRequest:
 
     path: str
     collection: str
-    query: str | None = None
+    #: The search query's embedding; a request without one asks whether the collection exists.
     embedding: list[float] | None = None
     limit: int = 5
     published_settings: dict[str, str] | None = None

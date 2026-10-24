@@ -350,7 +350,7 @@ async def test_stalled_embedding_deadline_reaps_child(
 
     async def prepare_request() -> ReadRequest:
         await asyncio.Event().wait()
-        return ReadRequest(str(published_index), "published", "alpha", [1.0, 0.0])
+        return ReadRequest(str(published_index), "published", [1.0, 0.0])
 
     for _ in range(5):
         with pytest.raises(TimeoutError, match="Knowledge read timed out"):
@@ -445,7 +445,7 @@ async def test_next_read_uses_warm_reader_and_replaces_it(
     capture_read_processes: list[subprocess.Popen[bytes]],
 ) -> None:
     """A read hands its request to the child the previous read left warm, then warms the next one."""
-    request = ReadRequest(str(published_index), "published", "alpha", [1.0, 0.0])
+    request = ReadRequest(str(published_index), "published", [1.0, 0.0])
 
     async def prepare_request() -> ReadRequest:
         return request

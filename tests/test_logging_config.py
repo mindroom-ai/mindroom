@@ -737,7 +737,7 @@ def test_knowledge_read_worker_logs_like_its_parent(
 
     async def read(collection: str) -> ReadResult:
         async def request() -> ReadRequest:
-            return ReadRequest(str(index), collection, "alpha", [1.0, 0.0])
+            return ReadRequest(str(index), collection, [1.0, 0.0])
 
         return await read_chroma_async(request)
 
