@@ -88,21 +88,6 @@ app = typer.Typer(
 avatars_app = typer.Typer(help="Generate and sync agent, room, and space avatars.")
 threads_app = typer.Typer(help="Export Matrix threads to searchable files.")
 journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
-
-_CONFIG_PATH_OPTION: Path | None = typer.Option(
-    None,
-    "--config",
-    "-c",
-    help="Use this config file path.",
-)
-
-_STORAGE_PATH_OPTION: Path | None = typer.Option(
-    None,
-    "--storage-path",
-    "-s",
-    help="Base directory for persistent MindRoom data.",
-)
-
 config_app.command("migrate", rich_help_panel="Create and edit")(config_migrate)
 config_app.command("fingerprint", rich_help_panel="Deployment")(config_fingerprint)
 config_app.command("install-bundle", rich_help_panel="Deployment")(config_install_bundle)
@@ -461,6 +446,21 @@ def avatars_sync(
             _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
+
+
+_CONFIG_PATH_OPTION: Path | None = typer.Option(
+    None,
+    "--config",
+    "-c",
+    help="Use this config file path.",
+)
+
+_STORAGE_PATH_OPTION: Path | None = typer.Option(
+    None,
+    "--storage-path",
+    "-s",
+    help="Base directory for persistent MindRoom data.",
+)
 
 
 @threads_app.command(
