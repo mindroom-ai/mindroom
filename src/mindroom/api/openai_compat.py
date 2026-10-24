@@ -856,7 +856,7 @@ async def _non_stream_completion(
 # ---------------------------------------------------------------------------
 
 
-async def _stream_completion(  # noqa: C901, PLR0915
+async def _stream_completion(
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -913,37 +913,21 @@ async def _stream_completion(  # noqa: C901, PLR0915
 
     state = CompletionStreamState.begin(agent_name)
     stream_completed = False
-    stream_failed = False
 
     async def event_generator() -> AsyncIterator[str]:
-        nonlocal stream_completed, stream_failed
-        saw_text_delta = False
+        nonlocal stream_completed
+        saw_text_delta = stream_failed = False
         completed_body: str | None = None
         try:
-            # 1. Initial role announcement
             yield sse_chunk(state, {"role": "assistant"})
-
-            # 2. Yield the peeked first event
-            if isinstance(first_event, RunFinished):
-                content = first_event.record.content
-                completed_body = str(content) if content is not None else None
-            else:
-                text = extract_stream_text(first_event, state.tool_state)
-                if text:
-                    if isinstance(first_event, ContentDelta | str):
-                        saw_text_delta = True
-                    yield sse_chunk(state, {"content": text})
-
-            # 3. Stream remaining content
-            # Error strings after the first event are sent as content chunks
-            # since we can't switch to an error HTTP status mid-stream.
-            async for event in stream:
+            # The peeked first event, then the rest. A failure after the first event is sent as a content chunk,
+            # since the HTTP status is already sent.
+            event: AIStreamChunk | None = first_event
+            while event is not None:
                 if isinstance(event, RunFinished):
                     content = event.record.content
                     completed_body = str(content) if content is not None else completed_body
-                    continue
-                failure_text = extract_agent_stream_failure(event)
-                if failure_text is not None:
+                elif (failure_text := extract_agent_stream_failure(event)) is not None:
                     stream_failed = True
                     logger.warning(
                         "Stream emitted terminal failure",
@@ -953,20 +937,16 @@ async def _stream_completion(  # noqa: C901, PLR0915
                     )
                     yield sse_chunk(state, {"content": failure_text})
                     break
-                text = extract_stream_text(event, state.tool_state)
-                if text:
+                elif text := extract_stream_text(event, state.tool_state):
                     if isinstance(event, ContentDelta | str):
                         saw_text_delta = True
                     yield sse_chunk(state, {"content": text})
+                event = await anext(stream, None)
 
             if completed_body and not saw_text_delta and not stream_failed:
                 yield sse_chunk(state, {"content": completed_body})
-
-            # 4. Final chunk with finish_reason
             logger.info("Chat completion sent", model=agent_name, stream=True)
             yield sse_chunk(state, {}, finish_reason="stop")
-
-            # 5. Stream terminator
             yield SSE_DONE
             stream_completed = not stream_failed
         finally:
