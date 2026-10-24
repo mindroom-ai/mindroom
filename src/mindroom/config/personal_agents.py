@@ -40,7 +40,8 @@ def _reject_unsupported_fields(*, private: object, allow_self_config: object, wh
     if private is not None:
         msg = f"{where}: private is not supported, a personal agent already belongs to one user"
         raise ValueError(msg)
-    if allow_self_config is True:
+    # Raw overrides are not coerced yet, and pydantic would accept "true" or 1 as true.
+    if allow_self_config not in (None, False):
         msg = f"{where}: allow_self_config is not supported, edit the template's users overrides instead"
         raise ValueError(msg)
 
@@ -213,6 +214,8 @@ def personal_agent_data(template: Mapping[str, Any], entry: PersonalAgentRosterE
         access["users"] = _with_owner(access.get("users"), entry.user_id)
         agent["access"] = access
     agent["credential_managers"] = _with_owner(agent.get("credential_managers"), entry.user_id)
+    # self_config edits agents.<name>, which a generated agent does not have; defaults.allow_self_config must not apply.
+    agent["allow_self_config"] = False
     return agent
 
 

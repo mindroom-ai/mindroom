@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import ValidationError
 
+from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.personal_agents import (
     PersonalAgentInstance,
     PersonalAgentRosterEntry,
@@ -160,6 +163,7 @@ def test_expansion_leaves_malformed_sections_for_pydantic() -> None:
         ("users", {"@bob:x": {"nonsense": 1}}, "nonsense"),
         ("users", {"@bob:x": {"private": {"per": "user"}}}, "private"),
         ("users", {"@bob:x": {"allow_self_config": True}}, "allow_self_config"),
+        ("users", {"@bob:x": {"allow_self_config": "true"}}, "allow_self_config"),
     ],
 )
 def test_template_validation(field: str, value: object, match: str) -> None:
@@ -203,3 +207,112 @@ def test_roster_append_keeps_earlier_entries(tmp_path: Path) -> None:
     append_personal_agent_roster_entry(paths, first)
     append_personal_agent_roster_entry(paths, second)
     assert read_personal_agent_roster(paths) == [first, second]
+
+
+BASE: dict[str, Any] = {
+    "models": {"default": {"provider": "openai", "id": "m"}},
+    "rooms": {"lobby": {}},
+    "personal_agents": {"mind": {"agent": {"display_name": "{user_display_name}'s Mind", "model": "default"}}},
+    "personal_rooms": {"agent": "mind", "onboarding_rooms": ["lobby"]},
+}
+
+
+def _runtime_config(
+    tmp_path: Path,
+    data: dict[str, Any] | None = None,
+    roster: tuple[PersonalAgentRosterEntry, ...] = (),
+) -> Config:
+    paths = test_runtime_paths(tmp_path)
+    for entry in roster:
+        append_personal_agent_roster_entry(paths, entry)
+    return Config.validate_with_runtime(deepcopy(BASE) if data is None else data, paths)
+
+
+def test_runtime_config_contains_generated_agent(tmp_path: Path) -> None:
+    """A roster entry becomes an ordinary agent that only the runtime dump keeps."""
+    config = _runtime_config(tmp_path, roster=(_entry(),))
+    assert config.agents["mind_alice_smith"].display_name == "Alice's Mind"
+    instance = config.personal_agent_instance("mind_alice_smith")
+    assert instance is not None
+    assert instance.user_id == "@Alice.Smith:example.org"
+    assert config.personal_agent_instance("mind") is None
+    assert config.personal_agent_name("mind", "@Alice.Smith:example.org") == "mind_alice_smith"
+    assert config.personal_agent_name("mind", "@bob:example.org") is None
+    assert "mind_alice_smith" not in config.authored_model_dump().get("agents", {})
+    assert config.runtime_model_dump()["agents"]["mind_alice_smith"]["display_name"] == "Alice's Mind"
+    overlaid = config.with_runtime_knowledge_base_overlay("extra", KnowledgeBaseConfig(path=str(tmp_path)))
+    assert overlaid.personal_agent_instance("mind_alice_smith") == instance
+
+
+def test_generated_agent_never_gets_self_config(tmp_path: Path) -> None:
+    """A generated agent opts out of self_config even when the defaults turn it on."""
+    data = deepcopy(BASE) | {"defaults": {"allow_self_config": True}}
+    config = _runtime_config(tmp_path, data, roster=(_entry(),))
+    assert config.agents["mind_alice_smith"].allow_self_config is False
+
+
+def test_broken_template_fails_without_any_user(tmp_path: Path) -> None:
+    """A template that would generate an invalid agent fails before anyone is onboarded."""
+    data = deepcopy(BASE)
+    # Config does not check agent model names, so use a knowledge base reference it does check.
+    data["personal_agents"]["mind"]["agent"]["knowledge_bases"] = ["missing"]
+    with pytest.raises(ConfigRuntimeValidationError, match="personal_agents would generate an invalid agent"):
+        _runtime_config(tmp_path, data)
+
+
+def test_broken_override_for_user_not_onboarded_fails(tmp_path: Path) -> None:
+    """A user override that would generate an invalid agent fails before that user is onboarded."""
+    data = deepcopy(BASE)
+    data["personal_agents"]["mind"]["users"] = {"@carol:example.org": {"knowledge_bases": ["missing"]}}
+    with pytest.raises(ConfigRuntimeValidationError, match="personal_agents would generate an invalid agent"):
+        _runtime_config(tmp_path, data, roster=(_entry(),))
+
+
+def test_authored_collision_is_a_config_error(tmp_path: Path) -> None:
+    """An authored agent that takes a generated agent's name is a config error naming the template."""
+    data = deepcopy(BASE) | {"agents": {"mind_alice_smith": {"display_name": "Mine"}}}
+    with pytest.raises(ConfigRuntimeValidationError, match=r"personal_agents\.mind"):
+        _runtime_config(tmp_path, data, roster=(_entry(),))
+
+
+def test_edited_generated_agent_is_rejected_on_save(tmp_path: Path) -> None:
+    """Editing a generated agent in place keeps it in the authored dump, so saving collides instead of dropping it."""
+    config = _runtime_config(tmp_path, roster=(_entry(),))
+    config.agents["mind_alice_smith"].display_name = "Edited"
+    authored = config.authored_model_dump()
+    assert authored["agents"]["mind_alice_smith"]["display_name"] == "Edited"
+    with pytest.raises(ConfigRuntimeValidationError, match=r"agents\.mind_alice_smith collides"):
+        Config.validate_with_runtime(authored, test_runtime_paths(tmp_path))
+
+
+def test_template_key_must_not_reuse_agent_key() -> None:
+    """A template key cannot also be an agent key."""
+    with pytest.raises(ValidationError, match="personal_agents keys must not equal an agent or team key: mind"):
+        Config.model_validate(
+            {
+                "agents": {"mind": {"display_name": "M"}},
+                "personal_agents": {"mind": {"agent": {"display_name": "Mind"}}},
+            },
+        )
+
+
+@pytest.mark.parametrize("key", ["router", "bad-key"])
+def test_template_key_must_be_a_valid_agent_name(key: str) -> None:
+    """A template key follows the agent name rules."""
+    with pytest.raises(ValidationError, match=key):
+        Config.model_validate({"personal_agents": {key: {"agent": {"display_name": "Mind"}}}})
+
+
+def test_personal_rooms_may_name_a_template() -> None:
+    """Personal rooms accept a template as their agent."""
+    assert Config.model_validate(deepcopy(BASE)).personal_rooms.agent == "mind"
+
+
+def test_authored_dump_round_trips_template(tmp_path: Path) -> None:
+    """Revalidating the authored dump regenerates the same agents from the template."""
+    config = _runtime_config(tmp_path, roster=(_entry(),))
+    authored = config.authored_model_dump()
+    assert "agents" not in authored
+    assert authored["personal_agents"] == BASE["personal_agents"]
+    revalidated = Config.validate_with_runtime(authored, test_runtime_paths(tmp_path))
+    assert revalidated.agents == config.agents
