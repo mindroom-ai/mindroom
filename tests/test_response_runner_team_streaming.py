@@ -1035,6 +1035,8 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
     [persisted_run] = _persisted_runs(store)
+    # The interrupted run belongs to the team whose history scope stored it.
+    assert persisted_run.team_id == "ultimate"
     _assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",

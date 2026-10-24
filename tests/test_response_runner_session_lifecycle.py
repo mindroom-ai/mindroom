@@ -34,6 +34,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.runs import RunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import (
     ResponseRequest,
@@ -1204,6 +1205,9 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
     assert resolution is None
     persisted_run = _persisted_run(storage)
     assert persisted_run.run_id == "run-retry"
+    # The interrupted run belongs to the agent whose history scope stored it.
+    assert isinstance(persisted_run, RunRecord)
+    assert persisted_run.agent_id == "general"
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_response_event_id"] == "$thinking"
     _assert_interrupted_messages(
