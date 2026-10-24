@@ -399,9 +399,10 @@ def _populate_azure_env(extra_kwargs: dict[str, Any], runtime: ProviderRuntime) 
         extra_kwargs["azure_deployment"] = deployment
 
 
-def _build_chat(route_key: str, model_id: str, model_config: ModelConfig, runtime: ProviderRuntime) -> ChatAdapter:
+def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> ChatAdapter:
     route = _CHAT_ROUTES[route_key]
     extra_kwargs = dict(model_config.extra_kwargs or {})
+    model_id = model_config.id
     if route_key == "kimi":
         model_id = normalize_kimi_model_id(model_id)
         _with_agent_cache_key(extra_kwargs, runtime)
@@ -476,11 +477,11 @@ def _native_compaction_supported(model_id: str, endpoint: str, store: bool | Non
 
 def _build_responses(
     route_key: Literal["openai", "codex"],
-    model_id: str,
     model_config: ModelConfig,
     runtime: ProviderRuntime,
 ) -> ResponsesAdapter:
     extra_kwargs = dict(model_config.extra_kwargs or {})
+    model_id = model_config.id
     accepted = RESPONSES_FIELDS
     if route_key == "codex":
         model_id = normalize_codex_model_id(model_id)
@@ -563,17 +564,17 @@ def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatA
     Raises ``ValueError`` for providers outside the family and for ``extra_kwargs`` the route does not accept.
     """
     route_key = provider_route(model_config.provider)
-    model_id = model_config.id
     if route_key == "codex":
-        return _build_responses("codex", model_id, model_config, runtime)
+        return _build_responses("codex", model_config, runtime)
     if route_key == "openai":
         extra_kwargs = model_config.extra_kwargs or {}
         base_url = _route_base_url("openai", extra_kwargs.get("client_params"), extra_kwargs.get("base_url"), runtime)
         if model_config.api == "responses" or (
-            model_config.api is None and openai_native_tool_search_supported("openai", model_id, base_url=base_url)
+            model_config.api is None
+            and openai_native_tool_search_supported("openai", model_config.id, base_url=base_url)
         ):
-            return _build_responses("openai", model_id, model_config, runtime)
+            return _build_responses("openai", model_config, runtime)
     if route_key not in _CHAT_ROUTES:
         msg = f"Provider {model_config.provider!r} is not an OpenAI-family provider"
         raise ValueError(msg)
-    return _build_chat(route_key, model_id, model_config, runtime)
+    return _build_chat(route_key, model_config, runtime)
