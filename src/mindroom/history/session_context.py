@@ -76,7 +76,7 @@ def resolve_bound_team_scope(
     *,
     member_names: Sequence[str],
     config: Config,
-    team_name: str | None = None,
+    team_name: str | None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> HistoryScope | None:
     """Resolve the history scope backing one live team run, or None when the run names no member."""
@@ -99,7 +99,6 @@ def load_scope_session(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-    create_session_if_missing: bool = False,
 ) -> ScopeSessionContext | None:
     """Load the session context of one already-resolved persisted history scope for the current request."""
     if session_id is None or scope is None:
@@ -113,7 +112,7 @@ def load_scope_session(
     )
     storage = storage_factory()
     session = storage.load_session(session_id, scope.kind)
-    context = ScopeSessionContext(
+    return ScopeSessionContext(
         scope=scope,
         storage=storage,
         session=session,
@@ -121,7 +120,6 @@ def load_scope_session(
         storage_factory=storage_factory,
         session_exists=session is not None,
     )
-    return context.with_session() if create_session_if_missing else context
 
 
 def load_bound_scope_session(
@@ -131,10 +129,12 @@ def load_bound_scope_session(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-    team_name: str | None = None,
-    create_session_if_missing: bool = False,
+    team_name: str | None,
 ) -> ScopeSessionContext | None:
-    """Load the canonical scope-backed session context for one bound team run."""
+    """Load the canonical scope-backed session context for one bound team run.
+
+    ``team_name`` is the configured team's name, or None for an ad-hoc team.
+    """
     if not member_names and team_name is not None and team_name in config.teams:
         scope = HistoryScope(kind="team", scope_id=team_name)
     else:
@@ -152,7 +152,6 @@ def load_bound_scope_session(
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
-        create_session_if_missing=create_session_if_missing,
     )
 
 

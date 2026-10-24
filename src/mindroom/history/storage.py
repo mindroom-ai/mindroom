@@ -184,9 +184,9 @@ def has_queued_force_compaction(storage: ConversationStore, session_id: str, sco
     return forced or scope.key in _pending_scope_keys(fields.session_state)
 
 
-def _pending_scope_keys(session_state: Mapping[str, object] | None) -> list[str]:
+def _pending_scope_keys(session_state: Mapping[str, object]) -> list[str]:
     """Return the scopes with a queued next-run compaction request."""
-    raw_scope_keys = session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY) if session_state else None
+    raw_scope_keys = session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
     if not isinstance(raw_scope_keys, list):
         return []
     return [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]
@@ -285,9 +285,10 @@ def _remove_redacted_event_from_history(
     session_id = session.session_id
     legacy_event_ids = summary_rows.legacy_event_ids(storage, session_id=session_id, scope_key=scope.key)
     if legacy_event_ids is not None and _legacy_summary_may_contain(event_id, legacy_source_event_id, legacy_event_ids):
-        summary_rows.cut_at_legacy_row(storage, session_id=session_id, scope_key=scope.key, session=session)
+        summary_rows.cut_at_legacy_row(storage, session=session, scope_key=scope.key)
     elif not summary_rows.cut_at_event(
         storage,
+        # The id repeats the session's: `remove_runs_answering` cuts with the id alone, so this function takes both.
         session_id=session_id,
         scope_key=scope.key,
         event_id=event_id,
@@ -296,7 +297,7 @@ def _remove_redacted_event_from_history(
     ):
         return False
     elif legacy_event_ids is not None:
-        summary_rows.retire(storage, session_id=session_id, scope_key=scope.key, session=session)
+        summary_rows.retire(storage, session=session, scope_key=scope.key)
     storage.update_metadata(session, partial(_with_scope_seen_event_ids, scope=scope, event_ids=set()))
     return True
 
@@ -431,13 +432,12 @@ def append_compaction_chunk(
     """
     row_id = summary_rows.append_summary(
         storage,
-        session_id=session.session_id,
+        session=session,
         scope_key=scope.key,
         based_on=basis.based_on,
         covered=[run for run in basis.covered if run.run_id in included_run_ids],
         summary=summary,
         summary_model=summary_model,
-        session=session,
     )
     return row_id is not None
 
@@ -492,14 +492,13 @@ def append_fold(
     """
     row_id = summary_rows.append_summary(
         storage,
-        session_id=session.session_id,
+        session=session,
         scope_key=scope.key,
         based_on=basis.based_on,
         covered=basis.covered,
         summary=summary,
         summary_model=summary_model,
         segment=segment,
-        session=session,
     )
     return row_id is not None
 

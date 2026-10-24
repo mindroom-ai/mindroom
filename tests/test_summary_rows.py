@@ -207,7 +207,7 @@ def _fold(storage: ConversationStore, run_ids: list[str], summary: str) -> int |
     latest = summary_rows.latest_row(storage, session_id="s1", scope_key=_SCOPE.key)
     return summary_rows.append_summary(
         storage,
-        session_id="s1",
+        session=_session_row(),
         scope_key=_SCOPE.key,
         based_on=latest.id if latest is not None else None,
         covered=summary_rows.covered_runs(storage, session_id="s1", run_ids=run_ids),
@@ -276,7 +276,7 @@ def test_a_chunk_refuses_history_that_changed_after_the_session_loaded(storage: 
     if change == "redaction":
         assert summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$r2", match="any")
     elif change == "retirement":
-        summary_rows.retire(storage, session_id="s1", scope_key=_SCOPE.key)
+        summary_rows.retire(storage, session=_session_row(), scope_key=_SCOPE.key)
     elif change == "another compaction":
         assert _fold(storage, ["r1"], "S2 by another response") is not None
     else:
@@ -333,7 +333,7 @@ def test_append_never_sorts_behind_the_latest_row(storage: ConversationStore) ->
 
     raced = summary_rows.append_summary(
         storage,
-        session_id="s1",
+        session=_session_row(),
         scope_key=_SCOPE.key,
         based_on=latest.id,
         covered=covered,
@@ -353,7 +353,7 @@ def test_append_refuses_a_stale_base(storage: ConversationStore) -> None:
 
     raced = summary_rows.append_summary(
         storage,
-        session_id="s1",
+        session=_session_row(),
         scope_key=_SCOPE.key,
         based_on=None,
         covered=covered,
@@ -377,7 +377,7 @@ def test_append_refuses_a_covered_run_changed_during_the_summary_call(storage: C
 
     appended = summary_rows.append_summary(
         storage,
-        session_id="s1",
+        session=_session_row(),
         scope_key=_SCOPE.key,
         based_on=None,
         covered=covered,
@@ -401,7 +401,7 @@ def test_append_reads_event_sets_from_the_stored_rows(storage: ConversationStore
     assert (
         summary_rows.append_summary(
             storage,
-            session_id="s1",
+            session=_session_row(),
             scope_key=_SCOPE.key,
             based_on=None,
             covered=covered,

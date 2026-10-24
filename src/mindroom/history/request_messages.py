@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
     from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan, ScopeSummary
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.media_inputs import MediaInputs
     from mindroom.session_storage.types import ConversationSession
 
 
@@ -155,17 +156,24 @@ def filter_tool_calls(messages: Sequence[Message], max_tool_calls: int) -> list[
 
 def build_request(
     *,
-    system: Sequence[Message],
     summary: ScopeSummary | None,
     history: Sequence[Message],
     turn: TurnMessages,
+    media: MediaInputs,
 ) -> list[Message]:
-    """Return a new run's request: the system messages, the scope summary, the replayed history, then the turn.
+    """Return one attempt's request after its system message: the scope summary, the replayed history, then the turn.
 
-    Pass ``summary=None`` when the run replays no stored history; a run that replays the summary but no runs passes
-    it with empty ``history``.
+    ``media`` goes on the turn's prompt. The request holds copies of ``history`` and ``turn``, so provider formatting
+    never edits the prepared input a retried attempt reuses. Pass ``summary=None`` when the run replays no stored
+    history; a run that replays the summary but no runs passes it with empty ``history``.
     """
-    return _with_scope_summary([*system, *history, *turn.in_request_order()], summary)
+    turn = deepcopy(turn)
+    prompt = turn.prompt
+    prompt.audio = media.audio or None
+    prompt.images = media.images or None
+    prompt.files = media.files or None
+    prompt.videos = media.videos or None
+    return _with_scope_summary([*deepcopy(history), *turn.in_request_order()], summary)
 
 
 def build_resume_request(

@@ -125,6 +125,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
 
     scope_context = load_bound_scope_session(
         member_names=["zeta", "alpha"],
+        team_name=None,
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -137,7 +138,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
         ) as mock_prepare,
         patch(
             "tests.test_history_team_scope.finalize_history_preparation",
-            return_value=PreparedHistoryState(replays_persisted_history=True),
+            return_value=PreparedHistoryState(replays_persisted_history=True, native_history=None),
         ) as mock_finalize,
     ):
         prepared_scope_history = await prepare_bound_scope_history(
@@ -319,6 +320,7 @@ def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path
 
     alice_scope = load_bound_scope_session(
         member_names=member_names,
+        team_name=None,
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -326,6 +328,7 @@ def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path
     )
     bob_scope = load_bound_scope_session(
         member_names=member_names,
+        team_name=None,
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
@@ -345,6 +348,7 @@ def test_private_ad_hoc_bound_team_scope_requires_requester_identity(tmp_path: P
         resolve_bound_team_scope(
             member_names=["private_worker", "shared"],
             config=config,
+            team_name=None,
             execution_identity=None,
         )
 

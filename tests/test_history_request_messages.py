@@ -28,6 +28,7 @@ from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
+from mindroom.media_inputs import MediaInputs
 from tests.llm.agno_dict_helpers import stored_run_record
 
 _PARITY = Path(__file__).parent / "fixtures" / "agno_parity"
@@ -431,6 +432,11 @@ def _system() -> Message:
     return Message(role="system", content="Be precise.")
 
 
+def _request(*, summary: ScopeSummary | None, history: list[Message], turn: TurnMessages) -> list[Message]:
+    """Return a new run's request as ``run_agent`` sends it: the system message, then what ``build_request`` builds."""
+    return [_system(), *build_request(summary=summary, history=history, turn=turn, media=MediaInputs())]
+
+
 def _rendered_summary(text: str) -> str:
     return (
         "The earlier part of this conversation was compacted into this summary:\n\n"
@@ -448,7 +454,7 @@ def test_new_request_orders_system_summary_history_context_prompt_then_transient
         transient=(Message(role="user", content="memories", add_to_agent_memory=False),),
     )
 
-    request = build_request(system=[_system()], summary=_SUMMARY, history=history, turn=turn)
+    request = _request(summary=_SUMMARY, history=history, turn=turn)
 
     assert _shape(request) == [
         {"role": "system", "content": "Be precise.", "from_history": False, "stop_after_tool_call": False},
@@ -462,7 +468,33 @@ def test_new_request_orders_system_summary_history_context_prompt_then_transient
         *_shape(history),
         *_shape([*turn.context, turn.prompt, *turn.transient]),
     ]
-    assert request[-2] is turn.prompt
+
+
+def test_each_attempt_request_carries_its_media_on_a_copy_of_the_prompt() -> None:
+    """An attempt's request copies the prepared history and turn, so a retry never sees an earlier attempt's media."""
+    history = _replay([_agent_run("earlier")])
+    turn = TurnMessages(prompt=Message(role="user", content="describe these"))
+    media = MediaInputs(
+        audio=(Audio(content=b"audio", mime_type="audio/ogg"),),
+        images=(Image(content=b"photo"),),
+        files=(File(content=b"file", mime_type="text/plain"),),
+        videos=(Video(content=b"video"),),
+    )
+
+    with_media = build_request(summary=None, history=history, turn=turn, media=media)
+    without_media = build_request(summary=None, history=history, turn=turn, media=MediaInputs())
+
+    prompt = with_media[-1]
+    assert (prompt.audio, prompt.images, prompt.files, prompt.videos) == (
+        media.audio,
+        media.images,
+        media.files,
+        media.videos,
+    )
+    for request in (without_media, [turn.prompt]):
+        assert (request[-1].audio, request[-1].images, request[-1].files, request[-1].videos) == (None,) * 4
+    assert _shape(with_media[:-1]) == _shape(history)
+    assert not {id(message) for message in with_media} & {id(message) for message in [*history, turn.prompt]}
 
 
 def test_next_request_repeats_the_previous_one_up_to_its_transient_context() -> None:
@@ -472,7 +504,7 @@ def test_next_request_repeats_the_previous_one_up_to_its_transient_context() -> 
         prompt=Message(role="user", content="question one"),
         transient=(Message(role="user", content="context one", add_to_agent_memory=False),),
     )
-    first = build_request(system=[_system()], summary=None, history=[], turn=first_turn)
+    first = _request(summary=None, history=[], turn=first_turn)
     stored = [
         *(message for message in first[1:] if message.add_to_agent_memory),
         Message(role="assistant", content="answer one"),
@@ -482,8 +514,7 @@ def test_next_request_repeats_the_previous_one_up_to_its_transient_context() -> 
         transient=(Message(role="user", content="context two", add_to_agent_memory=False),),
     )
 
-    second = build_request(
-        system=[_system()],
+    second = _request(
         summary=None,
         history=_replay([_agent_run("first", messages=stored)]),
         turn=second_turn,
@@ -504,7 +535,7 @@ def test_next_request_repeats_the_previous_one_up_to_its_transient_context() -> 
 def test_no_summary_message_without_summary_text(summary: ScopeSummary | None) -> None:
     turn = TurnMessages(prompt=Message(role="user", content="current request"))
 
-    request = build_request(system=[_system()], summary=summary, history=[], turn=turn)
+    request = _request(summary=summary, history=[], turn=turn)
 
     assert _contents(request) == ["Be precise.", "current request"]
 
@@ -513,7 +544,7 @@ def test_summary_replays_without_runs_and_with_its_text_trimmed() -> None:
     turn = TurnMessages(prompt=Message(role="user", content="current request"))
     padded = ScopeSummary(text=f"\n{_SUMMARY.text}  ", updated_at=_SUMMARY.updated_at)
 
-    request = build_request(system=[_system()], summary=padded, history=[], turn=turn)
+    request = _request(summary=padded, history=[], turn=turn)
 
     assert _contents(request) == ["Be precise.", _rendered_summary(_SUMMARY.text), "current request"]
 
@@ -525,7 +556,7 @@ def test_summary_follows_the_prompt_a_mid_turn_compaction_placed_it_after() -> N
     ]
     turn = TurnMessages(prompt=Message(role="user", content="next request"))
 
-    request = build_request(system=[_system()], summary=_SUMMARY, history=_replay(runs), turn=turn)
+    request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
 
     assert _contents(request) == [
         "Be precise.",
@@ -545,7 +576,7 @@ def test_a_replayed_run_local_summary_does_not_replace_the_scope_summary() -> No
     runs: list[AnyRunRecord] = [_agent_run("run", messages=[Message(role="user", content="task"), run_local])]
     turn = TurnMessages(prompt=Message(role="user", content="next request"))
 
-    request = build_request(system=[_system()], summary=_SUMMARY, history=_replay(runs), turn=turn)
+    request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
 
     assert _contents(request) == [
         "Be precise.",
@@ -570,7 +601,7 @@ def test_resumed_request_repeats_the_request_that_paused() -> None:
         prompt=Message(role="user", content="multiply"),
         transient=(Message(role="user", content="memories", add_to_agent_memory=False),),
     )
-    paused_request = build_request(system=[_system()], summary=_SUMMARY, history=_replay(runs), turn=turn)
+    paused_request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
     call = _tool_call("call-multiply")
     # A paused run stores its own messages, its system message included, and never history copies or transient context.
     stored = [

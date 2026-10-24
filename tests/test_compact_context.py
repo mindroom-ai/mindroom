@@ -182,7 +182,6 @@ def _load_scope_context(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None = None,
-    create_session_if_missing: bool = False,
 ) -> ScopeSessionContext:
     scope_context = load_scope_session(
         scope=scope,
@@ -190,7 +189,6 @@ def _load_scope_context(
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
-        create_session_if_missing=create_session_if_missing,
     )
     assert scope_context is not None
     return scope_context
@@ -315,10 +313,11 @@ async def test_compact_context_saves_nothing_after_budget_error(tmp_path: Path) 
     """A request that manual validation refuses leaves the stored session untouched."""
     config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=None)
     storage = Mock(spec=ConversationStore)
-    scope_context = SimpleNamespace(
+    scope_context = ScopeSessionContext(
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         storage=storage,
         session=_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]),
+        session_id="session-1",
     )
     identity = _execution_identity()
     tool = CompactContextTools(
@@ -345,10 +344,11 @@ async def test_compact_context_saves_only_the_scope_metadata(tmp_path: Path) -> 
     """Scheduling writes only the session metadata, so it cannot overwrite runs or tool state a reply saves."""
     config, runtime_paths = _make_config(tmp_path)
     storage = Mock(spec=ConversationStore)
-    scope_context = SimpleNamespace(
+    scope_context = ScopeSessionContext(
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         storage=storage,
         session=_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]),
+        session_id="session-1",
     )
     tool = CompactContextTools(
         agent_name="test_agent",
@@ -615,8 +615,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-        create_session_if_missing=True,
-    )
+    ).with_session()
     assert team_context.session is not None
     seed_session(team_context.storage, team_context.session)
     with tool_runtime_context(_member_runtime_context(config, runtime_paths)):
@@ -940,8 +939,7 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-        create_session_if_missing=True,
-    )
+    ).with_session()
     assert team_context.session is not None
     team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
     seed_session(team_context.storage, team_context.session)
@@ -1023,8 +1021,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-        create_session_if_missing=True,
-    )
+    ).with_session()
     assert team_context.session is not None
     team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
     seed_session(team_context.storage, team_context.session)
@@ -1102,8 +1099,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-        create_session_if_missing=True,
-    )
+    ).with_session()
     assert scope_context.session is not None
     scope_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
     seed_session(scope_context.storage, scope_context.session)

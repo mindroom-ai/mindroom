@@ -29,11 +29,13 @@ from mindroom.history.session_context import load_bound_scope_session
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
+from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
+from mindroom.media_inputs import MediaInputs
 from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
@@ -501,6 +503,22 @@ async def test_stored_team_history_replays_with_only_the_thread_messages_the_tea
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_the_leader_reads_the_turn_s_media_on_its_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    team = _team(tmp_path, monkeypatch, leader=[answer("A photo.")])
+    photo = Image(content=b"photo")
+
+    await team.reply(stream=stream, media=MediaInputs(images=[photo]))
+
+    assert _leader(team).requests[0].messages[-1].images == [photo]
+
+
+@pytest.mark.asyncio
 async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_replies_as_assistant_turns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -903,6 +921,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
 
     scope_context = load_bound_scope_session(
         member_names=team.member_names,
+        team_name=None,
         session_id=SESSION_ID,
         runtime_paths=team.runtime_paths,
         config=team.config,

@@ -195,6 +195,7 @@ def _prepared_team_execution_context(
         replay_plan=replay_plan,
         replays_persisted_history=replays_persisted_history,
         prepared_context_tokens=prepared_context_tokens,
+        native_history=None,
     )
     return PreparedTeamExecution(
         turn=turn,
@@ -4473,15 +4474,16 @@ class TestTeamCompletion:
                 },
             )
 
-        scope_context = load_bound_scope_session(
+        loaded = load_bound_scope_session(
             member_names=["general"],
+            team_name=None,
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
             execution_identity=None,
-            create_session_if_missing=True,
         )
-        assert scope_context is not None
+        assert loaded is not None
+        scope_context = loaded.with_session()
         assert scope_context.session is not None
         scope_context.session.runs = [
             TeamRunRecord(
@@ -4526,6 +4528,7 @@ class TestTeamCompletion:
 
         scope_context = load_bound_scope_session(
             member_names=["general"],
+            team_name=None,
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
@@ -4571,6 +4574,7 @@ class TestTeamCompletion:
         assert prepared.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         scope_context = load_bound_scope_session(
             member_names=["general"],
+            team_name=None,
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,

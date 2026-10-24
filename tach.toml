@@ -2619,7 +2619,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.history.request_messages"
 depends_on = [
-    "mindroom.constants",
     "mindroom.history.legacy_stored_tool_calls",
     "mindroom.history.legacy_summary_system_prompt",
     "mindroom.history.message_content",

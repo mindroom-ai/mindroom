@@ -529,7 +529,7 @@ def seed_summary(storage: ConversationStore, session: ConversationSession, scope
     latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
     assert summary_rows.append_summary(
         storage,
-        session_id=session.session_id,
+        session=session,
         scope_key=scope.key,
         based_on=latest.id if latest is not None else None,
         covered=[],
@@ -551,13 +551,12 @@ def store_fold(
     summary: str = "FOLD",
 ) -> int:
     """Append a mid-turn fold's summary row holding ``run_id``'s segment, covering no stored run."""
-    storage.ensure_session_row(
-        new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team"),
-    )
+    session = new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
+    storage.ensure_session_row(session)
     latest = summary_rows.latest_row(storage, session_id=session_id, scope_key=scope.key)
     row_id = summary_rows.append_summary(
         storage,
-        session_id=session_id,
+        session=session,
         scope_key=scope.key,
         based_on=latest.id if latest is not None else None,
         covered=[],

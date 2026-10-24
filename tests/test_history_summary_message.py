@@ -39,6 +39,7 @@ from mindroom.history.types import (
 )
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
@@ -116,7 +117,7 @@ def test_a_summary_only_plan_replays_the_summary_without_runs() -> None:
         num_history_messages=plan.num_history_messages,
         max_tool_calls_from_history=None,
     )
-    request = build_request(system=(), summary=session.summary, history=history, turn=_CURRENT)
+    request = build_request(summary=session.summary, history=history, turn=_CURRENT, media=MediaInputs())
 
     assert plan.mode == "disabled"
     assert plan.add_history_to_context is True
@@ -175,6 +176,7 @@ def test_scheduled_history_limits_keep_or_drop_the_summary() -> None:
             num_history_runs=0,
         ),
         replays_persisted_history=True,
+        native_history=None,
     )
 
     assert _prepared_history_with_scheduled_limit(summary_only, 3) is summary_only

@@ -1440,7 +1440,7 @@ async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary
     # The summary of the deleted reply sorts before every remaining run, as a compaction of it would.
     assert summary_rows.append_summary(
         storage,
-        session_id="session",
+        session=ConversationSession(session_id="session", kind="agent", owner_id="mind"),
         scope_key="agent:mind",
         based_on=None,
         covered=[],

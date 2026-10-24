@@ -191,7 +191,7 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
         make_visible_message(sender="bob", body="More context"),
     ]
 
-    with _no_memory(), _planned(PreparedHistoryState()) as prepare:
+    with _no_memory(), _planned(PreparedHistoryState(native_history=None)) as prepare:
         prepared = await _prepare_agent_and_prompt(
             make_turn_context("test_agent"),
             prompt="Current prompt",
@@ -233,7 +233,7 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
     )
     monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
-    with _no_memory(), _planned(PreparedHistoryState()) as prepare:
+    with _no_memory(), _planned(PreparedHistoryState(native_history=None)) as prepare:
         await _prepare_agent_and_prompt(
             make_turn_context("test_agent", room_id="!room:localhost"),
             prompt="Current prompt",
@@ -273,7 +273,7 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
         active_model_name="call_fast",
     )
 
-    with _no_memory(), _planned(PreparedHistoryState()) as prepare:
+    with _no_memory(), _planned(PreparedHistoryState(native_history=None)) as prepare:
         prepared = await _prepare_agent_and_prompt(
             turn,
             prompt="Current prompt",
@@ -303,7 +303,7 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
 
     with (
         patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=memory)),
-        _planned(PreparedHistoryState(replays_persisted_history=False)),
+        _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)),
     ):
         prepared_run = await _prepare_agent_and_prompt(
             make_turn_context("test_agent"),
@@ -356,7 +356,7 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
     with (
         _no_memory(),
         patch("mindroom.execution_preparation.build_static_token_estimator", _TextOnlyEstimator),
-        _planned(PreparedHistoryState(replays_persisted_history=False)),
+        _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)),
     ):
         prepared_run = await _prepare_agent_and_prompt(
             make_turn_context("test_agent"),
@@ -391,7 +391,7 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
         make_visible_message(sender="@carol:localhost", body="Later reaction", event_id="$later"),
     ]
 
-    with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=False)):
+    with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)):
         prepared_run = await _prepare_agent_and_prompt(
             make_turn_context(
                 "test_agent",
@@ -437,7 +437,7 @@ async def test_prepare_agent_and_prompt_trims_oversized_full_thread_fallback(
         ),
     ]
 
-    with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=False)):
+    with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)):
         prepared_run = await _prepare_agent_and_prompt(
             make_turn_context("test_agent"),
             prompt="Current prompt",
@@ -496,7 +496,7 @@ async def test_prepare_agent_and_prompt_keeps_matrix_current_sender_when_persist
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
 
-    with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=True)):
+    with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=True, native_history=None)):
         prepared_run = await _prepare_agent_and_prompt(
             make_turn_context("test_agent", requester_id="@alice:localhost"),
             prompt="Current prompt",
@@ -517,7 +517,7 @@ async def test_prepare_agent_and_prompt_reports_no_compaction_when_none_occurred
     prepared_execution = _PreparedExecutionContext(
         turn=TurnMessages(prompt=Message(role="user", content="Current prompt")),
         unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(),
+        prepared_history=PreparedHistoryState(native_history=None),
     )
 
     with (

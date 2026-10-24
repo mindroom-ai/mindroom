@@ -19,6 +19,7 @@ from mindroom.history.types import ScopeSummary
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
+from mindroom.media_inputs import MediaInputs
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.prompt_cache import _count_cache_markers, prepare_request_body
 from mindroom.system_prompt import render_session_context
@@ -68,12 +69,15 @@ def _agent_request(
     with patch("mindroom.agents.render_date_context", return_value=f"Current date: {date}"):
         build = create_agent("writer", config, runtime_paths, execution_identity=None)
     system = prompt_for_turn(build, system_enrichment)
-    messages = build_request(
-        system=(system,),
-        summary=None if summary is None else ScopeSummary(text=summary, updated_at=datetime.now(UTC)),
-        history=(),
-        turn=TurnMessages(prompt=Message(role="user", content="Write an introduction.")),
-    )
+    messages = [
+        system,
+        *build_request(
+            summary=None if summary is None else ScopeSummary(text=summary, updated_at=datetime.now(UTC)),
+            history=(),
+            turn=TurnMessages(prompt=Message(role="user", content="Write an introduction.")),
+            media=MediaInputs(),
+        ),
+    ]
     claude = bare_adapter(build.spec.model)
     assert isinstance(claude, ClaudeProvider)
     body = claude._prepare(ModelRequest(messages=tuple(messages))).kwargs

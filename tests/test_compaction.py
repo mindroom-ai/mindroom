@@ -214,6 +214,7 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
             add_history_to_context=True,
         ),
         prepared_context_tokens=20_000,
+        native_history=None,
     )
 
     metadata = build_ai_run_metadata_content(

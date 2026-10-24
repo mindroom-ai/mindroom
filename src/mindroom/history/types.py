@@ -342,9 +342,13 @@ class NativeHistory:
         return NativeHistory(native_compaction=None, portable_replay=self.portable_replay)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class PreparedHistoryState:
-    """Prepared persisted-history state for one run."""
+    """Prepared persisted-history state for one run.
+
+    ``native_history`` has no default, so a preparer states it: None when the provider route manages no history of
+    its own.
+    """
 
     replay_plan: ResolvedReplayPlan | None = None
     replays_persisted_history: bool = False
@@ -353,4 +357,4 @@ class PreparedHistoryState:
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     prepared_context_tokens: int | None = None
-    native_history: NativeHistory | None = None
+    native_history: NativeHistory | None

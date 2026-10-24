@@ -242,12 +242,10 @@ async def _exercise_team_member_assembly(
         config=config,
         runtime_paths=paths,
         execution_identity=identity,
-        create_session_if_missing=True,
     )
     assert scope is not None
-    assert scope.session is not None
     scope.storage.save_run(
-        scope.session,
+        scope.stored_or_first_session(),
         TeamRunRecord(
             run_id="paused-team-run",
             session_id=identity.session_id,

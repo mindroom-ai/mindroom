@@ -169,6 +169,7 @@ def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: 
     )
     bound_scope_context = load_bound_scope_session(
         member_names=["private_worker", "shared"],
+        team_name=None,
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,

@@ -28,6 +28,7 @@ from mindroom.history.summary_rows import Segment, folded_tool_call_ids, segment
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
@@ -346,7 +347,7 @@ def test_a_fold_racing_a_retirement_is_refused(storage: ConversationStore) -> No
     session = _seed(storage, [_run("r1")])
     basis = read_fold_basis(storage, _session(), _SCOPE)
     assert basis is not None
-    summary_rows.retire(storage, session_id="session", scope_key=_SCOPE.key)
+    summary_rows.retire(storage, session=_session(), scope_key=_SCOPE.key)
 
     assert not append_fold(
         storage,
@@ -368,7 +369,7 @@ def test_retiring_summaries_removes_runs_that_folded_mid_turn(storage: Conversat
     running = _run("live")
     assert _fold(storage, running, "S2")
 
-    summary_rows.retire(storage, session_id="session", scope_key=_SCOPE.key)
+    summary_rows.retire(storage, session=_session(), scope_key=_SCOPE.key)
 
     assert log_of(storage, _SCOPE.key, "session") == ["run:r1", "row:S1", "row:S2", "row:None"]
     _save(storage, running)
@@ -482,15 +483,14 @@ def test_a_fold_completed_after_a_later_turn_replays_its_summary_first(storage: 
         max_tool_calls_from_history=None,
     )
     built = build_request(
-        system=[Message(role="system", content="You are Code.")],
         summary=session.summary,
         history=replayed,
         turn=TurnMessages(prompt=Message(role="user", content="Task C")),
+        media=MediaInputs(),
     )
 
-    history = [message for message in built if message.role != "system"]
-    assert is_scope_summary(history[0])
-    assert history[1].content == "Task B"
-    assert [message.content for message in history[-3:]] == ["Task A", "A done", "Task C"]
+    assert is_scope_summary(built[0])
+    assert built[1].content == "Task B"
+    assert [message.content for message in built[-3:]] == ["Task A", "A done", "Task C"]
     planned = estimate_prompt_visible_history_tokens(session=session, scope=_SCOPE, history_settings=_ALL_HISTORY)
     assert estimate_request_messages_tokens([m for m in built if m.from_history], replay_model=None) == planned
