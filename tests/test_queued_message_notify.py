@@ -6,7 +6,6 @@ import asyncio
 import threading
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -24,7 +23,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai_runtime import (
     queued_message_signal_context,
     queued_notice_after_tool_batch,
-    register_queued_notice_storage,
+    register_scope_notice_storage,
 )
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing.batch import (
@@ -397,6 +396,27 @@ def _notice_count(
 
 def _queued_notice_storage(tmp_path: Path) -> ConversationStore:
     return create_state_storage("queued_notice", tmp_path)
+
+
+def _register_notice_storage(
+    store: ConversationStore,
+    *,
+    storage_factory: Callable[[], ConversationStore] | None = None,
+    session_id: str = "session-1",
+    session_kind: SessionKind = "agent",
+    entity_name: str = "general",
+) -> None:
+    """Register the scope a response ran in, whose runs ``store`` holds, for the response's notice finalization."""
+    register_scope_notice_storage(
+        scope_context=ScopeSessionContext(
+            scope=HistoryScope(kind=session_kind, scope_id=entity_name),
+            storage=store,
+            session=None,
+            session_id=session_id,
+            storage_factory=storage_factory or (lambda: store),
+        ),
+        entity_name=entity_name,
+    )
 
 
 async def _after_batch(
@@ -3240,12 +3260,7 @@ async def test_response_finalization_collapses_a_team_runs_current_notice_state(
             ),
             kind="team",
         )
-        register_queued_notice_storage(
-            storage_factory=lambda: store,
-            session_id="session-1",
-            session_kind="team",
-            entity_name="queued-notice-team",
-        )
+        _register_notice_storage(store, session_kind="team", entity_name="queued-notice-team")
         assert _notice_count(messages, marker=True) == 1
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
@@ -3273,12 +3288,7 @@ async def test_response_finalization_does_not_copy_notice_to_untouched_target(tm
         _seed(untouched_store, _completed("untouched-run", delegated), session_id="shared-session")
         _seed(noticed_store, _completed("noticed-run", noticed_messages), session_id="shared-session")
         for name, store in (("delegated-agent", untouched_store), ("outer-agent", noticed_store)):
-            register_queued_notice_storage(
-                storage_factory=partial(lambda chosen: chosen, store),
-                session_id="shared-session",
-                session_kind="agent",
-                entity_name=name,
-            )
+            _register_notice_storage(store, session_id="shared-session", entity_name=name)
 
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
@@ -3321,12 +3331,7 @@ async def test_response_finalization_uses_newest_completed_same_turn_run_and_ori
             _completed("first-completed-run", first_messages),
             _completed("second-completed-run", second_messages),
         )
-        register_queued_notice_storage(
-            storage_factory=lambda: store,
-            session_id="session-1",
-            session_kind="agent",
-            entity_name="general",
-        )
+        _register_notice_storage(store)
 
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
@@ -3362,12 +3367,7 @@ async def test_async_cleanup_keeps_session_storage_io_off_event_loop(tmp_path: P
         messages: list[OwnedMessage] = []
         await _after_batch(messages, OwnedMessage(role="tool", content="result"))
         _seed(store, _completed("run-1", messages))
-        register_queued_notice_storage(
-            storage_factory=storage_factory,
-            session_id="session-1",
-            session_kind="agent",
-            entity_name="queued-notice-agent",
-        )
+        _register_notice_storage(store, storage_factory=storage_factory, entity_name="queued-notice-agent")
         cleanup_task = asyncio.create_task(
             ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
         )
@@ -3394,12 +3394,7 @@ async def test_response_turn_finalization_completes_when_cancelled_during_storag
         messages: list[OwnedMessage] = []
         await _after_batch(messages, OwnedMessage(role="tool", content="result"))
         _seed(store, _completed("completed-run", messages))
-        register_queued_notice_storage(
-            storage_factory=lambda: store,
-            session_id="session-1",
-            session_kind="agent",
-            entity_name="general",
-        )
+        _register_notice_storage(store)
         finalization_task = asyncio.create_task(
             ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
         )
@@ -3434,12 +3429,7 @@ async def test_response_turn_finalization_defers_repeated_cancellation_during_st
         messages: list[OwnedMessage] = []
         await _after_batch(messages, OwnedMessage(role="tool", content="result"))
         _seed(store, _completed("completed-run", messages))
-        register_queued_notice_storage(
-            storage_factory=lambda: store,
-            session_id="session-1",
-            session_kind="agent",
-            entity_name="general",
-        )
+        _register_notice_storage(store)
         with patch.object(ai_runtime.asyncio, "shield", new=observed_shield):
             finalization_task = asyncio.create_task(
                 ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
@@ -3482,12 +3472,7 @@ async def test_storage_registration_deduplicates_one_session_across_fresh_factor
             return storage_factory
 
         for _ in range(2):
-            register_queued_notice_storage(
-                storage_factory=fresh_storage_factory(),
-                session_id="session-1",
-                session_kind="agent",
-                entity_name="general",
-            )
+            _register_notice_storage(store, storage_factory=fresh_storage_factory())
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
     assert factory_calls == 1
@@ -3515,12 +3500,7 @@ async def test_error_responses_never_attach_notices_to_prior_completed_run(tmp_p
             error_run = _completed(f"error-run-{index}", messages)
             error_run.status = OwnedRunStatus.error
             store.save_run(session, error_run, record_usage=True)
-            register_queued_notice_storage(
-                storage_factory=lambda: store,
-                session_id="session-1",
-                session_kind="agent",
-                entity_name="general",
-            )
+            _register_notice_storage(store)
             await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
     stored = _stored_runs(store)
@@ -3543,12 +3523,7 @@ async def test_response_lifecycle_finalizes_notice_after_locked_operation(tmp_pa
         messages: list[OwnedMessage] = []
         await _after_batch(messages, OwnedMessage(role="tool", content="result"), notice_text=notice_text)
         _seed(store, _completed("completed-run", messages))
-        register_queued_notice_storage(
-            storage_factory=lambda: store,
-            session_id="session-1",
-            session_kind="agent",
-            entity_name="general",
-        )
+        _register_notice_storage(store)
         observed_live_counts.append(_notice_count(messages, marker=True))
         return "$response"
 
@@ -3583,12 +3558,7 @@ async def test_response_lifecycle_finalizes_error_state_when_operation_raises(tm
         error_run = _completed("error-run", messages)
         error_run.status = OwnedRunStatus.error
         _seed(store, error_run)
-        register_queued_notice_storage(
-            storage_factory=lambda: store,
-            session_id="session-1",
-            session_kind="agent",
-            entity_name="general",
-        )
+        _register_notice_storage(store)
         error_message = "provider failed"
         raise RuntimeError(error_message)
 
@@ -3614,12 +3584,7 @@ async def test_response_turn_finalization_is_idempotent_for_one_persisted_notice
         persisted_notice = _owned_notice(notice_context.response_turn_id, marker="persisted")
         _seed(store, _completed("completed-run", [persisted_notice]))
         original_stored = _stored_runs(store)[0].messages[0].to_dict()
-        register_queued_notice_storage(
-            storage_factory=lambda: store,
-            session_id="session-1",
-            session_kind="agent",
-            entity_name="general",
-        )
+        _register_notice_storage(store)
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
@@ -3690,11 +3655,9 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
         response_1_ids.append(response_turn_id)
         messages.append(OwnedMessage(role="assistant", content="First response handoff"))
         _seed(_queued_notice_storage(tmp_path), _completed("run-1", messages))
-        register_queued_notice_storage(
+        _register_notice_storage(
+            _queued_notice_storage(tmp_path),
             storage_factory=lambda: _queued_notice_storage(tmp_path),
-            session_id="session-1",
-            session_kind="agent",
-            entity_name="general",
         )
         return "First response handoff"
 
