@@ -28,7 +28,7 @@ summary covered to replay (see ``tests/test_compaction_fuzz.py`` for the invaria
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -382,6 +382,22 @@ def update_scope_state_on_latest(
 
     storage.update_metadata(session, change)
     return read_scope_state(session, scope)
+
+
+def set_force_compaction(
+    storage: ConversationStore,
+    *,
+    session: ConversationSession,
+    scope: HistoryScope,
+    forced: bool,
+) -> HistoryScopeState:
+    """Store whether the scope's next run compacts its history first, on the stored row's latest state."""
+    return update_scope_state_on_latest(
+        storage,
+        session=session,
+        scope=scope,
+        update=lambda latest: replace(latest, force_compact_before_next_run=forced),
+    )
 
 
 @dataclass(frozen=True)

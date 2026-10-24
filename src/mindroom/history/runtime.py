@@ -41,7 +41,7 @@ from mindroom.history.session_context import (
 from mindroom.history.storage import (
     consume_pending_force_compaction_scope,
     read_scope_state,
-    update_scope_state_on_latest,
+    set_force_compaction,
 )
 from mindroom.history.summary_call import is_summary_timeout
 from mindroom.history.team_scope import ad_hoc_team_has_private_member
@@ -879,20 +879,10 @@ def _prepare_scope_state_for_run(
     if consume_pending_force_compaction_scope(session, scope):
         # The flag is stored before the request leaves the tools' state, so a crash between the two writes repeats
         # the request instead of losing it.
-        state = update_scope_state_on_latest(
-            storage,
-            session=session,
-            scope=scope,
-            update=lambda latest: replace(latest, force_compact_before_next_run=True),
-        )
+        state = set_force_compaction(storage, session=session, scope=scope, forced=True)
         storage.save_session_state(session, session_state_snapshot(session.session_state))
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
-        state = update_scope_state_on_latest(
-            storage,
-            session=session,
-            scope=scope,
-            update=lambda latest: replace(latest, force_compact_before_next_run=False),
-        )
+        state = set_force_compaction(storage, session=session, scope=scope, forced=False)
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",
             session_id=session.session_id,

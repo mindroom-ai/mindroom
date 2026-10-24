@@ -818,7 +818,7 @@ async def test_a_consumed_compaction_request_keeps_metadata_another_writer_store
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reply that consumes a queued request stores the flag over the row's metadata, not the copy it loaded."""
+    """A reply that consumes a queued request compacts and stores the flag over the row's metadata, not its copy."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -849,6 +849,7 @@ async def test_a_consumed_compaction_request_keeps_metadata_another_writer_store
     stored = storage.load_session("session-1", "agent")
     assert stored is not None
     assert read_scope_seen_event_ids(storage, stored, team_scope) == {"$consumed"}
+    assert stored.summary is not None
     assert not has_queued_force_compaction(storage, "session-1", scope)
 
 
