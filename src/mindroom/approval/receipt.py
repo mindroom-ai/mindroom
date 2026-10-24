@@ -71,7 +71,7 @@ def messages_with_approval_receipt(
     messages: Sequence[Message],
     receipt_text: str,
     *,
-    after_response_id: bool = False,
+    after_response_id: bool,
 ) -> list[Message]:
     """Return the request's messages with the trusted receipt projected in, leaving ``messages`` as they are.
 
