@@ -413,12 +413,11 @@ class ClaudeProvider:
             "messages": conversation.messages,
             **self._request_params(request, output_format, strict_tools=strict_tools),
         }
-        if conversation.system:
-            body["system"] = [{"text": conversation.system, "type": "text"}]
         if tools:
             body["tools"] = tools
         body = prepare_request_body(
             body,
+            system=conversation.system,
             route=self.route,
             deferred_tool_names=request.deferred_tool_names,
             tool_choice=request.tool_choice,

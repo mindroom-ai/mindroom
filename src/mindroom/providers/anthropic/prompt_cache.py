@@ -107,13 +107,24 @@ def _with_prompt_cache_ladder(body: dict[str, Any], cache_control: dict[str, str
     return prepared
 
 
-def _with_marked_system_prompt(body: dict[str, Any], cache_control: dict[str, str]) -> dict[str, Any]:
-    """Mark the system prompt, keeping its shared instructions cacheable apart from the session context after them."""
-    system = body.get("system")
+def _with_system_prompt(body: dict[str, Any], system: str, cache_control: dict[str, str] | None) -> dict[str, Any]:
+    """Send the conversation's system text as one block, marked when the model caches its prompt.
+
+    Without system text, a ``system`` the raw request overrides set goes as authored.
+    """
     if not system:
         return body
-    marked = {**system[0], "cache_control": dict(cache_control)}
-    return {**body, "system": split_shared_system_prefix([marked, *system[1:]])}
+    marker = {} if cache_control is None else {"cache_control": dict(cache_control)}
+    return {**body, "system": [{"text": system, "type": "text", **marker}]}
+
+
+def _with_shared_system_prefix(body: dict[str, Any]) -> dict[str, Any]:
+    """Keep the shared instructions cacheable independently of the session context that follows them."""
+    system = body.get("system")
+    if not isinstance(system, list):
+        return body
+    split_system = split_shared_system_prefix(system)
+    return body if split_system is system else {**body, "system": split_system}
 
 
 def _with_deferred_tool_search(body: dict[str, Any], deferred_tool_names: frozenset[str]) -> dict[str, Any]:
@@ -161,6 +172,7 @@ def _with_tool_choice(body: dict[str, Any], tool_choice: ToolChoice | None) -> d
 def prepare_request_body(
     body: dict[str, Any],
     *,
+    system: str,
     route: ClaudeRouteKind,
     deferred_tool_names: frozenset[str],
     tool_choice: ToolChoice | None,
@@ -169,9 +181,9 @@ def prepare_request_body(
 ) -> dict[str, Any]:
     """Return the request body as it goes on the wire.
 
-    ``body`` is the request the adapter built around ``format_claude_messages``. Repairs come first, then the
-    deferred tool search, the tool choice, and finally the cache breakpoints when the model caches its prompt.
-    The input body is never mutated.
+    ``body`` is the request the adapter built around ``format_claude_messages``, and ``system`` is that
+    conversation's system text. Repairs come first, then the deferred tool search, the tool choice, the system
+    prompt, and finally the cache breakpoints when the model caches its prompt. The input body is never mutated.
     """
     prepared = with_replay_safe_tool_search_results(body)
     prepared = without_unavailable_tool_references(prepared)
@@ -184,8 +196,9 @@ def prepare_request_body(
     )
     prepared = _with_deferred_tool_search(prepared, deferred_tool_names)
     prepared = _with_tool_choice(prepared, tool_choice)
-    if cache_system_prompt:
-        cache_control = prompt_cache_control(extended_cache_time=extended_cache_time)
-        prepared = _with_marked_system_prompt(prepared, cache_control)
+    cache_control = prompt_cache_control(extended_cache_time=extended_cache_time) if cache_system_prompt else None
+    prepared = _with_system_prompt(prepared, system, cache_control)
+    if cache_control is not None:
+        prepared = _with_shared_system_prefix(prepared)
         prepared = _with_prompt_cache_ladder(prepared, cache_control)
     return prepared

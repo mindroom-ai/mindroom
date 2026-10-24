@@ -226,6 +226,7 @@ def _prepared(
 ) -> dict[str, Any]:
     return prepare_request_body(
         body,
+        system="",
         route=route,
         deferred_tool_names=deferred,
         tool_choice=None,
