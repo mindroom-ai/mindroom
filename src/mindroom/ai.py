@@ -457,7 +457,7 @@ async def _collect_response_body_with_trace(
     return body
 
 
-def _extract_response_content(record: AnyRunRecord, *, show_tool_calls: bool = True) -> str:
+def _extract_response_content(record: AnyRunRecord, *, show_tool_calls: bool) -> str:
     response_parts: list[str] = []
 
     # Add main content if present
