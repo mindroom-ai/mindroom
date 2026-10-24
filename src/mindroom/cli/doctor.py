@@ -284,21 +284,11 @@ def _validate_provider_key(
 def _classify_vertexai_claude_error(
     exc: ProviderError | DefaultCredentialsError | RuntimeError | TypeError | ValueError,
 ) -> tuple[bool | None, str]:
-    """Classify one Vertex AI Claude validation failure for doctor output.
+    """Classify one Vertex AI Claude validation failure for doctor output, with an actionable message.
 
     The Claude adapter types every failure of a request, rejected Google credentials included, so rejected
     credentials fail with the reason their error carries and another rejected request with its status. Credentials
     that cannot be found and a service that cannot be reached leave the check inconclusive.
-    """
-    if isinstance(exc, AuthenticationFailed):
-        return False, str(exc)
-    if isinstance(exc, ProviderError) and exc.status_code is not None:
-        return False, _vertexai_claude_api_error_detail(exc.status_code, str(exc))
-    return None, str(exc)
-
-
-def _vertexai_claude_api_error_detail(status_code: int, message: str) -> str:
-    """Turn a Vertex Claude API error into an actionable doctor message.
 
     Model availability on Vertex is per project and region: a project can have
     the Vertex AI API enabled yet still 404 on a Claude model when Anthropic
@@ -306,17 +296,21 @@ def _vertexai_claude_api_error_detail(status_code: int, message: str) -> str:
     wrong for Vertex (current-generation ids are bare, e.g. the anthropic
     default; older ones are dated snapshots with an @ separator).
     """
-    if status_code == httpx.codes.NOT_FOUND:
-        return (
+    if isinstance(exc, AuthenticationFailed):
+        return False, str(exc)
+    if not isinstance(exc, ProviderError) or exc.status_code is None:
+        return None, str(exc)
+    if exc.status_code == httpx.codes.NOT_FOUND:
+        return False, (
             "HTTP 404: model not available in this project/region — verify the Vertex model id form "
             "(bare current-generation id or dated @ snapshot) and that Anthropic models are enabled "
-            f"in the project's Model Garden ({message})"
+            f"in the project's Model Garden ({exc})"
         )
-    if status_code == httpx.codes.FORBIDDEN:
-        if "SERVICE_DISABLED" in message:
-            return "HTTP 403: the Vertex AI API (aiplatform.googleapis.com) is not enabled in this project"
-        return "HTTP 403: permission denied — check the credentials' IAM access to Vertex AI in this project"
-    return f"HTTP {status_code}"
+    if exc.status_code == httpx.codes.FORBIDDEN:
+        if "SERVICE_DISABLED" in str(exc):
+            return False, "HTTP 403: the Vertex AI API (aiplatform.googleapis.com) is not enabled in this project"
+        return False, "HTTP 403: permission denied — check the credentials' IAM access to Vertex AI in this project"
+    return False, f"HTTP {exc.status_code}"
 
 
 def _validate_vertexai_claude_connection(
