@@ -179,7 +179,6 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
 
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
-    store.deps.state_writer.session_type_for_scope.return_value = "agent"
     original_run = RunRecord(
         run_id="interrupted",
         agent_id="agent",

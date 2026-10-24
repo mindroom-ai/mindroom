@@ -96,7 +96,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot._conversation_state_writer.team_history_scope = MagicMock(
         return_value=HistoryScope(kind="team", scope_id=bot.agent_name),
     )
-    bot._conversation_state_writer.session_type_for_scope = MagicMock(return_value="agent")
     bot._knowledge_access_support = _knowledge_access_support()
     return bot
 

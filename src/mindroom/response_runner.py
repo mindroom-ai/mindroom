@@ -2446,7 +2446,7 @@ class ResponseRunner:
         return ResponseOutcome(
             response_run_id=final.response_run_id or continuation.run_id,
             session_id=continuation.session_id,
-            session_type="team" if continuation.entity_kind == "team" else "agent",
+            session_type=continuation.entity_kind,
             execution_identity=execution_identity,
             run_succeeded=final.terminal_status == "completed",
             response_target=target,
@@ -2606,7 +2606,7 @@ class ResponseRunner:
             history_scope = self.deps.state_writer.history_scope()
         return self._build_persist_response_event_id_effect(
             session_id=continuation.session_id,
-            session_type=self.deps.state_writer.session_type_for_scope(history_scope),
+            session_type=history_scope.kind,
             create_storage=lambda: self.deps.state_writer.create_storage(
                 execution_identity,
                 scope=history_scope,
@@ -4688,7 +4688,7 @@ class ResponseRunner:
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
             allow_direct_private_agents=allow_direct_private_agents,
         )
-        session_type = self.deps.state_writer.session_type_for_scope(session_scope)
+        session_type = session_scope.kind
 
         def team_storage_factory() -> ConversationStore:
             return self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
@@ -5449,7 +5449,7 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_type = self.deps.state_writer.session_type_for_scope(session_scope)
+        session_type = session_scope.kind
 
         def history_storage_factory() -> ConversationStore:
             return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
@@ -5587,7 +5587,7 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_type = self.deps.state_writer.session_type_for_scope(session_scope)
+        session_type = session_scope.kind
 
         def history_storage_factory() -> ConversationStore:
             return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
@@ -5999,7 +5999,7 @@ class ResponseRunner:
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
-            session_type=self.deps.state_writer.session_type_for_scope(history_scope),
+            session_type=history_scope.kind,
             create_storage=lambda: self.deps.state_writer.create_storage(execution_identity),
         )
 
@@ -6044,7 +6044,7 @@ class ResponseRunner:
                 # returned generation outcome never materialized.
                 response_run_id=attempt_run_ids[-1] if attempt_run_ids else response_run_id,
                 session_id=session_id,
-                session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
+                session_type=history_scope.kind,
                 execution_identity=execution_identity,
                 run_succeeded=(
                     generation.run_succeeded
