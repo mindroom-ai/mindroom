@@ -6,7 +6,7 @@ from __future__ import annotations
 from agno.metrics import MessageMetrics
 from agno.models.message import Message
 
-from mindroom.model_usage import response_context_tokens
+from mindroom.model_usage import response_context_tokens, uncached_input_tokens_from_counts
 
 
 def _assistant(metrics: MessageMetrics) -> Message:
@@ -42,6 +42,48 @@ def test_response_without_reported_usage_has_no_context_size() -> None:
             provider="OpenAI",
             configured_provider="openai",
             model_id="m",
+        )
+        is None
+    )
+
+
+def test_uncached_input_subtracts_cache_reads_where_input_includes_them() -> None:
+    assert (
+        uncached_input_tokens_from_counts(
+            input_tokens=1_000,
+            cache_read_tokens=400,
+            cache_write_tokens=None,
+            provider="OpenAI",
+            configured_provider="openai",
+            model_id="gpt-6-luna",
+        )
+        == 600
+    )
+
+
+def test_uncached_input_counts_cache_writes_where_cache_is_reported_outside_input() -> None:
+    assert (
+        uncached_input_tokens_from_counts(
+            input_tokens=1_000,
+            cache_read_tokens=9_000,
+            cache_write_tokens=50,
+            provider="Anthropic",
+            configured_provider="anthropic",
+            model_id="claude-sonnet-5-5",
+        )
+        == 1_050
+    )
+
+
+def test_uncached_input_is_unknown_without_input() -> None:
+    assert (
+        uncached_input_tokens_from_counts(
+            input_tokens=None,
+            cache_read_tokens=10,
+            cache_write_tokens=None,
+            provider="OpenAI",
+            configured_provider="openai",
+            model_id="gpt-6-luna",
         )
         is None
     )

@@ -13,7 +13,7 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.db.sqlite import SqliteDb
 from agno.media import File
-from agno.metrics import RunMetrics
+from agno.metrics import ModelMetrics, RunMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse, ToolExecution
 from agno.models.vertexai.claude import Claude as VertexAIClaude
@@ -327,6 +327,57 @@ def test_ai_run_metadata_omits_cost_without_prices() -> None:
     )
 
     assert "cost" not in metadata[AI_RUN_METADATA_KEY]
+
+
+def test_ai_run_metadata_splits_uncached_input_per_model() -> None:
+    """A team mixing providers counts each model's new input by that provider's cache accounting."""
+    metrics = RunMetrics(
+        input_tokens=1_100,
+        cache_read_tokens=1_300,
+        cache_write_tokens=10,
+        details={
+            "model": [
+                ModelMetrics(id="gpt-6-luna", provider="OpenAI", input_tokens=1_000, cache_read_tokens=400),
+                ModelMetrics(
+                    id="claude-sonnet-5-5",
+                    provider="Anthropic",
+                    input_tokens=100,
+                    cache_read_tokens=900,
+                    cache_write_tokens=10,
+                ),
+            ],
+        },
+    )
+    metadata = build_ai_run_metadata_content(
+        prices={},
+        config=_metadata_config("openai", "gpt-6-luna"),
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="gpt-6-luna",
+        model_provider="OpenAI",
+        metrics=metrics,
+    )
+
+    assert metadata[AI_RUN_METADATA_KEY]["usage"]["uncached_input_tokens"] == 600 + 110
+
+
+def test_ai_run_metadata_splits_uncached_input_from_streamed_counters() -> None:
+    """Without per-model details the run's own model decides how cache reads are counted."""
+    metadata = build_ai_run_metadata_content(
+        prices={},
+        config=_metadata_config("openai", "gpt-6-luna"),
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="gpt-6-luna",
+        model_provider="OpenAI",
+        metrics={"input_tokens": 1_674, "cache_read_tokens": 1_408, "output_tokens": 31},
+    )
+
+    assert metadata[AI_RUN_METADATA_KEY]["usage"]["uncached_input_tokens"] == 266
 
 
 def test_append_knowledge_availability_notice_rendering() -> None:

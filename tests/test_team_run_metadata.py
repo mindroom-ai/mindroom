@@ -310,6 +310,7 @@ async def test_team_response_stream_falls_back_to_model_request_totals() -> None
         "cache_read_tokens": 340,
         "cache_write_tokens": 10,
         "time_to_first_token": "0",
+        "uncached_input_tokens": 260,
     }
 
 

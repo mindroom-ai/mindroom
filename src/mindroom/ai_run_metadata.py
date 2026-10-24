@@ -9,7 +9,7 @@ from agno.run.base import RunStatus
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.model_usage import context_input_tokens_from_counts
+from mindroom.model_usage import context_input_tokens_from_counts, uncached_input_tokens_from_counts
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -233,6 +233,39 @@ def _native_context_counts(
     return None
 
 
+def _uncached_input_tokens(
+    metrics: RunMetrics | None,
+    usage_payload: dict[str, Any] | None,
+    *,
+    provider: str | None,
+    configured_provider: str | None,
+    model_id: str | None,
+) -> int | None:
+    """Split new input from cache reads per model, since providers count cache tokens differently."""
+    entries = [entry for entries in ((metrics.details if metrics else None) or {}).values() for entry in entries]
+    if entries:
+        return sum(
+            uncached_input_tokens_from_counts(
+                input_tokens=entry.input_tokens,
+                cache_read_tokens=entry.cache_read_tokens,
+                cache_write_tokens=entry.cache_write_tokens,
+                provider=entry.provider,
+                configured_provider=None,
+                model_id=entry.id,
+            )
+            or 0
+            for entry in entries
+        )
+    return uncached_input_tokens_from_counts(
+        input_tokens=_int_usage_value(usage_payload, "input_tokens"),
+        cache_read_tokens=_int_usage_value(usage_payload, "cache_read_tokens"),
+        cache_write_tokens=_int_usage_value(usage_payload, "cache_write_tokens"),
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id=model_id,
+    )
+
+
 def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     *,
     config: Config,
@@ -335,6 +368,15 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
         model_payload["provider"] = provider
     payload["model"] = model_payload
     if usage_payload:
+        uncached_input_tokens = _uncached_input_tokens(
+            metrics if isinstance(metrics, RunMetrics) else None,
+            usage_payload,
+            provider=provider,
+            configured_provider=model_config.provider if model_config is not None else None,
+            model_id=model_id,
+        )
+        if uncached_input_tokens is not None:
+            usage_payload["uncached_input_tokens"] = uncached_input_tokens
         payload["usage"] = usage_payload
     cost = run_cost_usd(
         metrics if isinstance(metrics, RunMetrics) else None,
