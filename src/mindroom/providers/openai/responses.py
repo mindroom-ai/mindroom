@@ -80,8 +80,8 @@ class ResponsesAdapter:
         self,
         *,
         threshold: int | None,
-        history_generation: str = "",
-        allow_authored: bool = False,
+        history_generation: str,
+        allow_authored: bool,
     ) -> NativeCompactionReplay | None:
         """Return the replay settings of a request that wants compaction at ``threshold`` input tokens.
 
@@ -89,8 +89,10 @@ class ResponsesAdapter:
         a route without native compaction, or no threshold, runs without it.
         """
         del allow_authored
-        if threshold is None or not self.capabilities.native_compaction or self.identity.endpoint is None:
+        if threshold is None or not self.capabilities.native_compaction:
             return None
+        # Native compaction is supported only on the public endpoints, so a route that has it has one.
+        assert self.identity.endpoint is not None
         route = native_compaction_route(
             provider=self.identity.provider,
             model_id=self.identity.id,
@@ -126,10 +128,7 @@ class ResponsesAdapter:
         kwargs: dict[str, Any],
         accumulator: ResponsesStream,
     ) -> AsyncIterator[StreamEvent]:
-        try:
-            sdk_stream = await client.responses.create(**kwargs, stream=True)
-        except sdk_failures() as error:
-            raise provider_error(error, provider=self.identity.provider_name) from error
+        sdk_stream = await client.responses.create(**kwargs, stream=True)
         try:
             async for event in sdk_stream:
                 if (usage := usage_report(event)) is not None:
@@ -140,8 +139,6 @@ class ResponsesAdapter:
                 if not deltas:
                     # An event without deltas, such as tool-call arguments, is still activity.
                     yield StreamProgress()
-        except sdk_failures() as error:
-            raise provider_error(error, provider=self.identity.provider_name) from error
         finally:
             await sdk_stream.close()
 
@@ -150,42 +147,42 @@ class ResponsesAdapter:
         started = time.monotonic()
         first_token: float | None = None
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
-        client = await self.clients.client(request.overrides)
         store = request_store(self.wire, request)
         # TODO(simplify): With `reasoning` authored, the reply text is also stored as its reasoning (streamed only
         # without `reasoning_summary`, blocking only without a returned summary). Store only returned reasoning
         # summaries. Stored data and anything that replays or shows reasoning.
-        if request.stream or self.capabilities.streams_only:
-            accumulator = ResponsesStream(
-                wire=self.wire,
-                store=store,
-                portable_replay=request.portable_replay,
-                native_compaction=request.native_compaction,
-                text_as_reasoning=self.settings.reasoning is not None and self.settings.reasoning_summary is None,
-            )
-            events = self._streamed(client, kwargs, accumulator)
-            async with closing_async_stream(events):
-                async for event in events:
-                    first_token = output_started(first_token, event)
-                    yield event
-            if not accumulator.ended:
-                # The stream stopped before the response ended, so the turn did not finish.
-                return
-            parts = accumulator.finish()
-        else:
-            try:
+        try:
+            client = await self.clients.client(request.overrides)
+            if request.stream or self.capabilities.streams_only:
+                accumulator = ResponsesStream(
+                    provider=self.identity.provider_name,
+                    store=store,
+                    portable_replay=request.portable_replay,
+                    native_compaction=request.native_compaction,
+                    text_as_reasoning=self.settings.reasoning is not None and self.settings.reasoning_summary is None,
+                )
+                events = self._streamed(client, kwargs, accumulator)
+                async with closing_async_stream(events):
+                    async for event in events:
+                        first_token = output_started(first_token, event)
+                        yield event
+                if not accumulator.ended:
+                    # The stream stopped before the response ended, so the turn did not finish.
+                    return
+                parts = accumulator.finish()
+            else:
                 response = await client.responses.create(**kwargs)
-            except sdk_failures() as error:
-                raise provider_error(error, provider=self.identity.provider_name) from error
-            parts = parse_response(
-                response,
-                wire=self.wire,
-                store=store,
-                portable_replay=request.portable_replay,
-                native_compaction=request.native_compaction,
-                text_as_reasoning=self.settings.reasoning is not None,
-            )
-            first_token = time.monotonic()
+                parts = parse_response(
+                    response,
+                    provider=self.identity.provider_name,
+                    store=store,
+                    portable_replay=request.portable_replay,
+                    native_compaction=request.native_compaction,
+                    text_as_reasoning=self.settings.reasoning is not None,
+                )
+                first_token = time.monotonic()
+        except sdk_failures() as error:
+            raise provider_error(error, provider=self.identity.provider_name) from error
         message = finished_assistant_message(
             self.identity,
             content=parts.content,

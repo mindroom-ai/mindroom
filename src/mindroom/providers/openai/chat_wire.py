@@ -361,11 +361,13 @@ def _add_route_params(params: dict[str, Any], *, model_id: str, settings: ChatSe
 def _sdk_body_fields(endpoint: _SDKEndpoint) -> frozenset[str]:
     """Return the body fields the SDK's ``create`` takes as keywords."""
     if endpoint == "chat":
-        from openai.resources.chat.completions import AsyncCompletions  # noqa: PLC0415
+        from openai.resources.chat.completions import (  # noqa: PLC0415 - keep the SDK out of module import time
+            AsyncCompletions,
+        )
 
         create = AsyncCompletions.create
     else:
-        from openai.resources.responses import AsyncResponses  # noqa: PLC0415
+        from openai.resources.responses import AsyncResponses  # noqa: PLC0415 - keep the SDK out of module import time
 
         create = AsyncResponses.create
     return frozenset(inspect.signature(create).parameters) - {"self", *_SDK_OPTION_KEYS}

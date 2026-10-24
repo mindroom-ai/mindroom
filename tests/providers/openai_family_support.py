@@ -15,6 +15,8 @@ import httpx
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.responses import ResponsesAdapter
 from tests.providers.golden_support import Replay, encoded_response, pipeline_provider, replay_through_pipeline
@@ -23,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider
 
 OPENAI_FAMILIES = (
@@ -42,6 +45,21 @@ _CODEX_HOME = "<codex_home>"
 _KIMI_HOME = "<kimi_home>"
 # Far-future expiry so borrowed OAuth tokens never refresh: 2100-01-01T00:00:00Z.
 _TOKEN_EXPIRY = 4102444800
+
+
+def provider_runtime(
+    runtime_paths: RuntimePaths,
+    *,
+    http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT,
+    codex_default_instructions: str = CODEX_DEFAULT_INSTRUCTIONS,
+) -> ProviderRuntime:
+    """Return the runtime a test builds a provider with: the production prompt and client unless given."""
+    return ProviderRuntime(
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+        codex_default_instructions=codex_default_instructions,
+        http_client=http_client,
+    )
 
 
 def unsigned_jwt(claims: dict[str, Any]) -> str:
@@ -110,8 +128,8 @@ def openai_family_adapter(
             config["extra_kwargs"][key] = placeholders[value]
     config_path = root / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    runtime = ProviderRuntime(
-        runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
+    runtime = provider_runtime(
+        resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     return build_provider(ModelConfig(**config), runtime)
@@ -149,7 +167,7 @@ def responses_adapter(root: Path, model_id: str = "gpt-6-astra", **extra_kwargs:
         api="responses",
         extra_kwargs={"api_key": "test-key", **extra_kwargs},
     )
-    adapter = build_provider(config, ProviderRuntime(runtime_paths=paths))
+    adapter = build_provider(config, provider_runtime(paths))
     assert isinstance(adapter, ResponsesAdapter)
     return adapter
 

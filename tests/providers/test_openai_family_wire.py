@@ -46,7 +46,7 @@ from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.tool_policy import without_provider_tools
-from tests.providers.openai_family_support import golden_provider, unsigned_jwt
+from tests.providers.openai_family_support import golden_provider, provider_runtime, unsigned_jwt
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -724,6 +724,7 @@ async def test_responses_error_event_is_classified_by_its_code(tmp_path: Path) -
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert (info.value.status_code, info.value.code, str(info.value)) == (None, "server_error", "boom")
+    assert info.value.provider == "OpenAI Responses"
 
 
 @pytest.mark.asyncio
@@ -776,7 +777,7 @@ async def test_a_non_streamed_failed_response_raises_its_error(tmp_path: Path) -
     with pytest.raises(ProviderUnavailable, match="The server had an error") as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()], stream=False))
 
-    assert (info.value.status_code, info.value.code) == (None, "server_error")
+    assert (info.value.status_code, info.value.code, info.value.provider) == (None, "server_error", "OpenAI Responses")
 
 
 @pytest.mark.asyncio
@@ -964,7 +965,7 @@ def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path
     adapter = built.adapter
     assert isinstance(adapter, ResponsesAdapter)
 
-    settings = adapter.native_compaction_settings(threshold=60_000, history_generation="gen-2")
+    settings = adapter.native_compaction_settings(threshold=60_000, history_generation="gen-2", allow_authored=False)
 
     assert settings == NativeCompactionReplay(
         route=native_compaction_route(
@@ -975,7 +976,7 @@ def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path
         ),
         threshold=60_000,
     )
-    assert adapter.native_compaction_settings(threshold=None, allow_authored=True) is None
+    assert adapter.native_compaction_settings(threshold=None, history_generation="", allow_authored=True) is None
     (tmp_path / "proxy").mkdir()
     proxied = _Built(
         tmp_path / "proxy",
@@ -983,7 +984,7 @@ def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path
         _responses_reply(_completed()),
     ).adapter
     assert isinstance(proxied, ResponsesAdapter)
-    assert proxied.native_compaction_settings(threshold=60_000) is None
+    assert proxied.native_compaction_settings(threshold=60_000, history_generation="", allow_authored=False) is None
 
 
 # --- Request settings -----------------------------------------------------------------------------------------
@@ -1570,7 +1571,7 @@ def test_unknown_extra_kwargs_are_rejected_with_the_valid_keys(tmp_path: Path) -
 
 def _runtime(tmp_path: Path, **env: str) -> ProviderRuntime:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env=env)
-    return ProviderRuntime(runtime_paths=paths)
+    return provider_runtime(paths)
 
 
 @pytest.mark.parametrize(

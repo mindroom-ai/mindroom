@@ -29,7 +29,7 @@ from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.gemini.adapter import GeminiSettings
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.ollama_adapter import OllamaSettings
-from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
+from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.openai.settings import CODEX_FIELDS, ChatSettings, ResponsesSettings
 from mindroom.providers.registry import build_model_provider
@@ -38,6 +38,7 @@ from mindroom.redaction import REDACTED
 from mindroom.startup_errors import PermanentStartupError
 from tests.providers.anthropic_family_support import claude_turn, json_reply, route_provider
 from tests.providers.golden_support import Wire
+from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -832,7 +833,10 @@ def test_the_openai_family_builder_rejects_keys_its_route_does_not_take(tmp_path
     model_config = ModelConfig(provider="zai", id="glm-5.3", extra_kwargs={"temprature": 0.2})
 
     with pytest.raises(ValueError, match=r"Unsupported extra_kwargs for provider 'zai': temprature\. Accepted keys: "):
-        build_openai_provider(model_config, ProviderRuntime(runtime_paths=_runtime_paths(tmp_path)))
+        build_openai_provider(
+            model_config,
+            provider_runtime(_runtime_paths(tmp_path)),
+        )
 
 
 # --- Retired Agno fields --------------------------------------------------------------------------------------

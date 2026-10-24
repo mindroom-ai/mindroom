@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 from openai.types.chat import ChatCompletion
@@ -20,9 +20,11 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides
-from mindroom.providers.openai.build import ProviderRuntime, build_provider
+from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
+from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import chat_request_kwargs, parse_chat_completion
+from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
 from mindroom.providers.openai.legacy_replay import repair_legacy_responses_span
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import (
@@ -35,7 +37,7 @@ from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.system_prompt import render_session_context
-from tests.providers.openai_family_support import responses_adapter
+from tests.providers.openai_family_support import provider_runtime, responses_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,10 +106,14 @@ def _parsed(adapter: ResponsesAdapter, output: list[dict[str, Any]], **message: 
     """Return the stored assistant message of one response, parsed as the route parses it without native replay."""
     parts = parse_response(
         _response(output),
-        wire=adapter.wire,
+        provider=adapter.identity.provider_name,
         store=adapter.wire.store,
         portable_replay=False,
-        native_compaction=adapter.native_compaction_settings(threshold=1024),
+        native_compaction=adapter.native_compaction_settings(
+            threshold=1024,
+            history_generation="",
+            allow_authored=False,
+        ),
         text_as_reasoning=False,
     )
     fields = {"content": parts.content, "tool_calls": parts.tool_calls or None, "provider_data": parts.provider_data}
@@ -193,7 +199,7 @@ def test_ordered_replay_never_resurrects_a_filtered_call(tmp_path: Path, *, reta
 def test_a_reasoning_tail_after_a_checkpoint_replays_once(tmp_path: Path) -> None:
     """A later ordinary response keeps its reasoning without repeating the checkpoint's tail."""
     adapter = responses_adapter(tmp_path, store=False)
-    native = adapter.native_compaction_settings(threshold=1024)
+    native = adapter.native_compaction_settings(threshold=1024, history_generation="", allow_authored=False)
     checkpoint = _parsed(adapter, [_CHECKPOINT, _ANSWER])
     ordinary = _parsed(adapter, [_REASONING, _ANSWER])
     messages = [
@@ -518,7 +524,7 @@ def test_an_authored_replay_policy_turns_native_compaction_off(tmp_path: Path, k
     """A raw SDK override must not contradict automatic compaction's replay policy."""
     adapter = responses_adapter(tmp_path, request_params={"extra_body": {key: None}})
 
-    assert adapter.native_compaction_settings(threshold=1024) is None
+    assert adapter.native_compaction_settings(threshold=1024, history_generation="", allow_authored=False) is None
 
 
 @pytest.mark.parametrize("portable", [False, True])
@@ -528,7 +534,7 @@ def test_only_a_completed_response_records_its_replay_policy(tmp_path: Path, *, 
     adapter = responses_adapter(tmp_path, store=True)
     parts = parse_response(
         _response([_ANSWER], status=status),
-        wire=adapter.wire,
+        provider=adapter.identity.provider_name,
         store=True,
         portable_replay=portable,
         native_compaction=None,
@@ -756,7 +762,7 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
         input_details["audio_tokens"] = 11
         adapter = build_provider(
             ModelConfig(provider="openai", id="gpt-6-astra", api="chat_completions", api_key="test-key"),
-            ProviderRuntime(runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+            provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
         )
         assert isinstance(adapter, ChatAdapter)
         completion = ChatCompletion.model_validate(
@@ -795,7 +801,7 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
         adapter = responses_adapter(tmp_path)
         usage = parse_response(
             response,
-            wire=adapter.wire,
+            provider=adapter.identity.provider_name,
             store=None,
             portable_replay=False,
             native_compaction=None,
@@ -816,7 +822,7 @@ def test_groq_and_cerebras_usage_keeps_cached_input_and_reasoning(tmp_path: Path
     """Cached input and reasoning stay inside the prompt and completion totals these routes report."""
     adapter = build_provider(
         ModelConfig(provider=route, id="gpt-oss-120b", api_key="test-key"),
-        ProviderRuntime(runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
     )
     assert isinstance(adapter, ChatAdapter)
     completion = ChatCompletion.model_validate(
@@ -893,7 +899,7 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
             api_key="test-key",
             extra_kwargs=authored,
         ),
-        ProviderRuntime(runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
     )
     assert isinstance(adapter, ChatAdapter)
 
@@ -924,7 +930,7 @@ def _codex(tmp_path: Path, model_id: str = "gpt-5.6", **extra_kwargs: Any) -> Re
             id=model_id,
             extra_kwargs={"codex_home": str(tmp_path / ".codex"), **extra_kwargs},
         ),
-        ProviderRuntime(runtime_paths=paths, codex_default_instructions="Default Codex instructions."),
+        provider_runtime(paths, codex_default_instructions="Default Codex instructions."),
     )
     assert isinstance(adapter, ResponsesAdapter)
     return adapter
@@ -996,23 +1002,28 @@ def test_codex_session_headers_keep_authored_headers(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("provider", "model_id", "base_url", "expected"),
+    ("route", "model_id", "base_url", "expected"),
     [
-        ("codex", "gpt-5.6", None, True),
-        ("openai_codex", "openai-codex/gpt-5.6", None, True),
-        ("codex", "gpt-5.6-codex", None, True),
-        ("codex", "gpt-5.4-mini", None, True),
+        ("codex", "gpt-5.6", CODEX_BASE_URL, True),
+        ("codex", "gpt-5.6-codex", CODEX_BASE_URL, True),
+        ("codex", "gpt-5.4-mini", CODEX_BASE_URL, True),
         # Unreleased GPT versions default to the native path, including major-only spellings.
-        ("codex", "gpt-6.0", None, True),
-        ("codex", "gpt-6", None, True),
-        ("openai", "gpt-5.4", None, True),
-        ("openai", "gpt-5.3", None, False),
-        ("openai", "gpt-4o", None, False),
-        ("anthropic", "gpt-5.6", None, False),
+        ("codex", "gpt-6.0", CODEX_BASE_URL, True),
+        ("codex", "gpt-6", CODEX_BASE_URL, True),
+        ("codex", "gpt-6-astra", "http://localhost:9292/v1", True),
+        ("openai", "gpt-5.4", OPENAI_BASE_URL_DEFAULT, True),
+        ("openai", "gpt-5.3", OPENAI_BASE_URL_DEFAULT, False),
+        ("openai", "gpt-4o", OPENAI_BASE_URL_DEFAULT, False),
         ("openai", "gpt-6-astra", "http://localhost:9292/v1", False),
         ("openai", "gpt-6-astra", "https://api.openai.com/v1/", True),
     ],
 )
-def test_native_tool_search_gating(provider: str, model_id: str, base_url: str | None, *, expected: bool) -> None:
-    """The OpenAI API and Codex qualify from GPT-5.4 on; compatible endpoints do not opt into Responses search."""
-    assert openai_native_tool_search_supported(provider, model_id, base_url=base_url) is expected
+def test_native_tool_search_gating(
+    route: Literal["openai", "codex"],
+    model_id: str,
+    base_url: str,
+    *,
+    expected: bool,
+) -> None:
+    """The OpenAI API and Codex qualify from GPT-5.4 on; compatible OpenAI endpoints do not opt into Responses search."""
+    assert openai_native_tool_search_supported(route, model_id, base_url=base_url) is expected

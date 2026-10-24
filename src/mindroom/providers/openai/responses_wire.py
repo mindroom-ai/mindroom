@@ -41,7 +41,7 @@ from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from openai.types.responses import Response, ResponseStreamEvent, ResponseUsage
+    from openai.types.responses import Response, ResponseFunctionToolCall, ResponseStreamEvent, ResponseUsage
 
     from mindroom.llm.errors import ProviderError
     from mindroom.llm.messages import Message
@@ -76,13 +76,13 @@ _PORTABLE_KEY = "mindroom_portable_replay"
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResponsesWire:
-    """How one Responses route shapes requests: its storage setting and prompt-cache behavior."""
+    """How one Responses route shapes requests: its storage setting, prompt-cache behavior, and Codex instructions."""
 
     route: Literal["openai", "codex"]
-    provider_name: str
     store: bool | None
     explicit_breakpoint: bool
-    default_instructions: str | None = None
+    # Only Codex requests read it, as their instructions; the openai route carries the same prompt unused.
+    default_instructions: str
 
 
 def request_store(wire: ResponsesWire, request: ModelRequest) -> bool | None:
@@ -418,6 +418,16 @@ def _record_tool_search_items(parts: ResponsesTurnParts, output_items: Sequence[
         parts.provider_data.setdefault(TOOL_SEARCH_ITEMS_KEY, []).extend(items)
 
 
+def _function_call(item: ResponseFunctionToolCall) -> dict[str, Any]:
+    """Return a function-call output item as the turn's tool call, with the ``call_`` id its result references."""
+    return {
+        "id": item.id,
+        "call_id": item.call_id or item.id,
+        "type": "function",
+        "function": {"name": item.name, "arguments": item.arguments},
+    }
+
+
 def _incomplete_reason(response: Response) -> str | None:
     return None if response.incomplete_details is None else response.incomplete_details.reason
 
@@ -473,10 +483,11 @@ class ResponsesStream:
 
     An output item other than the model's own message, reasoning, or function call is a hosted tool at work, and
     its start is reported as such. ``text_as_reasoning`` also records the output text in the stored reasoning, in
-    event order with any summary text, kept as main behaves.
+    event order with any summary text, kept as main behaves. ``provider`` is the metrics provider name a failed
+    response's error carries.
     """
 
-    wire: ResponsesWire
+    provider: str
     store: bool | None
     portable_replay: bool
     native_compaction: NativeCompactionReplay | None
@@ -491,12 +502,12 @@ class ResponsesStream:
 
     def _failure(self, event: Any) -> ProviderError:  # noqa: ANN401 - SDK error event
         if event.type == "error":
-            return _response_error(event.code, event.message, provider=self.wire.provider_name)
+            return _response_error(event.code, event.message, provider=self.provider)
         failure = event.response.error
         return _response_error(
             failure.code if failure is not None else None,
             failure.message if failure is not None else None,
-            provider=self.wire.provider_name,
+            provider=self.provider,
         )
 
     def add(self, event: ResponseStreamEvent) -> list[StreamEvent]:  # noqa: C901 - one branch per event type
@@ -516,13 +527,7 @@ class ResponsesStream:
             self._reasoning.append(current.delta)
             events.append(ReasoningDelta(current.delta))
         elif event.type == "response.output_item.added" and current.item.type == "function_call":
-            item = current.item
-            self._tool_use = {
-                "id": item.id,
-                "call_id": item.call_id or item.id,
-                "type": "function",
-                "function": {"name": item.name, "arguments": item.arguments},
-            }
+            self._tool_use = _function_call(current.item)
         elif event.type == "response.function_call_arguments.delta" and self._tool_use:
             self._tool_use["function"]["arguments"] += current.delta
         elif event.type == "response.output_item.done":
@@ -595,33 +600,26 @@ def _reasoning_summary(response: Response) -> str:
 def parse_response(
     response: Response,
     *,
-    wire: ResponsesWire,
+    provider: str,
     store: bool | None,
     portable_replay: bool,
     native_compaction: NativeCompactionReplay | None,
     text_as_reasoning: bool,
 ) -> ResponsesTurnParts:
-    """Read one non-streamed response into a finished turn.
+    """Read one non-streamed response into a finished turn; ``provider`` is the metrics provider name of its error.
 
     ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary, kept as
     main behaves.
     """
     if response.error:
-        raise _response_error(response.error.code, response.error.message, provider=wire.provider_name)
+        raise _response_error(response.error.code, response.error.message, provider=provider)
     parts = ResponsesTurnParts()
     # The SDK's output union does not narrow on ``type``.
     for output in cast("list[Any]", response.output):
         if output.type == "message":
             parts.content = response.output_text
         elif output.type == "function_call":
-            parts.tool_calls.append(
-                {
-                    "id": output.id,
-                    "call_id": output.call_id or output.id,
-                    "type": "function",
-                    "function": {"name": output.name, "arguments": output.arguments},
-                },
-            )
+            parts.tool_calls.append(_function_call(output))
     parts.reasoning = _reasoning_summary(response) or (response.output_text if text_as_reasoning else None)
     # TODO(simplify): Only a blocking response stores response_status and incomplete_reason in provider_data, and
     # nothing reads them. Store them on neither path. Stored data.

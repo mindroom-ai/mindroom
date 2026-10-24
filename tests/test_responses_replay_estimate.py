@@ -277,7 +277,7 @@ def test_responses_unrecognized_webp_header_uses_conservative_allowance(tmp_path
 def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(tmp_path: Path) -> None:
     """A checkpoint keeps its opaque budget while new image input uses visual tokens."""
     adapter = responses_adapter(tmp_path, store=False)
-    native = adapter.native_compaction_settings(threshold=1024)
+    native = adapter.native_compaction_settings(threshold=1024, history_generation="", allow_authored=False)
     assert native is not None
     checkpoint = Message(role="assistant", content="Ready")
     record_native_checkpoint(
