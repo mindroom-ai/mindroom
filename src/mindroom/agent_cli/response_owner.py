@@ -1,4 +1,4 @@
-"""Bind one response's CLI owner and grant to a freshly prepared tool catalog."""
+"""Create an attempt's tool catalog, and bind the response's CLI owner and grant to it once prepared."""
 
 from __future__ import annotations
 
@@ -10,19 +10,48 @@ from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, cli_turn_owner
 from mindroom.agent_cli.shell_access import agent_cli_shell_env, minimal_shell_problems
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.approval.tool_owners import authorize_prepared_tool_call
+from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from mindroom.agent_cli.lifetime import CliTurnLifetime
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.spec import RunContext
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.llm.runs import RunRecord
     from mindroom.response_turn import ResponseTurnContext
-    from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding, PreparedAgentToolCatalog
+    from mindroom.run_storage import RunStorage
+    from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_access import ToolKey
 
-__all__ = ["bind_response_owner"]
+__all__ = ["bind_response_owner", "tool_catalog"]
+
+
+def tool_catalog(
+    build: AgentBuild,
+    *,
+    run: RunContext,
+    runtime: ToolRuntimeContext,
+    storage: RunStorage,
+    record: RunRecord | None = None,
+) -> PreparedAgentToolCatalog:
+    """Return an empty catalog for ``build``'s tools in run ``run``, under the build's tool-call policy and call limit.
+
+    ``record`` is the stored run an approval recovery continues; a live turn's catalog learns its run later.
+    """
+    return PreparedAgentToolCatalog(
+        agent_name=build.spec.id,
+        run=run,
+        runtime_context=runtime,
+        store=storage.store,
+        middleware=agent_tool_middleware(build),
+        max_tool_calls_per_turn=build.spec.max_tool_calls_per_turn,
+        record=record,
+    )
 
 
 def bind_response_owner(

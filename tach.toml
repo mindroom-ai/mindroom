@@ -443,6 +443,8 @@ depends_on = [
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.turn",
     "mindroom.approval.tool_owners",
+    "mindroom.tool_jobs.execution",
+    "mindroom.tool_system.agent_tool_calls",
 ]
 visibility = [
     "mindroom.agent_cli.cli_shell_agent",
@@ -453,6 +455,7 @@ visibility = [
 from = ["mindroom.agent_cli.response_owner"]
 expose = [
     "bind_response_owner",
+    "tool_catalog",
 ]
 
 [[modules]]
@@ -8555,8 +8558,7 @@ visibility = [
     "mindroom.agents",
     "mindroom.loop_hooks",
     # The CLI catalogs and a voice call's realtime tools run an agent's calls as its loop does.
-    "mindroom.agent_cli.cli_shell_agent",
-    "mindroom.agent_cli.minimal_agent",
+    "mindroom.agent_cli.response_owner",
     "mindroom.matrix_rtc.call_tools",
 ]
 
@@ -8722,7 +8724,6 @@ depends_on = [
     "mindroom.agent_cli.shell_access",
     "mindroom.approval.tool_approval",
     "mindroom.custom_tools.job",
-    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
@@ -8740,8 +8741,6 @@ depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.shell_contract",
-    "mindroom.tool_jobs.execution",
-    "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
     "mindroom.agent_loop.build",

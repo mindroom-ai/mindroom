@@ -136,6 +136,36 @@ def _call_and_wait(call_id: str, toolkit: str, function: str, arguments: dict[st
 
 
 @pytest.mark.asyncio
+async def test_cli_calls_count_against_the_agent_s_configured_call_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+) -> None:
+    """An agent's ``max_tool_calls_per_turn`` bounds the calls its shell makes through `mindroom-agent` as well."""
+    runtime = _helper_runtime(tmp_path, running_api)
+    runtime.config.agents["helper"].max_tool_calls_per_turn = 1
+    provider = ScriptedProvider()
+    provider.install(monkeypatch)
+    first, second = "00000000-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000004"
+    command = (
+        _call_and_wait(first, "calculator", "add", {"a": 2, "b": 3})
+        + "; "
+        + _call_and_wait(second, "calculator", "add", {"a": 4, "b": 5})
+    )
+    provider.steps = [[("run_shell_command", {"args": command})], "done"]
+
+    assert "done" in await _respond(runtime)
+
+    output = _tool_output(provider)
+    receipts = {
+        receipt["call_id"]: receipt
+        for receipt in (json.loads(line) for line in output.splitlines() if line.startswith("{"))
+    }
+    assert receipts[first]["status"] == "completed", output
+    assert (receipts[second]["status"], receipts[second]["outcome"]) == ("failed", "Tool call limit reached"), output
+
+
+@pytest.mark.asyncio
 async def test_nested_cli_shell_call_runs_inside_the_outer_window(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

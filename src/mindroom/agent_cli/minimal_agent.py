@@ -13,14 +13,12 @@ from typing import TYPE_CHECKING, NoReturn
 from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import current_cli_lifetime
-from mindroom.agent_cli.response_owner import bind_response_owner
+from mindroom.agent_cli.response_owner import bind_response_owner, tool_catalog
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
-from mindroom.tool_jobs.execution import agent_tool_middleware
-from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -36,6 +34,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.run_storage import RunStorage
+    from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 __all__ = [
@@ -170,15 +169,7 @@ async def prepare_minimal_catalog(
         raise MinimalModeUnavailableError(
             _failure(build, delegation_depth, "Minimal catalog requires its authenticated requester"),
         )
-    catalog = PreparedAgentToolCatalog(
-        agent_name=build.spec.id,
-        run=run,
-        runtime_context=runtime,
-        store=storage.store,
-        middleware=agent_tool_middleware(build),
-        max_tool_calls_per_turn=build.spec.max_tool_calls_per_turn,
-        record=record,
-    )
+    catalog = tool_catalog(build, run=run, runtime=runtime, storage=storage, record=record)
     try:
         await catalog.prepare(build.spec.toolkits, build.tool_owners)
         await catalog.connect(build.spec.toolkits)
