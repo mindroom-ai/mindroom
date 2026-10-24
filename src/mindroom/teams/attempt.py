@@ -221,7 +221,7 @@ class TeamAttempt:
             prices=model_prices(config, runtime_paths),
             model_name=self.runtime_model_name,
             run_id=record.run_id,
-            session_id=record.session_id or session_id,
+            session_id=session_id,
             status=status,
             model=record.model,
             model_provider=record.model_provider,
