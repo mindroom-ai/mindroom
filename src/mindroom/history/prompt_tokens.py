@@ -49,7 +49,7 @@ def build_static_token_estimator(
 
 
 def tool_definitions(tools: Sequence[ToolSpec], deferred_tool_names: frozenset[str]) -> list[dict[str, object]]:
-    """Return the fields each tool definition a request carries in full sets; tool search keeps deferred ones out."""
+    """Return each tool's set definition fields as a request carries them; tool search keeps deferred tools out."""
     return [
         {key: value for key, value in asdict(tool).items() if value is not None}
         for tool in tools

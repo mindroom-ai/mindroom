@@ -76,9 +76,9 @@ class _MidTurnCompaction:
 
     ``storage`` is where the run stores, and ``replay_plan`` is the plan its requests replay the scope's stored history
     under: a fold appends a summary row to the scope when they replay some, and a run that replays none keeps its
-    summary as a message of its own. ``prompt_id`` names the turn's prompt, which every fold keeps in place. Whether
-    the provider compacts natively, which a fallback changes, and which tools tool search defers are read from each
-    request.
+    summary as a message of its own. ``prompt_id`` names the turn's prompt, which every fold keeps in place. Each
+    request supplies whether the provider compacts natively, which a text fallback turns off for later requests, and
+    which tools tool search defers.
     """
 
     config: Config
