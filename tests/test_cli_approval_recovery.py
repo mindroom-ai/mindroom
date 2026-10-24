@@ -693,14 +693,14 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
         tool_name="run_shell_command",
         tool_args={"command": "echo folded"},
         result="folded shell output",
-        tool_call_error=False,
+        is_error=False,
     )
     nested = ToolExecution(
         tool_call_id="nested-call",
         tool_name="read_file",
         tool_args={"path": "notes.md"},
         result="nested tool output",
-        tool_call_error=False,
+        is_error=False,
     )
     # The fold took the earlier shell call out of the run's record and stored it on its summary row.
     store_fold(store, "session", HistoryScope(kind="agent", scope_id="helper"), "run", tools=[folded.to_dict()])

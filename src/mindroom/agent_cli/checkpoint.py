@@ -86,7 +86,7 @@ class BatchCheckpoint:
             tool_call_id=call_id,
             tool_name=call.function.name,
             tool_args=deepcopy(call.arguments),
-            tool_call_error=False,
+            is_error=False,
             result=result if isinstance(result, str) else result.content,
         )
         batch.messages.append(tool_result_message(execution, media=media))
@@ -122,7 +122,7 @@ class BatchCheckpoint:
                     tool_name=call.function.name,
                     tool_args=deepcopy(call.arguments),
                     result=result.get_content_string() if result is not None else None,
-                    tool_call_error=result.tool_call_error if result is not None else None,
+                    is_error=result.tool_call_error if result is not None else None,
                 )
             run.tools = [tool for tool in run.tools or () if tool.tool_call_id not in observed] + list(
                 observed.values(),

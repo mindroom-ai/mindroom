@@ -544,7 +544,7 @@ async def test_a_call_that_returns_a_stop_controls_only_its_own_invocation(tmp_p
     events = await _events(catalog, "control", "stop")
     assert events[-1].kind == "continuation_required"
     assert events[-1].execution.result == "stopped"
-    assert binding.function.stop_after_tool_call is False
+    assert binding.function.stop_after_call is False
 
 
 @pytest.mark.asyncio
@@ -559,7 +559,7 @@ async def test_generator_failure_is_terminal_and_does_not_leak_context(tmp_path:
     catalog = await _catalog(tmp_path, [_toolkit("stream", broken)])
     events = await _events(catalog, "stream", "broken")
     assert events[-1].kind == "failed"
-    assert events[-1].execution.tool_call_error
+    assert events[-1].execution.is_error
     assert get_tool_runtime_context() is None
 
 

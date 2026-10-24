@@ -245,7 +245,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
             denied = replace(
                 requirement.tool_execution,
                 result=result,
-                tool_call_error=True,
+                is_error=True,
                 requires_confirmation=False,
             )
             presentation.complete_tool(

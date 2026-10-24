@@ -107,7 +107,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                         == "alternate"
                     )
                 else:
-                    assert tool.tool_call_error
+                    assert tool.is_error
                     assert "background_after" in str(tool.result)
                     assert not started.is_set()
                     assert resolve_thread_model_override(paths, "$thread", config=config).active == {}

@@ -222,7 +222,7 @@ def _episode(
 
 
 def _tool_line(execution: ToolExecution, settings: KnowledgeGraphIngestConfig) -> str:
-    outcome = "error" if execution.tool_call_error else "result"
+    outcome = "error" if execution.is_error else "result"
     output = _clean(str(execution.result or ""), settings.max_tool_result_chars)
     # Clipped to half a result, so arguments and result together stay within an episode.
     arguments = tool_arguments(execution)[: settings.max_tool_result_chars // 2]

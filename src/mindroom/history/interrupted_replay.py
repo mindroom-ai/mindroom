@@ -77,7 +77,7 @@ def split_interrupted_tool_trace(
     completed: list[ToolTraceEntry] = []
     interrupted: list[ToolTraceEntry] = []
     for tool in tools or ():
-        if tool.result is None and tool.tool_call_error is None:
+        if tool.result is None and tool.is_error is None:
             _, trace_entry = format_tool_started_event(tool)
             traces = interrupted
         else:

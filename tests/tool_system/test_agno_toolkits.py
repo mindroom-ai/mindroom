@@ -180,7 +180,7 @@ def _what_the_loop_reads(function: Function) -> tuple[object, ...]:
     adapted = adapt_function(function)
     return (
         adapted.definition(),
-        adapted.stop_after_tool_call,
+        adapted.stop_after_call,
         adapted.external_execution_silent,
         adapted.entrypoint_processed,
         adapted.injected_params,

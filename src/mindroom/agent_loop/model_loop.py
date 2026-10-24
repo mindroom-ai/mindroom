@@ -341,7 +341,7 @@ async def _answer_resumed(
             results.extend(await dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware))
             yield ToolCompleted(execution)
         elif requirement.confirmation is False:
-            execution.tool_call_error = True
+            execution.is_error = True
             execution.requires_confirmation = False
             results.append(_rejection_message(requirement))
         if requirement.external_execution_result is not None:
@@ -361,7 +361,7 @@ def _rejection_message(requirement: RunRequirement) -> Message:
         tool_name=execution.tool_name,
         tool_args=execution.tool_args,
         tool_call_error=True,
-        stop_after_tool_call=execution.stop_after_tool_call,
+        stop_after_tool_call=execution.stop_after_call,
     )
 
 

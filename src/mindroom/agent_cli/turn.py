@@ -749,7 +749,7 @@ class LiveTurnTools(TurnToolBridge):
                     if event.kind == "waiting":
                         call.receipt = call.receipt.model_copy(update={"status": "waiting"})
                     if event.kind in {"completed", "failed", "continuation_required"} and event.execution is not None:
-                        status = "failed" if event.execution.tool_call_error else "completed"
+                        status = "failed" if event.execution.is_error else "completed"
                         result = event.execution.result
         except _StaleAttemptError as exc:
             status = "cancelled"

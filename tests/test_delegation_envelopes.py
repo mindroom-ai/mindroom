@@ -342,7 +342,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
     assert model.turns == []
     assert json.loads(run_path.read_text())["output"] == "Child finished the requested work."
     [approved] = [tool for tool in _child_tools(state.children[0], config, paths) if tool.tool_name == "add"]
-    assert not approved.tool_call_error
+    assert not approved.is_error
     assert "3" in str(approved.result)
     prompts = system_prompts(model)
     assert prompts

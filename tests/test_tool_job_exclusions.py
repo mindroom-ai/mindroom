@@ -115,7 +115,7 @@ async def test_an_excluded_shell_command_stops_at_its_timeout_without_a_job(
             timeout=1,
             args="echo $$ > started; while [ ! -f release ]; do sleep 0.01; done; printf 'native result'",
         )
-        assert not stopped.tool_call_error, stopped.result
+        assert not stopped.is_error, stopped.result
         assert str(stopped.result).endswith("Stopped after 1s.")
         with pytest.raises(ProcessLookupError):
             os.kill(int((tmp_path / "started").read_text()), 0)
@@ -140,7 +140,7 @@ async def test_empty_exclusion_list_includes_shell(shell_runtime: _ShellRuntime)
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
     result, schemas = await _invoke(actor, "run_shell_command", args="printf 'managed shell'")
-    assert not result.tool_call_error
+    assert not result.is_error
     assert "managed shell" in str(result.result)
     assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
     assert "background_after" in schemas["run_shell_command"]["properties"]
@@ -151,7 +151,7 @@ async def test_shell_rejects_extra_wait_before_side_effect(tmp_path: Path, shell
     """A stale model call cannot silently create a second shell execution owner."""
     actor, runtime, owner, _ = shell_runtime
     result, _ = await _invoke(actor, "run_shell_command", args="echo wrong > unexpected", background_after=0)
-    assert result.tool_call_error
+    assert result.is_error
     assert "background_after" in str(result.result)
     assert not (tmp_path / "unexpected").exists()
     assert await runtime.list_jobs(owner=owner, depth=0) == []
@@ -263,7 +263,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
             async with execution_resources():
                 if not excluded:
                     rejected, _ = await _invoke(actor, "native_step", background_after=3)
-                    assert rejected.tool_call_error
+                    assert rejected.is_error
                     assert "exclude_toolkits" in str(rejected.result)
                     assert not (plugin / "executions").exists()
                     assert await runtime.list_jobs(owner=owner, depth=0) == []
@@ -274,10 +274,10 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 lifecycle.record_applied(config)
                 assert lifecycle.status.status == "restart_required"
                 step, _ = await _invoke(actor, "native_step", background_after=3)
-                assert not step.tool_call_error
+                assert not step.is_error
                 assert step.result == "step:3"
                 status, schemas = await _invoke(actor, "native_status")
-                assert not status.tool_call_error
+                assert not status.is_error
                 for name in toolkit.get_async_functions():
                     properties = schemas[name]["properties"]
                     if name == "native_step":
@@ -290,7 +290,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 instance = pin_background_tool_jobs(config, paths)
                 register_background_runtime(paths, runtime)
                 rejected, _ = await _invoke(actor, "native_step", background_after=3)
-                assert rejected.tool_call_error
+                assert rejected.is_error
                 assert "exclude_toolkits" in str(rejected.result)
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:

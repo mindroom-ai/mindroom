@@ -822,7 +822,7 @@ async def test_a_resumed_batch_whose_result_stops_the_run_ends_it_without_anothe
     async def entry(*_hook_arguments: object) -> None:
         seen.append("resume hook")
 
-    switch = toolkit(switch_thread_model, name="thread_model", stop_after_tool_call=True)
+    switch = toolkit(switch_thread_model, name="thread_model", stop_after_call=True)
     switch_call = tool_call("switch_thread_model", "c-switch", model_name="opus")
     if stopping == "approved":
         tools = replace(switch, functions=tuple(replace(f, requires_confirmation=True) for f in switch.functions))
@@ -843,7 +843,7 @@ async def test_a_resumed_batch_whose_result_stops_the_run_ends_it_without_anothe
             tool_name="switch_thread_model",
             tool_args={"model_name": "opus"},
             result="switched to opus",
-            stop_after_tool_call=True,
+            stop_after_call=True,
         )
         paused = _paused_record(switched, _gated_add())
         paused.messages[1] = Message(role="assistant", tool_calls=[switch_call, tool_call("add", "c1", a=1, b=2)])

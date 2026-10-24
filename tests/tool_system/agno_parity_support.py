@@ -290,7 +290,7 @@ def golden_entry(toolkit: Toolkit, adapted: AdaptedToolkit) -> dict[str, object]
                 "requires_confirmation": function.requires_confirmation,
                 "external_execution": function.external_execution,
                 "approval_type": function.approval_type,
-                "stop_after_tool_call": function.stop_after_tool_call,
+                "stop_after_tool_call": function.stop_after_call,
                 "show_result": agno_function.show_result,
             }
             for function, agno_function in zip(adapted.functions, agno_functions, strict=True)

@@ -113,7 +113,7 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
         assert record.tools is not None
         results = {tool.tool_name: tool for tool in record.tools}
         assert set(results) == set(_SDK_FUNCTIONS)
-        assert all(not tool.tool_call_error for tool in results.values())
+        assert all(not tool.is_error for tool in results.values())
         assert "Knowledge about tea" in str(results["search_knowledge_base"].result)
         assert "# Body" in str(results["get_skill_instructions"].result)
         schemas = {definition.name: definition.parameters for definition in model.requests[0].tools}

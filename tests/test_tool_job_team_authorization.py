@@ -292,7 +292,7 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
             with tool_execution_identity(child_owner):
                 response = await _add(member, child.session_id)
                 assert response.tools is not None
-                assert not response.tools[0].tool_call_error
+                assert not response.tools[0].is_error
                 return BackgroundOutcome("completed", response.tools[0].result)
 
     try:

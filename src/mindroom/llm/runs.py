@@ -8,7 +8,7 @@ decode without migration; keys the records do not model are ignored on read.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from time import time
@@ -16,7 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from mindroom.llm.messages import Message
-from mindroom.llm.usage import RunMetrics, ToolCallMetrics, known_fields
+from mindroom.llm.usage import RunMetrics, ToolCallMetrics
 from mindroom.redaction import redact_sensitive_text
 
 
@@ -45,6 +45,10 @@ class RunStatus(StrEnum):
     regenerated = "REGENERATED"
 
 
+# The stored keys of the tool-execution fields whose names differ from them.
+_STORED_TOOL_KEYS = {"is_error": "tool_call_error", "stop_after_call": "stop_after_tool_call"}
+
+
 @dataclass(kw_only=True)
 class ToolExecution:
     """One tool call the model requested, with its outcome or pause state."""
@@ -52,11 +56,11 @@ class ToolExecution:
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_args: dict[str, Any] | None = None
-    tool_call_error: bool | None = None
+    is_error: bool | None = None
     result: str | None = None
     metrics: ToolCallMetrics | None = None
     child_run_id: str | None = None
-    stop_after_tool_call: bool = False
+    stop_after_call: bool = False
     created_at: int = field(default_factory=_now)
     requires_confirmation: bool | None = None
     confirmed: bool | None = None
@@ -71,15 +75,16 @@ class ToolExecution:
         return bool(self.requires_confirmation or self.external_execution_required)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: every field, None included, kept as main writes it."""
+        """Return the stored dict: every field, None included, under its stored key, kept as main writes it."""
         values = asdict(self)
         values["metrics"] = self.metrics.to_dict() if self.metrics is not None else None
-        return values
+        return {_STORED_TOOL_KEYS.get(name, name): value for name, value in values.items()}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolExecution:
         """Rebuild from a stored dict, ignoring keys this type does not model; an absent key keeps its default."""
-        values = known_fields(cls, data)
+        names = {_STORED_TOOL_KEYS.get(item.name, item.name): item.name for item in fields(cls)}
+        values = {names[key]: value for key, value in data.items() if key in names}
         metrics = values.pop("metrics", None)
         return cls(**values, metrics=ToolCallMetrics.from_dict(metrics) if metrics else None)
 

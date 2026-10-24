@@ -212,7 +212,7 @@ async def _append_response_events(
     pending_approval = False
     for tool in response.tools or ():
         await _append_tool_call(owner, handle, tool, run_id=run_id)
-        if tool.result is not None or tool.tool_call_error:
+        if tool.result is not None or tool.is_error:
             await _append_tool_result(owner, handle, tool, run_id=run_id)
         if response.status == RunStatus.paused and tool.requires_confirmation:
             pending_approval = True
@@ -373,7 +373,7 @@ async def _append_tool_result(
                 "tool_call_id": tool.tool_call_id,
                 "tool_name": tool.tool_name,
                 "result": tool.result,
-                "tool_call_error": tool.tool_call_error,
+                "tool_call_error": tool.is_error,
             },
         ),
     )

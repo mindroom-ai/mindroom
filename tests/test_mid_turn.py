@@ -561,7 +561,7 @@ async def test_real_tool_loop_judges_before_next_provider_request(
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
     state.mid_turn_gate = gate
     model = ScriptedModel([calls(tool_call("queue_followup", "call_1")), answer("Done")])
-    tools = toolkit(queue_followup, stop_after_tool_call=True) if terminal else toolkit(queue_followup)
+    tools = toolkit(queue_followup, stop_after_call=True) if terminal else toolkit(queue_followup)
     with queued_message_signal_context(state, mid_turn_gate=gate) as context:
         await _run_turn(model, tools, stream=stream)
         assert context.notice_fired is (not finish and not terminal)

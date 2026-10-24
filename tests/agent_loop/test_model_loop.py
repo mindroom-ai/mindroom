@@ -200,7 +200,7 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     assert [tool.tool_call_id for tool in started] == ["c1", "c2"] == [tool.tool_call_id for tool in completed]
     assert record.tools is not None
     assert [tool is entry for tool, entry in zip(started, record.tools, strict=True)]
-    assert [(tool.result, tool.tool_call_error) for tool in completed] == [('{"sum": 5}', False), ("yo", False)]
+    assert [(tool.result, tool.is_error) for tool in completed] == [('{"sum": 5}', False), ("yo", False)]
     assert record.content == "Checking. 2 + 3 = 5."
     assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool", "assistant"]
     assert [m.tool_call_id for m in messages if m.role == "tool"] == ["c1", "c2"]
@@ -283,12 +283,12 @@ async def test_a_stop_after_tool_call_ends_the_loop_without_another_request() ->
     model = ScriptedModel([calls(tool_call("echo", "c1", text="switch"), metrics=usage(1, 1)), answer("never sent")])
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(echo, stop_after_tool_call=True)), messages)
+    events, record = await _run(spec(model, toolkit(echo, stop_after_call=True)), messages)
 
     assert len(model.requests) == 1
     assert events[-1] == LoopEnded(paused=False)
     assert record.tools is not None
-    assert record.tools[0].stop_after_tool_call is True
+    assert record.tools[0].stop_after_call is True
     assert messages[-1].role == "tool"
     assert messages[-1].stop_after_tool_call is True
 
@@ -308,7 +308,7 @@ async def test_a_batch_that_stops_the_run_skips_the_batch_hooks_as_agno_did() ->
     )
 
     await _run(
-        spec(model, toolkit(add), toolkit(echo, name="stopper", stop_after_tool_call=True)),
+        spec(model, toolkit(add), toolkit(echo, name="stopper", stop_after_call=True)),
         _prompt(),
         hooks=LoopHooks(after_tool_batch=(after_batch,)),
     )
@@ -362,7 +362,7 @@ async def test_a_confirmation_pause_announces_the_call_records_a_requirement_and
     assert record.tools is not None
     assert record.requirements is not None
     plain, paused = record.tools
-    assert (plain.result, plain.tool_call_error, plain.is_paused) == ("fine", False, False)
+    assert (plain.result, plain.is_error, plain.is_paused) == ("fine", False, False)
     assert paused.to_dict() == {
         **paused.to_dict(),
         "tool_call_id": "c2",
@@ -577,7 +577,7 @@ async def test_a_tool_exception_is_an_error_result_not_a_failed_loop() -> None:
 
     assert events[-1] == LoopEnded(paused=False)
     assert record.tools is not None
-    assert (record.tools[0].result, record.tools[0].tool_call_error) == ("kaboom", True)
+    assert (record.tools[0].result, record.tools[0].is_error) == ("kaboom", True)
     assert (messages[3].content, messages[3].tool_call_error) == ("kaboom", True)
 
 

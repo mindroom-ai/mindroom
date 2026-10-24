@@ -172,7 +172,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         assert effects == ["outer-0"]
         # The control ends the run after its batch, so no further request is sent.
         assert record.content is None
-        assert [item.stop_after_tool_call for item in results] == [True, True]
+        assert [item.stop_after_call for item in results] == [True, True]
         first, second = [await owner.get_call(item["call_id"]) for item in receipts]
         assert first["status"] == ("failed" if raises else "completed")
         assert first["outcome"] == ("switch rejected" if raises else payload)

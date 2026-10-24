@@ -312,7 +312,7 @@ def _failure(
             tool_call_id=call_id,
             tool_name=binding.key.function,
             tool_args=arguments,
-            tool_call_error=True,
+            is_error=True,
             result=message,
         ),
     )
@@ -469,8 +469,8 @@ async def _execute_agent_tool_call(
         finally:
             await _settle_call(binding, tracker)
         execution.result = outcome.content
-        execution.tool_call_error = outcome.is_error
-        execution.stop_after_tool_call = outcome.stop_after_call
+        execution.is_error = outcome.is_error
+        execution.stop_after_call = outcome.stop_after_call
         if outcome.images or outcome.audios or outcome.videos or outcome.files:
             yield AgentToolCallEvent("media", call_id, binding.key, media=outcome)
         kind = "continuation_required" if outcome.stop_after_call else "failed" if outcome.is_error else "completed"

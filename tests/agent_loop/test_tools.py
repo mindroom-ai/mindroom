@@ -219,7 +219,7 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
     ]
     for call, result in zip(batch.planned, results, strict=True):
         execution = call.execution
-        assert (execution.result, execution.tool_call_error) == (result.content, False)
+        assert (execution.result, execution.is_error) == (result.content, False)
         assert execution.metrics is not None
         assert execution.metrics.duration is not None
         assert execution.metrics.duration > 0

@@ -266,7 +266,7 @@ async def test_registered_sync_tool_completes_through_the_loop(
                     assert waited.job.status == "completed", waited.job.result
                     assert "registered sync result" in waited.job.result
                 if background_after is None:
-                    assert not tool.tool_call_error, tool.result
+                    assert not tool.is_error, tool.result
                     assert "registered sync result" in str(tool.result)
                 else:
                     assert json.loads(str(tool.result))["job_id"] == jobs[0].job_id
@@ -314,7 +314,7 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
                 assert record.tools is not None
                 tool = record.tools[0]
                 if not managed:
-                    assert not tool.tool_call_error, tool.result
+                    assert not tool.is_error, tool.result
                     assert str(tool.result).splitlines() == expected
                     return
                 job_id = json.loads(str(tool.result))["job_id"]
@@ -788,7 +788,7 @@ async def test_a_cancel_of_an_ended_job_does_not_replay_its_outcome(tmp_path: Pa
                 )
 
         record = await cancel()
-        assert not record.tools[0].tool_call_error
+        assert not record.tools[0].is_error
         assert json.loads(str(record.tools[0].result))["job_id"] == job.job_id
         session = storage.load_session(context.session_id, "agent")
         assert session is not None
@@ -1075,10 +1075,10 @@ async def test_a_call_that_ran_never_reads_as_one_that_did_not(
         [tool] = record.tools
         assert ran == ["created"]
         if result == "driver_type":
-            assert not tool.tool_call_error
+            assert not tool.is_error
             assert "2026-10-10 00:00:00+00:00" in str(tool.result)
         else:
-            assert tool.tool_call_error
+            assert tool.is_error
             assert "The call ran" in str(tool.result)
             assert "do not call it again" in str(tool.result)
     finally:
@@ -1164,7 +1164,7 @@ async def test_a_call_whose_access_resolves_during_its_wait_returns_its_handle(t
                 record = await run_job_turn(job_actor(job_tool(pay)), model, "Pay")
         [tool] = record.tools
         assert ran == ["paid"]
-        assert not tool.tool_call_error
+        assert not tool.is_error
         handle = json.loads(str(tool.result))
         assert handle["tool"] == "pay"
         await wait_for_status(runtime, handle["job_id"], "completed")
@@ -1218,7 +1218,7 @@ async def test_a_refused_job_fails_its_call_not_the_reply(
             assert defer_execution_cleanup(cleanup) is False
         assert record.status is RunStatus.completed
         assert record.content == "done"
-        assert record.tools[0].tool_call_error
+        assert record.tools[0].is_error
         assert ran == []
         # A job the runtime refused finishes the record its call opened; a call refused before admission opens none.
         assert [entry[0] for entry in recorder.records] == (["started", "finished"] if refusal == "start" else [])
@@ -1336,7 +1336,7 @@ async def test_a_call_whose_wait_is_refused_leaves_its_job_to_be_reported(
         async with execution_resources():
             with tool_runtime_context(context):
                 record = await run_job_turn(job_actor(job_tool(slow_tool)), model, "Go")
-        assert record.tools[0].tool_call_error
+        assert record.tools[0].is_error
         (job,) = runtime.retained_jobs()
         gate.set()
         await wait_for_status(runtime, job.job_id, "completed")

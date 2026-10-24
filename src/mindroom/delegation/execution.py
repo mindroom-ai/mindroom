@@ -572,7 +572,7 @@ def _settle_pending_child_tools(
         cancelled_tool.requires_confirmation = False
         cancelled_tool.external_execution_required = False
         cancelled_tool.result = reason
-        cancelled_tool.tool_call_error = True
+        cancelled_tool.is_error = True
         on_event(ToolCompleted(cancelled_tool))
 
 
@@ -1062,7 +1062,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # An excluded delegate toolkit runs its child natively, outside the job runtime.
         background = None
         if BACKGROUND_AFTER in (tool.tool_args or {}):
-            tool.tool_call_error = True
+            tool.is_error = True
             return resolve_result(f"{BACKGROUND_AFTER} is unavailable for the excluded delegate toolkit.")
     try:
         background_after = read_background_after(
@@ -1070,7 +1070,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             owned_execution=job_owns_execution() or delegation_depth > 0,
         )
     except ValueError as error:
-        tool.tool_call_error = True
+        tool.is_error = True
         return resolve_result(str(error))
     args = application_arguments(tool.tool_args)
     target = await _resolve_delegation_target(

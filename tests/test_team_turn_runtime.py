@@ -880,7 +880,7 @@ async def test_a_denied_member_call_never_runs_and_the_member_answers_the_denial
     assert team.models["checker-model"].requests[-1].messages[-1].content == "Declined by requester"
     _, [member] = team.stored_runs()
     assert member.tools is not None
-    assert (member.tools[0].confirmed, member.tools[0].tool_call_error) == (False, True)
+    assert (member.tools[0].confirmed, member.tools[0].is_error) == (False, True)
 
 
 async def _writer_unavailable() -> None:

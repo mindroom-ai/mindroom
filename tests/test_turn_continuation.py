@@ -25,7 +25,7 @@ def _model_switch_execution(when: str, *, model_name: str = "large") -> ToolExec
                 "when": when,
             },
         ),
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
 
@@ -74,7 +74,7 @@ def test_failed_model_switch_resumes_with_current_model() -> None:
                 "tool": "thread_model",
             },
         ),
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
     decision = continuation_decision_from_tools(
@@ -97,7 +97,7 @@ def test_malformed_model_switch_result_resumes_with_current_model() -> None:
         tool_name="switch_thread_model",
         tool_args={"model_name": "large", "when": "after-toolcall"},
         result="not-json",
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
     decision = continuation_decision_from_tools(
@@ -127,7 +127,7 @@ def test_latest_successful_model_switch_wins_over_later_rejection() -> None:
                 "tool": "thread_model",
             },
         ),
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
     decision = continuation_decision_from_tools(

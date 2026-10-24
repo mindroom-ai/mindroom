@@ -152,7 +152,7 @@ def _model_switch_execution(when: str) -> ToolExecution:
                 "when": when,
             },
         ),
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
 
 

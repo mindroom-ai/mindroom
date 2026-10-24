@@ -353,7 +353,7 @@ async def test_a_leader_level_approval_whose_call_stops_the_run_sends_the_leader
         name="job_controls",
         requires_confirmation=True,
         approval_type="mindroom_policy",
-        stop_after_tool_call=True,
+        stop_after_call=True,
     )
     team = squad(leader, scripted("writer-model"), scripted("checker-model"), leader_toolkits=(stopping,))
     _, paused = await collect(
@@ -373,7 +373,7 @@ async def test_a_leader_level_approval_whose_call_stops_the_run_sends_the_leader
 
     assert record.status is RunStatus.completed
     assert record.tools is not None
-    assert (record.tools[0].result, record.tools[0].stop_after_tool_call) == ("hello", True)
+    assert (record.tools[0].result, record.tools[0].stop_after_call) == ("hello", True)
     # Only the request that asked for the call; the resume sends none.
     assert len(leader.requests) == 1
 
