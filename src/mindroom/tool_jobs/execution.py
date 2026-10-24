@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState
     from mindroom.llm.provider import ToolSpec
     from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
-    from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
+    from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -364,8 +364,19 @@ async def _run_managed_call(
     # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
     record_return = await record_call(call.function.name, dict(detached.arguments))
     reference = resources.acquire()
-    approval = _job_approval(runtime, job_id, detached, owner, context) if job_approval else None
 
+    async def ask_approval() -> tuple[bool, str | None]:
+        # The policy and approver current when the job asks decide, as for a paused reply.
+        return await ask_tool_call_approval(
+            runtime,
+            job_id,
+            detached,
+            owner=owner,
+            config=context.current_config,
+            runtime_paths=context.runtime_paths,
+        )
+
+    approval = ask_approval if job_approval else None
     claim = None
     retained = False
     try:
@@ -393,8 +404,16 @@ async def _run_managed_call(
         if waited.claim is None:
             value, error = format_job_handle(waited.job), None
         else:
-            value, error = await _consume_result(runtime, waited.job, waited.claim, job_call)
+            value, payload = await consume_tool_job(
+                runtime,
+                waited.job,
+                waited.claim,
+                job_call=job_call,
+                returned_inline=True,
+            )
             retained = True
+            # Every outcome but completion tells the model why, such as the reason an approval was denied.
+            error = None if waited.job.status == "completed" else payload.error or waited.job.result or ""
         # A released wait's call returned its job handle, which names the job a restart's account points to.
         await record_return(value if error is None else error)
     except JobAccessError as refused:
@@ -409,25 +428,6 @@ async def _run_managed_call(
     if error is not None:
         raise _JobCallError(error)
     return value
-
-
-def _job_approval(
-    runtime: ToolJobRuntime,
-    job_id: str,
-    call: JobCall,
-    owner: ToolExecutionIdentity,
-    context: ToolRuntimeContext,
-) -> _AskApproval:
-    """Ask for a gated call's approval as its job, on the frozen call the job then runs."""
-    # The policy and approver current when the job asks decide, as for a paused reply.
-    return lambda: ask_tool_call_approval(
-        runtime,
-        job_id,
-        call,
-        owner=owner,
-        config=context.current_config,
-        runtime_paths=context.runtime_paths,
-    )
 
 
 async def _run_operation(
@@ -505,20 +505,6 @@ def _saved_outcome(
         return BackgroundOutcome("failed", result=failure, result_payload=encoded)
     text = value.content if isinstance(value, ToolValue) else str(value)
     return BackgroundOutcome("completed", result=text, result_payload=encoded)
-
-
-async def _consume_result(
-    runtime: ToolJobRuntime,
-    job: BackgroundJob,
-    claim: JobClaim,
-    call: JobCall,
-) -> tuple[object, str | None]:
-    """Read the outcome a managed call's job left for it: what the call returned, and why it did not complete."""
-    value, payload = await consume_tool_job(runtime, job, claim, job_call=call, returned_inline=True)
-    if job.status == "completed":
-        return value, None
-    # Every outcome but completion tells the model why, such as the reason an approval was denied.
-    return value, payload.error or job.result or ""
 
 
 __all__ = [
