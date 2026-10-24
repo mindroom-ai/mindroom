@@ -350,7 +350,6 @@ async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_
 def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedExactTeamMembers:
     """Materialize the code and research members on scripted providers, as a team reply does."""
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     members = materialize_exact_team_members(
         ["code", "research"],
         config=config,

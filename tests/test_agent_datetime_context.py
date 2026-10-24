@@ -151,7 +151,6 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
     config.timezone = "UTC"
     runtime_paths = runtime_paths_for(config)
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
         members = materialize_exact_team_members(

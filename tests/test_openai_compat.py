@@ -4612,7 +4612,6 @@ class TestTeamCompletion:
             team_name="coord_team",
         )
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
         assert scope_context is not None
         members, built, built_mode = openai_compat._build_team(
             "coord_team",
@@ -4658,7 +4657,6 @@ class TestTeamCompletion:
             execution_identity=execution_identity,
             team_name="super_team",
         )
-        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
         assert scope_context is not None
         members, _built, mode = openai_compat._build_team(
