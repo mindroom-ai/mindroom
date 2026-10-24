@@ -2083,6 +2083,28 @@ class TestConfigValidate:
         assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
         assert "CLOUD_ML_REGION" in result.output
 
+    @pytest.mark.parametrize("provider", ["gemini", "Gemini"])
+    def test_validate_names_the_google_key_for_a_gemini_model(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+    ) -> None:
+        """Config validate asks for GOOGLE_API_KEY for a model whose provider is ``gemini``, in any letter case."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            f"models:\n  default:\n    provider: {provider}\n    id: gemini-3.8-flash\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY_FILE", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert f"{provider}: Set GOOGLE_API_KEY" in normalize_console_output(result.output)
+
     def test_validate_warns_for_missing_bedrock_claude_region(
         self,
         tmp_path: Path,
