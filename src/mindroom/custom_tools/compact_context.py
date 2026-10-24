@@ -51,7 +51,7 @@ class CompactContextTools(Toolkit):
         if session_id is None:
             return "Error: No active session available. Cannot determine session."
 
-        return request_compaction_before_next_reply(
+        return await request_compaction_before_next_reply(
             scope=scope,
             agent_name=self._agent_name,
             session_id=session_id,

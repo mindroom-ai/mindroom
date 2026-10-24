@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
-from mindroom.history.session_context import load_scope_session
-from mindroom.history.storage import add_pending_force_compaction_scope, update_scope_state_on_latest
+from mindroom.history.session_context import create_scope_session_storage
+from mindroom.history.storage import add_pending_force_compaction_scope, new_scope_session, update_scope_state_on_latest
 from mindroom.logging_config import get_logger
+from mindroom.session_storage.lanes import run_session_storage_operation
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -20,7 +22,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def request_compaction_before_next_reply(
+async def request_compaction_before_next_reply(
     *,
     scope: HistoryScope,
     agent_name: str,
@@ -38,17 +40,6 @@ def request_compaction_before_next_reply(
     Return the message the caller reports. When ``session_state``, the dict the run's tools share, is given, the
     request is also recorded in it, in place.
     """
-    scope_context = load_scope_session(
-        scope=scope,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        create_session_if_missing=True,
-    )
-    if scope_context is None:
-        return "Error: Current agent has no history scope. Cannot compact context."
-
     # An agent scope's id is its agent; an ad-hoc team has no authored settings of its own.
     entity_name = scope.scope_id if scope.kind == "agent" or scope.scope_id in config.teams else None
     runtime_model = config.resolve_runtime_model(
@@ -69,21 +60,29 @@ def request_compaction_before_next_reply(
     if unavailable is not None:
         return f"Error: Compaction is unavailable for this scope because {unavailable}."
 
-    session = scope_context.session
-    # create_session_if_missing gives a scope without a stored session its first one.
-    assert session is not None
-    update_scope_state_on_latest(
-        scope_context.storage,
-        session=session,
-        scope=scope_context.scope,
-        update=lambda latest: replace(latest, force_compact_before_next_run=True),
+    # The flag merges into the metadata the stored row holds, in the database's lane as the session's other writes
+    # run; a new session names that row, which the write creates when the scope has none yet.
+    await run_session_storage_operation(
+        partial(
+            create_scope_session_storage,
+            scope=scope,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        ),
+        partial(
+            update_scope_state_on_latest,
+            session=new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team"),
+            scope=scope,
+            update=lambda latest: replace(latest, force_compact_before_next_run=True),
+        ),
     )
 
     if session_state is not None:
-        add_pending_force_compaction_scope(session_state, scope_context.scope)
+        add_pending_force_compaction_scope(session_state, scope)
     logger.info(
         "Manual compaction scheduled",
         agent=agent_name,
-        scope=scope_context.scope.key,
+        scope=scope.key,
     )
     return "Compaction will run before the next reply in this conversation scope."

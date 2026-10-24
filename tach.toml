@@ -2614,6 +2614,7 @@ depends_on = [
     "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.logging_config",
+    "mindroom.session_storage.lanes",
 ]
 
 [[modules]]
