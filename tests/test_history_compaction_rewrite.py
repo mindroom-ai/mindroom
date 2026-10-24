@@ -226,6 +226,33 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
     assert estimate_compaction_input_tokens(summary_input) <= tight_budget
 
 
+def test_build_summary_input_leaves_the_stored_runs_unchanged() -> None:
+    """The summary input reads stored messages without copying them, so it must not strip their thinking."""
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="user", content="old question"),
+            Message(
+                role="assistant",
+                content="old answer",
+                reasoning_content="old thinking",
+                provider_data={"signature": "sig-old"},
+            ),
+            Message(role="user", content="current question"),
+        ],
+    )
+    stored = deepcopy(run.messages)
+
+    build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=1_000_000,
+        history_settings=_ALL_HISTORY_SETTINGS,
+    )
+
+    assert run.messages == stored
+
+
 @pytest.mark.asyncio
 async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)

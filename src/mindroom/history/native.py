@@ -102,9 +102,10 @@ def _restored_portable_replay(message: Message | None) -> bool:
     # Legacy format: an assistant message whose ``provider_data`` has no boolean ``mindroom_portable_replay``; a reply
     # that did not complete is still stored that way.
     # Last legacy release: v2026.9.134; replacement: v2026.9.135 records the policy on every completed reply.
-    # Handling: the original budget cannot always be recovered, so the resume replays portably only when the reply
-    # was not stored, recorded native-compaction settings, or holds encrypted reasoning among its ordered output
-    # items, and otherwise continues the stored response.
+    # Handling: the original budget cannot always be recovered, so the resume replays portably only when the
+    # provider did not store the response (``mindroom_response_stored`` is false), the reply recorded native-compaction
+    # settings, or it holds encrypted reasoning among its ordered output items, and otherwise continues the stored
+    # response.
     # Coverage: tests/test_native_compaction_history.py::test_restore_portable_policy_requires_latest_provenance
     items = data.get("mindroom_response_output")
     has_ordered_reasoning = (

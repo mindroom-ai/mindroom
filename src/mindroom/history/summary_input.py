@@ -243,11 +243,7 @@ def messages_for_runs(
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
     """Copy and sanitize conversation messages for portable compaction hooks."""
-    messages: list[Message] = []
-    for run in runs:
-        copies = [deepcopy(message) for message in _compaction_replay_messages(run, history_settings)]
-        strip_stale_anthropic_replay_fields(copies)
-        messages.extend(copies)
+    messages = [deepcopy(message) for run in runs for message in _compaction_replay_messages(run, history_settings)]
     strip_stale_anthropic_replay_fields(messages)
     return messages
 
