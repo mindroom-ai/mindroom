@@ -383,6 +383,8 @@ async def test_open_streamable_http_rejects_metadata_transport_url(
     [
         ("http://127.0.0.1:8000/mcp", "private_address"),
         ("http://localhost:8000/mcp", "private_hostname"),
+        ("http://mcp.localhost:8000/mcp", "private_hostname"),
+        ("http://mcp.tools.svc.cluster.local:8000/mcp", "private_hostname"),
         ("http://169.254.1.1/mcp", "blocked_address"),
         ("http://169.254.169.254/latest/meta-data/", "metadata_address"),
     ],
@@ -392,7 +394,7 @@ async def test_mcp_http_client_factory_rejects_unsafe_request_url(
     request_url: str,
     reason: str,
 ) -> None:
-    """The MCP HTTP client validates every request URL, redirects included, even with private networks allowed."""
+    """The MCP HTTP client refuses unsafe request URLs, with or without private networks allowed."""
     async with _server_fetch_mcp_http_client(
         follow_redirects=False,
         verify=False,
@@ -481,18 +483,27 @@ async def test_sdk_http_client_dials_only_the_validated_address(
     assert dialed == [("93.184.216.34", 443)]
 
 
-def _internal_url(transport: MCPTransport) -> str:
-    return f"http://internal-mcp:8000/{'sse' if transport == 'sse' else 'mcp'}"
+def _internal_url(transport: MCPTransport, host: str = "internal-mcp") -> str:
+    return f"http://{host}:8000/{'sse' if transport == 'sse' else 'mcp'}"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["sse", "streamable-http"])
+@pytest.mark.parametrize(
+    ("host", "dialed_host"),
+    [("internal-mcp", "10.0.0.5"), ("10.0.0.5", "10.0.0.5"), ("[fd12::5]", "fd12::5")],
+)
 async def test_private_network_server_is_refused_unless_it_opts_in(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     transport: MCPTransport,
+    host: str,
+    dialed_host: str,
 ) -> None:
-    """A cluster-internal hostname that resolves to a private address is refused by default, dialed after opting in."""
+    """A private server, by name or address literal, is refused by default and dialed after opting in.
+
+    An address literal also passes the per-request URL check, which does not resolve names.
+    """
     dialed: list[tuple[str, int]] = []
 
     async def record_connect(_backend: object, host: str, port: int, *_args: object, **_kwargs: object) -> object:
@@ -502,12 +513,12 @@ async def test_private_network_server_is_refused_unless_it_opts_in(
 
     monkeypatch.setattr(
         "mindroom.server_fetch_url.socket.getaddrinfo",
-        lambda *_args, **_kwargs: _addrinfo("10.60.16.5"),
+        lambda *_args, **_kwargs: _addrinfo("10.0.0.5"),
     )
     monkeypatch.setattr(AnyIOBackend, "connect_tcp", record_connect)
     default = build_transport_handle(
         "demo",
-        MCPServerConfig(transport=transport, url=_internal_url(transport)),
+        MCPServerConfig(transport=transport, url=_internal_url(transport, host)),
         _runtime_paths(tmp_path),
     )
     with pytest.raises(ServerFetchUrlError) as exc_info:
@@ -517,14 +528,14 @@ async def test_private_network_server_is_refused_unless_it_opts_in(
 
     opted_in = build_transport_handle(
         "demo",
-        MCPServerConfig(transport=transport, url=_internal_url(transport), allow_private_network=True),
+        MCPServerConfig(transport=transport, url=_internal_url(transport, host), allow_private_network=True),
         _runtime_paths(tmp_path),
     )
     with pytest.raises(BaseException) as exc_info:  # noqa: PT011 - SSE raises directly, streamable HTTP in a group
         await _initialize_over(opted_in)
 
     assert any(isinstance(exc, httpx2.ConnectError) for exc in _nested_exceptions(exc_info.value))
-    assert dialed == [("10.60.16.5", 8000)]
+    assert dialed == [(dialed_host, 8000)]
 
 
 @pytest.mark.asyncio
@@ -560,7 +571,7 @@ async def test_opted_in_server_still_refuses_loopback_link_local_and_metadata(
 
     def rebinding_getaddrinfo(host: str, *_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
         lookups.append(host)
-        return _addrinfo("10.60.16.5" if len(lookups) == 1 else unsafe_address)
+        return _addrinfo("10.0.0.5" if len(lookups) == 1 else unsafe_address)
 
     async def record_connect(_backend: object, host: str, *_args: object, **_kwargs: object) -> object:
         dialed.append(host)

@@ -190,16 +190,13 @@ async def _open_remote_transport(
     transport: MCPTransport,
     client: _RemoteTransportClient,
     httpx_client_factory: Callable[..., httpx2.AsyncClient],
+    private_networks: tuple[_IPNetwork, ...],
     extra_headers: Mapping[str, str] | None = None,
 ) -> AsyncIterator[_TransportStreams]:
     if server_config.url is None:
         msg = f"{transport} MCP servers require url"
         raise ValueError(msg)
-    url = await asyncio.to_thread(
-        validate_server_fetch_url,
-        server_config.url,
-        private_networks=_server_private_networks(server_config),
-    )
+    url = await asyncio.to_thread(validate_server_fetch_url, server_config.url, private_networks=private_networks)
     headers = {
         **_interpolate_mcp_headers(server_config.headers, runtime_paths),
         **(dict(extra_headers) if extra_headers is not None else {}),
@@ -214,10 +211,6 @@ async def _open_remote_transport(
         yield streams
 
 
-def _server_private_networks(server_config: MCPServerConfig) -> tuple[_IPNetwork, ...]:
-    return _PRIVATE_NETWORKS if server_config.allow_private_network else ()
-
-
 def build_transport_handle(
     server_id: str,
     server_config: MCPServerConfig,
@@ -228,6 +221,7 @@ def build_transport_handle(
     """Build a deferred transport opener for one configured MCP server."""
     if server_config.transport == "stdio":
         return _MCPTransportHandle(transport="stdio", opener=lambda: _open_stdio(server_config, runtime_paths))
+    private_networks = _PRIVATE_NETWORKS if server_config.allow_private_network else ()
     if server_config.transport == "sse":
         authorization_tracker = _MCPHTTPAuthorizationTracker()
         return _MCPTransportHandle(
@@ -237,10 +231,8 @@ def build_transport_handle(
                 runtime_paths,
                 transport="sse",
                 client=sse_client,
-                httpx_client_factory=_tracked_mcp_http_client_factory(
-                    authorization_tracker,
-                    _server_private_networks(server_config),
-                ),
+                httpx_client_factory=_tracked_mcp_http_client_factory(authorization_tracker, private_networks),
+                private_networks=private_networks,
                 extra_headers=extra_headers,
             ),
             authorization_rejected=authorization_tracker.is_rejected,
@@ -254,10 +246,8 @@ def build_transport_handle(
                 runtime_paths,
                 transport="streamable-http",
                 client=_streamable_http_client,
-                httpx_client_factory=_tracked_mcp_http_client_factory(
-                    authorization_tracker,
-                    _server_private_networks(server_config),
-                ),
+                httpx_client_factory=_tracked_mcp_http_client_factory(authorization_tracker, private_networks),
+                private_networks=private_networks,
                 extra_headers=extra_headers,
             ),
             authorization_rejected=authorization_tracker.is_rejected,

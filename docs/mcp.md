@@ -54,6 +54,8 @@ mcp_servers:
 
 Remote transports refuse loopback and private-network addresses; run local servers with `stdio` instead.
 A remote server on a private network, such as a cluster-internal service, needs `allow_private_network: true`; loopback, link-local and cloud metadata addresses stay refused.
+The opt-in opens every RFC 1918 and unique-local address to that server's URL and redirects, including MindRoom's own pods and Services, so set it only for a server you trust.
+`localhost` and `*.local` names stay refused, including Kubernetes `*.svc.cluster.local`; use the short Service name or `<service>.<namespace>.svc`.
 
 ### Credentials in Server Config
 
