@@ -211,15 +211,10 @@ def _get_custom_base_url(models: list[ModelConfig], provider: str) -> str | None
     return None
 
 
-def _http_check(
-    url: str,
-    headers: dict[str, str] | None = None,
-    *,
-    verify: bool = True,
-) -> tuple[bool | None, str]:
+def _http_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool | None, str]:
     """Make a lightweight GET request and return (True, ""), (False, reason), or (None, reason)."""
     try:
-        resp = httpx.get(url, headers=headers or {}, timeout=5, verify=verify)
+        resp = httpx.get(url, headers=headers or {}, timeout=5)
     except httpx.HTTPError as exc:
         return None, str(exc)
     if resp.is_success:
