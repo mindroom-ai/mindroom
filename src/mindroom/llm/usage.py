@@ -186,8 +186,8 @@ class ModelMetrics(_Counts):
     provider: str = ""
     provider_metrics: dict[str, Any] | None = None
 
-    def accumulate(self, other: ModelMetrics | MessageMetrics) -> None:
-        """Add another report for the same model into this entry."""
+    def accumulate(self, other: ModelMetrics) -> None:
+        """Add another entry for the same model into this one."""
         _add_counts(self, other)
         if other.provider_metrics is not None:
             if self.provider_metrics is None:
