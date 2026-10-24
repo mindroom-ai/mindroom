@@ -184,9 +184,9 @@ def has_queued_force_compaction(storage: ConversationStore, session_id: str, sco
     return forced or scope.key in _pending_scope_keys(fields.session_state)
 
 
-def _pending_scope_keys(session_state: Mapping[str, object] | None) -> list[str]:
+def _pending_scope_keys(session_state: Mapping[str, object]) -> list[str]:
     """Return the scopes with a queued next-run compaction request."""
-    raw_scope_keys = session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY) if session_state else None
+    raw_scope_keys = session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
     if not isinstance(raw_scope_keys, list):
         return []
     return [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]
