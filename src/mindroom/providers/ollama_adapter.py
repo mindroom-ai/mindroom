@@ -20,7 +20,7 @@ from ollama import AsyncClient, ResponseError
 
 from mindroom.credentials.sync import get_ollama_host
 from mindroom.llm.errors import InvalidRequest, ProviderError
-from mindroom.llm.messages import split_thinking
+from mindroom.llm.messages import split_thinking, tool_result_view
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -206,8 +206,12 @@ def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
 async def _format_message(message: Message, provider: str) -> dict[str, Any]:
     """Return one chat message; images are read off the event loop or downloaded.
 
-    An image that cannot be read raises ``InvalidRequest``, so the media fallback replaces it with its note.
+    A tool result names the tool that answered, as the API documents. An image that cannot be read raises
+    ``InvalidRequest``, so the media fallback replaces it with its note.
     """
+    if message.role == "tool":
+        result = tool_result_view(message)
+        return {"role": "tool", "content": result.content, "tool_name": result.name}
     formatted: dict[str, Any] = {"role": message.role, "content": message.content}
     if message.role == "assistant" and message.tool_calls:
         formatted["tool_calls"] = [

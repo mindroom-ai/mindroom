@@ -17,7 +17,7 @@ from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from mindroom.llm.messages import split_thinking
+from mindroom.llm.messages import split_thinking, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, StopReason, StructuredOutput, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.openai.errors import error_body_error
@@ -101,10 +101,15 @@ def chat_stop_reason(finish_reason: str | None) -> StopReason | None:
 # --- Requests -------------------------------------------------------------------------------------------------
 
 
+def _message_content(message: Message) -> str | list[Any] | None:
+    """Return the content a Chat message carries; a tool result always has one, as the API requires."""
+    return tool_result_view(message).content if message.role == "tool" else message.content
+
+
 def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str]) -> dict[str, Any]:
     values: dict[str, Any] = {
         "role": role_map.get(message.role, message.role),
-        "content": message.content,
+        "content": _message_content(message),
         "name": message.name,
         "tool_call_id": message.tool_call_id,
         "tool_calls": message.tool_calls,
@@ -139,7 +144,7 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
 def _groq_message(message: Message) -> dict[str, Any]:
     values = {
         "role": message.role,
-        "content": message.content,
+        "content": _message_content(message),
         "name": message.name,
         "tool_call_id": message.tool_call_id,
         "tool_calls": message.tool_calls,
@@ -154,11 +159,10 @@ def _groq_message(message: Message) -> dict[str, Any]:
 
 
 def _cerebras_message(message: Message) -> dict[str, Any]:
-    content = message.content if message.role == "tool" or message.content is not None else ""
+    content = _message_content(message)
     if message.role == "tool" and message.tool_call_id:
-        formatted: dict[str, Any] = {"role": "tool", "tool_call_id": message.tool_call_id, "content": content}
-        return {key: value for key, value in formatted.items() if value is not None}
-    formatted = {"role": message.role, "content": content}
+        return {"role": "tool", "tool_call_id": message.tool_call_id, "content": content}
+    formatted: dict[str, Any] = {"role": message.role, "content": "" if content is None else content}
     if message.name:
         formatted["name"] = message.name
     if message.tool_calls:

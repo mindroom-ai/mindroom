@@ -216,6 +216,29 @@ class Message:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ToolResultView:
+    """What a wire encodes of a tool message: the call it answers, the tool's name, its content, and whether it failed.
+
+    A result stored without content answers with empty content, so no wire leaves its call unanswered.
+    """
+
+    call_id: str | None
+    name: str | None
+    content: str | list[Any]
+    is_error: bool
+
+
+def tool_result_view(message: Message) -> ToolResultView:
+    """Return the tool result a ``tool`` message carries, as every wire encodes it."""
+    return ToolResultView(
+        call_id=message.tool_call_id,
+        name=message.tool_name,
+        content="" if message.content is None else message.content,
+        is_error=message.tool_call_error is True,
+    )
+
+
 def split_thinking(content: str) -> tuple[str | None, str]:
     """Split ``<think>`` reasoning from a reply that arrived whole.
 
@@ -237,8 +260,10 @@ __all__ = [
     "MODEL_PROVENANCE_KEY",
     "Message",
     "ModelProvenance",
+    "ToolResultView",
     "is_own_model_message",
     "model_provenance",
     "read_model_provenance",
     "split_thinking",
+    "tool_result_view",
 ]

@@ -27,7 +27,7 @@ from anthropic.types.beta import (
 )
 
 from mindroom.llm.media import canonical_mime_type, image_format
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, ToolResultView, tool_result_view
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
@@ -180,7 +180,7 @@ def format_claude_messages(
             if not content:
                 continue
         elif message.role == "tool":
-            content = [_tool_result_block(message)]
+            content = [_tool_result_block(tool_result_view(message))]
         else:
             msg = f"Claude requests cannot carry a message with role {message.role!r}"
             raise ValueError(msg)
@@ -427,17 +427,20 @@ def _assistant_blocks(message: Message) -> list[Any]:
     return blocks
 
 
-def _tool_result_block(message: Message) -> dict[str, Any]:
-    content = message.content
+def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
+    """Return the ``tool_result`` block of one result; a failed call is marked ``is_error``, as the API documents."""
     payload: str | list[Any]
-    if isinstance(content, list):
+    if isinstance(result.content, list):
         payload = [
             block if (block := as_dict(item)) is not None and block.get("type") else {"type": "text", "text": str(item)}
-            for item in content
+            for item in result.content
         ]
     else:
-        payload = "" if content is None else str(content)
-    return {"type": "tool_result", "tool_use_id": message.tool_call_id, "content": payload}
+        payload = str(result.content)
+    block: dict[str, Any] = {"type": "tool_result", "tool_use_id": result.call_id, "content": payload}
+    if result.is_error:
+        block["is_error"] = True
+    return block
 
 
 def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
