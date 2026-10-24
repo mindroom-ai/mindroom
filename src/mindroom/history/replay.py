@@ -68,7 +68,6 @@ def estimate_prompt_visible_history_tokens(
         num_history_runs=policy.num_history_runs,
         num_history_messages=policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
-        system_message_role=history_settings.system_message_role,
     )
     tokens, has_checkpoint = _route_tokens(history_messages, replay_model=replay_model, native_route=native_route)
     # A checkpoint covers the summary message before it, which native projection drops.

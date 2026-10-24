@@ -6,7 +6,7 @@ import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from mindroom.constants import prompt_roles_for_history_storage
+from mindroom.constants import PROMPT_MESSAGE_ROLES
 from mindroom.history.legacy_compaction_state import migrate_to_summary_rows
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.session_storage.preflight import session_storage_preflight
@@ -42,7 +42,7 @@ def create_state_storage(storage_name: str, state_root: Path) -> ConversationSto
         db_path.parent.mkdir(parents=True, exist_ok=True)
         migrate_usage_database(db_path, names)
         migrate_to_summary_rows(db_path, names)
-        return open_conversation_store(db_path, names, prompt_roles=prompt_roles_for_history_storage())
+        return open_conversation_store(db_path, names, prompt_roles=PROMPT_MESSAGE_ROLES)
 
 
 def create_session_storage(

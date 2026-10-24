@@ -225,7 +225,6 @@ def _replay(
     *,
     scope: HistoryScope = _AGENT,
     max_tool_calls_from_history: int | None = None,
-    system_message_role: str = "system",
     num_history_runs: int | None = None,
     num_history_messages: int | None = None,
 ) -> list[Message]:
@@ -235,7 +234,6 @@ def _replay(
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
         max_tool_calls_from_history=max_tool_calls_from_history,
-        system_message_role=system_message_role,
     )
 
 
@@ -292,13 +290,12 @@ def test_prompt_roles_and_stored_history_copies_never_replay() -> None:
             messages=[
                 Message(role="system", content="old system prompt"),
                 Message(role="developer", content="old developer prompt"),
-                Message(role="instructions", content="custom prompt role"),
                 stored_copy,
                 *_exchange("run"),
             ],
         ),
     ]
-    assert _contents(_replay(runs, system_message_role="instructions")) == ["run question", "run answer"]
+    assert _contents(_replay(runs)) == ["run question", "run answer"]
 
 
 def test_message_limit_applies_after_the_run_limit_and_drops_orphaned_tool_results() -> None:

@@ -194,10 +194,7 @@ def _compaction_replay_messages(
     run: AnyRunRecord,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    messages = [
-        deepcopy(message)
-        for message in replayable_messages([run], system_message_role=history_settings.system_message_role)
-    ]
+    messages = [deepcopy(message) for message in replayable_messages([run])]
     if history_settings.max_tool_calls_from_history is not None:
         messages = filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
     strip_stale_anthropic_replay_fields(messages)

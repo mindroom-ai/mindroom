@@ -99,7 +99,6 @@ class ResolvedHistorySettings:
 
     policy: HistoryPolicy
     max_tool_calls_from_history: int | None
-    system_message_role: str = "system"
 
     @property
     def replays_whole_history(self) -> bool:
