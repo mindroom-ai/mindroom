@@ -1500,12 +1500,8 @@ async def drive_delegation_stream[R: AnyRunRecord](
             **options,
         )
 
-    driven: AnyRunRecord = record
+    # The driver's events stream first, then the record it returns.
     driven_stream = callback_event_stream(drive)
     async with closing_async_stream(driven_stream):
         async for event in driven_stream:
-            if isinstance(event, RunRecord | TeamRunRecord):
-                driven = event
-            else:
-                yield cast("RunEvent", event)
-    yield RunFinished(driven)
+            yield RunFinished(event) if isinstance(event, RunRecord | TeamRunRecord) else cast("RunEvent", event)
