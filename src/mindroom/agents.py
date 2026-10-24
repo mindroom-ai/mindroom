@@ -1766,8 +1766,7 @@ def team_background_jobs(
     entry = _job_controls_entry(controls)
     # The job tools come from the selection a run of the controls makes: one function and one source per name.
     offered = _offered_entries((entry,))
-    functions = {function.name: function for _entry, function in offered}
-    control_names = frozenset(functions)
+    control_names = frozenset(function.name for _entry, function in offered)
 
     async def control_hooks(call: ToolCall, call_next: ToolNext) -> object:
         # The leader's delegations run without the tool-call policy, as they do with jobs off.
@@ -1780,7 +1779,7 @@ def team_background_jobs(
         team=True,
         depth=0,
         # A team has no execution scope of its own, so its calls run under the grants of the work around them.
-        tools=assembled_job_tools(functions, _job_sources(offered), {}),
+        tools=assembled_job_tools(_job_sources(offered), {}),
     )
     return LeaderJobs(controls=entry.adapted, middleware=with_job_admission(actor, (control_hooks,)), actor=actor)
 
@@ -1842,9 +1841,9 @@ def _offered_entries(entries: Sequence[_ToolkitEntry]) -> tuple[_OfferedFunction
     return tuple(first_of_each_name((entry, function) for entry in entries for function in entry.adapted.functions))
 
 
-def _job_sources(offered: Sequence[_OfferedFunction]) -> dict[str, tuple[str, Toolkit]]:
-    """Return the owner and concrete toolkit of each offered function, as tool jobs describe its calls."""
-    return {function.name: (entry.owner, entry.toolkit) for entry, function in offered}
+def _job_sources(offered: Sequence[_OfferedFunction]) -> tuple[tuple[str, Toolkit, ToolFunction], ...]:
+    """Return each offered function with its owner and concrete toolkit, as tool jobs describe its calls."""
+    return tuple((entry.owner, entry.toolkit, function) for entry, function in offered)
 
 
 @timed("system_prompt_assembly.agent_create")
@@ -2167,11 +2166,7 @@ def create_agent(
             name=agent_name,
             team=False,
             depth=delegation_depth,
-            tools=assembled_job_tools(
-                prepared.functions,
-                _job_sources(offered),
-                authority_snapshot(config, agent_name),
-            ),
+            tools=assembled_job_tools(_job_sources(offered), authority_snapshot(config, agent_name)),
         )
         if background_tool_jobs_enabled(config, runtime_paths)
         else None

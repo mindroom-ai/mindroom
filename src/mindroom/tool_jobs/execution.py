@@ -61,7 +61,7 @@ from mindroom.tool_system.toolkit_connections import connects_per_run
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState
@@ -100,24 +100,23 @@ class _JobCallError(Exception):
 
 
 def assembled_job_tools(
-    functions: Mapping[str, ToolFunction],
-    sources: Mapping[str, tuple[str, Toolkit]],
+    sources: Iterable[tuple[str, Toolkit, ToolFunction]],
     snapshot: Mapping[str, Any],
 ) -> dict[str, JobTool]:
-    """Describe each offered function a MindRoom-assembled toolkit built, by name.
+    """Describe each function a MindRoom-assembled toolkit offers the actor, by name.
 
-    ``functions`` holds every function the actor offers; ``sources`` holds, for each one an assembled toolkit built,
-    its authored toolkit and the concrete toolkit built for the actor, so a generated function has none.
-    ``snapshot`` is the actor's execution scope and file access, empty for a team.
+    ``sources`` holds each such function with its authored toolkit and the concrete toolkit built for the actor; a
+    function the framework generated has none. ``snapshot`` is the actor's execution scope and file access, empty
+    for a team.
     """
     return {
-        name: JobTool(
-            function=functions[name],
+        function.name: JobTool(
+            function=function,
             toolkit_name=owner,
             toolkit=toolkit,
             authority=toolkit_authority(snapshot, toolkit),
         )
-        for name, (owner, toolkit) in sources.items()
+        for owner, toolkit, function in sources
     }
 
 
