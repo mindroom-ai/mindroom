@@ -880,12 +880,16 @@ def _paused_answer() -> PausedAnswer:
     return PausedAnswer(text=segment.text, tool_trace=deepcopy(segment.tool_trace), team_state=segment.team_state)
 
 
-def _continuation_execution_identity(continuation: ApprovalContinuation) -> ToolExecutionIdentity | None:
+def _continuation_execution_identity(continuation: ApprovalContinuation) -> ToolExecutionIdentity:
     """Return the execution identity an approval continuation recorded when its run paused."""
-    return parse_tool_execution_identity_payload(
+    identity = parse_tool_execution_identity_payload(
         continuation.execution_identity,
         error_prefix="Approval continuation execution_identity",
     )
+    if identity is None:
+        msg = f"Approval continuation {continuation.approval_id!r} has no execution identity"
+        raise RuntimeError(msg)
+    return identity
 
 
 def _paused_presentation(handle: SpanHandle, paused: PausedAttempt, *, waiting_text: str | None) -> Presentation:
@@ -2533,8 +2537,6 @@ class ResponseRunner:
         else:
             return None
         execution_identity = _continuation_execution_identity(continuation)
-        if execution_identity is None:
-            return None
         return self._memory_persistence(
             agent_name=agent_name,
             session_id=continuation.session_id,
@@ -2595,8 +2597,6 @@ class ResponseRunner:
     ) -> Callable[[str, str], Awaitable[None]] | None:
         """Return the normal run-to-Matrix event linkage for a resumed response."""
         execution_identity = _continuation_execution_identity(continuation)
-        if execution_identity is None:
-            return None
         history_scope = continuation.history_scope
         if history_scope is None:
             if continuation.entity_kind == "team":
@@ -2619,9 +2619,6 @@ class ResponseRunner:
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
         execution_identity = _continuation_execution_identity(continuation)
-        if execution_identity is None:
-            msg = f"Approval continuation {continuation.approval_id!r} has no execution identity"
-            raise RuntimeError(msg)
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             target,
             user_id=continuation.requester_id,
@@ -5105,9 +5102,9 @@ class ResponseRunner:
             reply_event=reply_event,
         )
 
-    # TODO(simplify): the span registry keeps each attempt's run id only for its "Hard cancelling" log line.
-    # Drop that field, `_note_run_id`, and `_span_attempt`'s `run_id`; the turn recorders keep their own run ids.
-    # Operators would notice: the Stop log line loses its `run_id`.
+    # TODO(simplify): stop.py's spans keep each attempt's run id only for the "Hard cancelling" log line. Drop it with
+    # `_note_run_id`, the `run_id` parameters that only forward it, and approval's `run_id_callback`; the turn
+    # recorders keep their own run ids. Operators would notice: the Stop log line loses its `run_id`.
     @staticmethod
     def _note_run_id(run_id: str | None) -> None:
         """Tell the span registry which run the current span's attempt is on, for the Stop log."""

@@ -211,6 +211,9 @@ async def cancel_approval_delegations(
     if not continuation.execution_identity:
         return
     config = delegation_storage_config(config, continuation.delegation_storage_bindings)
+    # TODO(simplify): this decodes the continuation's identity under the generic error prefix, the response runner
+    # under the approval prefix. Decode it once, typed, when the continuation loads. Operators would see one
+    # malformed-identity message.
     identity = parse_tool_execution_identity_payload(continuation.execution_identity, strict=True)
     if identity is None:
         return
