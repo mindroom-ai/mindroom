@@ -249,8 +249,8 @@ def _text(text: str) -> dict[str, Any]:
 
 
 def test_prompt_cache_control_selects_the_one_hour_lifetime_only_when_extended() -> None:
-    """``extended_cache_time`` selects the 1h TTL; the default sends no ttl field."""
-    assert prompt_cache_control() == _FIVE_MINUTES
+    """``extended_cache_time`` selects the 1h TTL; without it the marker sends no ttl field."""
+    assert prompt_cache_control(extended_cache_time=False) == _FIVE_MINUTES
     assert prompt_cache_control(extended_cache_time=True) == _ONE_HOUR
 
 
