@@ -1593,7 +1593,7 @@ async def ai_response(  # noqa: C901
             pipeline_timing=pipeline_timing,
         )
         if isinstance(outcome, _FailedAgentAttempt):
-            failed = outcome.record
+            failed_record = outcome.record
             if skipped := skip_unapproved_attempt(
                 ctx.participation,
                 reason="run_failed_before_decision",
@@ -1602,18 +1602,18 @@ async def ai_response(  # noqa: C901
             ):
                 return skipped
             completed_tools, interrupted_tools = split_interrupted_tool_trace(
-                failed.tools if failed is not None else None,
+                failed_record.tools if failed_record is not None else None,
             )
             return ExcludedAttempt(
                 response_text=get_user_friendly_error_message(outcome.error, agent_name, runtime_paths=runtime_paths),
-                partial_text=_own_assistant_text(failed),
+                partial_text=_own_assistant_text(failed_record),
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
                 run_id=attempt.run_id,
                 metadata_content=_attempt_run_metadata(
                     run_metadata_collector,
                     run_context,
-                    failed,
+                    failed_record,
                     RunStatus.error,
                     run_id=attempt.run_id,
                 ),
