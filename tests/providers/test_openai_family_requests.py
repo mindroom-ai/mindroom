@@ -109,7 +109,11 @@ def _parsed(adapter: ResponsesAdapter, output: list[dict[str, Any]], **message: 
         provider=adapter.identity.provider_name,
         store=adapter.wire.store,
         portable_replay=False,
-        native_compaction=adapter.native_compaction_settings(threshold=1024),
+        native_compaction=adapter.native_compaction_settings(
+            threshold=1024,
+            history_generation="",
+            allow_authored=False,
+        ),
         text_as_reasoning=False,
     )
     fields = {"content": parts.content, "tool_calls": parts.tool_calls or None, "provider_data": parts.provider_data}
@@ -195,7 +199,7 @@ def test_ordered_replay_never_resurrects_a_filtered_call(tmp_path: Path, *, reta
 def test_a_reasoning_tail_after_a_checkpoint_replays_once(tmp_path: Path) -> None:
     """A later ordinary response keeps its reasoning without repeating the checkpoint's tail."""
     adapter = responses_adapter(tmp_path, store=False)
-    native = adapter.native_compaction_settings(threshold=1024)
+    native = adapter.native_compaction_settings(threshold=1024, history_generation="", allow_authored=False)
     checkpoint = _parsed(adapter, [_CHECKPOINT, _ANSWER])
     ordinary = _parsed(adapter, [_REASONING, _ANSWER])
     messages = [
@@ -520,7 +524,7 @@ def test_an_authored_replay_policy_turns_native_compaction_off(tmp_path: Path, k
     """A raw SDK override must not contradict automatic compaction's replay policy."""
     adapter = responses_adapter(tmp_path, request_params={"extra_body": {key: None}})
 
-    assert adapter.native_compaction_settings(threshold=1024) is None
+    assert adapter.native_compaction_settings(threshold=1024, history_generation="", allow_authored=False) is None
 
 
 @pytest.mark.parametrize("portable", [False, True])

@@ -208,7 +208,7 @@ def test_portable_replay_follows_each_plans_replay_budget(tmp_path: Path) -> Non
 def test_restore_native_policy_requires_latest_compatible_response(tmp_path: Path, change: str) -> None:
     """A rebuild must not recover stale policy from an older checkpoint or foreign route."""
     paused = responses_adapter(tmp_path, store=False)
-    native = paused.native_compaction_settings(threshold=1024)
+    native = paused.native_compaction_settings(threshold=1024, history_generation="", allow_authored=False)
     assert native is not None
     checkpoint = Message(role="assistant", content="Ready")
     record_native_checkpoint(checkpoint, _CHECKPOINT, native)
@@ -262,7 +262,11 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         # Billed for the transcript the checkpoint replaced, over the 183,516-token hard budget.
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=190000)),
     )
-    record_native_checkpoint(answer, _CHECKPOINT, model.native_compaction_settings(threshold=120000))
+    record_native_checkpoint(
+        answer,
+        _CHECKPOINT,
+        model.native_compaction_settings(threshold=120000, history_generation="", allow_authored=False),
+    )
     run = _completed_run("old", messages=[Message(role="user", content="large old transcript " * 50000), answer])
     run.model = model.identity.id
     run.model_provider = model.identity.provider
@@ -440,7 +444,7 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
     model = responses_adapter(tmp_path, store=False)
-    old = model.native_compaction_settings(threshold=120000)
+    old = model.native_compaction_settings(threshold=120000, history_generation="", allow_authored=False)
     assert old is not None
     session = _session("session", summary=ScopeSummary(text="New portable summary.", updated_at=datetime.now(UTC)))
     db = create_state_storage("test_agent", tmp_path)
@@ -605,10 +609,14 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     assert prepared.native_history is not None
     native = prepared.native_history.native_compaction
     assert native is not None
-    expected = leader.native_compaction_settings(threshold=120000)
+    expected = leader.native_compaction_settings(threshold=120000, history_generation="", allow_authored=False)
     assert expected is not None
     assert native == replace(expected, basis=replay_basis(None, session.runs))
-    member = responses_adapter(tmp_path, "gpt-6-luna", store=False).native_compaction_settings(threshold=30000)
+    member = responses_adapter(tmp_path, "gpt-6-luna", store=False).native_compaction_settings(
+        threshold=30000,
+        history_generation="",
+        allow_authored=False,
+    )
     assert member is not None
     assert (native.route, native.threshold) != (member.route, member.threshold)
 
@@ -715,7 +723,11 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
     )
 
     def route_for(history_generation: str) -> str:
-        native = model.native_compaction_settings(threshold=120000, history_generation=history_generation)
+        native = model.native_compaction_settings(
+            threshold=120000,
+            history_generation=history_generation,
+            allow_authored=False,
+        )
         assert native is not None
         return native.route
 
@@ -729,7 +741,11 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
 
 def test_compaction_marker_names_the_newest_summary_and_native_checkpoint(tmp_path: Path) -> None:
     """A provider compaction changes the marker as a text compaction does, so inlined memory reloads after either."""
-    native = responses_adapter(tmp_path, store=False).native_compaction_settings(threshold=1024)
+    native = responses_adapter(tmp_path, store=False).native_compaction_settings(
+        threshold=1024,
+        history_generation="",
+        allow_authored=False,
+    )
     assert native is not None
 
     def answer(items: list[dict[str, Any]]) -> Message:

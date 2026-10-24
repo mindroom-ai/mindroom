@@ -965,7 +965,7 @@ def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path
     adapter = built.adapter
     assert isinstance(adapter, ResponsesAdapter)
 
-    settings = adapter.native_compaction_settings(threshold=60_000, history_generation="gen-2")
+    settings = adapter.native_compaction_settings(threshold=60_000, history_generation="gen-2", allow_authored=False)
 
     assert settings == NativeCompactionReplay(
         route=native_compaction_route(
@@ -976,7 +976,7 @@ def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path
         ),
         threshold=60_000,
     )
-    assert adapter.native_compaction_settings(threshold=None, allow_authored=True) is None
+    assert adapter.native_compaction_settings(threshold=None, history_generation="", allow_authored=True) is None
     (tmp_path / "proxy").mkdir()
     proxied = _Built(
         tmp_path / "proxy",
@@ -984,7 +984,7 @@ def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path
         _responses_reply(_completed()),
     ).adapter
     assert isinstance(proxied, ResponsesAdapter)
-    assert proxied.native_compaction_settings(threshold=60_000) is None
+    assert proxied.native_compaction_settings(threshold=60_000, history_generation="", allow_authored=False) is None
 
 
 # --- Request settings -----------------------------------------------------------------------------------------

@@ -80,8 +80,8 @@ class ResponsesAdapter:
         self,
         *,
         threshold: int | None,
-        history_generation: str = "",
-        allow_authored: bool = False,
+        history_generation: str,
+        allow_authored: bool,
     ) -> NativeCompactionReplay | None:
         """Return the replay settings of a request that wants compaction at ``threshold`` input tokens.
 
@@ -89,8 +89,10 @@ class ResponsesAdapter:
         a route without native compaction, or no threshold, runs without it.
         """
         del allow_authored
-        if threshold is None or not self.capabilities.native_compaction or self.identity.endpoint is None:
+        if threshold is None or not self.capabilities.native_compaction:
             return None
+        # Native compaction is supported only on the public endpoints, so a route that has it has one.
+        assert self.identity.endpoint is not None
         route = native_compaction_route(
             provider=self.identity.provider,
             model_id=self.identity.id,
