@@ -1553,6 +1553,13 @@ class ResponseRunner:
         """Return tool-call visibility for this agent."""
         return show_tool_calls_for_agent(self.deps.runtime.config, self.deps.agent_name)
 
+    def _thread_summary_message_count_hint(self, request: ResponseRequest) -> int:
+        """Return a lower bound on the thread's size after this reply, counted from the request's visible history."""
+        return thread_summary_message_count_hint(
+            request.thread_history,
+            trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
+        )
+
     async def _failed_approval_handoff(
         self,
         approval_id: str,
@@ -1692,13 +1699,7 @@ class ResponseRunner:
                     )
                     for message in request.thread_history
                 ),
-                thread_summary_message_count_hint=thread_summary_message_count_hint(
-                    request.thread_history,
-                    trusted_sender_ids=current_internal_sender_ids(
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                    ),
-                ),
+                thread_summary_message_count_hint=self._thread_summary_message_count_hint(request),
                 runtime_generation=(self.deps.approval_runtime_generation if continuation_state == "waiting" else None),
             )
             # Later messages of the conversation wait while the approval is pending, as behind a running reply.
@@ -5023,13 +5024,7 @@ class ResponseRunner:
                 response_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
-                thread_summary_message_count_hint=thread_summary_message_count_hint(
-                    request.thread_history,
-                    trusted_sender_ids=current_internal_sender_ids(
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                    ),
-                ),
+                thread_summary_message_count_hint=self._thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
             )
 
@@ -6032,13 +6027,7 @@ class ResponseRunner:
                 response_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
-                thread_summary_message_count_hint=thread_summary_message_count_hint(
-                    request.thread_history,
-                    trusted_sender_ids=current_internal_sender_ids(
-                        self.deps.runtime.config,
-                        self.deps.runtime_paths,
-                    ),
-                ),
+                thread_summary_message_count_hint=self._thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
             )
 
