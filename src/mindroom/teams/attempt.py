@@ -225,7 +225,7 @@ class TeamAttempt:
             status=status,
             model=record.model,
             model_provider=record.model_provider,
-            metrics=team_usage(record, record.ended_member_runs),
+            metrics=team_usage(record),
             context_metrics=record.metrics,
             context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
             tool_count=len(team_tool_executions(record)),

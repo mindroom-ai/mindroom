@@ -6,11 +6,10 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopHooks
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest
@@ -41,8 +40,8 @@ class TeamMember:
 
     spec: AgentSpec
     role: str
-    new_hooks: Callable[[], LoopHooks] = lambda: NO_HOOKS
-    request_template: ModelRequest = EMPTY_REQUEST
+    new_hooks: Callable[[], LoopHooks]
+    request_template: ModelRequest
     # The hooks of each run of this member, by run id. It is an ``__init__`` field so that ``replace`` carries it
     # over: ``replace`` passes on only ``__init__`` fields, so a copy would otherwise build new hooks for a run.
     _hooks_by_run: dict[str, LoopHooks] = field(default_factory=dict, repr=False, compare=False)
@@ -75,8 +74,8 @@ class TeamSpec:
     mode: TeamMode
     model: ModelProvider
     system_message: Message
-    toolkits: tuple[AdaptedToolkit, ...] = ()
-    max_tool_calls_per_turn: int | None = None
+    toolkits: tuple[AdaptedToolkit, ...]
+    max_tool_calls_per_turn: int | None
     members: tuple[TeamMember, ...]
 
 

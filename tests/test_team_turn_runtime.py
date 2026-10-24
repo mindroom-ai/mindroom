@@ -1438,7 +1438,7 @@ async def test_an_approval_from_another_session_never_resumes_the_paused_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A run the team store holds for another conversation is refused before anything runs, as an agent's is."""
+    """A saved approval from a session that holds no paused run of the team is refused before anything runs, as an agent's is."""
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([])
     team.models["checker-model"] = ScriptedModel([])

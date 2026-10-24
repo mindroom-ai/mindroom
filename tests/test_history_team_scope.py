@@ -34,7 +34,7 @@ from mindroom.llm.messages import Message
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact_team_members
-from mindroom.teams.runtime import leader_tool_specs, run_team
+from mindroom.teams.runtime import leader_tool_specs
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -42,6 +42,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
 from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
+from tests.team_runtime.squad import start_team
 from tests.team_turn_helpers import SESSION_ID, delegate, member_approval, squad_turn
 
 _PAIR = TeamConfig(
@@ -93,7 +94,6 @@ def _build_pair(
         mode=TeamMode.COORDINATE,
         config=config,
         runtime_paths=runtime_paths,
-        team_display_name="Team-zeta-alpha",
         scope_context=scope_context,
         execution_identity=None,
         model_name="default",
@@ -207,7 +207,7 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
         current_sender_id=None,
         configured_team_name="pair",
     )
-    events = run_team(
+    events = start_team(
         built.spec,
         [Message(role="user", content="Current prompt")],
         ctx=RunContext(run_id="run-1", session=UnstoredSession("session-1")),

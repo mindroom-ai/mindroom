@@ -15,7 +15,6 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopHooks
 from mindroom.agent_loop.run import (
     Persist,
     ResumePlan,
@@ -36,12 +35,18 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
-from mindroom.teams.delegate_tools import delegate_functions, propagate_member_pause, waited_on_member
+from mindroom.teams.delegate_tools import (
+    delegate_functions,
+    member_requirement,
+    propagate_member_pause,
+    waited_on_member,
+)
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
+    from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest, ReasoningDelta, ToolSpec
@@ -74,9 +79,9 @@ def run_team(
     run_input: Sequence[Message],
     *,
     ctx: RunContext,
-    hooks: LoopHooks = NO_HOOKS,
-    persist: Persist[AnyRunRecord] | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
+    hooks: LoopHooks,
+    persist: Persist[AnyRunRecord],
+    request_template: ModelRequest,
 ) -> AsyncIterator[TeamRunEvent]:
     """Run one team turn: the leader's system message, then ``run_input`` as the history subsystem built it.
 
@@ -106,21 +111,18 @@ def continue_team(
     paused: TeamRunRecord,
     messages: list[Message],
     *,
-    approved: Mapping[TeamCallKey, ApprovedCall] = {},
-    denied: Mapping[TeamCallKey, str | None] = {},
-    external_results: Mapping[TeamCallKey, str] = {},
+    decisions: TeamDecisions,
     context: Callable[[str], RunContext],
-    hooks: LoopHooks = NO_HOOKS,
-    persist: Persist[AnyRunRecord] | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
+    hooks: LoopHooks,
+    persist: Persist[AnyRunRecord],
+    request_template: ModelRequest,
 ) -> AsyncIterator[TeamRunEvent]:
     """Resume a paused team run: its paused members with the decisions on their calls, then the leader.
 
     ``messages`` is the leader's resume request, built from ``paused`` as ``build_resume_request`` builds it, and
     ``context`` returns the context of the run with a given id, which the resume calls with ``paused``'s.
-    Decisions are keyed by ``TeamCallKey``: the member whose run waits for the call, None for the leader's own
-    calls. Every call the team waits for must be covered exactly, as ``resume_agent`` requires, and every decision
-    must name a waiting call, else ``ValueError`` here before anything runs.
+    Every call the team waits for must be covered exactly, as ``resume_agent`` requires, and every decision must
+    name a waiting call, else ``ValueError`` here before anything runs.
     A member that completes hands the leader its text in the member-results message, which replaces every
     delegation result that waited on a member; a member that pauses again keeps the team paused, with its new
     requirements on the team run, and the leader sends no request. The leader's and the members' requests stream
@@ -133,11 +135,10 @@ def continue_team(
     record.member_responses = []
     # The paused notice is not part of the answer; the leader's text starts afresh.
     record.content = None
-    member_requirements = [r for r in record.requirements or () if r.member_agent_id is not None]
-    record.requirements = [r for r in record.requirements or () if r.member_agent_id is None]
-    decisions = _TeamDecisions(approved, denied, external_results)
-    plans = _plan_member_resumes(spec, paused, member_requirements, decisions)
-    leader = decisions.take(None, {r.tool_execution.tool_call_id for r in record.requirements or ()})
+    leader_requirements = [r for r in record.requirements or () if r.member_agent_id is None]
+    record.requirements = leader_requirements
+    plans = _plan_member_resumes(spec, paused, decisions)
+    leader = decisions.take(None, {r.tool_execution.tool_call_id for r in leader_requirements})
     decided = decide_requirements(
         record,
         approved=leader.approved,
@@ -189,22 +190,23 @@ def team_paused_content(record: TeamRunRecord) -> str:
     return "Team run paused. The following require input:\n" + "\n".join(parts) if parts else ""
 
 
-def team_usage_runs(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[tuple[AnyRunRecord, RunMetrics]]:
+def team_usage_runs(record: TeamRunRecord) -> list[tuple[AnyRunRecord, RunMetrics]]:
     """Return the runs whose own metrics make up the turn's usage, with those metrics: the leader's, then each member's.
 
-    The team record's own metrics cover only the leader's requests; each member's usage is on its record, so
-    nothing is counted twice. A run that reported no usage is left out.
+    The team record's own metrics cover only the leader's requests; each member run that ended
+    (``ended_member_runs``) carries its usage on its record, so nothing is counted twice. A run that reported no
+    usage is left out.
     """
-    return [(run, run.metrics) for run in (record, *members) if run.metrics is not None]
+    return [(run, run.metrics) for run in (record, *record.ended_member_runs) if run.metrics is not None]
 
 
-def team_usage(record: TeamRunRecord, members: Sequence[RunRecord]) -> RunMetrics | None:
+def team_usage(record: TeamRunRecord) -> RunMetrics | None:
     """Return the turn's usage, the sum over ``team_usage_runs``, within the leader's duration.
 
     Members run inside the leader's window, so summing durations would double-count wall clock; token and cost sums
     are disjoint.
     """
-    metrics = [run_metrics for _, run_metrics in team_usage_runs(record, members)]
+    metrics = [run_metrics for _, run_metrics in team_usage_runs(record)]
     if not metrics:
         return None
     total = sum(metrics[1:], metrics[0])
@@ -223,13 +225,16 @@ class _Decided:
 
 
 @dataclass(slots=True)
-class _TeamDecisions:
-    """The resume's decisions by ``TeamCallKey``, handed out run by run so a stray decision is caught."""
+class TeamDecisions:
+    """One resume's decisions by ``TeamCallKey``, handed out run by run so a stray decision is caught.
+
+    ``continue_team`` records the calls it takes, so an instance serves one resume.
+    """
 
     approved: Mapping[TeamCallKey, ApprovedCall]
     denied: Mapping[TeamCallKey, str | None]
     external_results: Mapping[TeamCallKey, str]
-    consumed: set[TeamCallKey] = field(default_factory=set)
+    consumed: set[TeamCallKey] = field(default_factory=set, init=False)
 
     def take(self, member_id: str | None, call_ids: set[str | None]) -> _Decided:
         """Return the decisions on ``member_id``'s calls among ``call_ids`` (None names the leader's own)."""
@@ -257,18 +262,17 @@ class _MemberResume:
     plan: ResumePlan
 
 
-def _plan_member_resumes(
-    spec: TeamSpec,
-    paused: TeamRunRecord,
-    requirements: Sequence[RunRequirement],
-    decisions: _TeamDecisions,
-) -> list[_MemberResume]:
-    """Plan one resume per paused member run, checking every member's decisions before any member runs."""
+def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamDecisions) -> list[_MemberResume]:
+    """Plan one resume per paused member run, checking every member's decisions before any member runs.
+
+    The paused member runs are the ones the team run's requirements name.
+    """
     members = {member.spec.id: member for member in spec.members}
     embedded = {member.run_id: member for member in paused.member_responses}
     by_run: dict[tuple[str, str], list[RunRequirement]] = {}
-    for requirement in requirements:
-        assert requirement.member_agent_id is not None
+    for requirement in paused.requirements or ():
+        if requirement.member_agent_id is None:
+            continue
         if requirement.member_run_id is None:
             msg = f"Saved member approval of {requirement.member_agent_id!r} has no paused run identity; retry the request"
             raise ValueError(msg)
@@ -292,13 +296,7 @@ def _plan_member_resumes(
         named = replace(
             member_record,
             requirements=[
-                replace(
-                    requirement,
-                    member_agent_id=member.spec.id,
-                    member_display_name=member.spec.name,
-                    member_run_id=run_id,
-                )
-                for requirement in member_record.requirements or ()
+                member_requirement(requirement, member, run_id) for requirement in member_record.requirements or ()
             ],
         )
         plan = plan_resume(
@@ -382,11 +380,10 @@ class _MemberRuns:
     behaves.
     """
 
-    spec: TeamSpec
     record: TeamRunRecord
     ctx: RunContext
     emit: Emit
-    persist: Persist[AnyRunRecord] | None
+    persist: Persist[AnyRunRecord]
     stream: bool
 
     async def run(self, member: TeamMember, task: str) -> RunRecord:
@@ -430,8 +427,7 @@ class _MemberRuns:
             self.record.ended_member_runs[run_ids.index(record.run_id)] = record
         else:
             self.record.ended_member_runs.append(record)
-        if self.persist is not None:
-            await self.persist(record)
+        await self.persist(record)
 
     async def _finish(self, member: TeamMember, run_id: str, stream: AsyncIterator[RunEvent]) -> RunRecord:
         """Forward the member's events and return the terminal record its loop stored however it ended.
@@ -448,7 +444,7 @@ class _MemberRuns:
         except Exception as error:
             logger.warning(
                 "team_member_run_failed",
-                team_id=self.spec.id,
+                team_id=self.record.team_id,
                 member_id=member.spec.id,
                 run_id=run_id,
                 error=str(error),
@@ -463,7 +459,7 @@ async def _drive_team(
     *,
     ctx: RunContext,
     hooks: LoopHooks,
-    persist: Persist[AnyRunRecord] | None,
+    persist: Persist[AnyRunRecord],
     template: ModelRequest,
     entry: Callable[[_MemberRuns], Awaitable[None]] | None = None,
     resumed: Sequence[RunRequirement] | None = None,
@@ -474,7 +470,7 @@ async def _drive_team(
     """
 
     async def produce(emit: Emit) -> None:
-        members = _MemberRuns(spec, record, ctx, emit, persist, stream=template.stream)
+        members = _MemberRuns(record, ctx, emit, persist, stream=template.stream)
         leader = _leader_spec(spec, record, members.run, stream=template.stream)
         stream = drive_run(
             leader,
@@ -482,7 +478,10 @@ async def _drive_team(
             messages,
             ctx=ctx,
             hooks=hooks,
-            persist=persist,
+            # The leader's loop stores only the team record. A store of any run is a store of team records, but ty
+            # infers the loop's record type as the union of both arguments', so the cast names the team record that
+            # ``pause_content`` takes.
+            persist=cast("Persist[TeamRunRecord]", persist),
             template=template,
             entry=None if entry is None else lambda: entry(members),
             resumed=resumed,
@@ -504,6 +503,7 @@ __all__ = [
     "Emit",
     "MemberEvent",
     "TeamCallKey",
+    "TeamDecisions",
     "TeamRunEvent",
     "continue_team",
     "leader_tool_specs",

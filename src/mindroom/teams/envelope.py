@@ -76,7 +76,6 @@ from mindroom.teams.members import (
     materialized_team_label,
     requested_team_agent_names,
     resolve_team_member_model_names,
-    team_label,
 )
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
@@ -519,7 +518,6 @@ class _TeamTurn:
             mode=self.mode,
             config=config,
             runtime_paths=self.runtime_paths,
-            team_display_name=team_label(members.requested_agent_names),
             scope_context=run.scope_context,
             execution_identity=self.execution_identity,
             model_name=runtime_model.model_name,
@@ -753,7 +751,6 @@ class _TeamTurn:
             blocking_team_pause(
                 paused,
                 record,
-                record.ended_member_runs,
                 config_names=attempt.members.requested_agent_names,
                 display_names=attempt.members.display_names,
                 show_tool_calls=attempt.presentation.show_tool_calls,

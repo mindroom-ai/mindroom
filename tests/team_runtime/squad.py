@@ -15,24 +15,29 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
+from mindroom.config.main import Config
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import TeamRunRecord
+from mindroom.teams.members import BuiltTeam
+from mindroom.teams.runtime import TeamDecisions, continue_team, run_team
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from tests.fakes.scripted_model import ScriptedModel
 from tests.llm.agno_dict_helpers import expected_run_dict
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.agent_loop.run import ApprovedCall, Persist
+    from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord, RunRecord
-    from mindroom.teams.runtime import TeamRunEvent
+    from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
 STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage"
@@ -103,7 +108,40 @@ def member(
         system_message=Message(role="system", content=system or f"You are {name}."),
         toolkits=toolkits,
     )
-    return TeamMember(spec=spec, role=f"{name} role.")
+    return TeamMember(spec=spec, role=f"{name} role.", new_hooks=lambda: NO_HOOKS, request_template=EMPTY_REQUEST)
+
+
+def team_spec(
+    team_id: str,
+    name: str,
+    model: ModelProvider,
+    system: str,
+    members: Sequence[TeamMember],
+    *,
+    mode: TeamMode = TeamMode.COORDINATE,
+    toolkits: Sequence[AdaptedToolkit] = (),
+) -> TeamSpec:
+    """Return a team of ``members`` led by ``model``, with the leader prompt ``system`` and no call budget."""
+    return TeamSpec(
+        id=team_id,
+        name=name,
+        mode=mode,
+        model=model,
+        system_message=Message(role="system", content=system),
+        toolkits=tuple(toolkits),
+        max_tool_calls_per_turn=None,
+        members=tuple(members),
+    )
+
+
+def built_team(spec: TeamSpec) -> BuiltTeam:
+    """Return ``spec`` as a built team under the default history settings, with no leader middleware or jobs."""
+    return BuiltTeam(
+        spec=spec,
+        history_settings=Config().resolve_entity(None).history_settings,
+        leader_middleware=(),
+        leader_jobs=None,
+    )
 
 
 def squad(
@@ -122,17 +160,17 @@ def squad(
     """Return the capture's team: the writer with the calculator, the checker with the gated calculator."""
     writer_tools = (calculator(gate_multiply=False),) if writer_toolkits is None else tuple(writer_toolkits)
     checker_tools = (calculator(gate_multiply=True),) if checker_toolkits is None else tuple(checker_toolkits)
-    return TeamSpec(
-        id=team_id,
-        name=TEAM_NAME,
-        mode=mode,
-        model=leader,
-        system_message=Message(role="system", content=system),
-        toolkits=tuple(leader_toolkits),
-        members=(
+    return team_spec(
+        team_id,
+        TEAM_NAME,
+        leader,
+        system,
+        (
             member("writer", "Writer", writer, *writer_tools),
             member("checker", "Checker", checker, *checker_tools, system=checker_system),
         ),
+        mode=mode,
+        toolkits=leader_toolkits,
     )
 
 
@@ -185,6 +223,48 @@ class Store:
     def statuses(self) -> list[tuple[str, str]]:
         """Return ``(owner id, status)`` per stored record, members by agent id and the team by team id."""
         return [(record.get("agent_id") or record["team_id"], record["status"]) for record in self.records]
+
+
+async def no_store(record: AnyRunRecord) -> None:
+    """Store nothing: the persist callback of a run whose stored rows the test does not read."""
+    del record
+
+
+def start_team(
+    team: TeamSpec,
+    run_input: Sequence[Message],
+    *,
+    ctx: RunContext,
+    persist: Persist[AnyRunRecord] = no_store,
+    request_template: ModelRequest = EMPTY_REQUEST,
+) -> AsyncIterator[TeamRunEvent]:
+    """Start ``team``'s run (``run_team``) under no hooks, storing nothing unless the test passes a store."""
+    return run_team(team, run_input, ctx=ctx, hooks=NO_HOOKS, persist=persist, request_template=request_template)
+
+
+def resume_team(
+    team: TeamSpec,
+    paused: TeamRunRecord,
+    messages: list[Message],
+    *,
+    context: Callable[[str], RunContext],
+    approved: Mapping[TeamCallKey, ApprovedCall] = {},
+    denied: Mapping[TeamCallKey, str | None] = {},
+    external_results: Mapping[TeamCallKey, str] = {},
+    persist: Persist[AnyRunRecord] = no_store,
+    request_template: ModelRequest = EMPTY_REQUEST,
+) -> AsyncIterator[TeamRunEvent]:
+    """Resume ``paused`` (``continue_team``) with the test's decisions under no hooks, storing nothing unless asked."""
+    return continue_team(
+        team,
+        paused,
+        messages,
+        decisions=TeamDecisions(approved, denied, external_results),
+        context=context,
+        hooks=NO_HOOKS,
+        persist=persist,
+        request_template=request_template,
+    )
 
 
 async def collect(stream: AsyncIterator[TeamRunEvent]) -> tuple[list[TeamRunEvent], TeamRunRecord]:

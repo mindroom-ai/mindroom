@@ -19,7 +19,7 @@ from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.provider import ModelRequest, TextDelta
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
-from mindroom.teams.runtime import MemberEvent, continue_team, run_team
+from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
@@ -36,9 +36,11 @@ from tests.team_runtime.squad import (
     golden_run,
     pre_resume_runs,
     prompt,
+    resume_team,
     run_context,
     scripted,
     squad,
+    start_team,
 )
 
 if TYPE_CHECKING:
@@ -73,7 +75,7 @@ async def test_an_approved_member_call_resumes_into_agno_s_team_approved_rows() 
     store = Store()
 
     events, record = await collect(
-        continue_team(
+        resume_team(
             squad(leader, scripted("writer-model"), checker),
             paused,
             _resume_request(paused),
@@ -119,7 +121,7 @@ async def test_a_member_that_pauses_again_keeps_the_team_paused_without_a_leader
     store = Store()
 
     _, record = await collect(
-        continue_team(
+        resume_team(
             squad(leader, scripted("writer-model"), checker),
             paused,
             _resume_request(paused),
@@ -156,7 +158,7 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     store = Store()
 
     _, record = await collect(
-        continue_team(
+        resume_team(
             squad(leader, scripted("writer-model"), checker),
             paused,
             _resume_request(paused),
@@ -189,7 +191,7 @@ async def test_a_team_resume_streams_the_leader_s_and_the_resumed_member_s_reque
     checker = scripted("checker-model", answer("42", usage(1, 1)))
 
     _, record = await collect(
-        continue_team(
+        resume_team(
             squad(leader, scripted("writer-model"), checker),
             paused,
             _resume_request(paused),
@@ -225,14 +227,14 @@ async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_re
     )
     team = squad(leader, writer, checker, mode=TeamMode.COLLABORATE)
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.tools is not None
     assert paused.tools[0].result == "Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
 
     store = Store()
     _, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -279,7 +281,7 @@ async def test_a_resume_keeps_the_members_that_ended_before_the_pause_with_the_r
     )
     team = squad(leader, writer, checker)
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     ended = [(run.agent_id, run.run_id, run.status) for run in paused.ended_member_runs]
     assert [(agent, status) for agent, _, status in ended] == [
@@ -289,7 +291,7 @@ async def test_a_resume_keeps_the_members_that_ended_before_the_pause_with_the_r
     assert TeamRunRecord.from_dict(paused.to_dict()).ended_member_runs == []
 
     _, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -320,13 +322,13 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
         leader_toolkits=(gated(echo, name="job_controls"),),
     )
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
 
     store = Store()
     events, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -356,7 +358,7 @@ async def test_a_resume_refuses_an_approved_leader_call_the_team_no_longer_offer
         leader_toolkits=(gated(echo, name="job_controls"),),
     )
     _, paused = await collect(
-        run_team(gated_team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(gated_team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
     before = paused.to_dict()
@@ -364,7 +366,7 @@ async def test_a_resume_refuses_an_approved_leader_call_the_team_no_longer_offer
     ungated_team = squad(leader, scripted("writer-model"), scripted("checker-model"))
 
     with pytest.raises(ValueError, match="no longer offered"):
-        continue_team(
+        resume_team(
             ungated_team,
             paused,
             _resume_request(paused),
@@ -395,12 +397,12 @@ async def test_a_resumed_leader_s_calls_run_under_the_paused_team_run_s_id() -> 
         leader_toolkits=(gated(calling_run, name="job_controls"),),
     )
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
 
     _, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -425,12 +427,12 @@ async def test_a_leader_level_approval_whose_call_stops_the_run_sends_the_leader
     )
     team = squad(leader, scripted("writer-model"), scripted("checker-model"), leader_toolkits=(stopping,))
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
 
     _, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -473,12 +475,12 @@ async def test_an_external_result_resumes_the_member_that_waits_for_it() -> None
     )
     team = squad(leader, scripted("writer-model"), checker, checker_toolkits=(external(run_subagent),))
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
 
     store = Store()
     _, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -509,9 +511,9 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
         return run_context(run_id, SQUAD_APPROVED)
 
     with pytest.raises(ValueError, match="Decisions do not cover exactly the calls"):
-        continue_team(team, paused, _resume_request(paused), context=context)
+        resume_team(team, paused, _resume_request(paused), context=context)
     with pytest.raises(ValueError, match="name calls the team does not wait for"):
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -523,7 +525,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
         )
     # A decision on the right call id but the wrong member leaves the checker's call undecided.
     with pytest.raises(ValueError, match="Decisions do not cover exactly the calls"):
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -531,7 +533,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
             context=context,
         )
     with pytest.raises(ValueError, match="name calls the team does not wait for"):
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -541,7 +543,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
         )
     without_checker = replace(team, members=team.members[:1])
     with pytest.raises(ValueError, match="not a member of team 'squad'"):
-        continue_team(
+        resume_team(
             without_checker,
             paused,
             _resume_request(paused),
@@ -550,7 +552,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
         )
     orphaned = replace(paused, member_responses=[])
     with pytest.raises(ValueError, match="no longer holds member run"):
-        continue_team(
+        resume_team(
             team,
             orphaned,
             _resume_request(paused),
@@ -560,7 +562,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
     assert paused.requirements is not None
     unbound = replace(paused, requirements=[replace(paused.requirements[0], member_run_id=None)])
     with pytest.raises(ValueError, match="has no paused run identity"):
-        continue_team(
+        resume_team(
             team,
             unbound,
             _resume_request(paused),
@@ -569,7 +571,7 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
         )
     completed = replace(paused, status=RunStatus.completed)
     with pytest.raises(ValueError, match="Only a paused run can be resumed"):
-        continue_team(
+        resume_team(
             team,
             completed,
             _resume_request(paused),
@@ -607,7 +609,7 @@ async def test_a_collaborate_resume_routes_each_approval_to_the_member_that_wait
         writer_toolkits=(calculator(gate_multiply=True),),
     )
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.requirements is not None
     assert sorted((r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements) == [
@@ -618,7 +620,7 @@ async def test_a_collaborate_resume_routes_each_approval_to_the_member_that_wait
 
     store = Store()
     _, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -677,7 +679,7 @@ async def test_a_coordinate_resume_answers_each_waiting_delegation_with_the_resu
     )
     team = squad(leader, writer, checker, writer_toolkits=(calculator(gate_multiply=True),))
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
     assert paused.requirements is not None
@@ -694,7 +696,7 @@ async def test_a_coordinate_resume_answers_each_waiting_delegation_with_the_resu
 
     store = Store()
     _, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -748,7 +750,7 @@ async def test_a_member_approval_that_shares_an_id_with_a_leader_call_resumes_th
     )
     team = squad(leader, writer, checker)
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.requirements is not None
     assert [(r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements] == [("checker", "call-w")]
@@ -760,7 +762,7 @@ async def test_a_member_approval_that_shares_an_id_with_a_leader_call_resumes_th
 
     store = Store()
     _, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -813,12 +815,12 @@ async def test_a_finished_member_whose_answer_mentions_human_input_keeps_its_ans
     )
     team = squad(leader, writer, checker, mode=mode)
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
 
     _, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -855,7 +857,7 @@ async def test_a_resume_with_member_and_leader_decisions_runs_both_and_hands_the
     )
     team = squad(leader, scripted("writer-model"), checker, leader_toolkits=(gated(echo, name="job_controls"),))
     _, paused = await collect(
-        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.requirements is not None
     assert {(r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements} == {
@@ -864,7 +866,7 @@ async def test_a_resume_with_member_and_leader_decisions_runs_both_and_hands_the
     }
 
     _, record = await collect(
-        continue_team(
+        resume_team(
             team,
             paused,
             _resume_request(paused),
@@ -901,7 +903,7 @@ async def test_a_member_whose_resumed_run_fails_reaches_the_leader_as_its_redact
     store = Store()
 
     await collect(
-        continue_team(
+        resume_team(
             squad(leader, scripted("writer-model"), scripted("checker-model", [Await(lose_the_member_provider)])),
             paused,
             _resume_request(paused),
@@ -934,7 +936,7 @@ async def test_a_failed_resume_stores_its_error_over_the_paused_team_row_as_agno
         raise ProviderError(msg, provider=PROVIDER)
 
     store = Store()
-    events = continue_team(
+    events = resume_team(
         squad(
             scripted("leader-model", [Await(lose_the_provider)]),
             scripted("writer-model"),
@@ -978,7 +980,7 @@ async def test_cancelling_a_resume_stores_cancelled_rows_over_the_paused_ones_as
     store = Store()
 
     async def consume() -> None:
-        events = continue_team(
+        events = resume_team(
             squad(scripted("leader-model"), scripted("writer-model"), checker),
             paused,
             _resume_request(paused),

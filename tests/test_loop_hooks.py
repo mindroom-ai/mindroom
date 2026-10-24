@@ -9,17 +9,16 @@ from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.config.main import Config
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
-from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, DeferredTools, ModelRequest
 from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks, leader_loop_hooks
 from mindroom.participation import ParticipationGate
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.teams.members import BuiltTeam
-from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_jobs.execution import JobActor
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
+from tests.team_runtime.squad import team_spec
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -89,14 +88,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         skill_review_capture=SkillReviewCapture(),
     )
     team = BuiltTeam(
-        spec=TeamSpec(
-            id="squad",
-            name="Squad",
-            mode=TeamMode.COORDINATE,
-            model=model,
-            system_message=Message(role="system", content="You lead the squad."),
-            members=(),
-        ),
+        spec=team_spec("squad", "Squad", model, "You lead the squad.", ()),
         history_settings=settings,
         leader_middleware=(_middleware,),
         leader_jobs=JobActor(name="squad", team=True, depth=0, tools={}),

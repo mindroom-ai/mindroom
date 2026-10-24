@@ -38,10 +38,8 @@ from mindroom.run_storage import persist_into, scope_run_storage
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.members import (
     build_team_spec,
-    configured_team,
     materialize_exact_team_members,
     materialized_team_label,
-    team_label,
 )
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
@@ -50,7 +48,7 @@ from mindroom.teams.presentation import (
     format_team_header,
     publish_team_presentation,
 )
-from mindroom.teams.runtime import MemberEvent, continue_team
+from mindroom.teams.runtime import MemberEvent, TeamDecisions, continue_team
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -69,7 +67,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import ResolvedReplayPlan
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
-    from mindroom.llm.runs import AnyRunRecord, RunRecord, RunRequirement
+    from mindroom.llm.runs import RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
@@ -99,33 +97,16 @@ def _approval_history_scope(
 
 
 def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
-    """Return the paused team run the approval names, from the loaded session or the store.
+    """Return the paused team run the approval names from the session ``scope`` loaded, which holds its paused runs.
 
-    A run the store holds for another session of the scope than the one ``scope`` was loaded for is refused, as the
-    agent path refuses it.
+    A run of another session of the scope, or of a session with no stored row, is refused, as the agent path refuses it.
     """
-    persisted: AnyRunRecord | None = None
-    if scope.session is not None:
-        persisted = next((run for run in scope.session.runs if run.run_id == run_id), None)
-    if persisted is None:
-        persisted = scope.storage.get_run(run_id)
-    if (
-        not isinstance(persisted, TeamRunRecord)
-        or persisted.session_id != scope.session_id
-        or persisted.status is not RunStatus.paused
-    ):
+    runs = scope.session.runs if scope.session is not None else ()
+    persisted = next((run for run in runs if run.run_id == run_id), None)
+    if not isinstance(persisted, TeamRunRecord) or persisted.status is not RunStatus.paused:
         msg = f"Paused team run {run_id!r} is no longer available"
         raise RuntimeError(msg)
     return persisted
-
-
-@dataclass(frozen=True)
-class _RoutedDecisions:
-    """The resume's decisions routed to the calls the paused team waits for, by ``TeamCallKey``."""
-
-    approved: dict[TeamCallKey, ApprovedCall]
-    denied: dict[TeamCallKey, str | None]
-    external_results: dict[TeamCallKey, str]
 
 
 def _route_decisions(
@@ -133,7 +114,7 @@ def _route_decisions(
     decisions: ResumeDecisions,
     *,
     toolkit_owners: Mapping[tuple[str, str], str],
-) -> _RoutedDecisions:
+) -> TeamDecisions:
     """Route each decision to the waiting member or leader call it names, checking an approved call's toolkit owner.
 
     An approved call is matched by the member the approval was shown for, and must still come from the toolkit the
@@ -168,7 +149,7 @@ def _route_decisions(
             raise RuntimeError(msg)
         require_original_toolkit(toolkit_owners, call)
         approved[(requirement.member_agent_id, call.tool_call_id)] = call
-    return _RoutedDecisions(
+    return TeamDecisions(
         approved=approved,
         denied={key_of(call_id): note for call_id, note in decisions.denied.items()},
         external_results=dict(decisions.external_results),
@@ -215,9 +196,7 @@ class TeamResume:
             self.built.spec,
             paused,
             build_resume_request(paused=paused.messages, summary=summary, history=history),
-            approved=routed.approved,
-            denied=routed.denied,
-            external_results=routed.external_results,
+            decisions=routed,
             context=lambda run_id: RunContext(
                 run_id=run_id,
                 user_id=self.user_id,
@@ -326,7 +305,6 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
 def blocking_team_pause(
     paused: PausedAttempt,
     record: TeamRunRecord,
-    members: Sequence[RunRecord],
     *,
     config_names: Sequence[str],
     display_names: Sequence[str],
@@ -335,14 +313,15 @@ def blocking_team_pause(
     """Render a blocking team pause from its runs' records into the document the resume continues.
 
     Each run's text fills its slot first, paused notices included: the leader's is the consensus, and each
-    member run that ended adds its own to its member's slot. Every run's tool calls follow in their slots, still
-    pending where the pause waits on them; a member's own delegation card waits on that member's call.
+    member run that ended (``ended_member_runs``) adds its own to its member's slot. Every run's tool calls follow
+    in their slots, still pending where the pause waits on them; a member's own delegation card waits on that
+    member's call.
     """
     presentation = TeamStreamPresentation.new(config_names, display_names, show_tool_calls=show_tool_calls)
     waiting = {_waiting_slot(presentation, requirement) for requirement in paused.requirements}
     presentation.append_consensus(finished_run_text(record))
     calls = [("team", tool) for tool in record.tools or ()]
-    for member in members:
+    for member in record.ended_member_runs:
         member_id = presentation.resolve_member_id(member.agent_id, member.agent_display_name)
         presentation.append_member(member_id, finished_run_text(member))
         calls.extend((f"agent:{member_id}", tool) for tool in member.tools or ())
@@ -395,7 +374,8 @@ async def continue_paused_team_run(
         # Saved approvals name their members; without them no member could run the approved calls.
         msg = "The paused team approval names no members"
         raise RuntimeError(msg)
-    team_name = configured_team(config, configured_team_name)
+    # None for an ad hoc team, which compacts and stores as no configured entity.
+    team_name = configured_team_name if configured_team_name in config.teams else None
     # The entity the run's logs, notices, and delegations name, as its turn named it: the configured team, or the
     # label of an ad hoc team's members once they are known.
     entity_name = team_name or configured_team_name
@@ -444,7 +424,6 @@ async def continue_paused_team_run(
             mode=mode,
             config=config,
             runtime_paths=runtime_paths,
-            team_display_name=team_label(member_names),
             scope_context=scope,
             execution_identity=execution_identity,
             model_name=model_name,

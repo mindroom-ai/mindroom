@@ -304,23 +304,9 @@ def resolve_team_turn_models(
     )
 
 
-def team_label(member_names: Sequence[str]) -> str:
-    """Return the stored ``team_name`` of a team of these members, kept as main stores it."""
-    return f"Team-{'-'.join(member_names)}"
-
-
 def materialized_team_label(display_names: Sequence[str]) -> str:
     """Return the entity label an ad hoc team's turn and resume carry in their logs and notices."""
     return f"Team ({', '.join(display_names)})"
-
-
-def configured_team(config: Config, team_name: str | None) -> str | None:
-    """Return the configured team ``team_name`` names, or None for an ad hoc team.
-
-    A saved approval names the team as the entity whose account handles it, which for an ad hoc team is a member;
-    an ad hoc team compacts and stores as no configured entity, under the defaults.
-    """
-    return team_name if team_name in config.teams else None
 
 
 def _team_member(
@@ -352,9 +338,13 @@ def _team_member(
     def new_hooks() -> LoopHooks:
         return agent_loop_hooks(as_member, turn, queued_notices=False)
 
+    # An agent build always renders its role; only a helper's prompt may go without one.
+    if build.prompt.role is None:
+        msg = f"Team member {build.spec.id!r} has no role for the leader's roster"
+        raise ValueError(msg)
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
-        role=build.prompt.role or "",
+        role=build.prompt.role,
         new_hooks=new_hooks,
         request_template=build.request_template,
     )
@@ -389,7 +379,7 @@ class BuiltTeam:
     spec: TeamSpec
     history_settings: ResolvedHistorySettings
     leader_middleware: tuple[ToolMiddleware, ...]
-    leader_jobs: JobActor | None = None
+    leader_jobs: JobActor | None
 
 
 def build_team_spec(
@@ -398,7 +388,6 @@ def build_team_spec(
     mode: TeamMode,
     config: Config,
     runtime_paths: RuntimePaths,
-    team_display_name: str,
     scope_context: ScopeSessionContext | None,
     execution_identity: ToolExecutionIdentity | None,
     model_name: str,
@@ -407,10 +396,10 @@ def build_team_spec(
 ) -> BuiltTeam:
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
-    The leader prompt holds each member's roster role, the leader's tool instructions in offer order, the provider
-    family's note, and the date context with ``system_enrichment`` appended; the team's own history settings and
-    call budget come from the configured team ``configured_team_name``, or the defaults when it is None for an ad
-    hoc one.
+    The team is named for its requested members, as Agno named it. The leader prompt holds each
+    member's roster role, the leader's tool instructions in offer order, the provider family's note, and the date
+    context with ``system_enrichment`` appended; the team's own history settings and call budget come from the
+    configured team ``configured_team_name``, or the defaults when it is None for an ad hoc one.
     """
     model = provider_registry.build_model_provider(
         config,
@@ -418,6 +407,7 @@ def build_team_spec(
         model_name,
         execution_identity=execution_identity,
     )
+    team_display_name = f"Team-{'-'.join(members.requested_agent_names)}"
     team_view = config.resolve_entity(configured_team_name)
     if scope_context is not None:
         team_id = scope_context.scope.scope_id
@@ -480,7 +470,6 @@ __all__ = [
     "TeamTurnModelSelection",
     "allow_direct_private_team_agents",
     "build_team_spec",
-    "configured_team",
     "materialize_exact_requested_team_members",
     "materialize_exact_team_members",
     "materialize_team_members",
@@ -489,5 +478,4 @@ __all__ = [
     "resolve_team_member_model_names",
     "resolve_team_turn_models",
     "select_model_for_team",
-    "team_label",
 ]

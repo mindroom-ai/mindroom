@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -19,12 +19,12 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.store import persist_to
-from mindroom.teams.runtime import continue_team, run_team
-from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
+from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import gated, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
-from tests.team_runtime.squad import approval, collect, scripted
+from tests.team_runtime.squad import approval, collect, resume_team, scripted, start_team, team_spec
+from tests.team_runtime.squad import member as team_member
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -80,7 +80,7 @@ class _Squad:
     async def run(self) -> TeamRunRecord:
         """Run the team to its end and return the stored team record."""
         _, record = await collect(
-            run_team(self.spec, _GO, ctx=self.ctx(), persist=persist_to(self.store, self.session)),
+            start_team(self.spec, _GO, ctx=self.ctx(), persist=persist_to(self.store, self.session)),
         )
         return record
 
@@ -120,23 +120,21 @@ def _squad(tmp_path: Path, *, leader: list[list[Any]], member: list[list[Any]], 
 
     leader_model = scripted("leader-model", *leader)
     member_model = scripted("member-model", *[[Await(hang)] if turn == _HANG else turn for turn in member])
-    worker = TeamMember(
-        spec=AgentSpec(
-            id="worker",
-            name="worker",
-            model=member_model,
-            system_message=Message(role="system", content="You work."),
-            toolkits=(toolkit(lookup, name="lookup"), gated(publish, name="publish")),
-        ),
-        role="Does the work.",
+    worker = team_member(
+        "worker",
+        "worker",
+        member_model,
+        toolkit(lookup, name="lookup"),
+        gated(publish, name="publish"),
+        system="You work.",
     )
-    spec = TeamSpec(
-        id="squad",
-        name="Squad",
+    spec = team_spec(
+        "squad",
+        "Squad",
+        leader_model,
+        "You lead.",
+        (worker,),
         mode=TeamMode.COLLABORATE if collaborate else TeamMode.COORDINATE,
-        model=leader_model,
-        system_message=Message(role="system", content="You lead."),
-        members=(worker,),
     )
     return _Squad(config, runtime_paths, spec, store, session, leader_model, member_model, hanging)
 
@@ -159,7 +157,7 @@ async def test_stopped_team_member_keeps_its_usage(tmp_path: Path, collaborate: 
     )
 
     await squad.run_until_stopped(
-        run_team(squad.spec, _GO, ctx=squad.ctx(), persist=persist_to(squad.store, squad.session)),
+        start_team(squad.spec, _GO, ctx=squad.ctx(), persist=persist_to(squad.store, squad.session)),
     )
 
     assert squad.model_tokens() == {"leader-model": 10, "member-model": 1100}
@@ -213,7 +211,7 @@ async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path) -> 
     assert isinstance(stored, TeamRunRecord)
 
     await squad.run_until_stopped(
-        continue_team(
+        resume_team(
             squad.spec,
             stored,
             _GO,

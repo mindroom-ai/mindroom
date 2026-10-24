@@ -28,20 +28,22 @@ def test_a_team_turns_usage_is_the_leader_and_every_reporting_member_counted_onc
         agent_id="checker",
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22), duration=1.0),
     )
-    members = [writer, silent, checker]
+    leader.ended_member_runs = [writer, silent, checker]
 
-    assert [(run.run_id, metrics.tokens.input_tokens) for run, metrics in team_usage_runs(leader, members)] == [
+    assert [(run.run_id, metrics.tokens.input_tokens) for run, metrics in team_usage_runs(leader)] == [
         ("team", 100),
         ("writer", 50),
         ("checker", 20),
     ]
-    total = team_usage(leader, members)
+    total = team_usage(leader)
     assert total is not None
     assert (total.tokens.input_tokens, total.tokens.total_tokens, total.duration) == (170, 187, 5.0)
     # The sum is a new object; the stored records keep their own counters.
     assert (leader.metrics.tokens.input_tokens, writer.metrics.duration) == (100, 3.0)  # type: ignore[union-attr]
 
-    assert team_usage(leader, [silent]) is leader.metrics
-    leaderless = TeamRunRecord(run_id="team", team_id="squad")
-    assert team_usage(leaderless, [writer]) is writer.metrics
-    assert team_usage(leaderless, [silent]) is None
+    leader.ended_member_runs = [silent]
+    assert team_usage(leader) is leader.metrics
+    leaderless = TeamRunRecord(run_id="team", team_id="squad", ended_member_runs=[writer])
+    assert team_usage(leaderless) is writer.metrics
+    leaderless.ended_member_runs = [silent]
+    assert team_usage(leaderless) is None

@@ -32,7 +32,7 @@ from mindroom.history.types import PreparedHistoryState
 from mindroom.llm.messages import Message
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, TeamTurnModelSelection
-from mindroom.teams.spec import TeamMode, TeamSpec
+from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.budget_helpers import budget_monitor_with_spend
@@ -45,6 +45,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
+from tests.team_runtime.squad import built_team, team_spec
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
 from tests.test_dynamic_workflow_subagents import _config as _subagent_workflow_config
@@ -368,25 +369,14 @@ def test_openai_compat_agent_completion_budgets_mapped_requesters(
 
 def _memberless_team() -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
     """Return what ``_build_team`` builds for a team whose leader answers on its own: no members materialized."""
-    spec = TeamSpec(
-        id="super-team",
-        name="Super Team",
-        mode=TeamMode.COORDINATE,
-        model=ScriptedModel([answer("Team answer")]),
-        system_message=Message(role="system", content="You lead the team."),
-        members=(),
-    )
+    spec = team_spec("super-team", "Super Team", ScriptedModel([answer("Team answer")]), "You lead the team.", ())
     members = ResolvedExactTeamMembers(
         requested_agent_names=[],
         builds=[],
         display_names=[],
         failed_agent_names=[],
     )
-    return (
-        members,
-        BuiltTeam(spec=spec, history_settings=Config().resolve_entity(None).history_settings, leader_middleware=()),
-        TeamMode.COORDINATE,
-    )
+    return members, built_team(spec), TeamMode.COORDINATE
 
 
 def _prepared_team_turn() -> PreparedTeamExecution:

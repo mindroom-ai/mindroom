@@ -249,6 +249,10 @@ async def _team_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: s
         await team.stream(ctx=ctx, run_metadata_collector=published)
     else:
         await team.respond(ctx=ctx, run_metadata_collector=published)
+    # The stored team run is named for its members, as Agno named it.
+    stored = team.storage.get_run(run_id)
+    assert isinstance(stored, TeamRunRecord)
+    assert stored.team_name == record.team_name
     return published
 
 
@@ -297,11 +301,12 @@ async def test_a_team_approval_resume_publishes_the_golden_run_metadata(
         toolkit_owners={("checker", "multiply"): "calculator"},
     )
     assert attempt is not None
-    # The pause the blocking reply showed, whose document the resume continues.
+    # The pause the blocking reply showed, whose document the resume continues; the member runs that ended in that
+    # reply are the paused ones the stored row keeps.
+    paused.ended_member_runs = list(paused.member_responses)
     shown = blocking_team_pause(
         attempt,
         paused,
-        paused.member_responses,
         config_names=team.member_names,
         display_names=["Writer", "Checker"],
         show_tool_calls=False,
