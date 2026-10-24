@@ -631,7 +631,7 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     paused = raised.paused
     assert ProbeToolkit.calls == []
     [requirement] = paused.requirements
-    assert (requirement.member_agent_id, requirement.member_agent_name) == ("checker", "Checker")
+    assert (requirement.member_agent_id, requirement.member_display_name) == ("checker", "Checker")
     assert requirement.tool_execution.tool_call_id == "call-touch"
     assert paused.toolkit_owners[("checker", "touch")] == PROBE_TOOL
     assert ("writer", "touch") in paused.toolkit_owners

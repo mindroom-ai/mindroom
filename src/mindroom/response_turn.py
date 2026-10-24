@@ -611,9 +611,9 @@ def _paused_attempt_from_pause(
         requirements=pending_requirements,
         approval_agent_name=next(
             (
-                requirement.member_agent_name
+                requirement.member_display_name
                 for requirement in pending_requirements
-                if requirement.member_agent_name and requirement.member_agent_id is None
+                if requirement.member_display_name and requirement.member_agent_id is None
             ),
             None,
         ),

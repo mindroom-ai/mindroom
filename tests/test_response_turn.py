@@ -280,7 +280,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     )
     requirement = RunRequirement(tool)
     requirement.member_agent_id = "member-id"
-    requirement.member_agent_name = "researcher"
+    requirement.member_display_name = "researcher"
     requirement.member_run_id = "member-run"
     response = TeamRunRecord(
         run_id="team-run",
@@ -300,7 +300,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     assert paused is not None
     assert paused.tools == (tool,)
     assert paused.requirements == (requirement,)
-    assert paused.requirements[0].member_agent_name == "researcher"
+    assert paused.requirements[0].member_display_name == "researcher"
 
 
 @pytest.mark.parametrize(

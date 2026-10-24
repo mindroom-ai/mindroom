@@ -132,7 +132,7 @@ def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> N
     scout = RunRecord(
         run_id="scout-run",
         agent_id="scout",
-        agent_name="Scout",
+        agent_display_name="Scout",
         messages=[
             Message(role="assistant", content="\n\nAn earlier reply."),
             Message(role="user", content="Find vendors."),
@@ -164,7 +164,7 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
     checker = RunRecord(
         run_id="checker-run",
         agent_id="checker",
-        agent_name="Checker",
+        agent_display_name="Checker",
         status=RunStatus.error,
         content="I will check." if source == "live" else _RAW_FAILURE,
         error=reason if source == "live" else None,

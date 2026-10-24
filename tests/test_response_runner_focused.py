@@ -3420,7 +3420,7 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = "member-a"
-    requirement.member_agent_name = "Member A"
+    requirement.member_display_name = "Member A"
     trace = ToolTraceEntry(
         type="tool_call_started",
         tool_name="inspect",
@@ -3480,7 +3480,7 @@ def test_pause_presentation_rejects_a_tool_in_the_wrong_member_scope() -> None:
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = "member-a"
-    requirement.member_agent_name = "Same"
+    requirement.member_display_name = "Same"
     paused = PausedAttempt(
         session_id="session-1",
         run_id="run-1",

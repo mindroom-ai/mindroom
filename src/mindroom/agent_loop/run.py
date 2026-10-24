@@ -92,7 +92,7 @@ def run_agent(
         metrics=RunMetrics(),
         metadata=ctx.metadata,
         agent_id=spec.id,
-        agent_name=spec.name,
+        agent_display_name=spec.name,
     )
     messages = [*([] if spec.system_message is None else [spec.system_message]), *run_input]
     return drive_run(

@@ -33,7 +33,7 @@ def test_identify_approval_tools_keeps_team_member_owner(member_agent_id: str) -
     )
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = member_agent_id
-    requirement.member_agent_name = "Researcher"
+    requirement.member_display_name = "Researcher"
 
     identified = identify_approval_tools(
         PausedAttempt(
@@ -68,7 +68,7 @@ def member_pause() -> PausedAttempt:
     tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True)
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = "test_agent"
-    requirement.member_agent_name = "Test Agent"
+    requirement.member_display_name = "Test Agent"
     return PausedAttempt(
         session_id="session-1",
         run_id="run-1",

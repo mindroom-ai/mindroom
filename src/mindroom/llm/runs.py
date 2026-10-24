@@ -103,7 +103,7 @@ class RunRequirement:
     confirmation_note: str | None = field(default=None, kw_only=True)
     external_execution_result: str | None = field(default=None, kw_only=True)
     member_agent_id: str | None = field(default=None, kw_only=True)
-    member_agent_name: str | None = field(default=None, kw_only=True)
+    member_display_name: str | None = field(default=None, kw_only=True)
     member_run_id: str | None = field(default=None, kw_only=True)
 
     @property
@@ -168,7 +168,7 @@ class RunRequirement:
             "confirmation_note": self.confirmation_note,
             "external_execution_result": self.external_execution_result,
             "member_agent_id": self.member_agent_id,
-            "member_agent_name": self.member_agent_name,
+            "member_agent_name": self.member_display_name,
             "member_run_id": self.member_run_id,
             "tool_execution": self.tool_execution.to_dict(),
         }
@@ -200,7 +200,7 @@ class RunRequirement:
             confirmation_note=data.get("confirmation_note"),
             external_execution_result=data.get("external_execution_result"),
             member_agent_id=data.get("member_agent_id"),
-            member_agent_name=data.get("member_agent_name"),
+            member_display_name=data.get("member_agent_name"),
             member_run_id=data.get("member_run_id"),
         )
         execution = requirement.tool_execution
@@ -348,12 +348,12 @@ class RunRecord(_RunRecordCommon):
     """A persisted agent run; a team member run carries the team run as ``parent_run_id``."""
 
     agent_id: str | None = None
-    agent_name: str | None = None
+    agent_display_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored ``run_data`` dict, keys in stored order."""
         return {
-            **self._scalars_dict({"agent_id": self.agent_id, "agent_name": self.agent_name}),
+            **self._scalars_dict({"agent_id": self.agent_id, "agent_name": self.agent_display_name}),
             "status": self.status.value,
             **self._metrics_dict(),
             **self._history_dict(),
@@ -364,7 +364,7 @@ class RunRecord(_RunRecordCommon):
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> RunRecord:
         """Rebuild from a stored ``run_data`` dict, ignoring keys this record does not model."""
-        return cls(agent_id=data.get("agent_id"), agent_name=data.get("agent_name"), **_common_from_dict(data))
+        return cls(agent_id=data.get("agent_id"), agent_display_name=data.get("agent_name"), **_common_from_dict(data))
 
 
 @dataclass(kw_only=True)

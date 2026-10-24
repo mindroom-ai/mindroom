@@ -191,7 +191,7 @@ def propagate_member_pause(record: TeamRunRecord, member: TeamMember, child: Run
                 requirement,
                 tool_execution=deepcopy(requirement.tool_execution),
                 member_agent_id=member.spec.id,
-                member_agent_name=member.spec.name,
+                member_display_name=member.spec.name,
                 member_run_id=child.run_id,
             ),
         )

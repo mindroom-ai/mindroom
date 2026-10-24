@@ -255,7 +255,7 @@ def _member_call_event(requirement: RunRequirement, event: ToolStarted | ToolCom
     """
     if requirement.member_agent_id is None or requirement.member_run_id is None:
         return event
-    member_name = requirement.member_agent_name or requirement.member_agent_id
+    member_name = requirement.member_display_name or requirement.member_agent_id
     return cast("RunEvent", MemberEvent(requirement.member_agent_id, member_name, requirement.member_run_id, event))
 
 
@@ -301,7 +301,7 @@ def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirem
     member_id, call_id = pending_call_slot(requirement, presentation.config_names_by_id.values())
     if member_id is None:
         return "team", call_id
-    return f"agent:{presentation.resolve_member_id(member_id, requirement.member_agent_name)}", call_id
+    return f"agent:{presentation.resolve_member_id(member_id, requirement.member_display_name)}", call_id
 
 
 def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
@@ -344,7 +344,7 @@ def blocking_team_pause(
     presentation.append_consensus(finished_run_text(record))
     calls = [("team", tool) for tool in record.tools or ()]
     for member in members:
-        member_id = presentation.resolve_member_id(member.agent_id, member.agent_name)
+        member_id = presentation.resolve_member_id(member.agent_id, member.agent_display_name)
         presentation.append_member(member_id, finished_run_text(member))
         calls.extend((f"agent:{member_id}", tool) for tool in member.tools or ())
     for scope, tool in calls:

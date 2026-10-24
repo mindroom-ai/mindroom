@@ -175,7 +175,7 @@ class TeamAttempt:
             self.presentation.append_consensus(handover, separate=True)
             reply.consensus = append_stream_text(reply.consensus, handover, separate=True)
         else:
-            member_id = self.presentation.resolve_member_id(run.agent_id, run.agent_name)
+            member_id = self.presentation.resolve_member_id(run.agent_id, run.agent_display_name)
             handover = _unshown_handover(run, streamed=run.run_id in reply.streamed_member_runs)
             self.presentation.append_member(member_id, handover, separate=True)
             reply.per_member[member_id] = append_stream_text(reply.per_member[member_id], handover, separate=True)

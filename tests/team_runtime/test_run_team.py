@@ -220,7 +220,7 @@ async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:
     [requirement] = record.requirements
     # The approval card keys the call by member id and call id, both as the member run recorded them.
     assert f"{requirement.member_agent_id}:{requirement.tool_execution.tool_call_id}" == "checker:call-checker-multiply"
-    assert (requirement.member_agent_name, requirement.member_run_id) == ("Checker", member.run_id)
+    assert (requirement.member_display_name, requirement.member_run_id) == ("Checker", member.run_id)
     assert len(leader.requests) == 1  # The leader is not asked again while the member waits.
     assert store.statuses == [("checker", "PAUSED"), ("squad", "PAUSED")]
     assert record.content == "Team run paused. The following require input:\n- Checker: multiply requires confirmation"
