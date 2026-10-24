@@ -397,42 +397,30 @@ async def review_conversation(
         async for _event in events:
             pass
     finally:
-        # Only the review's own replies, whose metrics give the usage report its requests.
+        # Only the review's own replies, whose metrics give the usage report its requests. The usage counts against
+        # the conversation it reviewed, also when a timeout or a stop ended the review.
         record.messages = messages[len(review.messages) :]
         if record.messages:
-            await _record_usage(record, invocation_id, config, runtime_paths, agent_name, session_id, identity)
+            await record_helper_usage(
+                record,
+                owner=HelperUsageOwner(
+                    storage_factory=partial(
+                        create_session_storage,
+                        agent_name,
+                        config,
+                        runtime_paths,
+                        execution_identity=identity,
+                    ),
+                    session_id=session_id,
+                ),
+                invocation_id=invocation_id,
+                kind="skill_learning",
+                requester_id=identity.requester_id if identity is not None else None,
+            )
     logger.info(
         "Skill review model run finished",
         forked=review.forked,
         model_requests=len(own_model_messages(record)),
         input_tokens=_context_tokens(config, review.model, review.model_name, metrics),
         cache_read_tokens=metrics.cache_read_tokens,
-    )
-
-
-async def _record_usage(
-    record: RunRecord,
-    invocation_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    session_id: str,
-    identity: ToolExecutionIdentity | None,
-) -> None:
-    """Count the review's usage against the conversation it reviewed, also when a timeout or a stop ended it."""
-    await record_helper_usage(
-        record,
-        owner=HelperUsageOwner(
-            storage_factory=partial(
-                create_session_storage,
-                agent_name,
-                config,
-                runtime_paths,
-                execution_identity=identity,
-            ),
-            session_id=session_id,
-        ),
-        invocation_id=invocation_id,
-        kind="skill_learning",
-        requester_id=identity.requester_id if identity is not None else None,
     )
