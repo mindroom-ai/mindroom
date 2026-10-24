@@ -17,7 +17,7 @@ from mindroom.constants import PROMPT_MESSAGE_ROLES
 from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
-from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
+from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_fields, is_scope_summary, summary_follows
 from mindroom.llm.messages import Message
 
@@ -129,7 +129,7 @@ def _selected_messages(
     and its orphan result take no message of it. A tool result whose call the message limit cut off is dropped, since
     it cannot replay without that call.
     """
-    replayed = [run for run in runs if is_model_history_visible_run(run) and run_in_scope(run, scope)]
+    replayed = [run for run in runs if replays_in_scope(run, scope)]
     if num_history_runs is not None:
         if num_history_runs <= 0:
             return []

@@ -13,7 +13,7 @@ from mindroom.history.message_content import (
     render_message_content,
 )
 from mindroom.history.request_messages import scope_history_messages
-from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
+from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_fields
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
 from mindroom.llm.messages import Message
@@ -186,7 +186,7 @@ def _estimate_history_messages_tokens(messages: list[Message]) -> int:
 
 def scope_visible_runs(session: ConversationSession, scope: HistoryScope) -> list[AnyRunRecord]:
     """Return this scope's model-history-visible runs in stored order."""
-    return [run for run in session.runs if is_model_history_visible_run(run) and run_in_scope(run, scope)]
+    return [run for run in session.runs if replays_in_scope(run, scope)]
 
 
 def current_summary_text(session: ConversationSession) -> str | None:

@@ -39,7 +39,7 @@ from mindroom.constants import (
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.history import summary_rows
-from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
+from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope, run_in_scope
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.session_storage.agent_storage import save_compaction_usage
@@ -217,7 +217,7 @@ def read_scope_seen_event_ids(
         kind="seen",
     )
     for run in session.runs:
-        if is_model_history_visible_run(run) and run_in_scope(run, scope):
+        if replays_in_scope(run, scope):
             seen_event_ids.update(summary_rows.seen_event_ids(run.metadata))
     return seen_event_ids
 
@@ -462,11 +462,7 @@ def read_fold_basis(storage: ConversationStore, session: ConversationSession, sc
     """
     latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
     stored = storage.load_session(session.session_id, session.kind)
-    runs = [
-        run
-        for run in (stored.runs if stored is not None else [])
-        if is_model_history_visible_run(run) and run_in_scope(run, scope)
-    ]
+    runs = [run for run in (stored.runs if stored is not None else []) if replays_in_scope(run, scope)]
     run_ids = [run.run_id for run in runs]
     covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))
     if {run.run_id for run in covered if run.visible} != set(run_ids):
