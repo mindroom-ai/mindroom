@@ -778,7 +778,10 @@ def get_tool_by_name(
 
 
 def _build_with_tool_dependencies(tool_name: str, runtime_paths: RuntimePaths, build: Callable[[], Toolkit]) -> Toolkit:
-    """Run ``build`` once the tool's declared dependencies are installed, again after an import error installs more."""
+    """Run ``build`` once the tool's declared dependencies are present.
+
+    An import error that installs the tool's optional extra runs ``build`` once more.
+    """
     # Pre-check dependencies using find_spec (no side effects) before importing
     metadata = TOOL_METADATA.get(tool_name)
     deps = metadata.dependencies if metadata and metadata.dependencies else []
