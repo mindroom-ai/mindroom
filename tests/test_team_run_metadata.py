@@ -10,8 +10,16 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, ModelPricing
+from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.providers.registry import build_model_provider
+from mindroom.teams.attempt import TeamAttempt
+from mindroom.teams.members import ResolvedExactTeamMembers
+from mindroom.teams.presentation import TeamStreamPresentation
 from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call, usage
 from tests.team_turn_helpers import (
     PROBE_TOOL,
@@ -136,3 +144,76 @@ async def test_a_failed_team_reply_still_publishes_the_usage_it_was_billed(
     payload = collector[AI_RUN_METADATA_KEY]
     assert (payload["run_id"], payload["status"]) == ("run-1", "error")
     assert (payload["usage"]["input_tokens"], payload["usage"]["output_tokens"]) == (800, 130)
+
+
+def test_a_team_reply_on_priced_models_publishes_its_cost_at_each_model_s_prices(tmp_path: Path) -> None:
+    """The metadata every team reply and team resume publishes prices the leader and each member at its own model."""
+    config = Config(
+        models={
+            "leader": ModelConfig(
+                provider="openai",
+                id="gpt-6.1-sol",
+                api_key="key",
+                pricing=ModelPricing(input=2, output=8),
+            ),
+            "member": ModelConfig(
+                provider="anthropic",
+                id="claude-opus-5-5",
+                api_key="key",
+                pricing=ModelPricing(input=5, output=25),
+            ),
+        },
+    )
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    leader_model = build_model_provider(config, paths, "leader").identity
+    member_model = build_model_provider(config, paths, "member").identity
+    leader_metrics, member_metrics = RunMetrics(), RunMetrics()
+    leader_usage = MessageMetrics(input_tokens=1_000, output_tokens=10)
+    leader_metrics.add(leader_usage, model_id=leader_model.id, provider=leader_model.provider_name)
+    member_usage = MessageMetrics(input_tokens=1_000, output_tokens=100)
+    member_metrics.add(member_usage, model_id=member_model.id, provider=member_model.provider_name)
+    leader = TeamRunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        team_id="team",
+        status=RunStatus.completed,
+        model=leader_model.id,
+        model_provider=leader_model.provider,
+        metrics=leader_metrics,
+    )
+    leader.ended_member_runs = [
+        RunRecord(
+            run_id="member-run",
+            session_id="session-1",
+            agent_id="general",
+            status=RunStatus.completed,
+            model=member_model.id,
+            model_provider=member_model.provider,
+            metrics=member_metrics,
+        ),
+    ]
+    attempt = TeamAttempt(
+        run_id="run-1",
+        members=ResolvedExactTeamMembers(
+            requested_agent_names=["general"],
+            builds=[],
+            display_names=["GeneralAgent"],
+            failed_agent_names=[],
+        ),
+        presentation=TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False),
+        stream=False,
+        team_name="team",
+        runtime_model_name="leader",
+        prepared_history=None,
+    )
+    attempt.records.keep(leader)
+
+    content = attempt.metadata_content(config, runtime_paths=paths, session_id="session-1", status=RunStatus.completed)
+
+    # The leader's 1,000 input and 10 output tokens at 2 and 8 per million, the member's 1,000 and 100 at 5 and 25.
+    assert content[AI_RUN_METADATA_KEY]["cost"] == {"usd": "0.00958"}

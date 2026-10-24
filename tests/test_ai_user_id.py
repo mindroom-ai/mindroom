@@ -23,6 +23,7 @@ from mindroom.ai import (
     _prepare_agent_and_prompt,
     _stream_completed_without_visible_output,
     _StreamingAttemptState,
+    agent_run_metadata_content,
     ai_response,
     build_matrix_run_metadata,
     collect_streamed_response_content,
@@ -46,6 +47,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
     RuntimePaths,
+    resolve_runtime_paths,
 )
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import _PreparedExecutionContext
@@ -66,7 +68,7 @@ from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.llm.usage import ModelMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
@@ -386,6 +388,53 @@ def test_ai_run_metadata_records_reply_cost_as_a_decimal_string() -> None:
     )
 
     assert metadata[AI_RUN_METADATA_KEY]["cost"] == {"usd": "0.00208"}
+
+
+def test_an_agent_reply_on_a_priced_model_publishes_its_cost(tmp_path: Path) -> None:
+    """The metadata every agent reply and approval resume publishes carries the reply's cost at its model's prices."""
+    config = Config(
+        models={
+            "default": ModelConfig(
+                provider="openai",
+                id="gpt-6.1-sol",
+                api_key="key",
+                pricing=ModelPricing(input=2, output=8),
+            ),
+        },
+    )
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    identity = build_model_provider(config, paths, "default").identity
+    metrics = RunMetrics()
+    metrics.add(
+        MessageMetrics(input_tokens=1_000, output_tokens=10),
+        model_id=identity.id,
+        provider=identity.provider_name,
+    )
+    record = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        model=identity.id,
+        model_provider=identity.provider,
+        metrics=metrics,
+    )
+
+    content = agent_run_metadata_content(
+        config,
+        record,
+        runtime_paths=paths,
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        prepared_history=None,
+    )
+
+    assert content[AI_RUN_METADATA_KEY]["cost"] == {"usd": "0.00208"}
 
 
 def test_ai_run_metadata_omits_cost_without_prices() -> None:
