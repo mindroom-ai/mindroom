@@ -336,7 +336,8 @@ def build_team_turn(
 ) -> TeamTurn:
     """Build one team of ``members`` over ``authored``, each non-compaction model scripted by ``scripts`` or empty.
 
-    ``team_name`` names the configured team the turn runs as, or None for an ad hoc team of ``members``; every agent
+    The compaction model builds as the test installed it before, as a ``summary_calls`` fixture does; without such an
+    install, building it raises. ``team_name`` names the configured team the turn runs as, or None for an ad hoc team of ``members``; every agent
     of the config runs, and the requester may address every responder in the room.
     """
     runtime_paths = test_runtime_paths(tmp_path)

@@ -183,6 +183,7 @@ if TYPE_CHECKING:
 
 
 _STRUCTLOG_CONFIGURE = structlog.configure
+_REAL_BUILD_MODEL_PROVIDER = provider_registry.build_model_provider
 _POSTGRES_STARTUP_TIMEOUT_SECONDS = 30
 
 # The event journal orders text in SQL, in SQLite, and in Python, and those
@@ -2887,9 +2888,10 @@ def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
 
 
 def install_model_providers(monkeypatch: pytest.MonkeyPatch, providers: Mapping[str, "ModelProvider"]) -> None:
-    """Build the models ``providers`` names as the providers it maps them to; every other model builds as before.
+    """Build the models ``providers`` names as the providers it maps them to, and every other model as before.
 
-    ``providers`` is read at every build, so a test may replace a provider between two turns.
+    An earlier install builds the other models; a model no install maps raises ``LookupError`` instead of building
+    a real provider. ``providers`` is read at every build, so a test may replace a provider between two turns.
     """
     earlier = provider_registry.build_model_provider
 
@@ -2902,6 +2904,9 @@ def install_model_providers(monkeypatch: pytest.MonkeyPatch, providers: Mapping[
     ) -> "ModelProvider":
         if model_name in providers:
             return providers[model_name]
+        if earlier is _REAL_BUILD_MODEL_PROVIDER:
+            msg = f"no provider installed for model {model_name!r}"
+            raise LookupError(msg)
         return earlier(config, paths, model_name, execution_identity=execution_identity)
 
     monkeypatch.setattr(provider_registry, "build_model_provider", build)
