@@ -99,7 +99,6 @@ class BatchCheckpoint:
                 assert record is not None
                 await self._save(deepcopy(record))
             return
-        self._batch_of(parent_call_id, "Approval has no exact captured parent Bash call")
         await self.persist(parent_call_id, refresh=True)
 
     async def persist(self, call_id: str, *, refresh: bool = False) -> None:
