@@ -245,9 +245,10 @@ class _RunRecordCommon:
     # Why an ``ERROR`` run failed, credentials redacted, set by the loop that ended it. It is never stored, so a
     # loaded record has none; ``content`` keeps Agno's stored rule (the error's text only when the model said nothing).
     error: str | None = field(default=None, compare=False, repr=False)
-    # The content a resumed run carried over from its pause, set by the resume (``resumed_record``): a resumed run
-    # keeps its paused content until it writes text of its own, as Agno's continuation did. It is never stored, so a
-    # loaded record has none.
+    # The content a resumed run carried over from its pause, set by the resume (``resumed_record``): a resumed agent
+    # or team member keeps its paused content until it writes text of its own, as Agno's continuation did, while a
+    # resumed team leader starts its text afresh (``continue_team``) and this records what it had at the pause. It is
+    # never stored, so a loaded record has none.
     carried_content: str | dict[str, Any] | None = field(default=None, compare=False, repr=False)
 
     @property
