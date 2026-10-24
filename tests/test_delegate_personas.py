@@ -610,6 +610,13 @@ async def test_native_nested_persona_stays_within_running_child_tools(
     assert len(records) == 2
     grandchild = next(record for record in records if record["persona"]["system_prompt"] == "Q")
     assert grandchild["persona"]["tools"] == ["delegate", "file"]
+    # The audit record of the child the grandchild ran inside names it as the parent delegation.
+    audits = {
+        run["persona"]["system_prompt"]: run
+        for run in (json.loads(path.read_text()) for path in paths.storage_root.rglob("run.json"))
+    }
+    assert audits["P"]["parent_delegation_id"] is None
+    assert audits["Q"]["parent_delegation_id"] == audits["P"]["delegation_id"]
     tool_results = _last_tool_results(model)
     assert any(
         "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file." in text for text in tool_results
