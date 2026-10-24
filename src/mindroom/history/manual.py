@@ -34,6 +34,7 @@ def request_compaction_before_next_reply(
 ) -> str:
     """Schedule text compaction before the next reply in ``scope``, the history scope the running entity stores to.
 
+    ``agent_name`` names the agent that asked, a team member when ``scope`` is its team's; only the log reads it.
     Return the message the caller reports. When ``session_state``, the dict the run's tools share, is given, the
     request is also recorded in it, in place.
     """
@@ -48,10 +49,8 @@ def request_compaction_before_next_reply(
     if scope_context is None:
         return "Error: Current agent has no history scope. Cannot compact context."
 
-    entity_name: str | None = agent_name
-    if scope.kind != "agent":
-        # An ad-hoc team has no authored settings of its own.
-        entity_name = scope.scope_id if scope.scope_id in config.teams else None
+    # An agent scope's id is its agent; an ad-hoc team has no authored settings of its own.
+    entity_name = scope.scope_id if scope.kind == "agent" or scope.scope_id in config.teams else None
     runtime_model = config.resolve_runtime_model(
         entity_name=entity_name,
         active_model_name=active_model_name,

@@ -33,8 +33,8 @@ class ModelIdentity:
 
     ``id`` is the effective model id, ``provider`` the stored ``model_provider`` string, and ``provider_name`` the
     metrics provider string that usage rows and pricing key by.
-    ``endpoint`` is the base URL requests go to, when the route has one; capabilities learned from provider
-    errors and native-compaction routes are keyed by it.
+    ``endpoint`` identifies the server requests reach, when the route has one: its base URL, plus the project and
+    region on Vertex AI Claude; capabilities learned from provider errors and native-compaction routes are keyed by it.
     """
 
     id: str
