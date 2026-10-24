@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from functools import cache
@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.usage.legacy_usage_storage import legacy_request_model
 from mindroom.usage.stats_storage import (
-    TOKEN_FIELDS,
     UsageModelMetrics,
     UsageRunNode,
     UsageSessionRow,
@@ -22,7 +21,7 @@ from mindroom.usage.stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
-from mindroom.usage.storage import SYSTEM_USAGE_ENTITY
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, TOKEN_FIELDS
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -129,17 +128,7 @@ class TokenTotals:
 
     def to_dict(self) -> dict[str, int]:
         """Return the public token counters."""
-        return {
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "total_tokens": self.total_tokens,
-            "cache_read_tokens": self.cache_read_tokens,
-            "cache_write_tokens": self.cache_write_tokens,
-            "reasoning_tokens": self.reasoning_tokens,
-            "audio_input_tokens": self.audio_input_tokens,
-            "audio_output_tokens": self.audio_output_tokens,
-            "audio_total_tokens": self.audio_total_tokens,
-        }
+        return asdict(self)
 
     def plus(self, other: TokenTotals) -> TokenTotals:
         """Add another aggregate's counters."""
@@ -192,11 +181,7 @@ class UsageCoverage:
 
     def to_dict(self) -> dict[str, object]:
         """Return coverage without implying billing completeness."""
-        return {
-            "scanned_sources": self.scanned_sources,
-            "unavailable_sources": self.unavailable_sources,
-            "note": self.note,
-        }
+        return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1113,20 +1098,10 @@ def _user_breakdown(usage: _ModelUsageAccumulator) -> tuple[UsageUserBreakdownRo
     return tuple(sorted(rows, key=lambda row: (-row.totals.total_tokens, row.user_id or "")))
 
 
-def _model_breakdown(
-    buckets: Mapping[tuple[str, str], _Aggregate],
-) -> tuple[UsageModelBreakdownRow, ...]:
+def _model_breakdown(buckets: Mapping[tuple[str, str], _Aggregate]) -> tuple[UsageModelBreakdownRow, ...]:
     return tuple(
-        UsageModelBreakdownRow(
-            model_provider=key[0],
-            model=key[1],
-            totals=aggregate.totals,
-            run_count=aggregate.count,
-        )
-        for key, aggregate in sorted(
-            buckets.items(),
-            key=lambda item: (-item[1].totals.total_tokens, item[0]),
-        )
+        UsageModelBreakdownRow(provider, model, aggregate.totals, aggregate.count)
+        for (provider, model), aggregate in _largest_first(buckets)
     )
 
 
@@ -1134,17 +1109,13 @@ def _cumulative_model_breakdown(
     buckets: Mapping[tuple[str, str], _Aggregate],
 ) -> tuple[UsageCumulativeModelBreakdownRow, ...]:
     return tuple(
-        UsageCumulativeModelBreakdownRow(
-            model_provider=key[0],
-            model=key[1],
-            totals=aggregate.totals,
-            session_count=aggregate.count,
-        )
-        for key, aggregate in sorted(
-            buckets.items(),
-            key=lambda item: (-item[1].totals.total_tokens, item[0]),
-        )
+        UsageCumulativeModelBreakdownRow(provider, model, aggregate.totals, aggregate.count)
+        for (provider, model), aggregate in _largest_first(buckets)
     )
+
+
+def _largest_first(buckets: Mapping[tuple[str, str], _Aggregate]) -> list[tuple[tuple[str, str], _Aggregate]]:
+    return sorted(buckets.items(), key=lambda item: (-item[1].totals.total_tokens, item[0]))
 
 
 def _add_model_totals(

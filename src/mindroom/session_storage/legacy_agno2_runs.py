@@ -62,10 +62,8 @@ def move_blob_runs_to_rows(connection: sqlite3.Connection, names: TableNames) ->
     for session_id, blob in blobs:
         stored = ordered_run_ids(connection, names, session_id)
         legacy = _legacy_entries(blob)
-        stored_ids = set(stored)
-        for run_id, entry in legacy.items():
-            if run_id not in stored_ids:
-                insert_run_entry(connection, names, entry, session_id=session_id)
+        for entry in legacy.values():
+            insert_run_entry(connection, names, entry, session_id=session_id)
         # Agno's merge read blob entries first, table copies substituted, then table-only rows.
         renumber_runs(connection, names, session_id, [*legacy, *(run_id for run_id in stored if run_id not in legacy)])
         connection.execute(f"UPDATE {sessions} SET runs = NULL WHERE session_id = ?", (session_id,))  # noqa: S608

@@ -254,30 +254,8 @@ class ConversationStore:
 
         Once the save commits, ``session.runs`` holds the run as the store does (see ``_reconcile``).
         """
-        return self._save_run_dict(
-            session,
-            run.to_dict(),
-            row_type=run_type(run),
-            record_usage=record_usage,
-            state=state,
-        )
-
-    def _save_run_dict(
-        self,
-        session: ConversationSession,
-        data: dict[str, Any],
-        *,
-        row_type: SessionKind,
-        record_usage: bool,
-        state: dict[str, Any] | None,
-    ) -> SaveOutcome:
-        with self.transaction(write=True) as connection:
-            created = _ensure_session_row(connection, self.names, session)
-            saved = self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
-            stored = self._write_state(connection, session, created, state)
-        _record_stored_state(session, stored)
-        _reconcile(session, [saved])
-        return saved.outcome
+        (saved,) = self._save_encoded(session, [_encoded(run)], record_usage=record_usage, state=state)
+        return "written" if isinstance(saved.row, _WrittenRow) else saved.row
 
     def save_runs(
         self,
@@ -302,21 +280,27 @@ class ConversationStore:
         if any(id(run) in loaded for run in runs):
             msg = "save_runs received a run object loaded from the session; edit a copy instead"
             raise ValueError(msg)
+        self._save_encoded(session, [_encoded(run) for run in runs], record_usage=False, state=state)
+
+    def _save_encoded(
+        self,
+        session: ConversationSession,
+        runs: list[tuple[dict[str, Any], SessionKind]],
+        *,
+        record_usage: bool,
+        state: dict[str, Any] | None,
+    ) -> list[_SavedRun]:
+        """Save ``runs``, each a stored dict and its row type, and ``state`` in one transaction, then reconcile."""
         with self.transaction(write=True) as connection:
             created = _ensure_session_row(connection, self.names, session)
             saved = [
-                self._save_run(
-                    connection,
-                    session.session_id,
-                    run.to_dict(),
-                    row_type=run_type(run),
-                    record_usage=False,
-                )
-                for run in runs
+                self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
+                for data, row_type in runs
             ]
             stored = self._write_state(connection, session, created, state)
         _record_stored_state(session, stored)
         _reconcile(session, saved)
+        return saved
 
     def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
         """Write ``state`` as the session's ``session_state``, creating the row if needed, and leave the rest alone.
@@ -400,24 +384,20 @@ class ConversationStore:
 
     def get_run(self, run_id: str) -> AnyRunRecord | None:
         """Return one stored run, in whatever session, as stored."""
-        with self.transaction(write=False) as connection:
-            if self.names.runs not in table_names(connection):
-                return None
-            row = connection.execute(
-                f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} WHERE run_id = ?",  # noqa: S608
-                (run_id,),
-            ).fetchone()
-        return None if row is None else run_from_row(*row)
+        return next(iter(self._stored_runs("run_id = ?", run_id)), None)
 
     def list_runs(self, session_id: str) -> list[AnyRunRecord]:
         """Return the session's whole run log as stored, member runs included, in log order."""
+        return self._stored_runs("session_id = ? ORDER BY run_index, created_at, run_id", session_id)
+
+    def _stored_runs(self, condition: str, value: str) -> list[AnyRunRecord]:
+        """Decode the stored runs whose rows match ``condition`` on ``value``, skipping rows of other run types."""
         with self.transaction(write=False) as connection:
             if self.names.runs not in table_names(connection):
                 return []
             rows = connection.execute(
-                f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} "  # noqa: S608
-                "WHERE session_id = ? ORDER BY run_index, created_at, run_id",
-                (session_id,),
+                f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} WHERE {condition}",  # noqa: S608
+                (value,),
             ).fetchall()
         return [run for run in (run_from_row(*row) for row in rows) if run is not None]
 
@@ -519,6 +499,11 @@ class _Load:
         return runs
 
 
+def _encoded(run: AnyRunRecord) -> tuple[dict[str, Any], SessionKind]:
+    """Return ``run``'s stored dict and the ``run_type`` of its row."""
+    return run.to_dict(), run_type(run)
+
+
 def _adopt_log(session: ConversationSession, loaded: _Load | None) -> None:
     """Make ``session``'s runs and summary those of ``loaded``, or none when the session is no longer stored."""
     session.runs = loaded.runs() if loaded is not None else []
@@ -542,10 +527,6 @@ class _SavedRun:
     run_id: str
     row_type: SessionKind
     row: _WrittenRow | Refusal
-
-    @property
-    def outcome(self) -> SaveOutcome:
-        return "written" if isinstance(self.row, _WrittenRow) else self.row
 
 
 def _reconcile(session: ConversationSession, saved: Iterable[_SavedRun]) -> None:
@@ -581,17 +562,8 @@ def runs_without(runs: Iterable[AnyRunRecord], run_ids: Iterable[str]) -> list[A
     """Return ``runs`` minus ``run_ids`` and every run descending from them through ``parent_run_id``."""
     run_list = list(runs)
     removed = {run_id for run_id in run_ids if run_id}
-    children_by_parent: dict[str, list[str]] = {}
-    for run in run_list:
-        if run.parent_run_id:
-            children_by_parent.setdefault(run.parent_run_id, []).append(run.run_id)
-    frontier = list(removed)
-    while frontier:
-        parent = frontier.pop()
-        for child in children_by_parent.get(parent, []):
-            if child not in removed:
-                removed.add(child)
-                frontier.append(child)
+    while below := {run.run_id for run in run_list if run.parent_run_id and run.parent_run_id in removed} - removed:
+        removed |= below
     return [run for run in run_list if run.run_id not in removed and run.parent_run_id not in removed]
 
 
@@ -607,18 +579,11 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     """
 
     async def persist(record: AnyRunRecord) -> None:
-        data = record.to_dict()
-        row_type = run_type(record)
+        encoded = _encoded(record)
         await write_with_session_state(
             store,
             session,
-            lambda opened, state: opened._save_run_dict(
-                session,
-                data,
-                row_type=row_type,
-                record_usage=True,
-                state=state,
-            ),
+            lambda opened, state: opened._save_encoded(session, [encoded], record_usage=True, state=state),
         )
 
     return persist
@@ -633,10 +598,6 @@ async def write_with_session_state[Result](
 
     The run's tools change the live state in place while the lane is busy, so the copy is taken before the lane is
     awaited. ``write`` hands it to the run save it makes (``state=``), which commits it with the run.
-
-    The hand-off stays in each callback because callers save runs in different shapes and the callback picks the save:
-    a run already encoded on the caller's task (``persist_to``), a run record (the CLI checkpoint), or a replay run
-    built in the lane (the CLI approval recovery). Binding the state for every shape would wrap the whole store.
     """
     state = session_state_snapshot(session.session_state)
     return await run_session_storage_operation(lambda: store, lambda opened: write(opened, state))
@@ -808,6 +769,9 @@ def _is_folded(
     )
 
 
+# TODO(simplify): the session totals in `session_data` repeat what the usage ledger's run snapshots record.
+# Report undated totals from the ledger and stop writing them, once a migration keeps pre-ledger history.
+# Operators would notice in admin and private usage totals, and stored data.
 def _record_run_usage(
     connection: sqlite3.Connection,
     names: TableNames,

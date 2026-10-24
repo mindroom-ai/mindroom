@@ -17,28 +17,25 @@ if TYPE_CHECKING:
     import sqlite3
     from pathlib import Path
 
-# The columns of Agno 3's sessions table, which the schema preflight requires of an existing database.
-SESSION_COLUMNS = (
-    "session_id",
-    "session_type",
-    "agent_id",
-    "team_id",
-    "workflow_id",
-    "user_id",
-    "session_data",
-    "agent_data",
-    "team_data",
-    "workflow_data",
-    "metadata",
-    "summary",
-    "created_at",
-    "updated_at",
-)
-_SESSION_COLUMN_SQL = (
-    "session_id VARCHAR NOT NULL, session_type VARCHAR NOT NULL, agent_id VARCHAR, team_id VARCHAR, "
-    "workflow_id VARCHAR, user_id VARCHAR, session_data JSON, agent_data JSON, team_data JSON, workflow_data JSON, "
-    "metadata JSON, summary JSON, created_at BIGINT NOT NULL, updated_at BIGINT"
-)
+# The columns of Agno 3's sessions table and their types; the schema preflight requires them of an existing database.
+_SESSION_COLUMN_TYPES = {
+    "session_id": "VARCHAR NOT NULL",
+    "session_type": "VARCHAR NOT NULL",
+    "agent_id": "VARCHAR",
+    "team_id": "VARCHAR",
+    "workflow_id": "VARCHAR",
+    "user_id": "VARCHAR",
+    "session_data": "JSON",
+    "agent_data": "JSON",
+    "team_data": "JSON",
+    "workflow_data": "JSON",
+    "metadata": "JSON",
+    "summary": "JSON",
+    "created_at": "BIGINT NOT NULL",
+    "updated_at": "BIGINT",
+}
+SESSION_COLUMNS = tuple(_SESSION_COLUMN_TYPES)
+_SESSION_COLUMN_SQL = ", ".join(f"{column} {column_type}" for column, column_type in _SESSION_COLUMN_TYPES.items())
 _SESSIONS_DIRECTORY = "sessions"
 _DATABASE_SUFFIX = ".db"
 _RUNS_INDEXED_COLUMNS = (
@@ -87,6 +84,9 @@ class TableNames:
         """The runs table."""
         # Agno 3 (agno/db/base.py, BaseDb.__init__) names the runs table ``<sessions>_runs``, except that its default
         # sessions table ``agno_sessions``, which is the storage name ``agno``, keeps the runs table ``agno_runs``.
+        # TODO(simplify): only the storage name `agno` keeps a runs table that is not `<sessions>_runs`.
+        # Name every runs table `<sessions>_runs`, renaming `agno_runs` once.
+        # Stored data of an agent named `agno` would notice. (#3075)
         return "agno_runs" if self.storage_name == "agno" else f"{self.sessions}_runs"
 
     @property

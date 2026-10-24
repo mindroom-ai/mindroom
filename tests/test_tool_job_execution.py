@@ -611,7 +611,7 @@ async def test_fast_result_acknowledges_exact_saved_run(  # noqa: PLR0915 - Rece
             msg = "storage unavailable"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(type(storage), "_save_run_dict", fail_save)
+        monkeypatch.setattr(type(storage), "_save_encoded", fail_save)
 
     @owned_tool_execution()
     async def parent_run() -> object:
