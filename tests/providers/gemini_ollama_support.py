@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -34,13 +33,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    import pytest
-
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
 
 FAMILIES = ("gemini", "gemini_vertexai", "ollama")
-_PROVIDER_ENV_PREFIXES = ("GEMINI_", "GOOGLE_", "OLLAMA_")
 
 
 @dataclass(frozen=True)
@@ -64,13 +60,6 @@ def goldens() -> list[Golden]:
         for family in FAMILIES
         for path in sorted((FIXTURE_ROOT / family).glob("*.json"))
     ]
-
-
-def hide_provider_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep provider credentials and endpoints in the process environment away from SDK fallbacks."""
-    for name in list(os.environ):
-        if name.startswith(_PROVIDER_ENV_PREFIXES):
-            monkeypatch.delenv(name)
 
 
 def runtime_paths_for(root: Path) -> RuntimePaths:

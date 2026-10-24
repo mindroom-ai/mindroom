@@ -38,12 +38,12 @@ from mindroom.providers.tool_policy import without_provider_tools
 from tests.providers.gemini_ollama_support import (
     build_adapter,
     gemini_sse,
-    hide_provider_environment,
     normalized_request,
     ollama_ndjson,
     run_adapter,
     runtime_paths_for,
 )
+from tests.providers.golden_support import hide_provider_environment
 
 if TYPE_CHECKING:
     from pathlib import Path

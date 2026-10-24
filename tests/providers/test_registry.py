@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import ast
 import json
-import os
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -46,6 +45,7 @@ from tests.providers.golden_support import (
     expected_parsed,
     expected_stop_reason,
     golden_request,
+    hide_provider_environment,
     load_golden,
     normalized_parsed,
     normalized_request,
@@ -58,20 +58,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider, StreamEvent
 
-_PROVIDER_ENV_PREFIXES = (
-    "ANTHROPIC_",
-    "AWS_",
-    "AZURE_",
-    "CEREBRAS_",
-    "CLOUD_ML_",
-    "DEEPSEEK_",
-    "GEMINI_",
-    "GOOGLE_",
-    "GROQ_",
-    "OLLAMA_",
-    "OPENAI_",
-    "OPENROUTER_",
-)
 _GOOGLE_TOKEN = "parity-google-token"  # noqa: S105 - synthetic SDK credential
 _BAD_REQUEST = {"type": "error", "error": {"type": "invalid_request_error", "message": "bad", "code": 400}}
 _SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}}
@@ -79,9 +65,7 @@ _SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}}
 
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in list(os.environ):
-        if name.startswith(_PROVIDER_ENV_PREFIXES):
-            monkeypatch.delenv(name)
+    hide_provider_environment(monkeypatch)
 
 
 @pytest.fixture

@@ -39,10 +39,9 @@ from tests.providers.family_support import (
     claude_events,
     gemini_chunk,
     ollama_chunk,
-    scrub_provider_env,
 )
 from tests.providers.gemini_ollama_support import runtime_paths_for
-from tests.providers.golden_support import Wire, ndjson_response, sse_response
+from tests.providers.golden_support import Wire, hide_provider_environment, ndjson_response, sse_response
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,7 +61,7 @@ _OVERLOADED = "The model is overloaded"
 
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
-    scrub_provider_env(monkeypatch)
+    hide_provider_environment(monkeypatch)
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
 
 

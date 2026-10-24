@@ -17,8 +17,8 @@ from mindroom.llm.provider import ModelRequest, ToolSpec, complete
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.session_storage.codec import run_from_row
-from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES, scrub_provider_env
-from tests.providers.golden_support import Wire
+from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES
+from tests.providers.golden_support import Wire, hide_provider_environment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -157,7 +157,7 @@ _RESULTS = {
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", sorted(FAMILIES))
 async def test_combined_results_reach_every_route(family: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    scrub_provider_env(monkeypatch)
+    hide_provider_environment(monkeypatch)
     spec = FAMILIES[family]
     wire = Wire(lambda _request: spec.reply())
     messages = build_request(

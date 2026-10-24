@@ -26,7 +26,8 @@ from mindroom.teams.runtime import MemberEvent, run_team, team_paused_content, t
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
-from tests.providers.gemini_ollama_support import build_adapter, hide_provider_environment, ollama_ndjson
+from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
+from tests.providers.golden_support import hide_provider_environment
 from tests.team_runtime.squad import (
     PANEL,
     SQUAD,
