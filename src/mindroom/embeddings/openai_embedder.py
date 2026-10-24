@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 from openai import AsyncOpenAI, OpenAI
 
-from mindroom.embeddings.embedder_health import EmbedderHealthRecorder, capture_embedder_health_recorder
 from mindroom.embeddings.errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
     EmbedderRequestError,
@@ -36,6 +35,7 @@ if TYPE_CHECKING:
     from openai.types.create_embedding_response import CreateEmbeddingResponse
 
     from mindroom.embeddings.base import EmbeddingPurpose
+    from mindroom.embeddings.embedder_health import EmbedderHealthRecorder
 
 
 #: The most texts one request carries; longer lists go in further requests.
@@ -83,6 +83,9 @@ class OpenAIEmbedder:
     """
 
     model: str
+    #: The recorder this embedder's request outcomes feed; the factory captures it, so every embedder built for one
+    #: config generation reports into that generation.
+    health_recorder: EmbedderHealthRecorder = field(repr=False)
     api_key: str | None = field(default=None, repr=False)
     base_url: str | None = None
     #: Explicitly configured width; OpenAI's own models fall back to ``OPENAI_EMBEDDING_DIMENSIONS``.
@@ -94,7 +97,6 @@ class OpenAIEmbedder:
     max_retries: int | None = None
     client: OpenAI | None = field(default=None, repr=False)
     async_client: AsyncOpenAI | None = field(default=None, repr=False)
-    health_recorder: EmbedderHealthRecorder = field(default_factory=capture_embedder_health_recorder, repr=False)
 
     @property
     def sends_batches(self) -> bool:

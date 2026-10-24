@@ -48,17 +48,32 @@ def _success_response(*, count: int = 1) -> SimpleNamespace:
 def _sync_embedder_returning(response: SimpleNamespace) -> OpenAIEmbedder:
     client = MagicMock()
     client.embeddings.create.return_value = response
-    return OpenAIEmbedder(model="gemini-embedding-2", api_key=SECRET, client=client)
+    return OpenAIEmbedder(
+        model="gemini-embedding-2",
+        api_key=SECRET,
+        client=client,
+        health_recorder=capture_embedder_health_recorder(),
+    )
 
 
 def _failing_sync_embedder() -> OpenAIEmbedder:
     client = MagicMock()
     client.embeddings.create.side_effect = _auth_error()
-    return OpenAIEmbedder(model="gemini-embedding-2", api_key=SECRET, client=client)
+    return OpenAIEmbedder(
+        model="gemini-embedding-2",
+        api_key=SECRET,
+        client=client,
+        health_recorder=capture_embedder_health_recorder(),
+    )
 
 
 def _async_embedder(async_client: MagicMock) -> OpenAIEmbedder:
-    return OpenAIEmbedder(model="gemini-embedding-2", api_key=SECRET, async_client=async_client)
+    return OpenAIEmbedder(
+        model="gemini-embedding-2",
+        api_key=SECRET,
+        async_client=async_client,
+        health_recorder=capture_embedder_health_recorder(),
+    )
 
 
 def _failing_async_embedder() -> OpenAIEmbedder:
@@ -202,7 +217,12 @@ def test_file_reference_like_inputs_are_sent_as_literal_text() -> None:
     text = "files/bootsel.service#L9> If the embedded daemons do not start"
     client = MagicMock()
     client.embeddings.create.side_effect = [_success_response(), _success_response(count=2)]
-    embedder = OpenAIEmbedder(model="gemini-embedding-2", api_key=SECRET, client=client)
+    embedder = OpenAIEmbedder(
+        model="gemini-embedding-2",
+        api_key=SECRET,
+        client=client,
+        health_recorder=capture_embedder_health_recorder(),
+    )
 
     assert embedder.embed([text], purpose="query") == [[1.0, 2.0]]
     assert embedder.embed(["ordinary text", text], purpose="document") == [[1.0, 2.0], [1.0, 2.0]]
@@ -221,7 +241,12 @@ def test_texts_beyond_one_request_go_in_further_requests() -> None:
         _success_response(count=100),
         _success_response(),
     ]
-    embedder = OpenAIEmbedder(model="gemini-embedding-2", api_key=SECRET, client=client)
+    embedder = OpenAIEmbedder(
+        model="gemini-embedding-2",
+        api_key=SECRET,
+        client=client,
+        health_recorder=capture_embedder_health_recorder(),
+    )
 
     assert len(embedder.embed(texts, purpose="document")) == 201
 
@@ -257,6 +282,7 @@ def _prefixed_embedder(
         async_client=async_client,
         query_prefix=QUERY_PREFIX,
         document_prefix=DOCUMENT_PREFIX,
+        health_recorder=capture_embedder_health_recorder(),
     )
 
 

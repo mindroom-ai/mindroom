@@ -16,6 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.knowledge_graph import clients
 from mindroom.knowledge_graph.clients import MindRoomEmbedder, MindRoomLLMClient, UnusedCrossEncoder
@@ -208,7 +209,12 @@ async def test_embedder_sends_an_openai_batch_as_batch_requests() -> None:
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(side_effect=create)
     embedder = MindRoomEmbedder(
-        OpenAIEmbedder(model="text-embedding-3-small", api_key="sk-test", async_client=async_client),
+        OpenAIEmbedder(
+            model="text-embedding-3-small",
+            api_key="sk-test",
+            async_client=async_client,
+            health_recorder=capture_embedder_health_recorder(),
+        ),
     )
 
     texts = ["x" * (index % 7 + 1) for index in range(150)]
@@ -235,6 +241,7 @@ async def test_embedder_embeds_every_graph_text_as_a_query() -> None:
             async_client=async_client,
             query_prefix="q: ",
             document_prefix="d: ",
+            health_recorder=capture_embedder_health_recorder(),
         ),
     )
 
@@ -262,6 +269,7 @@ async def test_embedder_embeds_one_text_per_request_when_a_server_answers_a_batc
             api_key="sk-test",
             base_url="http://local/v1",
             async_client=async_client,
+            health_recorder=capture_embedder_health_recorder(),
         ),
     )
 

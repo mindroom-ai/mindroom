@@ -15,6 +15,7 @@ import pytest
 
 import mindroom.embeddings.sentence_transformers_embedder as local_embedder
 from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.embeddings.errors import EmbedderRequestError
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
@@ -34,7 +35,13 @@ def _isolate_sentence_transformer_client_cache(monkeypatch: pytest.MonkeyPatch) 
 
 
 def _request_dimensions(model: str, *, base_url: str | None = None, dimensions: int | None = None) -> int | None:
-    embedder = OpenAIEmbedder(model=model, api_key="sk-test", base_url=base_url, dimensions=dimensions)
+    embedder = OpenAIEmbedder(
+        model=model,
+        api_key="sk-test",
+        base_url=base_url,
+        dimensions=dimensions,
+        health_recorder=capture_embedder_health_recorder(),
+    )
     return embedder._request_parameters(["hello"], purpose="query").get("dimensions")
 
 
@@ -60,7 +67,12 @@ def test_custom_host_explicit_dimensions_override_is_preserved() -> None:
 
 def test_batch_requests_use_the_single_request_dimension_rules() -> None:
     """A batch request uses the same custom-host dimension rules as a single request."""
-    embedder = OpenAIEmbedder(model="gemini-embedding-2", api_key="sk-test", base_url="http://example.com/v1")
+    embedder = OpenAIEmbedder(
+        model="gemini-embedding-2",
+        api_key="sk-test",
+        base_url="http://example.com/v1",
+        health_recorder=capture_embedder_health_recorder(),
+    )
 
     request = embedder._request_parameters(["hello", "world"], purpose="document")
 

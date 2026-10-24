@@ -280,7 +280,12 @@ def test_probe_bounds_openai_client_timeout(tmp_path: Path, monkeypatch: pytest.
         data=[SimpleNamespace(embedding=[0.1, 0.2])],
         usage=None,
     )
-    embedder = OpenAIEmbedder(model="text-embedding-3-small", api_key="sk-x", client=client)
+    embedder = OpenAIEmbedder(
+        model="text-embedding-3-small",
+        api_key="sk-x",
+        client=client,
+        health_recorder=capture_embedder_health_recorder(),
+    )
     monkeypatch.setattr(
         "mindroom.embeddings.factory.create_configured_embedder",
         lambda *_args: embedder,
