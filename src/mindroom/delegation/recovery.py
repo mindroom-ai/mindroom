@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
@@ -158,16 +159,25 @@ async def interrupt_child(
                 runtime_paths,
                 execution_identity=child_execution_identity(child),
             )
-            session = storage.load_session(child.session_id, "agent") or new_scope_session(
-                session_id=child.session_id,
-                scope_id=child.child_agent_name,
-                is_team=False,
+            _rewrite_stored_run(
+                storage,
+                HistoryScope(kind="agent", scope_id=child.child_agent_name),
+                child.session_id,
+                response,
             )
-            # The run exists; this rewrites its row without touching the usage ledger.
-            storage.save_runs(session, [response])
 
         await asyncio.to_thread(persist)
     await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
+
+
+def _rewrite_stored_run(storage: ConversationStore, scope: HistoryScope, session_id: str, run: AnyRunRecord) -> None:
+    """Rewrite the stored row of ``run``, which exists, in session ``session_id``, leaving the usage ledger untouched."""
+    session = storage.load_session(session_id, scope.kind) or new_scope_session(
+        session_id=session_id,
+        scope_id=scope.scope_id,
+        is_team=scope.kind == "team",
+    )
+    storage.save_runs(session, [run])
 
 
 async def _cancel_delegations(
@@ -234,12 +244,4 @@ async def cancel_approval_delegations(
     response = await asyncio.to_thread(storage.get_run, continuation.run_id)
     if response is not None and bool((response.metadata or {}).get(DELEGATION_STATE_KEY)):
         await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-        session = await asyncio.to_thread(storage.load_session, continuation.session_id, scope.kind)
-        if session is None:
-            session = new_scope_session(
-                session_id=continuation.session_id,
-                scope_id=scope.scope_id,
-                is_team=scope.kind == "team",
-            )
-        # The run exists; this rewrites its row without touching the usage ledger.
-        await asyncio.to_thread(storage.save_runs, session, [response])
+        await asyncio.to_thread(_rewrite_stored_run, storage, scope, continuation.session_id, response)
