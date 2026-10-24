@@ -27,7 +27,6 @@ class PendingApproval:
     tool_name: str
     arguments_preview_truncated: bool
     timeout_seconds: int
-    created_at_ms: int
     initial_status: _PendingApprovalStatus
     approvable: bool = True
     full_arguments_available: bool = False
@@ -67,7 +66,6 @@ class PendingApproval:
 
         requested_at = _content_str(content, "requested_at")
         expires_at = _content_str(content, "expires_at")
-        created_at_ms = _created_at_ms(event, requested_at)
         timeout_seconds = _timeout_seconds(requested_at, expires_at)
         requester_id = _content_str(content, "requester_id") or ""
         thread_id = _content_str(content, "thread_id")
@@ -83,7 +81,6 @@ class PendingApproval:
             tool_name=tool_name,
             arguments_preview_truncated=bool(content.get("arguments_truncated")),
             timeout_seconds=timeout_seconds,
-            created_at_ms=created_at_ms,
             initial_status=cast("_PendingApprovalStatus", status),
             approvable=_approvable(content),
             full_arguments_available=_full_arguments_available(content),
@@ -131,14 +128,6 @@ def _required_str(event: dict[str, Any], key: str) -> str:
 def _content_str(content: dict[str, Any], key: str) -> str | None:
     value = content.get(key)
     return value if isinstance(value, str) and value else None
-
-
-def _created_at_ms(event: dict[str, Any], requested_at: str | None) -> int:
-    parsed = parse_approval_datetime(requested_at)
-    if parsed is None:
-        timestamp = event.get("origin_server_ts")
-        return timestamp if isinstance(timestamp, int) and not isinstance(timestamp, bool) else 0
-    return int(parsed.timestamp() * 1000)
 
 
 def _timeout_seconds(requested_at: str | None, expires_at: str | None) -> int:
