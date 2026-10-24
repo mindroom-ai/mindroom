@@ -20,7 +20,6 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
-from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.anthropic import messages as claude_messages
 from mindroom.providers.anthropic.messages import build_provider as build_claude_provider
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
@@ -30,7 +29,7 @@ from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.gemini.adapter import GeminiSettings
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.ollama_adapter import OllamaSettings
-from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
+from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.openai.settings import CODEX_FIELDS, ChatSettings, ResponsesSettings
 from mindroom.providers.registry import build_model_provider
@@ -39,6 +38,7 @@ from mindroom.redaction import REDACTED
 from mindroom.startup_errors import PermanentStartupError
 from tests.providers.anthropic_family_support import claude_turn, json_reply, route_provider
 from tests.providers.golden_support import Wire
+from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -835,11 +835,7 @@ def test_the_openai_family_builder_rejects_keys_its_route_does_not_take(tmp_path
     with pytest.raises(ValueError, match=r"Unsupported extra_kwargs for provider 'zai': temprature\. Accepted keys: "):
         build_openai_provider(
             model_config,
-            ProviderRuntime(
-                runtime_paths=_runtime_paths(tmp_path),
-                execution_identity=None,
-                codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
-            ),
+            provider_runtime(_runtime_paths(tmp_path)),
         )
 
 

@@ -21,8 +21,7 @@ from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
-from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
-from mindroom.providers.openai.build import ProviderRuntime, build_provider
+from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import chat_request_kwargs, parse_chat_completion
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
@@ -38,7 +37,7 @@ from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.system_prompt import render_session_context
-from tests.providers.openai_family_support import responses_adapter
+from tests.providers.openai_family_support import provider_runtime, responses_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -763,11 +762,7 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
         input_details["audio_tokens"] = 11
         adapter = build_provider(
             ModelConfig(provider="openai", id="gpt-6-astra", api="chat_completions", api_key="test-key"),
-            ProviderRuntime(
-                runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
-                execution_identity=None,
-                codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
-            ),
+            provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
         )
         assert isinstance(adapter, ChatAdapter)
         completion = ChatCompletion.model_validate(
@@ -827,11 +822,7 @@ def test_groq_and_cerebras_usage_keeps_cached_input_and_reasoning(tmp_path: Path
     """Cached input and reasoning stay inside the prompt and completion totals these routes report."""
     adapter = build_provider(
         ModelConfig(provider=route, id="gpt-oss-120b", api_key="test-key"),
-        ProviderRuntime(
-            runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
-            execution_identity=None,
-            codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
-        ),
+        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
     )
     assert isinstance(adapter, ChatAdapter)
     completion = ChatCompletion.model_validate(
@@ -908,11 +899,7 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
             api_key="test-key",
             extra_kwargs=authored,
         ),
-        ProviderRuntime(
-            runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
-            execution_identity=None,
-            codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
-        ),
+        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
     )
     assert isinstance(adapter, ChatAdapter)
 
@@ -943,11 +930,7 @@ def _codex(tmp_path: Path, model_id: str = "gpt-5.6", **extra_kwargs: Any) -> Re
             id=model_id,
             extra_kwargs={"codex_home": str(tmp_path / ".codex"), **extra_kwargs},
         ),
-        ProviderRuntime(
-            runtime_paths=paths,
-            execution_identity=None,
-            codex_default_instructions="Default Codex instructions.",
-        ),
+        provider_runtime(paths, codex_default_instructions="Default Codex instructions."),
     )
     assert isinstance(adapter, ResponsesAdapter)
     return adapter

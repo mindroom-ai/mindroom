@@ -19,9 +19,9 @@ from mindroom.history.summary_call import (
 from mindroom.llm.errors import TRANSPORT_TIMEOUT, ProviderError, ProviderUnavailable
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
-from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
-from mindroom.providers.openai.build import ProviderRuntime, build_provider
+from mindroom.providers.openai.build import build_provider
 from tests.providers.golden_support import pipeline_provider
+from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -48,14 +48,8 @@ def _model(
         api="chat_completions" if route == "chat" else "responses",
         extra_kwargs={"api_key": "test-key", "base_url": "https://mock.invalid/v1", **output_limit, **extra_kwargs},
     )
-    runtime = ProviderRuntime(
-        runtime_paths=resolve_runtime_paths(
-            config_path=root / "config.yaml",
-            storage_path=root / "data",
-            process_env={},
-        ),
-        execution_identity=None,
-        codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
+    runtime = provider_runtime(
+        resolve_runtime_paths(config_path=root / "config.yaml", storage_path=root / "data", process_env={}),
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     return pipeline_provider(build_provider(config, runtime))
@@ -228,14 +222,8 @@ async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) 
         id="anthropic/claude-sonnet-5",
         extra_kwargs={"api_key": "test-key", "cache_system_prompt": True, "max_retries": 2},
     )
-    runtime = ProviderRuntime(
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "data",
-            process_env={},
-        ),
-        execution_identity=None,
-        codex_default_instructions=CODEX_DEFAULT_INSTRUCTIONS,
+    runtime = provider_runtime(
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={}),
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     model = pipeline_provider(build_provider(config, runtime))
