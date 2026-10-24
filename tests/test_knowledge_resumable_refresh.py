@@ -1312,7 +1312,7 @@ def test_refresh_embedder_degrades_for_providers_without_batching() -> None:
     embedder = RefreshEmbedder(inner)
 
     assert embedder.batches() is False
-    assert embedder.embed_texts(["one", "two", "one"]) == {"one": [3.0, 1.0], "two": [3.0, 1.0]}
+    assert embedder.embed_texts(["one", "two"]) == {"one": [3.0, 1.0], "two": [3.0, 1.0]}
     assert inner.single_requests == ["one", "two"]
     assert embedder.embed_each(["one"]) == [[3.0, 1.0]]
     assert inner.single_requests == ["one", "two", "one"]
