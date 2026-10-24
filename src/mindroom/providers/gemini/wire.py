@@ -99,7 +99,7 @@ class MediaRoute:
     """
 
     provider: str
-    upload: Callable[[Path, str], Awaitable[str]] | None = None
+    upload: Callable[[Path, str], Awaitable[str]] | None
 
 
 async def format_contents(
