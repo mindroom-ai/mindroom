@@ -348,6 +348,7 @@ def test_private_ad_hoc_bound_team_scope_requires_requester_identity(tmp_path: P
         resolve_bound_team_scope(
             member_names=["private_worker", "shared"],
             config=config,
+            team_name=None,
             execution_identity=None,
         )
 

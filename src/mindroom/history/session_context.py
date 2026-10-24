@@ -76,7 +76,7 @@ def resolve_bound_team_scope(
     *,
     member_names: Sequence[str],
     config: Config,
-    team_name: str | None = None,
+    team_name: str | None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> HistoryScope | None:
     """Resolve the history scope backing one live team run, or None when the run names no member."""
