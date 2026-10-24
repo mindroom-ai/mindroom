@@ -32,9 +32,8 @@ def validate_approval_tool_owners(
 ) -> None:
     """Refuse an approved call unless the waiting call it names still has its recorded function, arguments, member, and toolkit.
 
-    ``owners`` maps ``(agent id, function name)`` to the authored toolkit the rebuilt agent offers the function from,
-    as ``AgentBuild.tool_owners`` records it. The resume itself refuses decisions that do not cover the waiting calls
-    exactly; this check binds each approval to the toolkit it was granted for.
+    ``owners`` are the rebuilt agent's, as ``require_original_toolkit`` reads them. The resume itself refuses decisions
+    that do not cover the waiting calls exactly; this check binds each approval to the toolkit it was granted for.
     """
     pending = {
         requirement.tool_execution.tool_call_id: requirement
@@ -61,7 +60,7 @@ def require_original_toolkit(owners: Mapping[tuple[str, str], str], call: Approv
     """Refuse an approved ``call`` unless its agent still offers the function from the toolkit the approval recorded.
 
     ``owners`` maps ``(agent id, function name)`` to the authored toolkit the rebuilt agent offers the function from,
-    so a removed or replaced tool cannot run under an old approval.
+    as ``tool_owners_by_agent`` returns it, so a removed or replaced tool cannot run under an old approval.
     """
     if call.toolkit_name is None or owners.get((call.invoking_agent, call.tool_name)) != call.toolkit_name:
         msg = f"Saved approval tool {call.tool_name!r} no longer has its original toolkit; retry the request"
