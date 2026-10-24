@@ -77,7 +77,7 @@ def finished_assistant_message(
         content=content,
         reasoning_content=reasoning,
         tool_calls=list(tool_calls) or None,
-        provider_data=dict(provider_data or {}),
+        provider_data=provider_data,
     )
     if usage is not None:
         message.metrics = usage
