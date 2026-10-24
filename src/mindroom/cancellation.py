@@ -15,7 +15,6 @@ __all__ = [
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "TaskCancelSource",
-    "build_cancelled_error",
     "cancel_failure_reason",
     "cancel_message_for_source",
     "cancel_source_from_failure_reason",
@@ -87,16 +86,6 @@ def current_task_is_process_shutdown() -> bool:
 def task_is_process_shutdown(task: asyncio.Task[Any] | None) -> bool:
     """Read shutdown disposition from an explicitly retained response owner task."""
     return task is not None and task in _PROCESS_SHUTDOWN_TASKS
-
-
-def build_cancelled_error(reason: str | None) -> asyncio.CancelledError:
-    """Return one CancelledError that preserves the task's in-flight cancel source."""
-    task = asyncio.current_task()
-    if task is not None and task.cancelling() > 0:
-        cancel_source = _TASK_CANCEL_SOURCES.get(task)
-        if cancel_source is not None:
-            return asyncio.CancelledError(cancel_message_for_source(cancel_source))
-    return asyncio.CancelledError(reason or "Run cancelled")
 
 
 def classify_cancel_source(exc: asyncio.CancelledError) -> CancelSource:

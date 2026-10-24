@@ -37,7 +37,7 @@ from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.budgets.monitor import budget_model
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history.interrupted_replay import persist_interrupted_replay
-from mindroom.history.session_context import create_scope_session_storage, open_resolved_scope_session_context
+from mindroom.history.session_context import create_scope_session_storage, load_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
@@ -359,25 +359,25 @@ class _CallResponseTracker:
         return self.pending.pop(next(iter(self.pending))) if self.pending else None
 
     def _persist(self, state: _CallAgentRunState, spoken_text: str, original_status: RunStatus) -> None:
-        with open_resolved_scope_session_context(
+        scope_context = load_scope_session(
             agent_name=self.agent_name,
             scope=HistoryScope(kind="agent", scope_id=self.agent_name),
             session_id=state.session_id,
             runtime_paths=self.runtime_paths,
             config=self.config,
             execution_identity=self.execution_identity,
-        ) as scope_context:
-            persist_interrupted_replay(
-                scope_context=scope_context,
-                run_id=state.run_id,
-                user_message=state.user_message,
-                user_message_is_structured=False,
-                partial_text=spoken_text,
-                completed_tools=state.completed_tools,
-                interrupted_tools=state.interrupted_tools,
-                run_metadata=state.run_metadata,
-                original_status=original_status,
-            )
+        )
+        persist_interrupted_replay(
+            scope_context=scope_context,
+            run_id=state.run_id,
+            user_message=state.user_message,
+            user_message_is_structured=False,
+            partial_text=spoken_text,
+            completed_tools=state.completed_tools,
+            interrupted_tools=state.interrupted_tools,
+            run_metadata=state.run_metadata,
+            original_status=original_status,
+        )
 
 
 @dataclass

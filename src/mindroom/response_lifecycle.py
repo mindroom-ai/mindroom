@@ -623,8 +623,8 @@ class ResponseLifecycleDeps:
     process_shutdown_requested: Callable[[], bool]
 
 
-def _session_exists(*, storage: ConversationStore, session_id: str, session_type: SessionKind) -> bool:
-    return storage.load_session(session_id, session_type) is not None
+def _session_exists(create_storage: Callable[[], ConversationStore], session_id: str, kind: SessionKind) -> bool:
+    return create_storage().has_session(session_id, kind)
 
 
 def _response_outcome_label(final_delivery_outcome: FinalDeliveryOutcome | None) -> str:
@@ -682,7 +682,7 @@ class ResponseLifecycle:
             error_type=error.__class__.__name__,
         )
 
-    def _session_started_watch_is_needed(
+    async def _session_started_watch_is_needed(
         self,
         *,
         tool_context: ToolRuntimeContext | None,
@@ -693,7 +693,7 @@ class ResponseLifecycle:
         if tool_context is None or not tool_context.hook_registry.has_hooks(EVENT_SESSION_STARTED):
             return False
         try:
-            return not _session_exists(storage=create_storage(), session_id=session_id, session_type=session_type)
+            return not await asyncio.to_thread(_session_exists, create_storage, session_id, session_type)
         except Exception as error:
             self.deps.logger.exception(
                 "Failed to probe session storage for session:started eligibility",
@@ -703,7 +703,7 @@ class ResponseLifecycle:
             )
             return False
 
-    def setup_session_watch(
+    async def setup_session_watch(
         self,
         *,
         tool_context: ToolRuntimeContext | None,
@@ -716,7 +716,7 @@ class ResponseLifecycle:
     ) -> _SessionStartedWatch:
         """Pre-compute session:started eligibility for one response path."""
         return _SessionStartedWatch(
-            should_watch=self._session_started_watch_is_needed(
+            should_watch=await self._session_started_watch_is_needed(
                 tool_context=tool_context,
                 session_id=session_id,
                 session_type=session_type,
@@ -735,8 +735,7 @@ class ResponseLifecycle:
     async def _maybe_emit_session_started(self, watch: _SessionStartedWatch) -> None:
         if watch.tool_context is None or not watch.should_watch:
             return
-        storage = watch.create_storage()
-        if not _session_exists(storage=storage, session_id=watch.session_id, session_type=watch.session_type):
+        if not await asyncio.to_thread(_session_exists, watch.create_storage, watch.session_id, watch.session_type):
             return
 
         bindings = resolve_tool_runtime_hook_bindings(watch.tool_context)

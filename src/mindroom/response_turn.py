@@ -1,7 +1,7 @@
 """Shared response-turn drivers for the agent and team envelopes.
 
 One inbound response turn has the same lifecycle regardless of which entity
-answers it: open the scope session, run prepared attempts, decide whether the
+answers it: load the scope session, run prepared attempts, decide whether the
 turn continues after a model switch or a discarded empty run, record the
 outcome on the turn recorder, and persist an interrupted replay when the turn
 is cancelled without a recorder.
@@ -21,19 +21,16 @@ out of it and crosses via ``TurnSinks`` or the adapters.
 from __future__ import annotations
 
 import asyncio
-import sys
-from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime, response_cli_lifetime
 from mindroom.ai_turn_state import AITurnState
-from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
-from mindroom.cancellation import build_cancelled_error
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
@@ -55,7 +52,6 @@ from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT, continuation_dec
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
-    from contextlib import AbstractContextManager
 
     from mindroom.agent_modes import AgentMode
     from mindroom.delegation.state import SubagentPersona
@@ -370,23 +366,6 @@ class TurnSinks:
     on_completed: Callable[[CompletedAttempt], None] | None = None
 
 
-@dataclass
-class TurnRunState:
-    """Driver-owned mutable state shared with the adapter attempt bodies.
-
-    Attempt bodies must set ``run_metadata`` and ``unseen_event_ids`` once
-    prepare finishes; interruption recording falls back to rebuilt metadata
-    while they are still unset.
-    """
-
-    turn_state: AITurnState = field(default_factory=AITurnState)
-    scope_context: ScopeSessionContext | None = None
-    run_metadata: dict[str, Any] | None = None
-    unseen_event_ids: list[str] = field(default_factory=list)
-    standalone_replay_persisted: bool = False
-    empty_response_retried: bool = False
-
-
 @dataclass(frozen=True)
 class TurnPartialSnapshot:
     """Live partial-output view used when a turn is cancelled from outside."""
@@ -395,6 +374,39 @@ class TurnPartialSnapshot:
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     interrupted_tools: tuple[ToolTraceEntry, ...] = ()
     attempt_run_id: str | None = None
+
+
+class _LiveAttempt(Protocol):
+    """The attempt a turn is running, as an interruption records it."""
+
+    def partial_snapshot(self) -> TurnPartialSnapshot:
+        """Return the attempt's partial output and run id."""
+        ...
+
+
+@dataclass
+class TurnRunState:
+    """Driver-owned mutable state shared with the adapter attempt bodies.
+
+    Attempt bodies must set ``run_metadata`` and ``unseen_event_ids`` once
+    prepare finishes; interruption recording falls back to rebuilt metadata
+    while they are still unset. They set ``attempt`` once their attempt starts;
+    the driver drops it when the attempt is spent, so an interruption before the
+    next attempt starts records none of the spent attempt's partial output, whose
+    finished calls the turn state already carries.
+    """
+
+    turn_state: AITurnState = field(default_factory=AITurnState)
+    scope_context: ScopeSessionContext | None = None
+    run_metadata: dict[str, Any] | None = None
+    unseen_event_ids: list[str] = field(default_factory=list)
+    standalone_replay_persisted: bool = False
+    empty_response_retried: bool = False
+    attempt: _LiveAttempt | None = None
+
+    def partial_snapshot(self) -> TurnPartialSnapshot:
+        """Return the running attempt's partial output, empty while no attempt runs."""
+        return self.attempt.partial_snapshot() if self.attempt is not None else TurnPartialSnapshot()
 
 
 @dataclass(frozen=True)
@@ -432,11 +444,9 @@ class ResumedAttempt:
 
 @dataclass(frozen=True)
 class ExcludedAttempt:
-    """One attempt whose provider result is excluded from model history."""
+    """One failed attempt whose provider result is excluded from model history."""
 
-    original_status: RunStatus = RunStatus.cancelled
     response_text: str = ""
-    reason: str | None = None
     partial_text: str = ""
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     interrupted_tools: tuple[ToolTraceEntry, ...] = ()
@@ -641,7 +651,7 @@ class SkippedAttempt:
 
 
 BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | SkippedAttempt
-StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | HandledAttempt | SkippedAttempt
+StreamAttemptResolution = CompletedAttempt | PausedAttempt | HandledAttempt | SkippedAttempt
 
 
 @dataclass(frozen=True)
@@ -676,15 +686,13 @@ class StandaloneReplaySnapshot:
 class BlockingTurnAdapter:
     """Entity-specific callbacks for one blocking response turn."""
 
-    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]]
+    load_scope: Callable[[], ScopeSessionContext | None]
     run_attempt: Callable[
         [TurnRunState, TurnContinuationRunState],
         Awaitable[BlockingAttemptResolution],
     ]
-    snapshot_partial: Callable[[], TurnPartialSnapshot]
-    release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
-    on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
+    on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
@@ -694,16 +702,14 @@ class BlockingTurnAdapter:
 class StreamingTurnAdapter[ChunkT]:
     """Entity-specific callbacks for one streaming response turn."""
 
-    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]]
+    load_scope: Callable[[], ScopeSessionContext | None]
     run_attempt: Callable[
         [TurnRunState, TurnContinuationRunState],
         AsyncIterator[ChunkT | AttemptResolved],
     ]
-    snapshot_partial: Callable[[], TurnPartialSnapshot]
-    release_attempt_entity: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     make_text_chunk: Callable[[str], ChunkT]
-    on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
+    on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
@@ -748,12 +754,12 @@ def _interrupted_run_metadata(
 
 def _settle_excluded_attempt(
     ctx: ResponseTurnContext,
-    adapter: _TurnAdapter,
+    adapter: BlockingTurnAdapter,
     sinks: TurnSinks,
     run: TurnRunState,
     resolution: ExcludedAttempt,
 ) -> str:
-    """Record an excluded attempt as the turn's interrupted outcome and return its reply text; a cancellation raises."""
+    """Record a failed attempt as the turn's interrupted outcome and return its reply text."""
     _publish_run_metadata(sinks, resolution.metadata_content)
     run_metadata = _interrupted_run_metadata(ctx, sinks, run)
     run.turn_state.record_interrupted(
@@ -762,7 +768,7 @@ def _settle_excluded_attempt(
         assistant_text=resolution.partial_text,
         completed_tools=list(resolution.completed_tools),
         interrupted_tools=list(resolution.interrupted_tools),
-        original_status=resolution.original_status,
+        original_status=RunStatus.error,
     )
     if sinks.turn_recorder is None and adapter.persist_standalone_replay is not None:
         adapter.persist_standalone_replay(
@@ -773,12 +779,10 @@ def _settle_excluded_attempt(
                 completed_tools=run.turn_state.completed_tools_for(resolution.completed_tools),
                 interrupted_tools=list(resolution.interrupted_tools),
                 run_metadata=run_metadata,
-                original_status=resolution.original_status,
+                original_status=RunStatus.error,
             ),
         )
         run.standalone_replay_persisted = True
-    if resolution.original_status is RunStatus.cancelled:
-        raise build_cancelled_error(resolution.reason)
     return resolution.response_text
 
 
@@ -813,7 +817,7 @@ def _record_turn_excluded_fallback(
     original_status: RunStatus,
     use_recorder_state: bool,
 ) -> None:
-    snapshot = adapter.snapshot_partial()
+    snapshot = run.partial_snapshot()
     recorder = sinks.turn_recorder
     if recorder is not None:
         if recorder.outcome == "completed":
@@ -865,8 +869,7 @@ def _settle_empty_run(
     turn with no content teaches the model that ending immediately is the
     expected continuation. The one-shot retry borrows a continuation slot so
     the outer loop's iteration budget stays authoritative; a granted retry
-    closes the spent entity's runtime state exactly like the continuation
-    handoff.
+    drops the spent attempt exactly like the continuation handoff.
     """
     adapter.discard_empty_run(
         run.scope_context,
@@ -879,12 +882,11 @@ def _settle_empty_run(
     if run.empty_response_retried or continuation_count >= TURN_CONTINUATION_LIMIT:
         return False
     run.empty_response_retried = True
-    adapter.release_attempt_entity(run.scope_context)
+    run.attempt = None
     return True
 
 
 def _advance_turn_continuation(
-    adapter: _TurnAdapter,
     sinks: TurnSinks,
     run: TurnRunState,
     resolution: CompletedAttempt,
@@ -894,9 +896,9 @@ def _advance_turn_continuation(
     active_model_name: str | None,
     apply_model_to_team_members: bool,
 ) -> TurnContinuationRunState:
-    """Close the spent attempt entity and prepare run state for one more continuation."""
+    """Drop the spent attempt and prepare run state for one more continuation."""
     completed_tools_for_turn = run.turn_state.completed_tools_for(resolution.completed_tools)
-    adapter.release_attempt_entity(run.scope_context)
+    run.attempt = None
     advanced = continuation.advance(
         continuation_prompt=next_prompt or continuation.original_prompt,
         previous_run_id=resolution.attempt_run_id,
@@ -943,47 +945,19 @@ async def _remove_history_of_redacted_events(
         )
 
 
-def _enter_scope_context(
-    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]],
-) -> tuple[AbstractContextManager[ScopeSessionContext | None], ScopeSessionContext | None]:
-    """Enter one synchronous scope context on a worker thread."""
-    manager = open_scope()
-    return manager, manager.__enter__()
-
-
-@asynccontextmanager
-async def _open_scope_off_event_loop(
-    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]],
-) -> AsyncIterator[ScopeSessionContext | None]:
-    """Keep synchronous session storage open and close work off the event loop."""
-    entry_task = asyncio.create_task(asyncio.to_thread(_enter_scope_context, open_scope))
-    try:
-        manager, scope_context = await wait_for_future_until_complete(entry_task)
-    except asyncio.CancelledError as cancellation:
-        # The guarded wait drains the entry task before propagating cancellation.
-        # If entry succeeded, close the newly opened storage before returning it.
-        try:
-            manager, _scope_context = entry_task.result()
-        except BaseException as entry_error:
-            raise cancellation from entry_error
-        try:
-            await run_blocking_until_complete(
-                manager.__exit__,
-                type(cancellation),
-                cancellation,
-                cancellation.__traceback__,
-            )
-        except BaseException as exit_error:
-            raise cancellation from exit_error
-        raise
-
-    try:
-        yield scope_context
-    except BaseException:
-        if not await run_blocking_until_complete(manager.__exit__, *sys.exc_info()):
-            raise
-    else:
-        await run_blocking_until_complete(manager.__exit__, None, None, None)
+async def _load_scope_session(
+    ctx: ResponseTurnContext,
+    adapter: _TurnAdapter,
+    run: TurnRunState,
+) -> ScopeSessionContext | None:
+    """Load the turn's scope session off the event loop, without the history of events since redacted."""
+    scope_context = await run_blocking_until_complete(adapter.load_scope)
+    await _remove_history_of_redacted_events(ctx, scope_context)
+    run.scope_context = scope_context
+    set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
+    if adapter.on_scope_loaded is not None:
+        adapter.on_scope_loaded(scope_context)
+    return scope_context
 
 
 @owned_tool_execution(enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
@@ -997,15 +971,8 @@ async def run_blocking_response_turn(
     """Run one blocking response turn to a final user-visible text."""
     run = TurnRunState()
     try:
-        async with (
-            response_cli_lifetime() as cli_lifetime,
-            _open_scope_off_event_loop(adapter.open_scope) as scope_context,
-        ):
-            await _remove_history_of_redacted_events(ctx, scope_context)
-            run.scope_context = scope_context
-            set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
-            if adapter.on_scope_opened is not None:
-                adapter.on_scope_opened(scope_context)
+        async with response_cli_lifetime() as cli_lifetime:
+            scope_context = await _load_scope_session(ctx, adapter, run)
             for continuation_count in range(TURN_CONTINUATION_LIMIT + 1):
                 cli_lifetime.continuation_count = continuation_count
                 try:
@@ -1031,9 +998,8 @@ async def run_blocking_response_turn(
                 continuation = settled
             _raise_continuation_budget_exhausted()
     except asyncio.CancelledError:
-        # The blocking envelope re-records from the recorder's canonical state so
-        # an in-attempt cancellation (recorded above with attempt-local partials)
-        # and an external task cancel converge on the same interrupted turn.
+        # Kept as main behaves: a blocking turn records a cancel from the recorder's state,
+        # a streaming turn from the running attempt's partial output.
         _record_turn_excluded_fallback(
             ctx,
             adapter,
@@ -1195,7 +1161,6 @@ def _settle_completed_attempt(
         return _CompletionSettle(
             keep_going=True,
             continuation=_advance_turn_continuation(
-                adapter,
                 sinks,
                 run,
                 resolution,
@@ -1276,83 +1241,74 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
     run = TurnRunState()
     try:
-        async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
-            await _remove_history_of_redacted_events(ctx, scope_context)
-            run.scope_context = scope_context
-            set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
-            if adapter.on_scope_opened is not None:
-                adapter.on_scope_opened(scope_context)
-            initial_count = (
-                resumed_attempt.continuation_count if resumed_attempt is not None else initial_continuation_count
-            )
-            for continuation_count in range(initial_count, TURN_CONTINUATION_LIMIT + 1):
-                cli_lifetime.continuation_count = continuation_count
-                resolution: StreamAttemptResolution | None = None
-                keep_going = False
-                try:
-                    if resumed_attempt is not None:
-                        resolution = resumed_attempt.attempt
-                        resumed_attempt = None
-                    else:
-                        attempt_stream = context_bound_async_stream(
-                            context_factory=lambda: helper_usage_context(scope_context),
-                            stream_factory=partial(adapter.run_attempt, run, continuation),
-                        )
-                        async with closing_async_stream(attempt_stream):
-                            async for item in attempt_stream:
-                                if isinstance(item, AttemptResolved):
-                                    # Drain the producer to finish persistence and cleanup.
-                                    resolution = item.resolution
-                                    continue
-                                yield item
-                    await finalize_consumption()
-                    if resolution is None:
-                        _raise_missing_stream_resolution(ctx.entity_label)
-                    if isinstance(resolution, SkippedAttempt):
-                        _settle_skipped_attempt(ctx, adapter, sinks, run, resolution)
-                        return
-                    if isinstance(resolution, PausedAttempt):
-                        if sinks.turn_recorder is not None:
-                            sinks.turn_recorder.mark_suspended()
-                        raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
-                    if isinstance(resolution, HandledAttempt):
-                        _publish_run_metadata(sinks, resolution.metadata_content)
-                        _record_turn_excluded_fallback(
-                            ctx,
-                            adapter,
-                            sinks,
-                            run,
-                            original_status=RunStatus.error,
-                            use_recorder_state=False,
-                        )
-                        return
-                    if isinstance(resolution, ExcludedAttempt):
-                        if response_text := _settle_excluded_attempt(ctx, adapter, sinks, run, resolution):
-                            yield adapter.make_text_chunk(response_text)
-                        return
-                    settle = _settle_completed_attempt(
+        scope_context = await _load_scope_session(ctx, adapter, run)
+        initial_count = (
+            resumed_attempt.continuation_count if resumed_attempt is not None else initial_continuation_count
+        )
+        for continuation_count in range(initial_count, TURN_CONTINUATION_LIMIT + 1):
+            cli_lifetime.continuation_count = continuation_count
+            resolution: StreamAttemptResolution | None = None
+            keep_going = False
+            try:
+                if resumed_attempt is not None:
+                    resolution = resumed_attempt.attempt
+                    resumed_attempt = None
+                else:
+                    attempt_stream = context_bound_async_stream(
+                        context_factory=lambda: helper_usage_context(scope_context),
+                        stream_factory=partial(adapter.run_attempt, run, continuation),
+                    )
+                    async with closing_async_stream(attempt_stream):
+                        async for item in attempt_stream:
+                            if isinstance(item, AttemptResolved):
+                                # Drain the producer to finish persistence and cleanup.
+                                resolution = item.resolution
+                                continue
+                            yield item
+                await finalize_consumption()
+                if resolution is None:
+                    _raise_missing_stream_resolution(ctx.entity_label)
+                if isinstance(resolution, SkippedAttempt):
+                    _settle_skipped_attempt(ctx, adapter, sinks, run, resolution)
+                    return
+                if isinstance(resolution, PausedAttempt):
+                    if sinks.turn_recorder is not None:
+                        sinks.turn_recorder.mark_suspended()
+                    raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
+                if isinstance(resolution, HandledAttempt):
+                    _publish_run_metadata(sinks, resolution.metadata_content)
+                    _record_turn_excluded_fallback(
                         ctx,
                         adapter,
                         sinks,
                         run,
-                        resolution,
-                        continuation,
-                        continuation_count=continuation_count,
+                        original_status=RunStatus.error,
+                        use_recorder_state=False,
                     )
-                    continuation = settle.continuation
-                    keep_going = settle.keep_going
-                    if settle.response_text:
-                        yield adapter.make_text_chunk(settle.response_text)
-                    if not keep_going:
-                        _record_completed_turn(sinks, run, resolution, settle)
-                finally:
-                    await cli_lifetime.retire_attempt()
-                    if adapter.finalize_attempt is not None:
-                        await adapter.finalize_attempt(run.scope_context)
-                    await finalize_consumption()
-                if not keep_going:
                     return
-            _raise_continuation_budget_exhausted()
+                settle = _settle_completed_attempt(
+                    ctx,
+                    adapter,
+                    sinks,
+                    run,
+                    resolution,
+                    continuation,
+                    continuation_count=continuation_count,
+                )
+                continuation = settle.continuation
+                keep_going = settle.keep_going
+                if settle.response_text:
+                    yield adapter.make_text_chunk(settle.response_text)
+                if not keep_going:
+                    _record_completed_turn(sinks, run, resolution, settle)
+            finally:
+                await cli_lifetime.retire_attempt()
+                if adapter.finalize_attempt is not None:
+                    await adapter.finalize_attempt(run.scope_context)
+                await finalize_consumption()
+            if not keep_going:
+                return
+        _raise_continuation_budget_exhausted()
     except asyncio.CancelledError:
         _record_turn_excluded_fallback(
             ctx,

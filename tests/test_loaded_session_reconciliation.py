@@ -10,7 +10,7 @@ after the summary, no longer returns it.
 from __future__ import annotations
 
 import sqlite3
-from contextlib import closing, contextmanager
+from contextlib import closing
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -44,7 +44,6 @@ from tests.team_turn_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.agent_loop.run import Persist
@@ -133,19 +132,18 @@ def _cut(store: ConversationStore, run_id: str, session_id: str = SESSION) -> No
 
 @pytest.fixture
 def opened_scopes(monkeypatch: pytest.MonkeyPatch) -> list[ScopeSessionContext]:
-    """Record every scope context a turn opens, so a test can read the session the turn loaded and saved into."""
+    """Record every scope context a turn loads, so a test can read the session the turn loaded and saved into."""
     opened: list[ScopeSessionContext] = []
-    original = session_context.open_resolved_scope_session_context
+    original = session_context.load_scope_session
 
-    @contextmanager
-    def recording(**kwargs: Any) -> Iterator[ScopeSessionContext | None]:  # noqa: ANN401
-        with original(**kwargs) as scope_context:
-            if scope_context is not None:
-                opened.append(scope_context)
-            yield scope_context
+    def recording(**kwargs: Any) -> ScopeSessionContext | None:  # noqa: ANN401
+        scope_context = original(**kwargs)
+        if scope_context is not None:
+            opened.append(scope_context)
+        return scope_context
 
-    monkeypatch.setattr(session_context, "open_resolved_scope_session_context", recording)
-    monkeypatch.setattr(ai, "open_resolved_scope_session_context", recording)
+    monkeypatch.setattr(session_context, "load_scope_session", recording)
+    monkeypatch.setattr(ai, "load_scope_session", recording)
     return opened
 
 

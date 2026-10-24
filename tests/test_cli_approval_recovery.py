@@ -290,6 +290,12 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
 
     monkeypatch.setattr(execution.client(), "room_typing", room_typing)
     run_ids = []
+    stream_agent_response = approval_execution.stream_agent_response
+    monkeypatch.setattr(
+        approval_execution,
+        "stream_agent_response",
+        lambda *args, **kwargs: stream_agent_response(*args, **kwargs, run_id_callback=run_ids.append),
+    )
     with approval_receipt_context("Trusted approval receipt.", run_id=continuation.run_id):
         result = await execution.continue_run(
             continuation,
@@ -301,7 +307,6 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
-            run_id_callback=run_ids.append,
         )
     if continuation_count == 4:
         assert "Model switching did not produce a final answer" in result.response_text
@@ -1071,7 +1076,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             knowledge=None,
             refresh_scheduler=None,
             tool_trace_collector=[],
-            run_id_callback=None,
             tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
             progress=publish,
         )

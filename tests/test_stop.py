@@ -37,10 +37,9 @@ async def test_a_cancel_for_a_span_this_instance_does_not_run_is_not_kept() -> N
 
 
 def _registry_running(task: asyncio.Task[None]) -> SpanRegistry:
-    """Return a registry whose span ``span-1`` is executed by ``task`` on run ``run-123``."""
+    """Return a registry whose span ``span-1`` is executed by ``task``."""
     registry = SpanRegistry()
     registry.register("span-1", task)
-    registry.update_run_id("span-1", "run-123")
     return registry
 
 

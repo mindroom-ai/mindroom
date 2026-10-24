@@ -35,7 +35,7 @@ from mindroom.history.mid_turn_compaction import without_fold_records
 from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
-from mindroom.history.session_context import open_bound_scope_session_context
+from mindroom.history.session_context import load_bound_scope_session
 from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
@@ -57,7 +57,6 @@ from mindroom.response_turn import (
     ResponseTurnContext,
     StreamingTurnAdapter,
     TurnContinuationRunState,
-    TurnPartialSnapshot,
     TurnSinks,
     build_llm_request_log_context,
     build_matrix_run_metadata,
@@ -100,7 +99,6 @@ from mindroom.tool_system.events import StructuredStreamChunk
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
-    from contextlib import AbstractContextManager
 
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.config.main import Config, ResolvedRuntimeModel
@@ -441,25 +439,14 @@ def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[st
 
 @dataclass
 class _TeamTurnHolder:
-    """Live per-turn team state shared between attempt closures and adapter callbacks."""
+    """Live per-turn team state shared between attempt closures and adapter callbacks.
+
+    ``team_members`` holds the members the turn built until its first attempt takes them.
+    """
 
     team_members: ResolvedExactTeamMembers | None = None
     member_model_names: dict[str, str] = field(default_factory=dict)
-    attempt: TeamAttempt | None = None
     attempt_started: bool = False
-
-    def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return the live partial-output view, empty between a released attempt and the next."""
-        return self.attempt.partial_snapshot() if self.attempt is not None else TurnPartialSnapshot()
-
-    def release_attempt_members(self, _scope_context: ScopeSessionContext | None) -> None:
-        """Drop the spent attempt's members so the next attempt rebuilds them with the switched model.
-
-        Cancel snapshots taken between this release and the next attempt must not see the spent attempt's partials;
-        its completed tools already carried over via the turn state.
-        """
-        self.team_members = None
-        self.attempt = None
 
 
 @dataclass(frozen=True)
@@ -504,12 +491,15 @@ class _TeamTurn:
         return self.ctx.session_id
 
     async def members_for_attempt(self, continuation_state: TurnContinuationRunState) -> ResolvedExactTeamMembers:
-        """Return the attempt's member set, rebuilding released members with the continuation's model."""
+        """Return the attempt's member set: the turn's members for its first attempt, rebuilt for every later one."""
         holder = self.holder
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
             holder.member_model_names = dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name)
-        members = holder.team_members
+        members, holder.team_members = holder.team_members, None
         if members is None:
+            # TODO(simplify): an empty-reply retry or a continuation that keeps the members' models rebuilds them too.
+            # Rebuild only when a continuation applies a new model to the members. Plugin authors would notice:
+            # member toolkit factories and MCP servers start fewer times.
             members = await asyncio.to_thread(
                 materialize_team_members,
                 self.requested_agent_names,
@@ -519,7 +509,6 @@ class _TeamTurn:
                 configured_team_name=self.configured_team_name,
                 active_model_names=holder.member_model_names,
             )
-            holder.team_members = members
         return members
 
     async def start_attempt(
@@ -588,7 +577,7 @@ class _TeamTurn:
             runtime_model_name=prepared.runtime_model_name,
             prepared_history=prepared.prepared_history,
         )
-        self.holder.attempt = attempt
+        run.attempt = attempt
         self.holder.attempt_started = True
         logger.info("executing_team_response", agent_count=len(members.builds), mode=self.mode.value)
         run_input = prepared.run_input(self.media)
@@ -674,9 +663,7 @@ class _TeamTurn:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
             snapshot = attempt.partial_snapshot()
             return ExcludedAttempt(
-                original_status=RunStatus.error,
                 response_text=self.error_text(error),
-                reason=str(error),
                 partial_text=snapshot.assistant_text,
                 completed_tools=snapshot.completed_tools,
                 interrupted_tools=snapshot.interrupted_tools,
@@ -878,8 +865,8 @@ class _TeamTurn:
             output_tokens=discard.output_tokens,
         )
 
-    def open_scope(self) -> AbstractContextManager[ScopeSessionContext | None]:
-        return open_bound_scope_session_context(
+    def load_scope(self) -> ScopeSessionContext | None:
+        return load_bound_scope_session(
             member_names=self.requested_agent_names,
             session_id=self.session_id,
             runtime_paths=self.runtime_paths,
@@ -1064,10 +1051,8 @@ async def team_response(
         return turn
 
     adapter = BlockingTurnAdapter(
-        open_scope=turn.open_scope,
+        load_scope=turn.load_scope,
         run_attempt=turn.run_blocking_attempt,
-        snapshot_partial=turn.holder.partial_snapshot,
-        release_attempt_entity=turn.holder.release_attempt_members,
         finalize_attempt=turn.finalize_attempt,
         unexpected_error_text=turn.error_text,
         discard_empty_run=turn.discard_empty_run,
@@ -1144,10 +1129,8 @@ async def team_response_stream(
         return
 
     adapter = StreamingTurnAdapter[TeamStreamChunk](
-        open_scope=turn.open_scope,
+        load_scope=turn.load_scope,
         run_attempt=turn.run_streaming_attempt,
-        snapshot_partial=turn.holder.partial_snapshot,
-        release_attempt_entity=turn.holder.release_attempt_members,
         finalize_attempt=turn.finalize_attempt,
         make_text_chunk=lambda text: text,
         unexpected_error_text=turn.error_text,

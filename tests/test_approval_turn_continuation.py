@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom import agents
-from mindroom.ai import ai_response
+from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.execution import (
     _collect_agent_continuation,
@@ -333,6 +333,10 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     )
     trace: list[ToolTraceEntry] = []
     run_ids: list[str] = []
+    monkeypatch.setattr(
+        "mindroom.approval.execution.stream_agent_response",
+        lambda *args, **kwargs: stream_agent_response(*args, **kwargs, run_id_callback=run_ids.append),
+    )
     paused_answer = PausedAnswer()
     resume_starts: list[int] = []
 
@@ -348,7 +352,6 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
                 denial_reasons={call.tool_call_id: None for call in continuation.calls},
                 tool_trace_collector=trace,
                 typing_log_context={},
-                run_id_callback=run_ids.append,
                 progress=None,
             )
 
@@ -506,7 +509,6 @@ async def test_approval_settlement_preserves_tool_boundary(
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=trace,
-        run_id_callback=None,
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
         progress=None,
     )
@@ -563,7 +565,6 @@ async def test_approval_settlement_uses_typed_status(
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=[],
-        run_id_callback=None,
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
         progress=None,
     )
@@ -909,7 +910,6 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=[],
-        run_id_callback=None,
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
         progress=progress,
     )

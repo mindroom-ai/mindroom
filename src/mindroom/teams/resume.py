@@ -26,7 +26,7 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
-from mindroom.history.session_context import open_resolved_scope_session_context
+from mindroom.history.session_context import load_scope_session
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished
@@ -400,167 +400,167 @@ async def continue_paused_team_run(
     # The entity the run's logs, notices, and delegations name, as its turn named it: the configured team, or the
     # label of an ad hoc team's members once they are known.
     entity_name = team_name or configured_team_name
-    with open_resolved_scope_session_context(
+    scope = load_scope_session(
         agent_name=min(member_names),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
         scope=_approval_history_scope(member_names, team_name, config, execution_identity, history_scope),
-    ) as scope:
-        try:
-            # Named members always resolve a team scope, and the approval names its session.
-            assert scope is not None
-            set_consumption_storage(scope.storage_factory)
-            persisted = _stored_paused_team_run(scope, run_id)
-            delegated = has_delegation_state(persisted)
-            approved_calls = tuple(call for call in approval_calls if decisions.get(call.tool_call_id))
-            async with asyncio.TaskGroup() as recovery:
-                required_tool_tasks = {
-                    name: recovery.create_task(
-                        required_approval_tool_names(
-                            name,
-                            tuple(call for call in approved_calls if call.invoking_agent == name),
-                            config=config,
-                            runtime_paths=runtime_paths,
-                            execution_identity=execution_identity,
-                        ),
-                    )
-                    for name in member_names
-                }
-            members = await asyncio.to_thread(
-                materialize_exact_team_members,
-                list(member_names),
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-                refresh_scheduler=refresh_scheduler,
-                supports_native_tool_approval=True,
-                active_model_names=member_model_names,
-                required_tool_names={name: task.result() for name, task in required_tool_tasks.items()},
-            )
-            if team_name is None:
-                entity_name = materialized_team_label(members.display_names)
-            built = build_team_spec(
-                members=members,
-                mode=mode,
-                config=config,
-                runtime_paths=runtime_paths,
-                team_display_name=team_label(member_names),
-                scope_context=scope,
-                execution_identity=execution_identity,
-                model_name=model_name,
-                configured_team_name=team_name,
-            )
-            toolkit_owners = tool_owners_by_agent(*members.builds)
-            native = restore_native_history(built.spec.model, persisted_run=persisted, session=scope.session)
-            presentation = TeamStreamPresentation.restore(
-                config_names=member_names,
-                show_tool_calls=show_tool_calls,
-                state=prior_presentation_state,
-                tool_trace=prior_tool_trace,
-            )
-            storage = scope_storage(scope)
-            attempt = TeamAttempt(
-                run_id=run_id,
-                members=members,
-                presentation=presentation,
-                stream=True,
-                team_name=entity_name,
-                runtime_model_name=model_name,
-                prepared_history=None,
-            )
-            settings = team_history_settings(config, team_name)
-            plan = configured_replay_plan(history_settings=settings, estimated_tokens=0)
-            resume = TeamResume(
-                spec=built.spec,
-                storage=storage,
-                records=attempt.records,
-                hooks=leader_loop_hooks(
-                    HookTurn(
+    )
+    try:
+        # Named members always resolve a team scope, and the approval names its session.
+        assert scope is not None
+        set_consumption_storage(scope.storage_factory)
+        persisted = _stored_paused_team_run(scope, run_id)
+        delegated = has_delegation_state(persisted)
+        approved_calls = tuple(call for call in approval_calls if decisions.get(call.tool_call_id))
+        async with asyncio.TaskGroup() as recovery:
+            required_tool_tasks = {
+                name: recovery.create_task(
+                    required_approval_tool_names(
+                        name,
+                        tuple(call for call in approved_calls if call.invoking_agent == name),
                         config=config,
                         runtime_paths=runtime_paths,
-                        model_name=model_name,
-                        store=storage.store,
-                        session=storage.session,
-                        scope=storage.scope,
-                        replay_plan=plan,
-                        prompt_id=None,
+                        execution_identity=execution_identity,
                     ),
-                    entity_name=team_name,
-                    scope_id=built.spec.id,
-                    model=built.spec.model,
-                    history_settings=settings,
-                    tool_middleware=built.leader_middleware,
-                    jobs=built.leader_jobs,
-                ),
-                request_template=with_native_history(ModelRequest(messages=()), native),
-                settings=settings,
-                plan=plan,
-                user_id=user_id,
-                toolkit_owners=toolkit_owners,
-            )
-            # A run the delegation driver owns resumes through it with the decisions on its children's calls; any
-            # other run resumes with the decisions on its own calls, and the driver continues it if it then pauses
-            # on a member's delegation.
-            events = drive_team_delegations(
-                _finished(persisted)
-                if delegated
-                else resume.events(persisted, approval_decisions(approval_calls, decisions, denial_reasons)),
-                resume,
-                team_name=entity_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-                refresh_scheduler=refresh_scheduler,
-                decisions=decisions if delegated else None,
-                denial_reasons=denial_reasons if delegated else None,
-                approval_calls=approval_calls if delegated else (),
-            )
-            events = with_resumed_turn_log_context(events, entity_name=entity_name)
-            with helper_usage_context(scope):
-                await publish_team_presentation(progress, presentation)
-                async with closing_async_stream(events):
-                    async for event in events:
-                        if attempt.apply(event):
-                            await publish_team_presentation(progress, presentation)
-            continued = attempt.records.terminal(entity_name)
-            # Each resumed run's slot shows what the run hands over beyond what it carried over from the pause and its
-            # events did not show: a paused notice, or a failed member run's reason.
-            for run in (continued, *continued.ended_member_runs):
-                attempt.show_unshown_handover(run)
-            paused = paused_attempt_from_response(
-                continued,
-                fallback_session_id=session_id,
-                fallback_run_id=run_id,
-                toolkit_owners=toolkit_owners,
-            )
-            if paused is not None:
-                return continued_team_pause(presentation, paused)
-            if continued.status is not RunStatus.completed:
-                raise RuntimeError(continued.handover_content or "Team continuation did not complete")
-            if tool_trace_collector is not None and show_tool_calls:
-                tool_trace_collector.extend(presentation.tool_trace)
-            # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply
-            # note. The document already holds what each run handed over beyond what it carried over, so rendering the
-            # member runs again could add only what they carried over.
-            response_text = presentation.render_body() or (
-                format_team_header(members.display_names) + (finished_run_text(continued) or NO_TEAM_RESPONSE)
-            )
-            return CompletedApprovalRun(
-                response_text=response_text,
-                metadata_content=attempt.metadata_content(
-                    config,
+                )
+                for name in member_names
+            }
+        members = await asyncio.to_thread(
+            materialize_exact_team_members,
+            list(member_names),
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            refresh_scheduler=refresh_scheduler,
+            supports_native_tool_approval=True,
+            active_model_names=member_model_names,
+            required_tool_names={name: task.result() for name, task in required_tool_tasks.items()},
+        )
+        if team_name is None:
+            entity_name = materialized_team_label(members.display_names)
+        built = build_team_spec(
+            members=members,
+            mode=mode,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_display_name=team_label(member_names),
+            scope_context=scope,
+            execution_identity=execution_identity,
+            model_name=model_name,
+            configured_team_name=team_name,
+        )
+        toolkit_owners = tool_owners_by_agent(*members.builds)
+        native = restore_native_history(built.spec.model, persisted_run=persisted, session=scope.session)
+        presentation = TeamStreamPresentation.restore(
+            config_names=member_names,
+            show_tool_calls=show_tool_calls,
+            state=prior_presentation_state,
+            tool_trace=prior_tool_trace,
+        )
+        storage = scope_storage(scope)
+        attempt = TeamAttempt(
+            run_id=run_id,
+            members=members,
+            presentation=presentation,
+            stream=True,
+            team_name=entity_name,
+            runtime_model_name=model_name,
+            prepared_history=None,
+        )
+        settings = team_history_settings(config, team_name)
+        plan = configured_replay_plan(history_settings=settings, estimated_tokens=0)
+        resume = TeamResume(
+            spec=built.spec,
+            storage=storage,
+            records=attempt.records,
+            hooks=leader_loop_hooks(
+                HookTurn(
+                    config=config,
                     runtime_paths=runtime_paths,
-                    session_id=session_id,
-                    status=continued.status,
+                    model_name=model_name,
+                    store=storage.store,
+                    session=storage.session,
+                    scope=storage.scope,
+                    replay_plan=plan,
+                    prompt_id=None,
                 ),
-            )
+                entity_name=team_name,
+                scope_id=built.spec.id,
+                model=built.spec.model,
+                history_settings=settings,
+                tool_middleware=built.leader_middleware,
+                jobs=built.leader_jobs,
+            ),
+            request_template=with_native_history(ModelRequest(messages=()), native),
+            settings=settings,
+            plan=plan,
+            user_id=user_id,
+            toolkit_owners=toolkit_owners,
+        )
+        # A run the delegation driver owns resumes through it with the decisions on its children's calls; any
+        # other run resumes with the decisions on its own calls, and the driver continues it if it then pauses
+        # on a member's delegation.
+        events = drive_team_delegations(
+            _finished(persisted)
+            if delegated
+            else resume.events(persisted, approval_decisions(approval_calls, decisions, denial_reasons)),
+            resume,
+            team_name=entity_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            refresh_scheduler=refresh_scheduler,
+            decisions=decisions if delegated else None,
+            denial_reasons=denial_reasons if delegated else None,
+            approval_calls=approval_calls if delegated else (),
+        )
+        events = with_resumed_turn_log_context(events, entity_name=entity_name)
+        with helper_usage_context(scope):
+            await publish_team_presentation(progress, presentation)
+            async with closing_async_stream(events):
+                async for event in events:
+                    if attempt.apply(event):
+                        await publish_team_presentation(progress, presentation)
+        continued = attempt.records.terminal(entity_name)
+        # Each resumed run's slot shows what the run hands over beyond what it carried over from the pause and its
+        # events did not show: a paused notice, or a failed member run's reason.
+        for run in (continued, *continued.ended_member_runs):
+            attempt.show_unshown_handover(run)
+        paused = paused_attempt_from_response(
+            continued,
+            fallback_session_id=session_id,
+            fallback_run_id=run_id,
+            toolkit_owners=toolkit_owners,
+        )
+        if paused is not None:
+            return continued_team_pause(presentation, paused)
+        if continued.status is not RunStatus.completed:
+            raise RuntimeError(continued.handover_content or "Team continuation did not complete")
+        if tool_trace_collector is not None and show_tool_calls:
+            tool_trace_collector.extend(presentation.tool_trace)
+        # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply
+        # note. The document already holds what each run handed over beyond what it carried over, so rendering the
+        # member runs again could add only what they carried over.
+        response_text = presentation.render_body() or (
+            format_team_header(members.display_names) + (finished_run_text(continued) or NO_TEAM_RESPONSE)
+        )
+        return CompletedApprovalRun(
+            response_text=response_text,
+            metadata_content=attempt.metadata_content(
+                config,
+                runtime_paths=runtime_paths,
+                session_id=session_id,
+                status=continued.status,
+            ),
+        )
+    finally:
+        try:
+            await finalize_consumption()
         finally:
-            try:
-                await finalize_consumption()
-            finally:
-                ai_runtime.register_scope_notice_storage(scope_context=scope, entity_name=entity_name)
+            ai_runtime.register_scope_notice_storage(scope_context=scope, entity_name=entity_name)
 
 
 __all__ = [

@@ -1,12 +1,8 @@
-"""Team approval reconstruction closes its scope when consumption finalization fails.
-
-The agent continuation has no handle to close: the owned conversation store holds no connection.
-"""
+"""Approval continuations clean up when a step fails: a team resume finalizes consumption, an agent one closes its run."""
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -27,7 +23,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.llm.events import RunEvent
@@ -50,8 +46,8 @@ def _config() -> Config:
 
 
 @pytest.mark.asyncio
-async def test_team_approval_closes_scope_after_consumption_finalization_error(tmp_path: Path) -> None:
-    """A failed consumption finalizer cannot skip reconstructed team scope closure."""
+async def test_team_approval_finalizes_consumption_after_member_assembly_fails(tmp_path: Path) -> None:
+    """A team resume whose members cannot be assembled still finalizes consumption, and that failure surfaces."""
     config = _config()
     paths = test_runtime_paths(tmp_path)
     identity = _identity()
@@ -66,22 +62,15 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
         ),
         session_id="session-1",
     )
-    cleanup_order: list[str] = []
-
-    @contextmanager
-    def open_scope() -> Iterator[ScopeSessionContext]:
-        try:
-            yield scope
-        finally:
-            cleanup_order.append("scope")
+    finalized: list[bool] = []
 
     async def fail_finalization() -> None:
-        cleanup_order.append("finalize")
+        finalized.append(True)
         msg = "consumption finalization failed"
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.teams.resume.open_resolved_scope_session_context", return_value=open_scope()),
+        patch("mindroom.teams.resume.load_scope_session", return_value=scope),
         patch("mindroom.teams.resume.materialize_exact_team_members", side_effect=RuntimeError("assembly failed")),
         patch("mindroom.teams.resume.finalize_consumption", new=fail_finalization),
         pytest.raises(RuntimeError, match="consumption finalization failed"),
@@ -104,7 +93,7 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
             progress=None,
         )
 
-    assert cleanup_order == ["finalize", "scope"]
+    assert finalized == [True]
 
 
 @pytest.mark.asyncio

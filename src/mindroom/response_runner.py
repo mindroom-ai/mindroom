@@ -2219,7 +2219,6 @@ class ResponseRunner:
             progress=progress,
             response_function=continue_response,
             user_id=claimed.requester_id,
-            run_id=claimed.run_id,
             build_post_response_outcome=lambda final: self._approval_post_response_outcome(
                 post_effect_continuation,
                 target=target,
@@ -2700,7 +2699,6 @@ class ResponseRunner:
                         request,
                         response_run_id=continuation.run_id,
                     ),
-                    run_id_callback=self._note_run_id,
                     progress=progress,
                 )
         return response_text
@@ -4230,7 +4228,6 @@ class ResponseRunner:
         progress: _DeliveryProgress,
         response_function: Callable[[str | None], Coroutine[Any, Any, None]],
         user_id: str | None,
-        run_id: str,
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
         streaming_delivery_error_handler: Callable[
@@ -4252,7 +4249,6 @@ class ResponseRunner:
                 response_function=response_function,
                 existing_event_id=_existing_event_id(request),
                 user_id=user_id,
-                run_id=run_id,
                 on_cancelled=progress.note_task_cancelled,
                 show_stop_button=not _is_silent_schedule_response(request),
             )
@@ -4602,7 +4598,6 @@ class ResponseRunner:
                 progress=progress,
                 response_function=deliver_resolution_reason,
                 user_id=request.user_id,
-                run_id=str(uuid4()),
                 build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
                 post_response_deps=lambda: self._post_response_deps(request),
             )
@@ -4675,7 +4670,7 @@ class ResponseRunner:
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
             allow_direct_private_agents=allow_direct_private_agents,
         )
-        session_started_watch = lifecycle.setup_session_watch(
+        session_started_watch = await lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(tool_dispatch),
             session_id=session_id,
             session_type=session_scope.kind,
@@ -4785,10 +4780,6 @@ class ResponseRunner:
                 request=delivery_request,
             )
 
-            def _note_attempt_run_id(current_run_id: str) -> None:
-                self._note_run_id(current_run_id)
-                team_turn_recorder.set_run_id(current_run_id)
-
             def _note_visible_response_event_id(response_event_id: str) -> None:
                 team_turn_recorder.set_response_event_id(response_event_id)
 
@@ -4812,7 +4803,7 @@ class ResponseRunner:
                             member_model_names=member_model_names,
                             media=resolved_request.media,
                             show_tool_calls=show_tool_calls,
-                            run_id_callback=_note_attempt_run_id,
+                            run_id_callback=team_turn_recorder.set_run_id,
                             user_id=requester_user_id,
                             current_timestamp_ms=request.current_timestamp_ms,
                             current_prompt_is_structured=request.current_prompt_is_structured,
@@ -4907,7 +4898,7 @@ class ResponseRunner:
                                     member_model_names=member_model_names,
                                     media=resolved_request.media,
                                     show_tool_calls=show_tool_calls,
-                                    run_id_callback=_note_attempt_run_id,
+                                    run_id_callback=team_turn_recorder.set_run_id,
                                     user_id=requester_user_id,
                                     current_timestamp_ms=request.current_timestamp_ms,
                                     current_prompt_is_structured=request.current_prompt_is_structured,
@@ -5031,7 +5022,6 @@ class ResponseRunner:
             progress=progress,
             response_function=generate_team_response,
             user_id=requester_user_id,
-            run_id=response_run_id,
             build_post_response_outcome=build_team_post_response_outcome,
             post_response_deps=lambda: self._post_response_deps(
                 request,
@@ -5060,7 +5050,6 @@ class ResponseRunner:
         response_function: Callable[[str | None], Coroutine[Any, Any, None]],
         existing_event_id: str | None = None,
         user_id: str | None = None,
-        run_id: str | None = None,
         on_cancelled: Callable[[str], None] | None = None,
         show_stop_button: bool = True,
     ) -> None:
@@ -5078,39 +5067,24 @@ class ResponseRunner:
                 existing_event_id=existing_event_id,
                 user_id=user_id,
                 on_cancelled=on_cancelled,
-                span=self._span_attempt(run_id),
+                span=self._span_attempt(),
             ),
         )
 
-    def _span_attempt(self, run_id: str | None) -> SpanAttempt:
+    def _span_attempt(self) -> SpanAttempt:
         """Return the current reply span's ownership of an attempt: its Stop and its Stop button."""
         handle = current_span()
         assert handle is not None, "every response attempt runs in a reply span"
-        spans = handle.runtime.spans
-
-        def register(task: asyncio.Task[None]) -> None:
-            spans.register(handle.span_id, task)
-            spans.update_run_id(handle.span_id, run_id)
 
         async def reply_event() -> str | None:
             await handle.reply_shown.wait()
             return handle.reply.event_id
 
         return SpanAttempt(
-            register=register,
+            register=partial(handle.runtime.spans.register, handle.span_id),
             add_stop_button=lambda message_id: self.deps.delivery_gateway.add_reply_stop_button(handle, message_id),
             reply_event=reply_event,
         )
-
-    # TODO(simplify): stop.py's spans keep each attempt's run id only for the "Hard cancelling" log line. Drop it with
-    # `_note_run_id`, the `run_id` parameters that only forward it, and approval's `run_id_callback`; the turn
-    # recorders keep their own run ids. Operators would notice: the Stop log line loses its `run_id`.
-    @staticmethod
-    def _note_run_id(run_id: str | None) -> None:
-        """Tell the span registry which run the current span's attempt is on, for the Stop log."""
-        handle = current_span()
-        assert handle is not None, "every response attempt runs in a reply span"
-        handle.runtime.spans.update_run_id(handle.span_id, run_id)
 
     @timed("prepare_response_runtime")
     async def prepare_response_runtime(
@@ -5179,7 +5153,6 @@ class ResponseRunner:
         run_metadata_content: dict[str, Any] = {}
 
         def note_attempt_run_id(current_run_id: str) -> None:
-            self._note_run_id(current_run_id)
             turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
 
@@ -5283,7 +5256,6 @@ class ResponseRunner:
         )
 
         def note_attempt_run_id(current_run_id: str) -> None:
-            self._note_run_id(current_run_id)
             turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
 
@@ -5424,7 +5396,7 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_started_watch = lifecycle.setup_session_watch(
+        session_started_watch = await lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
             session_type=session_scope.kind,
@@ -5561,7 +5533,7 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_started_watch = lifecycle.setup_session_watch(
+        session_started_watch = await lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
             session_type=session_scope.kind,
@@ -6043,7 +6015,6 @@ class ResponseRunner:
                 progress=progress,
                 response_function=generate,
                 user_id=request.user_id,
-                run_id=response_run_id,
                 build_post_response_outcome=build_post_response_outcome,
                 post_response_deps=lambda: self._post_response_deps(
                     request,

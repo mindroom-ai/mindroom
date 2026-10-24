@@ -25,7 +25,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import claude_agent as claude_agent_module
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.session_context import open_resolved_scope_session_context
+from mindroom.history.session_context import load_scope_session
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
@@ -1195,8 +1195,8 @@ async def _send_metered_turns(
 ) -> tuple[list[str], list[tuple[str | None, str, int, int, int, int]]]:
     """Send one prompt per requester on one session; return the replies and each requester's usage by model."""
     config, paths, _storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
-    open_scope = partial(
-        open_resolved_scope_session_context,
+    load_scope = partial(
+        load_scope_session,
         agent_name="test_agent",
         scope=scope,
         session_id="session",
@@ -1222,7 +1222,7 @@ async def _send_metered_turns(
             if api_requests
             else tool_runtime_context(replace(context, requester_id=requester))
         )
-        with open_scope() as scope_context, helper_usage_context(scope_context), requester_context:
+        with helper_usage_context(load_scope()), requester_context:
             replies.append(
                 await tools.claude_send(
                     "Fix the bug",

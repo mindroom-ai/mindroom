@@ -14,7 +14,6 @@ DeliveryGateway. The pins:
 
 from __future__ import annotations
 
-import contextlib
 import json
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
@@ -36,7 +35,6 @@ from mindroom.response_turn import (
     ResponseTurnContext,
     StreamingTurnAdapter,
     TurnContinuationRunState,
-    TurnPartialSnapshot,
     TurnRunState,
     TurnSinks,
     run_blocking_response_turn,
@@ -47,7 +45,6 @@ from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _t
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from mindroom.history.session_context import ScopeSessionContext
@@ -77,8 +74,8 @@ def _completed_outcome(event_id: str, body: str) -> FinalDeliveryOutcome:
     )
 
 
-def _open_scope() -> AbstractContextManager[ScopeSessionContext | None]:
-    return contextlib.nullcontext(None)
+def _load_scope() -> ScopeSessionContext | None:
+    return None
 
 
 def _noop(*_args: object) -> None:
@@ -89,10 +86,8 @@ def _blocking_adapter(
     run_attempt: Callable[[TurnRunState, TurnContinuationRunState], Awaitable[CompletedAttempt]],
 ) -> BlockingTurnAdapter:
     return BlockingTurnAdapter(
-        open_scope=_open_scope,
+        load_scope=_load_scope,
         run_attempt=run_attempt,
-        snapshot_partial=TurnPartialSnapshot,
-        release_attempt_entity=_noop,
         discard_empty_run=_noop,
     )
 
@@ -104,10 +99,8 @@ def _streaming_adapter(
     ],
 ) -> StreamingTurnAdapter[str]:
     return StreamingTurnAdapter[str](
-        open_scope=_open_scope,
+        load_scope=_load_scope,
         run_attempt=run_attempt,
-        snapshot_partial=TurnPartialSnapshot,
-        release_attempt_entity=_noop,
         discard_empty_run=_noop,
         make_text_chunk=lambda text: text,
     )

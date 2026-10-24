@@ -56,7 +56,7 @@ from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import (
     ScopeSessionContext,
     create_scope_session_storage,
-    open_bound_scope_session_context,
+    load_bound_scope_session,
 )
 from mindroom.history.types import HistoryScope, PreparedHistoryState, ResolvedReplayPlan
 from mindroom.judgment.client import JudgmentClient
@@ -4450,30 +4450,30 @@ class TestTeamCompletion:
                 },
             )
 
-        with open_bound_scope_session_context(
+        scope_context = load_bound_scope_session(
             member_names=["general"],
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
             execution_identity=None,
             create_session_if_missing=True,
-        ) as scope_context:
-            assert scope_context is not None
-            assert scope_context.session is not None
-            scope_context.session.runs = [
-                TeamRunRecord(
-                    run_id="run-queued-notice",
-                    team_id=scope_context.session.owner_id,
-                    team_name="General Team",
-                    session_id="session-openai-team-prep",
-                    content="done",
-                    messages=[notice(True)],
-                    member_responses=[
-                        RunRecord(run_id="member-run-queued-notice", session_id="session-openai-team-prep"),
-                    ],
-                ),
-            ]
-            seed_session(scope_context.storage, scope_context.session)
+        )
+        assert scope_context is not None
+        assert scope_context.session is not None
+        scope_context.session.runs = [
+            TeamRunRecord(
+                run_id="run-queued-notice",
+                team_id=scope_context.session.owner_id,
+                team_name="General Team",
+                session_id="session-openai-team-prep",
+                content="done",
+                messages=[notice(True)],
+                member_responses=[
+                    RunRecord(run_id="member-run-queued-notice", session_id="session-openai-team-prep"),
+                ],
+            ),
+        ]
+        seed_session(scope_context.storage, scope_context.session)
 
         def collect_messages(run: RunRecord | TeamRunRecord) -> list[Message]:
             messages = list(run.messages)
@@ -4501,61 +4501,61 @@ class TestTeamCompletion:
                 for message in persisted_messages
             )
 
-        with open_bound_scope_session_context(
+        scope_context = load_bound_scope_session(
             member_names=["general"],
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
             execution_identity=None,
-        ) as scope_context:
-            assert scope_context is not None
-            assert scope_context.session is not None
+        )
+        assert scope_context is not None
+        assert scope_context.session is not None
 
-            async def fake_prepare_bound_team_execution_context(_ctx: object, **kwargs: object) -> SimpleNamespace:
-                prepared_scope_context = kwargs["scope_context"]
-                assert isinstance(prepared_scope_context, ScopeSessionContext)
-                assert prepared_scope_context.session is not None
-                assert_notices_persisted(prepared_scope_context.session.runs)
-                return _prepared_team_execution_context(
-                    final_prompt="Previous team reply\n\nAnalyze this.",
-                    messages=[
-                        Message(role="assistant", content="Previous team reply"),
-                        Message(role="user", content="Analyze this."),
-                    ],
-                )
+        async def fake_prepare_bound_team_execution_context(_ctx: object, **kwargs: object) -> SimpleNamespace:
+            prepared_scope_context = kwargs["scope_context"]
+            assert isinstance(prepared_scope_context, ScopeSessionContext)
+            assert prepared_scope_context.session is not None
+            assert_notices_persisted(prepared_scope_context.session.runs)
+            return _prepared_team_execution_context(
+                final_prompt="Previous team reply\n\nAnalyze this.",
+                messages=[
+                    Message(role="assistant", content="Previous team reply"),
+                    Message(role="user", content="Analyze this."),
+                ],
+            )
 
-            with (
-                patch(
-                    "mindroom.execution_preparation._prepare_bound_team_execution_context",
-                    new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
-                ),
-            ):
-                prepared = await openai_compat._prepare_openai_team_execution(
-                    scope_context=scope_context,
-                    team_name="general",
-                    built=built,
-                    prompt="Analyze this.",
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    thread_history=[],
-                    team_model_name="default",
-                )
+        with (
+            patch(
+                "mindroom.execution_preparation._prepare_bound_team_execution_context",
+                new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+            ),
+        ):
+            prepared = await openai_compat._prepare_openai_team_execution(
+                scope_context=scope_context,
+                team_name="general",
+                built=built,
+                prompt="Analyze this.",
+                config=config,
+                runtime_paths=runtime_paths,
+                thread_history=[],
+                team_model_name="default",
+            )
 
         assert prepared.prompt_text == "assistant: Previous team reply\n\nAnalyze this."
         assert prepared.run_metadata is not None
         assert "tools_schema" not in prepared.run_metadata
         assert prepared.run_metadata["model_params"] == {"temperature": 0.7}
         assert prepared.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
-        with open_bound_scope_session_context(
+        scope_context = load_bound_scope_session(
             member_names=["general"],
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
             execution_identity=None,
-        ) as scope_context:
-            assert scope_context is not None
-            assert scope_context.session is not None
-            assert_notices_persisted(scope_context.session.runs)
+        )
+        assert scope_context is not None
+        assert scope_context.session is not None
+        assert_notices_persisted(scope_context.session.runs)
 
     @pytest.mark.parametrize(
         ("mode", "expected"),
@@ -4577,17 +4577,17 @@ class TestTeamCompletion:
             },
         )
         runtime_paths = _runtime_paths_for_config(config)
+        scope_context = load_bound_scope_session(
+            member_names=[],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            team_name="coord_team",
+        )
         with (
             patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])),
             patch("mindroom.teams.members.build_model_provider", return_value=ScriptedModel([])),
-            open_bound_scope_session_context(
-                member_names=[],
-                session_id="session-1",
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=None,
-                team_name="coord_team",
-            ) as scope_context,
         ):
             assert scope_context is not None
             members, built, built_mode = openai_compat._build_team(
@@ -4625,15 +4625,15 @@ class TestTeamCompletion:
             resolved_thread_id=None,
         )
 
+        scope_context = load_bound_scope_session(
+            member_names=[],
+            session_id="openai-team-session",
+            runtime_paths=runtime_paths,
+            config=team_config,
+            execution_identity=execution_identity,
+            team_name="super_team",
+        )
         with (
-            open_bound_scope_session_context(
-                member_names=[],
-                session_id="openai-team-session",
-                runtime_paths=runtime_paths,
-                config=team_config,
-                execution_identity=execution_identity,
-                team_name="super_team",
-            ) as scope_context,
             patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])),
             patch("mindroom.teams.members.build_model_provider", return_value=ScriptedModel([])),
         ):
@@ -4669,28 +4669,28 @@ class TestTeamCompletion:
         runtime_paths = _runtime_paths()
         members, _built, _mode = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
 
-        with open_bound_scope_session_context(
+        scope_context = load_bound_scope_session(
             member_names=[],
             session_id="session-1",
             runtime_paths=runtime_paths,
             config=config,
             execution_identity=None,
             team_name="coord_team",
-        ) as scope_context:
-            assert scope_context is not None
-            with (
-                patch("mindroom.api.openai_compat.materialize_exact_team_members", return_value=members),
-                patch("mindroom.api.openai_compat.build_team_spec", side_effect=RuntimeError("team build failed")),
-                pytest.raises(RuntimeError, match="team build failed"),
-            ):
-                openai_compat._build_team(
-                    "coord_team",
-                    config,
-                    runtime_paths,
-                    execution_identity=None,
-                    scope_context=scope_context,
-                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
-                )
+        )
+        assert scope_context is not None
+        with (
+            patch("mindroom.api.openai_compat.materialize_exact_team_members", return_value=members),
+            patch("mindroom.api.openai_compat.build_team_spec", side_effect=RuntimeError("team build failed")),
+            pytest.raises(RuntimeError, match="team build failed"),
+        ):
+            openai_compat._build_team(
+                "coord_team",
+                config,
+                runtime_paths,
+                execution_identity=None,
+                scope_context=scope_context,
+                models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
+            )
 
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
         """Team member creation resolves and passes configured knowledge."""
@@ -4730,23 +4730,23 @@ class TestTeamCompletion:
             mock_create.return_value = MagicMock(name="Research")
 
             runtime_paths = _runtime_paths_for_config(config)
-            with open_bound_scope_session_context(
+            scope_context = load_bound_scope_session(
                 member_names=[],
                 session_id="session-1",
                 runtime_paths=runtime_paths,
                 config=config,
                 execution_identity=None,
                 team_name="team_with_kb",
-            ) as scope_context:
-                assert scope_context is not None
-                openai_compat._build_team(
-                    "team_with_kb",
-                    config,
-                    runtime_paths,
-                    execution_identity=None,
-                    scope_context=scope_context,
-                    models=openai_compat._openai_team_models("team_with_kb", config, lambda model_name: model_name),
-                )
+            )
+            assert scope_context is not None
+            openai_compat._build_team(
+                "team_with_kb",
+                config,
+                runtime_paths,
+                execution_identity=None,
+                scope_context=scope_context,
+                models=openai_compat._openai_team_models("team_with_kb", config, lambda model_name: model_name),
+            )
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
             assert "include_default_tools" not in mock_create.call_args.kwargs

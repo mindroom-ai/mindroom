@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, get_type_hints
@@ -20,7 +19,7 @@ from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.session_context import (
     ScopeSessionContext,
-    open_resolved_scope_session_context,
+    load_scope_session,
 )
 from mindroom.history.storage import (
     _with_scope_state,
@@ -64,7 +63,6 @@ from tests.fakes.summary_model import summary_model
 from tests.history_helpers import RecordingCompactionLifecycle, completed_outcome, folded_run_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -176,8 +174,7 @@ async def _compact_as_team_member(tool: CompactContextTools, team_scope: History
     return await run_tool_call(function, {}, context)
 
 
-@contextmanager
-def _open_scope_context(
+def _load_scope_context(
     *,
     scope: HistoryScope,
     agent_name: str,
@@ -186,8 +183,8 @@ def _open_scope_context(
     config: Config,
     execution_identity: ToolExecutionIdentity | None = None,
     create_session_if_missing: bool = False,
-) -> Iterator[ScopeSessionContext]:
-    with open_resolved_scope_session_context(
+) -> ScopeSessionContext:
+    scope_context = load_scope_session(
         scope=scope,
         agent_name=agent_name,
         session_id=session_id,
@@ -195,14 +192,9 @@ def _open_scope_context(
         config=config,
         execution_identity=execution_identity,
         create_session_if_missing=create_session_if_missing,
-    ) as scope_context:
-        assert scope_context is not None
-        yield scope_context
-
-
-@contextmanager
-def _patched_scope_context(scope_context: ScopeSessionContext | SimpleNamespace) -> Iterator[object]:
-    yield scope_context
+    )
+    assert scope_context is not None
+    return scope_context
 
 
 def test_compact_context_runtime_annotations_resolve_for_agno_registration(tmp_path: Path) -> None:
@@ -338,8 +330,8 @@ async def test_compact_context_saves_nothing_after_budget_error(tmp_path: Path) 
     )
 
     with patch(
-        "mindroom.history.manual.open_resolved_scope_session_context",
-        return_value=_patched_scope_context(scope_context),
+        "mindroom.history.manual.load_scope_session",
+        return_value=scope_context,
     ):
         result = await tool.compact_context()
 
@@ -367,8 +359,8 @@ async def test_compact_context_saves_only_the_scope_metadata(tmp_path: Path) -> 
     )
 
     with patch(
-        "mindroom.history.manual.open_resolved_scope_session_context",
-        return_value=_patched_scope_context(scope_context),
+        "mindroom.history.manual.load_scope_session",
+        return_value=scope_context,
     ):
         result = await tool.compact_context()
 
@@ -620,7 +612,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
     )
 
     team_scope = HistoryScope(kind="team", scope_id="team-123")
-    with _open_scope_context(
+    team_context = _load_scope_context(
         scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
@@ -628,25 +620,25 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
         config=config,
         execution_identity=identity,
         create_session_if_missing=True,
-    ) as team_context:
-        assert team_context.session is not None
-        seed_session(team_context.storage, team_context.session)
+    )
+    assert team_context.session is not None
+    seed_session(team_context.storage, team_context.session)
     with tool_runtime_context(_member_runtime_context(config, runtime_paths)):
         await _compact_as_team_member(tool, team_scope)
 
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     direct_state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
-    with _open_scope_context(
+    reloaded_team_context = _load_scope_context(
         scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-    ) as reloaded_team_context:
-        assert reloaded_team_context.session is not None
-        team_state = read_scope_state(reloaded_team_context.session, team_scope)
+    )
+    assert reloaded_team_context.session is not None
+    team_state = read_scope_state(reloaded_team_context.session, team_scope)
     assert direct_state.force_compact_before_next_run is False
     assert team_state.force_compact_before_next_run is True
 
@@ -909,16 +901,16 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
     with tool_runtime_context(_member_runtime_context(config, runtime_paths, agent_name="beta")):
         result = await _compact_as_team_member(tool, team_scope)
 
-    with _open_scope_context(
+    team_context = _load_scope_context(
         scope=team_scope,
         agent_name="beta",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-    ) as team_context:
-        assert team_context.session is not None
-        team_state = read_scope_state(team_context.session, team_scope)
+    )
+    assert team_context.session is not None
+    team_state = read_scope_state(team_context.session, team_scope)
     assert team_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -953,7 +945,7 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         execution_identity=identity,
     )
     team_scope = HistoryScope(kind="team", scope_id="team_123")
-    with _open_scope_context(
+    team_context = _load_scope_context(
         scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
@@ -961,10 +953,10 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         config=config,
         execution_identity=identity,
         create_session_if_missing=True,
-    ) as team_context:
-        assert team_context.session is not None
-        team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
-        seed_session(team_context.storage, team_context.session)
+    )
+    assert team_context.session is not None
+    team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
+    seed_session(team_context.storage, team_context.session)
 
     runtime_context = make_test_tool_runtime_context(
         agent_name="test_agent",
@@ -987,16 +979,16 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
     with tool_runtime_context(runtime_context):
         result = await _compact_as_team_member(tool, team_scope)
 
-    with _open_scope_context(
+    reloaded_team_context = _load_scope_context(
         scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-    ) as reloaded_team_context:
-        assert reloaded_team_context.session is not None
-        team_state = read_scope_state(reloaded_team_context.session, team_scope)
+    )
+    assert reloaded_team_context.session is not None
+    team_state = read_scope_state(reloaded_team_context.session, team_scope)
     assert team_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -1038,7 +1030,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         execution_identity=identity,
     )
     team_scope = HistoryScope(kind="team", scope_id="team_123")
-    with _open_scope_context(
+    team_context = _load_scope_context(
         scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
@@ -1046,10 +1038,10 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         config=config,
         execution_identity=identity,
         create_session_if_missing=True,
-    ) as team_context:
-        assert team_context.session is not None
-        team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
-        seed_session(team_context.storage, team_context.session)
+    )
+    assert team_context.session is not None
+    team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
+    seed_session(team_context.storage, team_context.session)
 
     runtime_context = make_test_tool_runtime_context(
         agent_name="test_agent",
@@ -1072,16 +1064,16 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
     with tool_runtime_context(runtime_context):
         result = await _compact_as_team_member(tool, team_scope)
 
-    with _open_scope_context(
+    reloaded_team_context = _load_scope_context(
         scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-    ) as reloaded_team_context:
-        assert reloaded_team_context.session is not None
-        team_state = read_scope_state(reloaded_team_context.session, team_scope)
+    )
+    assert reloaded_team_context.session is not None
+    team_state = read_scope_state(reloaded_team_context.session, team_scope)
     assert team_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -1119,7 +1111,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    with _open_scope_context(
+    scope_context = _load_scope_context(
         scope=_AGENT_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
@@ -1127,10 +1119,10 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         config=config,
         execution_identity=identity,
         create_session_if_missing=True,
-    ) as scope_context:
-        assert scope_context.session is not None
-        scope_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
-        seed_session(scope_context.storage, scope_context.session)
+    )
+    assert scope_context.session is not None
+    scope_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
+    seed_session(scope_context.storage, scope_context.session)
 
     runtime_context = make_test_tool_runtime_context(
         agent_name="test_agent",
@@ -1153,18 +1145,18 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
     with tool_runtime_context(runtime_context):
         result = await tool.compact_context()
 
-    with _open_scope_context(
+    reloaded_scope_context = _load_scope_context(
         scope=_AGENT_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=identity,
-    ) as reloaded_scope_context:
-        assert reloaded_scope_context.session is not None
-        agent_state = read_scope_state(
-            reloaded_scope_context.session,
-            HistoryScope(kind="agent", scope_id="test_agent"),
-        )
+    )
+    assert reloaded_scope_context.session is not None
+    agent_state = read_scope_state(
+        reloaded_scope_context.session,
+        HistoryScope(kind="agent", scope_id="test_agent"),
+    )
     assert agent_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS

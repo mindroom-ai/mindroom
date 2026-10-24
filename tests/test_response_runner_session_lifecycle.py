@@ -522,7 +522,7 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
         return None
 
     class BrokenStorage:
-        def load_session(self, _session_id: str, _kind: object) -> ConversationSession | None:
+        def has_session(self, _session_id: str, _kind: object) -> bool:
             msg = "probe boom"
             raise RuntimeError(msg)
 
@@ -547,7 +547,7 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
         identity=coordinator._response_identity(watch_request, response_kind="ai"),
         request=watch_request,
     )
-    watch = lifecycle.setup_session_watch(
+    watch = await lifecycle.setup_session_watch(
         tool_context=tool_context,
         session_id=target.session_id,
         session_type="agent",

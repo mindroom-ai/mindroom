@@ -14,7 +14,6 @@ import asyncio
 import hashlib
 import time
 import weakref
-from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -62,7 +61,7 @@ from mindroom.budgets.monitor import budget_model
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
+from mindroom.history.session_context import ScopeSessionContext, load_bound_scope_session
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
@@ -1123,83 +1122,83 @@ async def _non_stream_team_completion(
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
     requester_id = execution_identity.requester_id if execution_identity is not None else None
-    with open_bound_scope_session_context(
+    scope_context = load_bound_scope_session(
         member_names=[],
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
         team_name=team_name,
-    ) as scope_context:
-        turn = await _prepare_team_turn(
-            team_name,
-            prompt,
-            session_id,
-            config,
-            runtime_paths,
-            thread_history,
-            team_models,
-            scope_context,
-            execution_identity=execution_identity,
-            refresh_scheduler=refresh_scheduler,
-            stream=False,
-        )
-        if isinstance(turn, JSONResponse):
-            return turn
-        built, prepared = turn
-        records = TeamRunRecords()
-        try:
-            with (
-                bind_llm_request_log_context(
-                    **_openai_team_request_log_context(
-                        team_name=team_name,
-                        session_id=session_id,
-                        requester_id=requester_id,
-                        prepared=prepared,
-                    ),
-                ),
-                # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
-                helper_usage_context(scope_context),
-            ):
-                events = run_prepared_team(
-                    built,
-                    prepared,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    scope_context=scope_context,
+    )
+    turn = await _prepare_team_turn(
+        team_name,
+        prompt,
+        session_id,
+        config,
+        runtime_paths,
+        thread_history,
+        team_models,
+        scope_context,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        stream=False,
+    )
+    if isinstance(turn, JSONResponse):
+        return turn
+    built, prepared = turn
+    records = TeamRunRecords()
+    try:
+        with (
+            bind_llm_request_log_context(
+                **_openai_team_request_log_context(
                     team_name=team_name,
                     session_id=session_id,
-                    user_id=requester_id,
-                    stream=False,
-                )
-                async with closing_async_stream(events):
-                    async for event in events:
-                        records.collect(event)
-        except Exception:
-            logger.exception("Team execution failed", team=team_name)
-            return error_response(500, "Team execution failed", error_type="server_error")
-        record = records.terminal(team_name)
-        # The blocking Matrix reply's member and consensus document, which API clients replay as history. A run where
-        # nobody wrote anything gives empty text, where the Matrix reply falls back to the leader's own messages.
-        response_text = format_team_response(record)
-
-        if is_error_response(response_text):
-            logger.warning("Team response returned error", team=team_name, error=response_text)
-            return error_response(500, "Team execution failed", error_type="server_error")
-
-        logger.info("Team completion sent", team=team_name, stream=False)
-        result = _ChatCompletionResponse(
-            id=new_completion_id(),
-            created=int(time.time()),
-            model=model_id,
-            choices=[
-                _ChatCompletionChoice(
-                    message=ChatMessage(role="assistant", content=response_text),
+                    requester_id=requester_id,
+                    prepared=prepared,
                 ),
-            ],
-            usage=_usage_from_team_output(record),
-        )
-        return OpenAIJSONResponse(content=result.model_dump())
+            ),
+            # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
+            helper_usage_context(scope_context),
+        ):
+            events = run_prepared_team(
+                built,
+                prepared,
+                config=config,
+                runtime_paths=runtime_paths,
+                scope_context=scope_context,
+                team_name=team_name,
+                session_id=session_id,
+                user_id=requester_id,
+                stream=False,
+            )
+            async with closing_async_stream(events):
+                async for event in events:
+                    records.collect(event)
+    except Exception:
+        logger.exception("Team execution failed", team=team_name)
+        return error_response(500, "Team execution failed", error_type="server_error")
+    record = records.terminal(team_name)
+    # The blocking Matrix reply's member and consensus document, which API clients replay as history. A run where
+    # nobody wrote anything gives empty text, where the Matrix reply falls back to the leader's own messages.
+    response_text = format_team_response(record)
+
+    if is_error_response(response_text):
+        logger.warning("Team response returned error", team=team_name, error=response_text)
+        return error_response(500, "Team execution failed", error_type="server_error")
+
+    logger.info("Team completion sent", team=team_name, stream=False)
+    result = _ChatCompletionResponse(
+        id=new_completion_id(),
+        created=int(time.time()),
+        model=model_id,
+        choices=[
+            _ChatCompletionChoice(
+                message=ChatMessage(role="assistant", content=response_text),
+            ),
+        ],
+        usage=_usage_from_team_output(record),
+    )
+    return OpenAIJSONResponse(content=result.model_dump())
 
 
 async def _stream_team_completion(  # noqa: C901, PLR0915
@@ -1215,132 +1214,122 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
-    stack = ExitStack()
     stream: AsyncGenerator[TeamRunEvent, None] | None = None
     requester_id = execution_identity.requester_id if execution_identity is not None else None
 
     async def _cleanup() -> None:
         if stream is not None:
             await stream.aclose()
-        stack.close()
 
+    scope_context = load_bound_scope_session(
+        member_names=[],
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        team_name=team_name,
+    )
+    turn = await _prepare_team_turn(
+        team_name,
+        prompt,
+        session_id,
+        config,
+        runtime_paths,
+        thread_history,
+        team_models,
+        scope_context,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        stream=True,
+    )
+    if isinstance(turn, JSONResponse):
+        return turn
+    built, prepared = turn
     try:
-        scope_context = stack.enter_context(
-            open_bound_scope_session_context(
-                member_names=[],
-                session_id=session_id,
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=execution_identity,
-                team_name=team_name,
-            ),
+        request_log_context = _openai_team_request_log_context(
+            team_name=team_name,
+            session_id=session_id,
+            requester_id=requester_id,
+            prepared=prepared,
         )
-        turn = await _prepare_team_turn(
-            team_name,
-            prompt,
-            session_id,
-            config,
-            runtime_paths,
-            thread_history,
-            team_models,
-            scope_context,
-            execution_identity=execution_identity,
-            refresh_scheduler=refresh_scheduler,
-            stream=True,
-        )
-        if isinstance(turn, JSONResponse):
-            await _cleanup()
-            return turn
-        built, prepared = turn
-        try:
-            request_log_context = _openai_team_request_log_context(
-                team_name=team_name,
-                session_id=session_id,
-                requester_id=requester_id,
-                prepared=prepared,
-            )
-            stream = cast(
-                "AsyncGenerator[TeamRunEvent, None]",
-                stream_with_tool_execution_identity(
-                    execution_identity,
-                    # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
-                    stream_factory=lambda: context_bound_async_stream(
-                        context_factory=lambda: helper_usage_context(scope_context),
-                        stream_factory=lambda: stream_with_llm_request_log_context(
-                            run_prepared_team(
-                                built,
-                                prepared,
-                                config=config,
-                                runtime_paths=runtime_paths,
-                                scope_context=scope_context,
-                                team_name=team_name,
-                                session_id=session_id,
-                                user_id=requester_id,
-                                stream=True,
-                            ),
-                            request_context=request_log_context,
+        stream = cast(
+            "AsyncGenerator[TeamRunEvent, None]",
+            stream_with_tool_execution_identity(
+                execution_identity,
+                # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
+                stream_factory=lambda: context_bound_async_stream(
+                    context_factory=lambda: helper_usage_context(scope_context),
+                    stream_factory=lambda: stream_with_llm_request_log_context(
+                        run_prepared_team(
+                            built,
+                            prepared,
+                            config=config,
+                            runtime_paths=runtime_paths,
+                            scope_context=scope_context,
+                            team_name=team_name,
+                            session_id=session_id,
+                            user_id=requester_id,
+                            stream=True,
                         ),
+                        request_context=request_log_context,
                     ),
                 ),
-            )
-            first_event = await anext(stream, None)
-        except Exception:
-            logger.exception("Team execution failed", team=team_name)
-            await _cleanup()
-            return error_response(500, "Team execution failed", error_type="server_error")
-
-        if first_event is None:
-            await _cleanup()
-            return error_response(500, "Team returned empty response", error_type="server_error")
-
-        state = CompletionStreamState.begin(model_id)
-        stream_completed = False
-
-        async def _event_generator() -> AsyncGenerator[str, None]:
-            """Yield the SSE chunks of the team stream, starting with ``first_event``, which was already pulled.
-
-            A run that fails mid-stream closes its started tool calls as interrupted and ends with a failure chunk,
-            since the HTTP status is already sent.
-            """
-            nonlocal stream_completed
-            tool_state = state.tool_state
-            try:
-                yield sse_chunk(state, {"role": "assistant"})
-                text = _team_stream_text(first_event, tool_state)
-                if text:
-                    yield sse_chunk(state, {"content": text})
-                failed = False
-                try:
-                    async for event in stream:
-                        text = _team_stream_text(event, tool_state)
-                        if text:
-                            yield sse_chunk(state, {"content": text})
-                except Exception:
-                    logger.exception("Team stream failed during iteration", team=team_name)
-                    failed = True
-                # Tool calls that started but never completed, such as those a pause left waiting.
-                pending = finalize_pending_tools(tool_state)
-                if pending:
-                    yield sse_chunk(state, {"content": pending})
-                if failed:
-                    yield sse_chunk(state, {"content": "Team execution failed."})
-                logger.info("Team completion sent", team=team_name, stream=True)
-                yield sse_chunk(state, {}, finish_reason="stop")
-                yield SSE_DONE
-                stream_completed = not failed
-            finally:
-                await _cleanup()
-
-        response = OpenAIStreamingResponse(
-            _event_generator(),
-            media_type="text/event-stream",
+            ),
         )
-        response.completion_predicate = lambda: stream_completed
+        first_event = await anext(stream, None)
     except Exception:
-        stack.close()
-        raise
-    else:
-        return response
+        logger.exception("Team execution failed", team=team_name)
+        await _cleanup()
+        return error_response(500, "Team execution failed", error_type="server_error")
+
+    if first_event is None:
+        await _cleanup()
+        return error_response(500, "Team returned empty response", error_type="server_error")
+
+    state = CompletionStreamState.begin(model_id)
+    stream_completed = False
+
+    async def _event_generator() -> AsyncGenerator[str, None]:
+        """Yield the SSE chunks of the team stream, starting with ``first_event``, which was already pulled.
+
+        A run that fails mid-stream closes its started tool calls as interrupted and ends with a failure chunk,
+        since the HTTP status is already sent.
+        """
+        nonlocal stream_completed
+        tool_state = state.tool_state
+        try:
+            yield sse_chunk(state, {"role": "assistant"})
+            text = _team_stream_text(first_event, tool_state)
+            if text:
+                yield sse_chunk(state, {"content": text})
+            failed = False
+            try:
+                async for event in stream:
+                    text = _team_stream_text(event, tool_state)
+                    if text:
+                        yield sse_chunk(state, {"content": text})
+            except Exception:
+                logger.exception("Team stream failed during iteration", team=team_name)
+                failed = True
+            # Tool calls that started but never completed, such as those a pause left waiting.
+            pending = finalize_pending_tools(tool_state)
+            if pending:
+                yield sse_chunk(state, {"content": pending})
+            if failed:
+                yield sse_chunk(state, {"content": "Team execution failed."})
+            logger.info("Team completion sent", team=team_name, stream=True)
+            yield sse_chunk(state, {}, finish_reason="stop")
+            yield SSE_DONE
+            stream_completed = not failed
+        finally:
+            await _cleanup()
+
+    response = OpenAIStreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+    )
+    response.completion_predicate = lambda: stream_completed
+    return response
 
 
 def _team_stream_text(event: TeamRunEvent, tool_state: ToolStreamState) -> str | None:

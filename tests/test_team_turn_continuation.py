@@ -19,13 +19,9 @@ from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
-from mindroom.llm.runs import RunRecord, TeamRunRecord, ToolExecution
-from mindroom.response_turn import TurnPartialSnapshot
+from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.room_model_overrides import set_room_model_override
-from mindroom.teams.attempt import TeamAttempt
-from mindroom.teams.envelope import _TeamTurnHolder
-from mindroom.teams.members import materialize_exact_team_members, materialize_team_members
-from mindroom.teams.presentation import TeamStreamPresentation
+from mindroom.teams.members import materialize_exact_team_members
 from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call
@@ -319,42 +315,6 @@ async def test_a_stop_during_the_continuation_records_only_its_text_and_the_firs
     assert "Switching." not in snapshot.partial_text
     assert snapshot.partial_text.endswith("Half")
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["switch_thread_model", "delegate_task_to_member"]
-
-
-def test_releasing_a_spent_attempt_s_members_drops_its_partial_output(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A stop landing between the release and the next attempt records no text or calls of the spent attempt.
-
-    Its finished calls already carried over through the turn state, so keeping them here would count them twice.
-    No public entry can stop a turn inside that window deterministically, so this drives the private turn holder
-    whose snapshot the stop reads.
-    """
-    team = _team(tmp_path, monkeypatch)
-    members = materialize_team_members(["general"], team.orchestrator, team.identity)
-    presentation = TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False)
-    presentation.start_member_tool(
-        "general",
-        ToolExecution(tool_call_id="call-1", tool_name="touch", tool_args={}).call,
-    )
-    attempt = TeamAttempt(
-        run_id="run-1",
-        members=members,
-        presentation=presentation,
-        stream=True,
-        team_name="team",
-        runtime_model_name="default",
-        prepared_history=None,
-    )
-    attempt.reply.per_member["general"] = "stale partial"
-    holder = _TeamTurnHolder(team_members=members, attempt=attempt)
-    assert holder.partial_snapshot().assistant_text
-
-    holder.release_attempt_members(None)
-
-    assert holder.team_members is None
-    assert holder.partial_snapshot() == TurnPartialSnapshot()
 
 
 @pytest.mark.asyncio

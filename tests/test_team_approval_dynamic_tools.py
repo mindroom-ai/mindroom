@@ -11,7 +11,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall
 from mindroom.event_journal.approval_continuations import ApprovalDecision
-from mindroom.history.session_context import open_resolved_scope_session_context
+from mindroom.history.session_context import load_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import CompletedApprovalRun
@@ -231,7 +231,7 @@ async def _exercise_team_member_assembly(
         assert "add" not in functions["beta"]
         raise _MemberAssemblyObservedError
 
-    with open_resolved_scope_session_context(
+    scope = load_scope_session(
         agent_name="alpha",
         scope=HistoryScope(kind="team", scope_id="research"),
         session_id=identity.session_id,
@@ -239,20 +239,20 @@ async def _exercise_team_member_assembly(
         runtime_paths=paths,
         execution_identity=identity,
         create_session_if_missing=True,
-    ) as scope:
-        assert scope is not None
-        assert scope.session is not None
-        scope.storage.save_run(
-            scope.session,
-            TeamRunRecord(
-                run_id="paused-team-run",
-                session_id=identity.session_id,
-                user_id=identity.requester_id,
-                team_id="research",
-                status=RunStatus.paused,
-            ),
-            record_usage=False,
-        )
+    )
+    assert scope is not None
+    assert scope.session is not None
+    scope.storage.save_run(
+        scope.session,
+        TeamRunRecord(
+            run_id="paused-team-run",
+            session_id=identity.session_id,
+            user_id=identity.requester_id,
+            team_id="research",
+            status=RunStatus.paused,
+        ),
+        record_usage=False,
+    )
     monkeypatch.setattr("mindroom.teams.resume.build_team_spec", inspect_members)
     with pytest.raises(_MemberAssemblyObservedError):
         await continue_paused_team_run(
