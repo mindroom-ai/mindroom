@@ -25,8 +25,8 @@ def openai_native_tool_search_supported(route: Literal["openai", "codex"], model
     """Return whether a model on the ``openai`` or ``codex`` route supports server-side tool search.
 
     Tool search is a Responses-API feature on gpt-5.4 and later, so the gate parses the ``gpt-N.M`` version from the
-    model id instead of keeping an allowlist that goes stale with each release. On the ``openai`` route only the
-    public API endpoint at ``base_url`` offers it.
+    model id instead of keeping an allowlist that goes stale with each release. On the ``openai`` route it also needs
+    ``base_url`` to be the public API endpoint.
     """
     if route == "openai" and base_url.rstrip("/") != OPENAI_BASE_URL_DEFAULT:
         return False
