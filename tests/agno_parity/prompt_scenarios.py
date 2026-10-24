@@ -685,7 +685,7 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
     recorder = TurnRecorder(user_message=prompt)
     with _api_server(), tool_runtime_context(runtime):
         async for _chunk in team_response_stream(
-            agent_ids=[member_ids["planner"], member_ids["writer"]],
+            agent_names=["planner", "writer"],
             message=prompt,
             orchestrator=orchestrator,
             execution_identity=build_execution_identity_from_runtime_context(runtime),

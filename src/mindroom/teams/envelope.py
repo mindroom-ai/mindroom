@@ -69,7 +69,6 @@ from mindroom.response_turn import (
 )
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
-from mindroom.teams.formation import team_member_name
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     allow_direct_private_team_agents,
@@ -90,7 +89,6 @@ from mindroom.teams.presentation import (
 )
 from mindroom.teams.resume import TeamResume, blocking_team_pause, continued_team_pause, drive_team_delegations
 from mindroom.teams.runtime import leader_tool_specs, run_team
-from mindroom.teams.spec import TeamMode
 from mindroom.teams.storage import (
     persist_into,
     scope_storage,
@@ -115,12 +113,11 @@ if TYPE_CHECKING:
     from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
     from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.identity import MatrixID
     from mindroom.response_turn import EmptyRunDiscard, TurnRunState
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.members import BuiltTeam
     from mindroom.teams.runtime import TeamRunEvent
-    from mindroom.teams.spec import TeamSpec
+    from mindroom.teams.spec import TeamMode, TeamSpec
     from mindroom.teams.storage import TeamRunRecords, TeamStorage
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -1092,12 +1089,12 @@ async def team_response(
 
 
 async def team_response_stream(
-    agent_ids: list[MatrixID],
+    agent_names: list[str],
+    mode: TeamMode,
     message: str,
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     ctx: ResponseTurnContext,
-    mode: TeamMode = TeamMode.COORDINATE,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
@@ -1123,17 +1120,13 @@ async def team_response_stream(
     Matrix identity; this entry refines its ``entity_label`` to the materialized team label and appends the
     knowledge-availability enrichment before the turn runs.
     """
-    assert orchestrator.config is not None
-    config = orchestrator.config
     turn = await asyncio.to_thread(
         _team_turn,
         ctx,
         orchestrator=orchestrator,
         execution_identity=execution_identity,
         mode=mode,
-        requested_agent_names=requested_team_agent_names(
-            [team_member_name(member_id, config, orchestrator.runtime_paths) for member_id in agent_ids],
-        ),
+        requested_agent_names=requested_team_agent_names(agent_names),
         thread_history=thread_history,
         model_name=model_name,
         media=media,
