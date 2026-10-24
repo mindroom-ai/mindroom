@@ -37,15 +37,10 @@ _MAX_EMBEDDING_BATCH_ITEMS = 64
 _MAX_EMBEDDING_BATCH_PAYLOAD_BYTES = 512_000
 
 
-def plan_embedding_batches(
-    texts: Sequence[str],
-    *,
-    max_items: int = _MAX_EMBEDDING_BATCH_ITEMS,
-    max_payload_bytes: int = _MAX_EMBEDDING_BATCH_PAYLOAD_BYTES,
-) -> list[list[str]]:
+def plan_embedding_batches(texts: Sequence[str]) -> list[list[str]]:
     """Split texts into provider requests bounded by item count and payload size.
 
-    A single text larger than ``max_payload_bytes`` still gets its own request:
+    A single text larger than the payload bound still gets its own request:
     splitting it here would embed a fragment of a chunk.
     """
     batches: list[list[str]] = []
@@ -54,7 +49,8 @@ def plan_embedding_batches(
     for text in texts:
         text_bytes = len(text.encode("utf-8"))
         exceeds_limits = current and (
-            len(current) >= max(max_items, 1) or current_bytes + text_bytes > max_payload_bytes
+            len(current) >= _MAX_EMBEDDING_BATCH_ITEMS
+            or current_bytes + text_bytes > _MAX_EMBEDDING_BATCH_PAYLOAD_BYTES
         )
         if exceeds_limits:
             batches.append(current)

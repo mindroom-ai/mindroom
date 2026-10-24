@@ -1248,18 +1248,13 @@ async def test_repeated_interrupted_refreshes_keep_collection_count_bounded(
 
 def test_embedding_batches_respect_item_and_payload_limits() -> None:
     """Batch planning bounds both request size and request payload."""
-    assert plan_embedding_batches([], max_items=4, max_payload_bytes=100) == []
-    assert plan_embedding_batches(["a"] * 9, max_items=4, max_payload_bytes=1000) == [
-        ["a"] * 4,
-        ["a"] * 4,
-        ["a"],
-    ]
-    assert plan_embedding_batches(["aaaa", "bbbb", "cc"], max_items=10, max_payload_bytes=8) == [
-        ["aaaa", "bbbb"],
-        ["cc"],
-    ]
+    assert plan_embedding_batches([]) == []
+    assert plan_embedding_batches(["a"] * 129) == [["a"] * 64, ["a"] * 64, ["a"]]
+    half = "a" * 256_000
+    assert plan_embedding_batches([half, half, "c"]) == [[half, half], ["c"]]
     # A single oversized chunk still gets its own request rather than being split.
-    assert plan_embedding_batches(["x" * 50, "y"], max_items=10, max_payload_bytes=8) == [["x" * 50], ["y"]]
+    oversized = "x" * 512_001
+    assert plan_embedding_batches([oversized, "y"]) == [[oversized], ["y"]]
 
 
 @pytest.mark.asyncio
