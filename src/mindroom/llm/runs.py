@@ -245,6 +245,10 @@ class _RunRecordCommon:
     # Why an ``ERROR`` run failed, credentials redacted, set by the loop that ended it. It is never stored, so a
     # loaded record has none; ``content`` keeps Agno's stored rule (the error's text only when the model said nothing).
     error: str | None = field(default=None, compare=False, repr=False)
+    # The content a resumed run carried over from its pause, set by the resume (``resumed_record``): a resumed run
+    # keeps its paused content until it writes text of its own, as Agno's continuation did. It is never stored, so a
+    # loaded record has none.
+    carried_content: str | dict[str, Any] | None = field(default=None, compare=False, repr=False)
 
     @property
     def handover_content(self) -> str | dict[str, Any] | None:
@@ -259,6 +263,17 @@ class _RunRecordCommon:
         if self.error is not None:
             return self.error
         return redact_sensitive_text(self.content) if isinstance(self.content, str) else self.content
+
+    @property
+    def new_handover_content(self) -> str | dict[str, Any] | None:
+        """Return what the run hands over (``handover_content``) beyond what it carried over from its pause.
+
+        A reply that a resume continues already accounts for what each resumed run carried over: the text it wrote
+        before the pause, or a paused notice that no longer holds once the run continues. A run that was not resumed
+        hands over all of it, and a failed run why it failed.
+        """
+        handover = self.handover_content
+        return None if handover == self.carried_content else handover
 
     def _scalars_dict(self, identity: Mapping[str, str | None]) -> dict[str, Any]:
         """Return the scalar keys in Agno's order: the run, its agent or team, then the rest."""

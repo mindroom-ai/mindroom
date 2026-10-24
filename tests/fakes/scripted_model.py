@@ -84,11 +84,15 @@ def raw_tool_call(function: str, call_id: str, raw_arguments: str, /) -> dict[st
 
 
 def answer(text: str, metrics: MessageMetrics | None = None, *, chunk: int = 4) -> list[ScriptStep]:
-    """Return a turn that streams ``text`` in chunks and completes with it."""
+    """Return a turn that streams ``text`` in chunks and completes with it.
+
+    An empty ``text`` completes without content, as the adapters report a streamed reply without text.
+    """
     steps: list[ScriptStep] = [TextDelta(text[start : start + chunk]) for start in range(0, len(text), chunk)]
     final = metrics or MessageMetrics()
     steps.append(UsageReported(final))
-    steps.append(TurnCompleted(message=Message(role="assistant", content=text, metrics=final), stop_reason="end"))
+    message = Message(role="assistant", content=text or None, metrics=final)
+    steps.append(TurnCompleted(message=message, stop_reason="end"))
     return steps
 
 

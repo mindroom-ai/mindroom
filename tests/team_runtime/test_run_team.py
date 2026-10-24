@@ -71,6 +71,11 @@ def _silent() -> list[Any]:
     return [TurnCompleted(message=Message(role="assistant", content=None), stop_reason="end")]
 
 
+def _blank() -> list[Any]:
+    """A turn whose provider sent an empty string whole, as a reply that does not stream can end."""
+    return [TurnCompleted(message=Message(role="assistant", content=""), stop_reason="end")]
+
+
 def _member_events(events: list[Any], member_id: str) -> list[Any]:
     return [event.event for event in events if isinstance(event, MemberEvent) and event.member_id == member_id]
 
@@ -463,13 +468,13 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
             id="text",
         ),
         pytest.param(
-            [answer("")],
+            [_blank()],
             [_silent()],
             f"Agent Writer: No ResponseAgent Checker: {NO_MEMBER_RESPONSE}",
             id="empty",
         ),
         pytest.param(
-            [calls(tool_call("echo", "call-a", text="a"), tool_call("echo", "call-b", text="")), answer("")],
+            [calls(tool_call("echo", "call-a", text="a"), tool_call("echo", "call-b", text="")), _blank()],
             [calls(tool_call("echo", "call-c", text="c")), _silent()],
             # The broadcast keeps an empty tool result, which a coordinate delegation drops.
             "Agent Writer: a,Agent Checker: null",
@@ -625,7 +630,7 @@ async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_not
     ("stream", "writer_turns", "expected"),
     [
         pytest.param(True, [answer("")], NO_MEMBER_RESPONSE, id="streamed-empty"),
-        pytest.param(False, [answer("")], "", id="blocking-empty"),
+        pytest.param(False, [_blank()], "", id="blocking-empty"),
         pytest.param(True, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="streamed-tool-only"),
         pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "null", id="blocking-tool-only"),
     ],

@@ -221,8 +221,10 @@ def prepare_resume_tools(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> P
 def resumed_record[R: AnyRunRecord](paused: R) -> R:
     """Return the record the resume continues: a running copy of ``paused`` without its messages.
 
-    The copy is deep, so no field it carries is shared with ``paused`` and a refused resume changes nothing; a team
-    record keeps its own copy of the member runs that ended before the pause, as Agno's continuation of its live run
+    The copy keeps the paused content, as Agno's continuation did, and records it as what the run carried over
+    (``carried_content``), so a reply the resume continues adds only what the run hands over beyond it
+    (``new_handover_content``). The copy is deep, so no field it carries is shared with ``paused`` and a refused
+    resume changes nothing; a team record keeps its own copy of the member runs that ended before the pause, as Agno's continuation of its live run
     kept them. The copy's own requirements share their tool entries: Agno's continuation replaced each tool entry by
     the requirement's execution of the same call, so a decision recorded on a requirement shows on the run's tools
     too. A team run also holds its members' requirements, whose call ids come from other provider requests and may
@@ -234,6 +236,7 @@ def resumed_record[R: AnyRunRecord](paused: R) -> R:
         msg = f"Only a paused run can be resumed; run {paused.run_id!r} is {paused.status.value}"
         raise ValueError(msg)
     record = deepcopy(replace(paused, messages=[]))
+    record.carried_content = record.content
     record.status = RunStatus.running
     record.requirements = record.requirements or []
     if record.metrics is None:

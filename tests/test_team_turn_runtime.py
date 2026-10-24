@@ -41,7 +41,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
 from mindroom.teams.spec import TeamMode
@@ -1162,16 +1162,11 @@ async def test_a_streamed_team_pause_shows_a_failed_member_run_s_reason_after_th
     assert [member["content"] for member in paused.response_presentation_state["members"]] == ["", slot]
 
 
-@pytest.mark.asyncio
-async def test_an_approved_resume_shows_once_the_text_its_runs_wrote_before_the_pause(
+async def _pause_after_the_checker_wrote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Text the leader and the checker wrote before the pause stands once when neither writes more after approval.
-
-    The Agno-backed resume added a content-less run's earlier messages to its slot again; the restored document
-    already holds them.
-    """
+) -> tuple[TeamTurn, PausedAttempt]:
+    """Pause the team on the checker's gated call after the leader and the checker each wrote a sentence."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -1186,19 +1181,95 @@ async def test_an_approved_resume_shows_once_the_text_its_runs_wrote_before_the_
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
+    return team, raised.value.paused
+
+
+_WROTE_BEFORE_THE_PAUSE = f"{HEADER}**Checker**: Let me touch it.\n\n\n**Team Consensus**:\n\nAsking the checker."
+_CHECKER_PAUSED_AGAIN = "Team run paused. The following require input:\n- Checker: touch requires confirmation"
+
+
+@pytest.mark.asyncio
+async def test_an_approved_resume_shows_once_the_text_its_runs_wrote_before_the_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text the leader and the checker wrote before the pause stands once when neither writes more after approval.
+
+    The Agno-backed resume added a content-less run's earlier messages to its slot again; the restored document
+    already holds them.
+    """
+    team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([answer("")])
     team.models["checker-model"] = ScriptedModel([answer("")])
 
-    result = await team.resume(
-        raised.value.paused,
-        approved=True,
-        approvals=(member_approval("call-touch", "dangerous"),),
-    )
+    result = await team.resume(paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
 
     assert ProbeToolkit.calls == ["dangerous"]
-    assert (
-        result.response_text == f"{HEADER}**Checker**: Let me touch it.\n\n\n**Team Consensus**:\n\nAsking the checker."
-    )
+    assert result.response_text == _WROTE_BEFORE_THE_PAUSE
+
+
+@pytest.mark.asyncio
+async def test_an_approved_member_that_answers_without_text_shows_no_paused_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member that paused without text and answers after its approved call without text adds nothing to its slot.
+
+    Its run still holds the paused notice from before the pause, which no longer holds once the call ran.
+    """
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([answer("Done.")])
+    team.models["checker-model"] = ScriptedModel([answer("")])
+
+    result = await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
+
+    assert ProbeToolkit.calls == ["dangerous"]
+    assert result.response_text == f"{HEADER}\n**Team Consensus**:\n\nDone."
+
+
+@pytest.mark.asyncio
+async def test_a_member_that_pauses_again_after_approval_shows_its_earlier_text_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member whose approved call leads only to another gated call keeps its earlier text once in the new pause.
+
+    The leader sends no request while its member waits, and its paused notice names the new call.
+    """
+    team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([])
+    team.models["checker-model"] = ScriptedModel([calls(tool_call("touch", "call-touch-2", label="again"))])
+
+    repaused = await team.resume(paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
+
+    assert isinstance(repaused, PausedAttempt)
+    assert ProbeToolkit.calls == ["dangerous"]
+    assert repaused.response_text == f"{_WROTE_BEFORE_THE_PAUSE}\n\n{_CHECKER_PAUSED_AGAIN}"
+    state = repaused.response_presentation_state
+    assert [member["content"] for member in state["members"]] == ["", "Let me touch it."]
+
+
+@pytest.mark.asyncio
+async def test_a_chained_approval_shows_the_text_each_run_wrote_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two approvals in a row show the text the checker wrote before the first pause once.
+
+    Its first approved call leads only to a second gated call, and after the second it answers without text, as
+    the leader does; the leader's paused notice from the second pause stays.
+    """
+    team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([answer("")])
+    team.models["checker-model"] = ScriptedModel([calls(tool_call("touch", "call-touch-2", label="again")), answer("")])
+
+    repaused = await team.resume(paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
+    assert isinstance(repaused, PausedAttempt)
+    result = await team.resume(repaused, approved=True, approvals=(member_approval("call-touch-2", "again"),))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.calls == ["dangerous", "again"]
+    assert result.response_text == f"{_WROTE_BEFORE_THE_PAUSE}\n\n{_CHECKER_PAUSED_AGAIN}"
 
 
 @pytest.mark.asyncio

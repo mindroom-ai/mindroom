@@ -2,11 +2,11 @@
 
 ``TeamReplyText`` is the reply's text without tool markers as the run's events build it, which a streamed turn records,
 also when it is interrupted, and which tells the attempt the runs that streamed text. When the team run ends, a resume
-adds what each of its runs hands over and its events did not show, and a live streamed turn adds each failed member
-run's reason (``TeamAttempt.show_failure_reasons``); both go through ``TeamAttempt.show_unshown_handover``, which adds
-to the document and to that text alike. A blocking attempt adds nothing: the attempt collects the records the run hands
-over, which a blocking turn renders its reply from and records however it ends, and renders the run's metadata from
-them.
+adds what each of its runs hands over beyond what it carried over from the pause and its events did not show, and a
+live streamed turn adds each failed member run's reason (``TeamAttempt.show_failure_reasons``); both go through
+``TeamAttempt.show_unshown_handover``, which adds to the document and to that text alike. A blocking attempt adds
+nothing: the attempt collects the records the run hands over, which a blocking turn renders its reply from and records
+however it ends, and renders the run's metadata from them.
 """
 
 from __future__ import annotations
@@ -45,12 +45,13 @@ def team_tool_executions(record: TeamRunRecord) -> list[ToolExecution]:
 
 
 def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | dict[str, Any] | None:
-    """Return what ``run`` hands over (``handover_content``) that its events have not shown.
+    """Return what ``run`` hands over beyond its pause (``new_handover_content``) that its events have not shown.
 
     A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
-    unless that is not its content: a failed run hands over why it failed.
+    unless that is not its content: a failed run hands over why it failed. What a resumed run carried over from its
+    pause the document the resume continues already accounts for.
     """
-    handover = run.handover_content
+    handover = run.new_handover_content
     return None if streamed and handover == run.content else handover
 
 
