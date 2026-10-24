@@ -73,8 +73,8 @@ class _RetryBudget:
     stalls: int = 0
 
 
-def _retry_delay(error: ProviderError, budget: _RetryBudget, model_id: str) -> float | None:
-    """Return the wait before reissuing the request, or None when the error must propagate."""
+def _reissue(error: ProviderError, *, request: ModelRequest, budget: _RetryBudget, model_id: str) -> Retry | None:
+    """Return how to reissue ``request`` after ``error``, or None when the error must propagate."""
     if not error.retryable:
         return None
     if error.code == STREAM_STALLED:
@@ -82,7 +82,7 @@ def _retry_delay(error: ProviderError, budget: _RetryBudget, model_id: str) -> f
             return None
         budget.stalls += 1
         logger.warning("Retrying silent provider stream", model_id=model_id, error=str(error))
-        return 0.0
+        return Retry(request)
     if budget.transient >= _MAX_TRANSIENT_RETRIES:
         return None
     delay = _retry_delay_seconds(budget.transient)
@@ -96,7 +96,7 @@ def _retry_delay(error: ProviderError, budget: _RetryBudget, model_id: str) -> f
         max_retries=_MAX_TRANSIENT_RETRIES,
         delay_seconds=delay,
     )
-    return delay
+    return Retry(request, delay)
 
 
 def retrying_stream(
@@ -113,12 +113,6 @@ def retrying_stream(
     """
     if request.overrides.caller_retries or (not request.stream and not inner.capabilities.streams_only):
         return inner.stream(request)
-    budget = _RetryBudget()
-    model_id = inner.identity.id
-
-    def reissue(error: ProviderError) -> Retry | None:
-        delay = _retry_delay(error, budget, model_id)
-        return None if delay is None else Retry(request, delay)
-
+    reissue = partial(_reissue, request=request, budget=_RetryBudget(), model_id=inner.identity.id)
     next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=inner.identity.provider_name)
     return attempts(inner, request, reissue, next_event=next_event)

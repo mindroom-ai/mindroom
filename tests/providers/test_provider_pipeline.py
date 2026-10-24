@@ -755,13 +755,13 @@ async def test_request_log_builds_the_record_off_the_event_loop(
     """Serializing a long conversation must not stall the loop, so the record is built in the thread that writes it."""
     inner = _ScriptedProvider([[_turn()]])
     build_threads: list[int] = []
-    build_record = request_log_stage._request_record
+    write_record = request_log_stage._write_request_record
 
-    def record_build_thread(*args: object, **kwargs: object) -> dict[str, object]:
+    def record_build_thread(*args: object, **kwargs: object) -> None:
         build_threads.append(threading.get_ident())
-        return build_record(*args, **kwargs)
+        write_record(*args, **kwargs)
 
-    monkeypatch.setattr(request_log_stage, "_request_record", record_build_thread)
+    monkeypatch.setattr(request_log_stage, "_write_request_record", record_build_thread)
     request = ModelRequest(messages=[_user("hi")], tools=[_tool("search")])
 
     await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
@@ -916,6 +916,30 @@ async def test_a_response_record_that_cannot_be_written_is_reported_and_the_answ
     assert [entry["event"] for entry in logs if entry["log_level"] in {"info", "error"}] == [
         "LLM usage",
         "Failed to emit LLM response telemetry",
+    ]
+
+
+def test_concurrent_large_records_each_land_on_their_own_line(tmp_path: Path) -> None:
+    """Records larger than the file buffer, written by concurrent model calls, never share a line."""
+    path = tmp_path / "llm-requests.jsonl"
+    writers = 8
+    records_per_writer = 25
+    start = threading.Barrier(writers)
+
+    def write(writer: int) -> None:
+        start.wait()
+        for index in range(records_per_writer):
+            request_log_stage._write_line(path, {"writer": writer, "index": index, "padding": "x" * 65536})
+
+    threads = [threading.Thread(target=write, args=(writer,)) for writer in range(writers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert sorted((record["writer"], record["index"]) for record in records) == [
+        (writer, index) for writer in range(writers) for index in range(records_per_writer)
     ]
 
 

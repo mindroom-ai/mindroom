@@ -15,7 +15,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, SAFEGUARD_REFUSAL, ContextWindowExceeded, ProviderError
-from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
 from mindroom.logging_config import get_logger
 from mindroom.providers.pipeline.wrapped import Retry, attempts
 from mindroom.redaction import redact_sensitive_text
@@ -25,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import MediaKind, ModelIdentity, ModelProvider, ModelRequest, StreamEvent
+    from mindroom.llm.provider import MediaKind, ModelProvider, ModelRequest, StreamEvent
 
 __all__ = ["FALLBACK_MARKER", "media_fallback_stream"]
 
@@ -60,10 +59,6 @@ class _Route:
 
 # Learned limits live for the process only; a provider may add a capability at any time.
 _LEARNED_UNSUPPORTED: dict[_Route, set[MediaKind]] = {}
-
-
-def _route(identity: ModelIdentity) -> _Route:
-    return _Route(provider=identity.provider.lower(), model_id=identity.id, endpoint=identity.endpoint)
 
 
 def _media_kinds(messages: Sequence[Message]) -> frozenset[MediaKind]:
@@ -110,6 +105,7 @@ def _without_media(messages: Sequence[Message], removed: frozenset[MediaKind], f
     for message in messages:
         content = message.content
         if "image" in removed:
+            # Every ready view receipt, also one whose image follows its tool results as a separate message.
             content = _mark_view_unsupported(content)
         lost_media = bool(removed & _media_kinds([message]))
         stripped.append(
@@ -122,20 +118,7 @@ def _without_media(messages: Sequence[Message], removed: frozenset[MediaKind], f
                 content=_with_note(content, note) if lost_media else content,
             ),
         )
-    if "image" in removed:
-        # A viewed image arrives as a follow-up message after its tool results; mark those receipts too.
-        for index, message in enumerate(messages):
-            if not any(image.id.startswith(VIEWED_IMAGE_ID_PREFIX) for image in message.images or ()):
-                continue
-            preceding = index - 1
-            while preceding >= 0 and messages[preceding].role == "tool":
-                stripped[preceding].content = _mark_view_unsupported(stripped[preceding].content)
-                preceding -= 1
     return stripped
-
-
-def _media_may_have_caused(error: ProviderError) -> bool:
-    return not error.retryable and error.code not in _NOT_MEDIA_RELATED_CODES
 
 
 def _names_capability_gap(error: ProviderError, kinds: frozenset[MediaKind]) -> bool:
@@ -162,7 +145,7 @@ async def media_fallback_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with unsupported media replaced, retrying once media-free after a rejection."""
     identity = inner.identity
-    route = _route(identity)
+    route = _Route(provider=identity.provider.lower(), model_id=identity.id, endpoint=identity.endpoint)
     present = _media_kinds(request.messages)
     known = (frozenset(_LEARNED_UNSUPPORTED.get(route, ())) | inner.capabilities.omitted_media) & present
     remaining = present - known
@@ -170,7 +153,7 @@ async def media_fallback_stream(
 
     def without_remaining_media(error: ProviderError) -> Retry | None:
         nonlocal failure
-        if failure is not None or not remaining or not _media_may_have_caused(error):
+        if failure is not None or not remaining or error.retryable or error.code in _NOT_MEDIA_RELATED_CODES:
             return None
         failure = error
         logger.warning(

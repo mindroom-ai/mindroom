@@ -70,14 +70,11 @@ def is_model_safeguard_refusal(error: Exception | str) -> bool:
 
 
 def _extract_provider_from_error(error: Exception) -> str | None:
-    """Try to extract the provider name from the module of an exception that is not an owned provider error."""
-    module = type(error).__module__ or ""
-    # e.g. "openai" from "openai._exceptions", "anthropic" from "anthropic._exceptions"
-    top_module = module.split(".")[0] if module else ""
-    known_providers = {"openai", "anthropic", "google", "groq", "httpx"}
-    if top_module in known_providers:
-        return top_module
-    return None
+    """Return the SDK that raised an untyped error, such as ``openai`` for an error from ``openai._exceptions``."""
+    top_module = (type(error).__module__ or "").split(".")[0]
+    # TODO(simplify): An untyped httpx error names `httpx` as the provider in the authentication reply. Name no
+    # provider for it, since httpx is the HTTP client and not a provider. Users would notice.
+    return top_module if top_module in {"openai", "anthropic", "google", "groq", "httpx"} else None
 
 
 def _structured_provider_error(error_str: str) -> tuple[str, str] | None:
@@ -121,25 +118,16 @@ def get_user_friendly_error_message(
     *,
     runtime_paths: RuntimePaths | None = None,
 ) -> str:
-    """Return a user-friendly error message.
+    """Return the reply that reports ``error``, prefixed with ``[agent_name]`` when one is given.
 
     A provider error's type alone decides its message, since the provider's status and wording were read when it
     was classified. An error of another kind that holds a provider's error payload reads as that payload's typed
-    error would; only one without a payload is matched by the whole words in its text.
-
-    Args:
-        error: The exception that occurred
-        agent_name: Optional name of the agent that encountered the error
-        runtime_paths: Runtime context used to point missing-key errors at the dashboard URL
-
-    Returns:
-        A user-friendly error message
-
+    error would; only one without a payload is matched by the whole words in its text. ``runtime_paths`` points a
+    missing-key reply at the dashboard URL.
     """
     safe_error = redact_sensitive_text(str(error))
     agent_prefix = f"[{agent_name}] " if agent_name else ""
 
-    # Log the full error for debugging
     logger.error(
         "agent_error",
         agent=agent_name or "agent",
@@ -191,7 +179,6 @@ def _untyped_error_message(error: Exception, safe_error: str, runtime_paths: Run
         error_type, message = payload
         typed = classify_provider_error(message, provider=provider or "", error_type=error_type)
         return _provider_error_message(typed, safe_error, runtime_paths)
-    # Only distinguish the most important error types
     if _UNAUTHORIZED_WORDING.search(error_str) or is_credential_error(error_str):
         return _authentication_failed(provider, safe_error)
     if _RATE_LIMIT_WORDING.search(error_str):
@@ -199,5 +186,4 @@ def _untyped_error_message(error: Exception, safe_error: str, runtime_paths: Run
     # No word holds "timeout" by accident, while a name such as ConnectTimeoutError holds it on purpose.
     if "timeout" in error_str:
         return "⏰ Request timed out. Please try again."
-    # Generic error with the actual error message for transparency
     return f"⚠️ Error: {safe_error}"

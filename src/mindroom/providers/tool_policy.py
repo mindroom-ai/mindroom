@@ -23,12 +23,10 @@ def disable_tool_selection(request_params: dict[str, Any]) -> dict[str, Any]:
     if not provider_tools_disabled():
         return request_params
     extra_body = request_params.get("extra_body")
-    effective_tools = (
-        extra_body.get("tools", request_params.get("tools"))
-        if isinstance(extra_body, dict)
-        else request_params.get("tools")
-    )
-    if not effective_tools:
+    tools = request_params.get("tools")
+    if isinstance(extra_body, dict):
+        tools = extra_body.get("tools", tools)
+    if not tools:
         return request_params
     request_params["tool_choice"] = "none"
     if isinstance(extra_body, dict) and "tool_choice" in extra_body:
