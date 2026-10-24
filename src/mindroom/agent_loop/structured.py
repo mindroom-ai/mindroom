@@ -1,17 +1,15 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Ask a model for structured output the way its provider supports, and read the answer back into the schema.
 
-Providers with native structured output receive the pydantic schema, JSON-schema providers receive a ``json_schema``
-response format, and every other provider receives JSON mode plus a JSON prompt in the system message.
-The request formats, the prompt text, and the lenient parsing are kept as main behaves: helper prompts and response
-formats are model-visible.
+Each adapter renders a request's output schema in its provider's wire format; a route that only offers JSON mode
+also needs a JSON prompt at the end of the system message. The prompt text and the lenient parsing are kept as main
+behaves: helper prompts are model-visible.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
@@ -28,30 +26,14 @@ _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1F\x7F]")
 _QUOTED_VALUE = re.compile(r'"(?P<key>[^"]+)"\s*:\s*"(?P<value>.*?)(?="\s*(?:,|\}))')
 
 
-@dataclass(frozen=True, slots=True)
-class ResponseFormat[T: BaseModel]:
-    """How one request asks for ``schema``.
+def output_format_prompt(capabilities: Capabilities, schema: type[BaseModel] | None) -> str | None:
+    """Return the JSON prompt a system message asking for ``schema`` must end with, or None when none is needed.
 
-    ``request_format`` is the request's ``response_format``; ``prompt`` is the JSON prompt the system message must
-    end with, or None when the provider enforces the schema itself.
+    Only a route that enforces no schema itself needs it.
     """
-
-    schema: type[T]
-    request_format: type[T] | Mapping[str, Any]
-    prompt: str | None
-
-
-def select_response_format[T: BaseModel](capabilities: Capabilities, schema: type[T]) -> ResponseFormat[T]:
-    """Return the response format and system-message prompt a provider with ``capabilities`` needs for ``schema``."""
-    if capabilities.structured_output == "native":
-        return ResponseFormat(schema, schema, None)
-    if capabilities.structured_output == "json_schema":
-        request_format = {
-            "type": "json_schema",
-            "json_schema": {"name": schema.__name__, "schema": schema.model_json_schema()},
-        }
-        return ResponseFormat(schema, request_format, None)
-    return ResponseFormat(schema, {"type": "json_object"}, json_output_prompt(schema))
+    if schema is None or capabilities.structured_output != "json_mode":
+        return None
+    return json_output_prompt(schema)
 
 
 def json_output_prompt(schema: type[BaseModel]) -> str:
@@ -206,8 +188,7 @@ def _merged[T: BaseModel](candidates: list[str], schema: type[T]) -> T | None:
 
 
 __all__ = [
-    "ResponseFormat",
     "json_output_prompt",
+    "output_format_prompt",
     "parse_structured",
-    "select_response_format",
 ]

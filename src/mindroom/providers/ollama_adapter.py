@@ -17,8 +17,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from uuid import uuid4
 
-from pydantic import BaseModel
-
 from mindroom.credentials.sync import get_ollama_host
 from mindroom.llm.errors import InvalidRequest, ProviderError
 from mindroom.llm.messages import split_thinking
@@ -157,9 +155,8 @@ class OllamaProvider:
         if provider_tools_disabled():
             # Ollama has no tool_choice, so a decision request carries no tools at all.
             kwargs.pop("tools", None)
-        response_format = request.response_format
-        if isinstance(response_format, type) and issubclass(response_format, BaseModel) and "format" not in kwargs:
-            kwargs["format"] = response_format.model_json_schema()
+        if request.output_schema is not None and "format" not in kwargs:
+            kwargs["format"] = request.output_schema.model_json_schema()
         return kwargs
 
     def _sdk_client(self) -> AsyncClient:

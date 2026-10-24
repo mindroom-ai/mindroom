@@ -344,7 +344,7 @@ async def test_complete_raises_when_the_stream_never_completes_the_turn() -> Non
 def test_model_request_defaults_are_immutable_and_empty() -> None:
     request = ModelRequest(messages=())
 
-    assert (request.tools, request.tool_choice, request.response_format) == ((), None, None)
+    assert (request.tools, request.tool_choice, request.output_schema) == ((), None, None)
     assert request.overrides == RequestOverrides()
     assert RequestOverrides().disable_thinking is False
     with pytest.raises(FrozenInstanceError):

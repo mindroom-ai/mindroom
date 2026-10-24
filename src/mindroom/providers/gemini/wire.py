@@ -18,8 +18,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from pydantic import BaseModel
-
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
 from mindroom.llm.media import IMAGE_HEADER_BYTES, image_mime_type
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
@@ -37,6 +35,7 @@ if TYPE_CHECKING:
         GenerateContentResponseUsageMetadata,
         Part,
     )
+    from pydantic import BaseModel
 
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message
@@ -367,14 +366,12 @@ def tool_config(tool_choice: ToolChoice | None) -> dict[str, Any] | None:
     return None if tool_choice is None else {"function_calling_config": {"mode": "NONE"}}
 
 
-def response_schema(response_format: object) -> type[BaseModel] | dict[str, Any] | None:
+def response_schema(output_schema: type[BaseModel]) -> type[BaseModel] | dict[str, Any]:
     """Return the response schema for a pydantic output model, converted where Gemini needs it."""
-    if not (isinstance(response_format, type) and issubclass(response_format, BaseModel)):
-        return None
-    schema = response_format.model_json_schema()
+    schema = output_schema.model_json_schema()
     if not _needs_conversion(schema):
-        return response_format
-    return convert_schema(schema) or response_format
+        return output_schema
+    return convert_schema(schema) or output_schema
 
 
 def _needs_conversion(schema: Mapping[str, Any]) -> bool:

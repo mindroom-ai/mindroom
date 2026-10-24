@@ -195,9 +195,9 @@ class GeminiProvider:
         }
         if system_instruction is not None:
             config["system_instruction"] = system_instruction
-        if (schema := response_schema(request.response_format)) is not None:
+        if request.output_schema is not None:
             config["response_mime_type"] = "application/json"
-            config["response_schema"] = schema
+            config["response_schema"] = response_schema(request.output_schema)
         thinking = {
             "thinking_budget": settings.thinking_budget,
             "include_thoughts": settings.include_thoughts,

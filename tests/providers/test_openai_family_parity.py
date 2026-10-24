@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.llm.provider import TextDelta, ToolCallReady, TurnCompleted
-from tests.providers.golden_support import expected_stop_reason, golden_id, golden_paths, load_golden, ordered_json
+from tests.providers.golden_support import (
+    expected_body,
+    expected_stop_reason,
+    golden_id,
+    golden_paths,
+    load_golden,
+    ordered_json,
+)
 from tests.providers.openai_family_support import OPENAI_FAMILIES, replay_golden
 
 if TYPE_CHECKING:
@@ -29,7 +36,7 @@ async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> No
     golden = load_golden(path)
     replay = await replay_golden(golden, tmp_path)
     assert replay.request == golden["request"]
-    assert ordered_json(replay.request["body"]) == ordered_json(golden["request"]["body"])
+    assert ordered_json(replay.request["body"]) == ordered_json(expected_body(golden, replay.request["body"]))
     assert replay.parsed == golden["parsed"]
     assert replay.stop_reason == expected_stop_reason(golden)
 

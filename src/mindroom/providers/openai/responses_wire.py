@@ -12,8 +12,6 @@ import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import BaseModel
-
 from mindroom.llm.provider import (
     ReasoningDelta,
     StopReason,
@@ -308,13 +306,11 @@ def _base_params(settings: ResponsesSettings, request: ModelRequest) -> dict[str
     text: dict[str, Any] = {}
     if settings.verbosity is not None:
         text["verbosity"] = settings.verbosity
-    # Responses takes native structured output, so a request's format is always its output model class.
-    response_format = request.response_format
-    if isinstance(response_format, type) and issubclass(response_format, BaseModel):
+    if (schema := request.output_schema) is not None:
         text["format"] = {
             "type": "json_schema",
-            "name": response_format.__name__,
-            "schema": strict_response_schema(response_format),
+            "name": schema.__name__,
+            "schema": strict_response_schema(schema),
             "strict": settings.strict_output,
         }
     params = {

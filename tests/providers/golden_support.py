@@ -27,6 +27,8 @@ from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.tool_policy import without_provider_tools
+from mindroom.routing import _RoutingSuggestion
+from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.tool_jobs.execution import project_definitions
 
 if TYPE_CHECKING:
@@ -57,6 +59,10 @@ GENERATED_ID = "<uuid4>"
 _VOLATILE_MESSAGE_KEYS = ("id", "created_at")
 _TIMING_METRIC_KEYS = ("duration", "time_to_first_token")
 _STOP_KEYS = ("stop_reason", "finish_reason", "response_status")
+# The classes the JSON-schema structured-output goldens name, which record no module.
+_GOLDEN_SCHEMAS: dict[str, type[BaseModel]] = {
+    schema.__name__: schema for schema in (_RoutingSuggestion, ScheduledWorkflow)
+}
 # Every golden input key the harness turns into the owned request; a new key fails loudly instead of silently.
 _HANDLED_INPUT_KEYS = frozenset(
     {
@@ -289,6 +295,21 @@ def expected_parsed(golden: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
+def expected_body(golden: dict[str, Any], sent: dict[str, Any]) -> dict[str, Any]:
+    """Return a golden's request body in the key order to compare ``sent`` with.
+
+    A golden whose input is a dict response format sent that dict in the capture input's sorted key order (the
+    fixture README), which no caller builds: the adapter renders the format from the schema, ``type`` first and the
+    properties in field order, as Agno's agent did. Its order is taken from ``sent`` when the value is equal.
+    """
+    body = deepcopy(golden["request"]["body"])
+    encoded = golden["input"]["response_format"]
+    dict_format = encoded is not None and encoded["type"] == "dict" and "response_format" in body
+    if dict_format and body["response_format"] == sent.get("response_format"):
+        body["response_format"] = sent["response_format"]
+    return body
+
+
 def comparable_metrics(metrics: Any) -> dict[str, Any]:  # noqa: ANN401 - MessageMetrics
     """Return a usage report without the wall-clock timings the goldens drop."""
     values = metrics.to_dict()
@@ -297,17 +318,30 @@ def comparable_metrics(metrics: Any) -> dict[str, Any]:  # noqa: ANN401 - Messag
     return values
 
 
-def response_format_from_golden(encoded: dict[str, Any] | None) -> dict[str, Any] | type[BaseModel] | None:
-    """Return the golden's response format: a dict as recorded, or the pydantic class whose schema it pinned."""
+class _AnyOutput(BaseModel):
+    """An output schema for a JSON-mode golden: Agno's agent named none, and JSON-mode routes send none."""
+
+
+def output_schema_from_golden(encoded: dict[str, Any] | None) -> type[BaseModel] | None:
+    """Return the output schema whose response format the golden recorded, as Agno's agent resolved it for the route.
+
+    A route with native structured output got the pydantic class, Cerebras a ``json_schema`` format naming the
+    class, and a JSON-mode route ``{"type": "json_object"}``, which names none.
+    """
     if encoded is None:
         return None
-    if encoded["type"] == "dict":
-        return encoded["value"]
-    module_name, _, class_name = encoded["model"].partition(":")
-    schema = getattr(import_module(module_name), class_name)
+    if encoded["type"] == "pydantic":
+        module_name, _, class_name = encoded["model"].partition(":")
+        schema = getattr(import_module(module_name), class_name)
+        recorded = encoded["json_schema"]
+    elif encoded["value"] == {"type": "json_object"}:
+        return _AnyOutput
+    else:
+        recorded = encoded["value"]["json_schema"]["schema"]
+        schema = _GOLDEN_SCHEMAS[encoded["value"]["json_schema"]["name"]]
     assert issubclass(schema, BaseModel)
-    if schema.model_json_schema() != encoded["json_schema"]:
-        msg = f"{encoded['model']} no longer matches the schema recorded in the golden"
+    if schema.model_json_schema() != recorded:
+        msg = f"{schema.__name__} no longer matches the schema recorded in the golden"
         raise AssertionError(msg)
     return schema
 
@@ -360,7 +394,7 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
         messages=[Message.from_dict(deepcopy(message)) for message in case_input["messages"]],
         tools=tools,
         tool_choice=tool_choice,
-        response_format=response_format_from_golden(case_input["response_format"]),
+        output_schema=output_schema_from_golden(case_input["response_format"]),
         stream=case_input["stream"],
         deferred_tool_names=frozenset(deferred["tool_names"]) if deferred is not None else frozenset(),
         portable_replay=bool(case_input["portable_replay"]),

@@ -29,7 +29,7 @@ class PromptSpec:
     ``markdown`` adds the markdown line; callers with an output schema leave it False, as main does.
     ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered.
     ``model_note`` is the text the provider family adds (``model_note_for``), and ``output_format_prompt`` the JSON
-    prompt a structured-output request needs (``structured.select_response_format``).
+    prompt a structured-output request needs (``structured.output_format_prompt``).
     """
 
     description: str | None = None

@@ -11,7 +11,7 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.helper import complete_once, complete_prompt
 from mindroom.agent_loop.prompt import PromptSpec, render_system_message
-from mindroom.agent_loop.structured import select_response_format
+from mindroom.agent_loop.structured import output_format_prompt
 from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -91,17 +91,16 @@ async def test_a_prompt_is_sent_under_its_rendered_system_message(structured_out
     assert result.content == _Verdict(answer="yes")
     assert result.record.run_id == "decide-1"
     [request] = provider.requests
-    selected = select_response_format(capabilities, _Verdict)
     spec = PromptSpec(
         role="Decide.",
         instructions=("Answer briefly.", "Use the evidence."),
-        output_format_prompt=selected.prompt,
+        output_format_prompt=output_format_prompt(capabilities, _Verdict),
     )
     assert [message_dict(message) for message in request.messages] == [
         message_dict(render_system_message(spec)),
         message_dict(Message(role="user", content="Is it raining?")),
     ]
-    assert request.response_format == selected.request_format
+    assert request.output_schema is _Verdict
     assert ("Provide your output as a JSON" in str(request.messages[0].content)) is json_prompt
 
 
@@ -116,7 +115,7 @@ async def test_a_prompt_without_a_schema_returns_text_with_the_callers_overrides
     assert result.content == "Noted."
     [request] = provider.requests
     assert request.messages[0].content == "<your_role>\nExtract memories.\n</your_role>"
-    assert (request.response_format, request.overrides) == (None, overrides)
+    assert (request.output_schema, request.overrides) == (None, overrides)
 
 
 @pytest.mark.asyncio
@@ -146,30 +145,29 @@ async def test_a_text_answer_returns_its_text_and_a_completed_record() -> None:
 async def test_a_structured_answer_is_read_into_the_schema(structured_output: str) -> None:
     """The request asks for the schema the provider's way, and the answer comes back as the model."""
     capabilities = Capabilities(structured_output=structured_output)
-    response_format = select_response_format(capabilities, _Verdict)
+    prompt = output_format_prompt(capabilities, _Verdict)
     provider = _RecordingProvider(answer='```json\n{"answer": "yes"}\n```', capabilities=capabilities)
-    spec = PromptSpec(role="Decide.", output_format_prompt=response_format.prompt)
+    spec = PromptSpec(role="Decide.", output_format_prompt=prompt)
 
-    result = await complete_once(provider, _messages(spec, "Is it raining?"), response_format=response_format)
+    result = await complete_once(provider, _messages(spec, "Is it raining?"), schema=_Verdict)
 
     assert result.content == _Verdict(answer="yes")
     assert result.record.content == {"answer": "yes"}
     [request] = provider.requests
-    assert request.response_format == response_format.request_format
-    assert (response_format.prompt is not None) == (structured_output == "json_mode")
+    assert request.output_schema is _Verdict
+    assert (prompt is not None) == (structured_output == "json_mode")
 
 
 @pytest.mark.asyncio
 async def test_an_unreadable_structured_answer_stays_text() -> None:
     """An answer that does not validate is returned as its text, so callers that check the type fall back."""
-    response_format = select_response_format(Capabilities(structured_output="native"), _Verdict)
     provider = _RecordingProvider(answer="I cannot decide.")
 
     with capture_logs() as logs:
         result = await complete_once(
             provider,
             _messages(PromptSpec(role="Decide."), "?"),
-            response_format=response_format,
+            schema=_Verdict,
         )
 
     assert result.content == "I cannot decide."
@@ -186,7 +184,7 @@ async def test_a_request_carries_the_callers_overrides_and_no_tools() -> None:
     await complete_once(provider, _messages(PromptSpec(role="Summarize."), "Thread: ..."), overrides=overrides)
 
     [request] = provider.requests
-    assert (request.overrides, request.tools, request.tool_choice, request.response_format) == (
+    assert (request.overrides, request.tools, request.tool_choice, request.output_schema) == (
         overrides,
         (),
         None,

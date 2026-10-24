@@ -566,7 +566,7 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
     tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=True)]
     completed = await claude_turn(
         provider,
-        ModelRequest(messages=_user(), tools=tools, response_format=_Answer, stream=False),
+        ModelRequest(messages=_user(), tools=tools, output_schema=_Answer, stream=False),
     )
     request = wire.requests[0]
     assert str(request.url) == "https://api.anthropic.com/v1/messages?beta=true"
@@ -586,7 +586,7 @@ async def test_authored_output_config_and_stop_sequences_reach_the_request(tmp_p
     wire = Wire(json_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
     authored = {"output_config": {"effort": "low"}, "stop_sequences": ["</answer>"]}
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs=authored)
-    await claude_turn(provider, ModelRequest(messages=_user(), response_format=_Answer, stream=False))
+    await claude_turn(provider, ModelRequest(messages=_user(), output_schema=_Answer, stream=False))
     body = wire.body()
     assert body["stop_sequences"] == ["</answer>"]
     assert body["output_config"]["effort"] == "low"
@@ -602,7 +602,7 @@ async def test_documents_ask_for_citations_except_under_structured_output(tmp_pa
     provider = route_provider("anthropic", tmp_path, wire)
     document = File(content=b"Paris is in France.", mime_type="text/plain")
     messages = [Message(role="user", content="Where is Paris?", files=[document])]
-    request = ModelRequest(messages=messages, response_format=_Answer if structured else None, stream=False)
+    request = ModelRequest(messages=messages, output_schema=_Answer if structured else None, stream=False)
 
     await claude_turn(provider, request)
 
@@ -619,7 +619,7 @@ async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Pat
     wire = Wire(json_reply([{"type": "text", "text": "{}"}]))
     provider = route_provider("vertexai_claude", tmp_path, wire)
     tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=True)]
-    await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, response_format=_Answer, stream=False))
+    await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, output_schema=_Answer, stream=False))
     request = wire.requests[0]
     assert request.url.path.endswith(":rawPredict")
     assert "anthropic-beta" not in request.headers
