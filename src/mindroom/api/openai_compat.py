@@ -103,7 +103,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
-    from mindroom.llm.runs import RunRecord, TeamRunRecord
+    from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.teams.envelope import PreparedTeamExecution
     from mindroom.teams.runtime import TeamRunEvent
@@ -270,10 +270,10 @@ def _usage_from_run_metadata(run_metadata: dict[str, Any]) -> _UsageInfo:
     )
 
 
-def _usage_from_team_output(record: TeamRunRecord, members: Sequence[RunRecord]) -> _UsageInfo:
+def _usage_from_team_output(record: TeamRunRecord) -> _UsageInfo:
     """Sum usage over the runs of a team turn, normalizing each run for its own provider."""
     total = _UsageInfo()
-    for run, metrics in team_usage_runs(record, members):
+    for run, metrics in team_usage_runs(record, record.ended_member_runs):
         usage = _usage_info(
             input_tokens=metrics.input_tokens,
             output_tokens=metrics.output_tokens,
@@ -1227,7 +1227,7 @@ async def _non_stream_team_completion(
                     message=ChatMessage(role="assistant", content=response_text),
                 ),
             ],
-            usage=_usage_from_team_output(record, record.ended_member_runs),
+            usage=_usage_from_team_output(record),
         )
         return OpenAIJSONResponse(content=result.model_dump())
 
