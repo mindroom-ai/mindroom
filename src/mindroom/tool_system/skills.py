@@ -496,12 +496,8 @@ def build_skills_toolkit(
         ),
     )
 
-    loaders: list[_SkillsLoader]
-    if skill_roots is None:
-        loaders = [loader for loader in (configured_loader, workspace_loader) if loader is not None]
-    else:
-        loaders = [loader for loader in (workspace_loader, configured_loader) if loader is not None]
-
+    ordered = (configured_loader, workspace_loader) if skill_roots is None else (workspace_loader, configured_loader)
+    loaders = [loader for loader in ordered if loader is not None]
     skills, workspace_roots = _load_skills(loaders, None if only is None else frozenset(only))
     if refused is not None:
         refused.extend(workspace_loader.refused)
