@@ -58,7 +58,6 @@ def _provider_context(
 ) -> tools_api._ResolvedToolAvailabilityContext:
     return tools_api._ResolvedToolAvailabilityContext(
         execution_scope="user_agent",
-        dashboard_configuration_supported=True,
         status_authoritative=True,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
@@ -176,7 +175,6 @@ async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) ->
     }
     context = tools_api._ResolvedToolAvailabilityContext(
         execution_scope="shared",
-        dashboard_configuration_supported=True,
         status_authoritative=True,
         credentials_manager=manager,
         worker_target=target,
