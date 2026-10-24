@@ -4779,9 +4779,6 @@ class ResponseRunner:
                 request=delivery_request,
             )
 
-            def _note_visible_response_event_id(response_event_id: str) -> None:
-                team_turn_recorder.set_response_event_id(response_event_id)
-
             if use_streaming and (_existing_event_id(delivery_request) is None or _shows_placeholder(delivery_request)):
                 async with _response_typing_indicator(
                     self._client(),
@@ -4844,7 +4841,7 @@ class ResponseRunner:
                                 ),
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
-                                visible_event_id_callback=_note_visible_response_event_id,
+                                visible_event_id_callback=team_turn_recorder.set_response_event_id,
                                 visible_progress_callback=self._lifecycle_coordinator.visible_progress_callback(
                                     delivery_target,
                                 ),
