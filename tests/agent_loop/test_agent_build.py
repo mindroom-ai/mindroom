@@ -145,6 +145,8 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
         context_documents=("You are calm and precise.",),
         context_files=("SOUL.md",),
         knowledge_sources=tuple(source.description for source in knowledge.sources),
+        deferred=(),
+        output_file_policy=None,
     )
 
 

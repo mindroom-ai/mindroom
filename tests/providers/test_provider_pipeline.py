@@ -506,7 +506,15 @@ async def test_removed_viewed_image_marks_its_receipt_unsupported() -> None:
 
 
 def _tool(name: str) -> ToolSpec:
-    return ToolSpec(name=name, description=name, parameters={"type": "object"})
+    return ToolSpec(
+        name=name,
+        description=name,
+        parameters={"type": "object"},
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -1129,6 +1137,7 @@ async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_part
         name="Code",
         model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
         system_message=None,
+        toolkits=(),
     )
 
     with pytest.raises(InvalidRequest, match="rejected"):
@@ -1177,6 +1186,7 @@ async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attem
         name="Code",
         model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
         system_message=None,
+        toolkits=(),
     )
 
     async def consume() -> None:

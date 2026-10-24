@@ -58,7 +58,7 @@ async def test_team_approval_finalizes_consumption_after_member_assembly_fails(t
             session_id="session-1",
             kind="team",
             owner_id="research",
-            runs=[TeamRunRecord(run_id="run-1", session_id="session-1", status=RunStatus.paused)],
+            runs=[TeamRunRecord(run_id="run-1", session_id="session-1", status=RunStatus.paused, team_id=None)],
         ),
         session_id="session-1",
     )

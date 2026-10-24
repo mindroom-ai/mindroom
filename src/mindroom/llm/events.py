@@ -18,7 +18,7 @@ class ReportedCall:
 
     tool_call_id: str | None
     tool_name: str | None
-    tool_args: dict[str, Any] | None = None
+    tool_args: dict[str, Any] | None
     result: str | None = None
     is_error: bool | None = None
 

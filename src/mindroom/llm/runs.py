@@ -393,7 +393,7 @@ class TeamRunRecord(_RunRecordCommon):
     of the live record carries it on.
     """
 
-    team_id: str | None = None
+    team_id: str | None
     team_name: str | None = None
     member_responses: list[RunRecord] = field(default_factory=list)
     ended_member_runs: list[RunRecord] = field(default_factory=list, compare=False, repr=False)

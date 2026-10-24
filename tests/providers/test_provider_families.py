@@ -67,7 +67,15 @@ def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _tool(name: str) -> ToolSpec:
-    return ToolSpec(name=name, description=f"{name}.", parameters=_SCHEMA)
+    return ToolSpec(
+        name=name,
+        description=f"{name}.",
+        parameters=_SCHEMA,
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    )
 
 
 def _pipeline(adapter: ModelProvider, *, log_dir: Path | None = None, idle: float | None = None) -> ModelProvider:
@@ -91,7 +99,15 @@ def _pipeline(adapter: ModelProvider, *, log_dir: Path | None = None, idle: floa
 
 
 _TRI_STATE_TOOLS = [
-    ToolSpec(name="unset", description=None, parameters=_SCHEMA, strict=None),
+    ToolSpec(
+        name="unset",
+        description=None,
+        parameters=_SCHEMA,
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    ),
     ToolSpec(
         name="gated",
         description="Gated.",
@@ -108,6 +124,7 @@ _TRI_STATE_TOOLS = [
         strict=False,
         requires_confirmation=False,
         external_execution=False,
+        approval_type=None,
     ),
 ]
 _GEMINI_SCHEMA = {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}, "required": []}

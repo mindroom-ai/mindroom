@@ -72,12 +72,12 @@ class ToolSpec:
     name: str
     description: str | None
     parameters: Mapping[str, Any]
-    strict: bool | None = None
+    strict: bool | None
     # TODO(simplify): the approval flags exist only so OpenAI-family wires send them in each function definition,
     # as main does. Stop sending them and drop them here. Models would notice: tool definitions change once. (#3075)
-    requires_confirmation: bool | None = None
-    external_execution: bool | None = None
-    approval_type: str | None = None
+    requires_confirmation: bool | None
+    external_execution: bool | None
+    approval_type: str | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -119,7 +119,7 @@ class NativeCompactionReplay:
     """
 
     route: str
-    threshold: int | None = None
+    threshold: int | None
     basis: str | None = None
 
 
@@ -267,7 +267,7 @@ class ModelTurn:
     """One finished model turn, as ``complete`` returns it."""
 
     message: Message
-    stop_reason: StopReason | None = None
+    stop_reason: StopReason | None
 
     @property
     def content(self) -> str:

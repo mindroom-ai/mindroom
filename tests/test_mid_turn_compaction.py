@@ -497,12 +497,31 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     assert tokens < 10_000
 
 
-_BIG_TOOL = ToolSpec(name="big_tool", description="d" * 80_000, parameters={})
+_BIG_TOOL = ToolSpec(
+    name="big_tool",
+    description="d" * 80_000,
+    parameters={},
+    strict=None,
+    requires_confirmation=None,
+    external_execution=None,
+    approval_type=None,
+)
 
 
 def test_request_sizing_leaves_out_deferred_tool_definitions(tmp_path: Path) -> None:
     """Tool search keeps deferred definitions out of the context until the model loads them."""
-    tools = [_BIG_TOOL, ToolSpec(name="lookup", description="Look up a value.", parameters={})]
+    tools = [
+        _BIG_TOOL,
+        ToolSpec(
+            name="lookup",
+            description="Look up a value.",
+            parameters={},
+            strict=None,
+            requires_confirmation=None,
+            external_execution=None,
+            approval_type=None,
+        ),
+    ]
     binding = _binding(tmp_path, frozenset({"big_tool"}))
 
     assert mid_turn_compaction._tool_tokens(binding, tools, []) < 1_000

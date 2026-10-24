@@ -166,7 +166,15 @@ async def test_combined_results_reach_every_route(family: str, tmp_path: Path, m
         history=_history(_stored_run()),
         turn=TurnMessages(prompt=Message(role="user", content="And tomorrow?")),
     )
-    tool = ToolSpec(name="get_weather", description="Weather.", parameters={"type": "object", "properties": {}})
+    tool = ToolSpec(
+        name="get_weather",
+        description="Weather.",
+        parameters={"type": "object", "properties": {}},
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    )
 
     await complete(spec.adapter(tmp_path, wire), ModelRequest(messages=messages, tools=[tool]))
 

@@ -129,7 +129,17 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
         ),
     )
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
-    tools = [ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object", "properties": {}})]
+    tools = [
+        ToolSpec(
+            name="get_weather",
+            description="Forecast.",
+            parameters={"type": "object", "properties": {}},
+            strict=None,
+            requires_confirmation=None,
+            external_execution=None,
+            approval_type=None,
+        ),
+    ]
     streamed = await claude_events(provider, ModelRequest(messages=_user(), tools=tools))
 
     # Block starts, the signature delta, and the tool-call argument piece show up as provider activity.
@@ -196,7 +206,17 @@ async def test_a_whole_reply_finishes_with_the_message_its_stream_would(tmp_path
         {"type": "text", "text": "Looking it up."},
         {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
     ]
-    tools = [ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object", "properties": {}})]
+    tools = [
+        ToolSpec(
+            name="get_weather",
+            description="Forecast.",
+            parameters={"type": "object", "properties": {}},
+            strict=None,
+            requires_confirmation=None,
+            external_execution=None,
+            approval_type=None,
+        ),
+    ]
     streamed = await claude_events(
         route_provider(route, tmp_path, Wire(sse_reply(blocks, stop_reason="tool_use"))),
         ModelRequest(messages=_user(), tools=tools),
@@ -580,7 +600,17 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
     """Strict tools and a pydantic response format use the beta endpoint with its header."""
     wire = Wire(json_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
     provider = route_provider("anthropic", tmp_path, wire)
-    tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=True)]
+    tools = [
+        ToolSpec(
+            name="pick",
+            description="Pick.",
+            parameters={"type": "object", "properties": {}},
+            strict=True,
+            requires_confirmation=None,
+            external_execution=None,
+            approval_type=None,
+        ),
+    ]
     completed = await claude_turn(
         provider,
         ModelRequest(messages=_user(), tools=tools, output_schema=_Answer, stream=False),
@@ -635,7 +665,17 @@ async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Pat
     """Vertex rejects provider-level strict fields and has no structured output, so the schema stays out."""
     wire = Wire(json_reply([{"type": "text", "text": "{}"}]))
     provider = route_provider("vertexai_claude", tmp_path, wire)
-    tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=True)]
+    tools = [
+        ToolSpec(
+            name="pick",
+            description="Pick.",
+            parameters={"type": "object", "properties": {}},
+            strict=True,
+            requires_confirmation=None,
+            external_execution=None,
+            approval_type=None,
+        ),
+    ]
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, output_schema=_Answer, stream=False))
     request = wire.requests[0]
     assert request.url.path.endswith(":rawPredict")
@@ -670,7 +710,15 @@ async def test_tool_definitions_carry_only_the_fields_agno_sent(
     provider = route_provider(route, tmp_path, wire, extra_kwargs={"cache_system_prompt": False})
     schema = {"type": "object", "properties": {"city": {"type": "string"}}}
     tools = [
-        ToolSpec(name="unset", description=None, parameters=schema, strict=None),
+        ToolSpec(
+            name="unset",
+            description=None,
+            parameters=schema,
+            strict=None,
+            requires_confirmation=None,
+            external_execution=None,
+            approval_type=None,
+        ),
         ToolSpec(
             name="gated",
             description="Gated.",
@@ -687,6 +735,7 @@ async def test_tool_definitions_carry_only_the_fields_agno_sent(
             strict=False,
             requires_confirmation=False,
             external_execution=False,
+            approval_type=None,
         ),
     ]
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools))
@@ -721,7 +770,17 @@ async def test_request_tool_choice_replaces_an_authored_one(
     wire = Wire(json_reply([{"type": "text", "text": "{}"}]))
     authored = {"request_params": {"tool_choice": {"type": "auto"}, "extra_body": {"tool_choice": {"type": "any"}}}}
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs=authored)
-    tools = [ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object", "properties": {}})]
+    tools = [
+        ToolSpec(
+            name="get_weather",
+            description="Forecast.",
+            parameters={"type": "object", "properties": {}},
+            strict=None,
+            requires_confirmation=None,
+            external_execution=None,
+            approval_type=None,
+        ),
+    ]
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, tool_choice=tool_choice, stream=False))
     assert wire.body()["tool_choice"] == expected
 

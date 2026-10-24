@@ -45,10 +45,10 @@ class AgentSurface:
 
     mode: AgentMode
     cli_shell: bool
-    deferred: tuple[DeferredAgentToolkit, ...] = ()
-    context_documents: tuple[str, ...] = ()
-    context_files: tuple[str, ...] = ()
-    knowledge_sources: tuple[KnowledgeSourceDescription, ...] = ()
+    deferred: tuple[DeferredAgentToolkit, ...]
+    context_documents: tuple[str, ...]
+    context_files: tuple[str, ...]
+    knowledge_sources: tuple[KnowledgeSourceDescription, ...]
     identity: str | None = None
     toolkit_names: tuple[str, ...] = ()
     memory_root: Path | None = None
@@ -56,7 +56,7 @@ class AgentSurface:
     minimal_instructions: tuple[str, ...] = ()
     interactive_prompt: str = ""
     skills: tuple[Skill, ...] = ()
-    output_file_policy: ToolOutputFilePolicy | None = None
+    output_file_policy: ToolOutputFilePolicy | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

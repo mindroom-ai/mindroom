@@ -406,7 +406,17 @@ async def test_complete_drains_the_stream_and_returns_the_turn() -> None:
     )
     request = ModelRequest(
         messages=[Message(role="user", content="hi")],
-        tools=[ToolSpec(name="t", description="d", parameters={"type": "object"})],
+        tools=[
+            ToolSpec(
+                name="t",
+                description="d",
+                parameters={"type": "object"},
+                strict=None,
+                requires_confirmation=None,
+                external_execution=None,
+                approval_type=None,
+            ),
+        ],
     )
 
     turn = await complete(provider, request)

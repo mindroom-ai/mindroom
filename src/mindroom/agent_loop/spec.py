@@ -28,7 +28,7 @@ class AgentSpec:
     name: str
     model: ModelProvider
     system_message: Message | None
-    toolkits: tuple[AdaptedToolkit, ...] = ()
+    toolkits: tuple[AdaptedToolkit, ...]
     max_tool_calls_per_turn: int | None = None
 
 

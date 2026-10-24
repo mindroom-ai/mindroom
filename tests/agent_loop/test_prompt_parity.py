@@ -91,6 +91,6 @@ def test_sections_render_in_agno_order() -> None:
 
 def test_an_empty_skills_block_adds_nothing() -> None:
     """Only a non-empty skills block is added."""
-    assert render_system_message(PromptSpec(role="Role.", skills_block="")).content == (
+    assert render_system_message(PromptSpec(role="Role.", skills_block="", instructions=())).content == (
         "<your_role>\nRole.\n</your_role>"
     )
