@@ -43,6 +43,7 @@ from mindroom.system_prompt import render_session_context
 from tests.providers.openai_family_support import openai_family_adapter, provider_runtime, responses_adapter
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 _CHECKPOINT = {"type": "compaction", "id": "cmp_latest", "encrypted_content": "opaque-checkpoint"}
@@ -490,13 +491,18 @@ def test_a_stored_tool_turn_continues_whatever_the_model_name(tmp_path: Path) ->
     assert request["input"] == [{"type": "function_call_output", "call_id": "call_1", "output": "ready"}]
 
 
-def _stored_reply_route(root: Path) -> tuple[ResponsesAdapter, list[dict[str, Any]]]:
-    """Return a stored-response route answering every request with a text reply, and the bodies it was sent."""
+def _stored_reply_route(
+    root: Path,
+    *first_outputs: list[dict[str, Any]],
+) -> tuple[ResponsesAdapter, list[dict[str, Any]]]:
+    """Return a stored-response route answering with ``first_outputs`` in turn, then text replies, and its bodies."""
     sent: list[dict[str, Any]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         sent.append(json.loads(request.content))
-        reply = _response([{**_ANSWER, "id": f"msg_{len(sent)}"}]).model_dump(mode="json")
+        index = len(sent) - 1
+        output = first_outputs[index] if index < len(first_outputs) else [{**_ANSWER, "id": f"msg_{len(sent)}"}]
+        reply = _response(output).model_dump(mode="json")
         return httpx.Response(200, json={**reply, "id": f"resp_{len(sent)}"})
 
     config = {"provider": "openai", "id": "gpt-6-astra", "api": "responses", "api_key": "test-key"}
@@ -516,35 +522,76 @@ def _dated_prompt(day: str) -> Message:
 
 
 @pytest.mark.asyncio
+async def test_a_reply_with_an_unchanged_prompt_continues_the_stored_chain(tmp_path: Path) -> None:
+    """A stored chain holds the prompt it started with, so the same prompt sends only what follows the stored reply."""
+    adapter, sent = _stored_reply_route(tmp_path)
+    question = Message(role="user", content="Plan my day.")
+    reply = await _reply(adapter, [_dated_prompt("Monday"), question])
+
+    await _reply(adapter, [_dated_prompt("Monday"), question, reply, Message(role="user", content="And tomorrow?")])
+
+    assert (sent[1]["previous_response_id"], sent[1]["input"]) == (
+        "resp_1",
+        [{"role": "user", "content": "And tomorrow?"}],
+    )
+
+
+def _next_day(history: list[Message]) -> list[Message]:
+    return [_dated_prompt("Tuesday"), *history[1:]]
+
+
+def _with_receipt(history: list[Message]) -> list[Message]:
+    return messages_with_approval_receipt(history, "trusted approval receipt")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("scenario", "sent_system_text"),
-    [("unchanged", None), ("next day", "Today is Tuesday."), ("approval receipt", "trusted approval receipt")],
+    ("change_prompt", "sent_system_text"),
+    [
+        pytest.param(_next_day, "Today is Tuesday.", id="next day"),
+        pytest.param(_with_receipt, "trusted approval receipt", id="approval receipt"),
+    ],
 )
 async def test_a_reply_after_the_system_prompt_changes_sends_the_new_prompt(
     tmp_path: Path,
-    scenario: str,
-    sent_system_text: str | None,
+    change_prompt: Callable[[list[Message]], list[Message]],
+    sent_system_text: str,
 ) -> None:
     """A stored chain holds the prompt it started with, so a changed prompt replays the history instead of chaining."""
     adapter, sent = _stored_reply_route(tmp_path)
     question = Message(role="user", content="Plan my day.")
     reply = await _reply(adapter, [_dated_prompt("Monday"), question])
     follow_up = Message(role="user", content="And tomorrow?")
-    history = [_dated_prompt("Tuesday" if scenario == "next day" else "Monday"), question, reply, follow_up]
-    if scenario == "approval receipt":
-        history = messages_with_approval_receipt(history, "trusted approval receipt")
 
-    await _reply(adapter, history)
+    await _reply(adapter, change_prompt([_dated_prompt("Monday"), question, reply, follow_up]))
 
-    if sent_system_text is None:
-        assert (sent[1]["previous_response_id"], sent[1]["input"]) == (
-            "resp_1",
-            [{"role": "user", "content": "And tomorrow?"}],
-        )
-        return
     assert "previous_response_id" not in sent[1]
     assert [item["role"] for item in sent[1]["input"]] == ["developer", "developer", "user", "assistant", "user"]
     assert sent_system_text in sent[1]["input"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_on_a_stored_chain_replays_its_tool_loop(tmp_path: Path) -> None:
+    """The receipt changes the prompt mid tool loop, so the resumed request replays the loop, still stored.
+
+    The route recorded no reasoning for the stored call, so the replayed call drops the item ID its reasoning owns.
+    """
+    adapter, sent = _stored_reply_route(tmp_path, [{"type": "reasoning", "id": "rs_first", "summary": []}, _CALL])
+    prompt = _dated_prompt("Monday")
+    question = Message(role="user", content="Look it up.")
+    call = await _reply(adapter, [prompt, question])
+    result = Message(role="tool", tool_call_id="fc_lookup", content="Found it")
+
+    await _reply(adapter, _with_receipt([prompt, question, call, result]))
+
+    assert sent[1]["store"] is True
+    assert "previous_response_id" not in sent[1]
+    assert "trusted approval receipt" in sent[1]["input"][1]["content"]
+    assert sent[1]["input"][2:] == [
+        {"role": "user", "content": "Look it up."},
+        {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
+        {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+    ]
 
 
 @pytest.mark.asyncio
