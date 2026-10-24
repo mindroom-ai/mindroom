@@ -277,8 +277,6 @@ class TurnContinuationRunState:
         current_event_id: str | None,
         run_id: str | None,
         continuation_model_prompt_tail: str,
-        active_model_name: str | None = None,
-        apply_model_to_team_members: bool = False,
     ) -> TurnContinuationRunState:
         """Build the continuation state for one turn's first attempt."""
         return cls(
@@ -290,8 +288,8 @@ class TurnContinuationRunState:
             active_current_event_id=current_event_id,
             active_run_id=run_id,
             continuation_model_prompt_tail=continuation_model_prompt_tail,
-            active_model_name=active_model_name,
-            apply_model_to_team_members=apply_model_to_team_members,
+            active_model_name=None,
+            apply_model_to_team_members=False,
         )
 
     def advance(
@@ -709,6 +707,9 @@ class StreamingTurnAdapter[ChunkT]:
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
 
 
+type _TurnAdapter = BlockingTurnAdapter | StreamingTurnAdapter[Any]
+
+
 def _raise_continuation_budget_exhausted() -> NoReturn:
     # The continuation loop always settles on its final iteration: at the limit
     # the decision carries a limit_message and never asks to continue.
@@ -745,7 +746,7 @@ def _interrupted_run_metadata(
 
 def _settle_excluded_attempt(
     ctx: ResponseTurnContext,
-    adapter: BlockingTurnAdapter | StreamingTurnAdapter[Any],
+    adapter: _TurnAdapter,
     sinks: TurnSinks,
     run: TurnRunState,
     resolution: ExcludedAttempt,
@@ -781,7 +782,7 @@ def _settle_excluded_attempt(
 
 def _failed_turn_text(
     ctx: ResponseTurnContext,
-    adapter: BlockingTurnAdapter | StreamingTurnAdapter[Any],
+    adapter: _TurnAdapter,
     sinks: TurnSinks,
     run: TurnRunState,
     error: Exception,
@@ -791,18 +792,10 @@ def _failed_turn_text(
     Raises ``error`` again, after recording the interrupted turn, when the adapter has no error reply.
     """
     if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
-        _settle_skipped_attempt(ctx, sinks, run, skipped, adapter.discard_empty_run)
+        _settle_skipped_attempt(ctx, adapter, sinks, run, skipped)
         logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
         return None
-    _record_turn_excluded_fallback(
-        ctx,
-        adapter.persist_standalone_replay,
-        sinks,
-        run,
-        adapter.snapshot_partial(),
-        original_status=RunStatus.error,
-        use_recorder_state=False,
-    )
+    _record_turn_excluded_fallback(ctx, adapter, sinks, run, original_status=RunStatus.error, use_recorder_state=False)
     if adapter.unexpected_error_text is None:
         raise error
     logger.exception("Response turn failed", entity=ctx.entity_label)
@@ -811,14 +804,14 @@ def _failed_turn_text(
 
 def _record_turn_excluded_fallback(
     ctx: ResponseTurnContext,
-    persist: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None,
+    adapter: _TurnAdapter,
     sinks: TurnSinks,
     run: TurnRunState,
-    snapshot: TurnPartialSnapshot,
     *,
     original_status: RunStatus,
     use_recorder_state: bool,
 ) -> None:
+    snapshot = adapter.snapshot_partial()
     recorder = sinks.turn_recorder
     if recorder is not None:
         if recorder.outcome == "completed":
@@ -840,9 +833,9 @@ def _record_turn_excluded_fallback(
                 original_status=original_status,
             )
         return
-    if run.standalone_replay_persisted or persist is None:
+    if run.standalone_replay_persisted or adapter.persist_standalone_replay is None:
         return
-    persist(
+    adapter.persist_standalone_replay(
         run.scope_context,
         StandaloneReplaySnapshot(
             run_id=(snapshot.attempt_run_id or ctx.run_id) or str(uuid4()),
@@ -858,8 +851,7 @@ def _record_turn_excluded_fallback(
 
 def _settle_empty_run(
     ctx: ResponseTurnContext,
-    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None],
-    release_attempt_entity: Callable[[ScopeSessionContext | None], None],
+    adapter: _TurnAdapter,
     run: TurnRunState,
     resolution: CompletedAttempt,
     *,
@@ -874,7 +866,7 @@ def _settle_empty_run(
     closes the spent entity's runtime state exactly like the continuation
     handoff.
     """
-    discard_empty_run(
+    adapter.discard_empty_run(
         run.scope_context,
         EmptyRunDiscard(
             session_id=resolution.session_id or ctx.session_id,
@@ -885,13 +877,13 @@ def _settle_empty_run(
     if run.empty_response_retried or continuation_count >= TURN_CONTINUATION_LIMIT:
         return False
     run.empty_response_retried = True
-    release_attempt_entity(run.scope_context)
+    adapter.release_attempt_entity(run.scope_context)
     return True
 
 
 def _advance_turn_continuation(
+    adapter: _TurnAdapter,
     sinks: TurnSinks,
-    release_attempt_entity: Callable[[ScopeSessionContext | None], None],
     run: TurnRunState,
     resolution: CompletedAttempt,
     continuation: TurnContinuationRunState,
@@ -902,7 +894,7 @@ def _advance_turn_continuation(
 ) -> TurnContinuationRunState:
     """Close the spent attempt entity and prepare run state for one more continuation."""
     completed_tools_for_turn = run.turn_state.completed_tools_for(resolution.completed_tools)
-    release_attempt_entity(run.scope_context)
+    adapter.release_attempt_entity(run.scope_context)
     advanced = continuation.advance(
         continuation_prompt=next_prompt or continuation.original_prompt,
         previous_run_id=resolution.attempt_run_id,
@@ -1042,10 +1034,9 @@ async def run_blocking_response_turn(
         # and an external task cancel converge on the same interrupted turn.
         _record_turn_excluded_fallback(
             ctx,
-            adapter.persist_standalone_replay,
+            adapter,
             sinks,
             run,
-            adapter.snapshot_partial(),
             original_status=RunStatus.cancelled,
             use_recorder_state=True,
         )
@@ -1072,14 +1063,14 @@ def skip_unapproved_attempt(
 
 def _settle_skipped_attempt(
     ctx: ResponseTurnContext,
+    adapter: _TurnAdapter,
     sinks: TurnSinks,
     run: TurnRunState,
     resolution: SkippedAttempt,
-    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None],
 ) -> None:
     """Discard the skipped provider run without recording an assistant turn."""
     if resolution.run_id is not None:
-        discard_empty_run(
+        adapter.discard_empty_run(
             run.scope_context,
             EmptyRunDiscard(
                 session_id=resolution.session_id or ctx.session_id,
@@ -1106,7 +1097,7 @@ def _settle_blocking_attempt(
     # for attempts that end the turn: a discarded empty run's or a superseded
     # continuation attempt's payload must not ride out on a later resolution.
     if isinstance(resolution, SkippedAttempt):
-        _settle_skipped_attempt(ctx, sinks, run, resolution, adapter.discard_empty_run)
+        _settle_skipped_attempt(ctx, adapter, sinks, run, resolution)
         return ""
     if isinstance(resolution, PausedAttempt):
         if sinks.turn_recorder is not None:
@@ -1116,12 +1107,11 @@ def _settle_blocking_attempt(
         return _settle_excluded_attempt(ctx, adapter, sinks, run, resolution)
     settle = _settle_completed_attempt(
         ctx,
+        adapter,
         sinks,
         run,
         resolution,
         continuation,
-        discard_empty_run=adapter.discard_empty_run,
-        release_attempt_entity=adapter.release_attempt_entity,
         continuation_count=continuation_count,
     )
     if settle.keep_going:
@@ -1173,28 +1163,19 @@ class _CompletionSettle:
 
 def _settle_completed_attempt(
     ctx: ResponseTurnContext,
+    adapter: _TurnAdapter,
     sinks: TurnSinks,
     run: TurnRunState,
     resolution: CompletedAttempt,
     continuation: TurnContinuationRunState,
     *,
-    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None],
-    release_attempt_entity: Callable[[ScopeSessionContext | None], None],
     continuation_count: int,
 ) -> _CompletionSettle:
     """Settle one completed attempt into a record/deliver plan or a continuation."""
     if resolution.is_empty and ctx.allow_no_report_response:
         return _CompletionSettle(keep_going=False, continuation=continuation)
     if resolution.is_empty:
-        retry_granted = _settle_empty_run(
-            ctx,
-            discard_empty_run,
-            release_attempt_entity,
-            run,
-            resolution,
-            continuation_count=continuation_count,
-        )
-        if retry_granted:
+        if _settle_empty_run(ctx, adapter, run, resolution, continuation_count=continuation_count):
             return _CompletionSettle(keep_going=True, continuation=continuation)
         # The notice falls through: run metadata and recorder completion
         # still apply to this notice-only turn.
@@ -1212,8 +1193,8 @@ def _settle_completed_attempt(
         return _CompletionSettle(
             keep_going=True,
             continuation=_advance_turn_continuation(
+                adapter,
                 sinks,
-                release_attempt_entity,
                 run,
                 resolution,
                 continuation,
@@ -1326,7 +1307,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
                     if isinstance(resolution, SkippedAttempt):
-                        _settle_skipped_attempt(ctx, sinks, run, resolution, adapter.discard_empty_run)
+                        _settle_skipped_attempt(ctx, adapter, sinks, run, resolution)
                         return
                     if isinstance(resolution, PausedAttempt):
                         if sinks.turn_recorder is not None:
@@ -1336,10 +1317,9 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         _publish_run_metadata(sinks, resolution.metadata_content)
                         _record_turn_excluded_fallback(
                             ctx,
-                            adapter.persist_standalone_replay,
+                            adapter,
                             sinks,
                             run,
-                            adapter.snapshot_partial(),
                             original_status=RunStatus.error,
                             use_recorder_state=False,
                         )
@@ -1350,12 +1330,11 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         return
                     settle = _settle_completed_attempt(
                         ctx,
+                        adapter,
                         sinks,
                         run,
                         resolution,
                         continuation,
-                        discard_empty_run=adapter.discard_empty_run,
-                        release_attempt_entity=adapter.release_attempt_entity,
                         continuation_count=continuation_count,
                     )
                     continuation = settle.continuation
@@ -1375,10 +1354,9 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     except asyncio.CancelledError:
         _record_turn_excluded_fallback(
             ctx,
-            adapter.persist_standalone_replay,
+            adapter,
             sinks,
             run,
-            adapter.snapshot_partial(),
             original_status=RunStatus.cancelled,
             use_recorder_state=False,
         )

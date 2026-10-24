@@ -66,12 +66,11 @@ async def suggest_responder(
         )
 
         if thread_context:
-            context = f"{config.get_prompt('ROUTER_THREAD_CONTEXT_HEADER')}\n"
-            for msg in thread_context[-3:]:  # Last 3 messages
-                sender = msg.sender
-                body = body_without_tool_markers(msg.body, msg.content)[:100]
-                context += f"{sender}: {body}\n"
-            prompt = context + "\n" + prompt
+            recent = "".join(
+                f"{msg.sender}: {body_without_tool_markers(msg.body, msg.content)[:100]}\n"
+                for msg in thread_context[-3:]
+            )
+            prompt = f"{config.get_prompt('ROUTER_THREAD_CONTEXT_HEADER')}\n{recent}\n{prompt}"
 
         router_model_name = config.resolve_runtime_model(
             entity_name=ROUTER_AGENT_NAME,
@@ -146,6 +145,8 @@ async def suggest_responder_for_message(
             sender = msg.sender
             if sender.startswith("@") and ":" in sender:
                 sender_name = registry.current_entity_name_for_user_id(sender)
+                # TODO(simplify): A human sender reaches the router as its homeserver domain, so every human on one
+                # server reads as the same speaker. Keep the sender's Matrix ID instead. Models routing would notice.
                 sender = sender_name if sender_name is not None else MatrixID.parse(sender).domain
             resolved_context.append(replace_visible_message(msg, sender=sender))
 

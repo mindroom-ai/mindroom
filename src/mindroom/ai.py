@@ -50,7 +50,6 @@ from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
-    EnrichmentItem,
     render_enrichment_block,
     render_system_enrichment_block,
     render_transient_context,
@@ -123,7 +122,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
     from mindroom.history.request_messages import TurnMessages
-    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ResolvedReplayPlan, ScopeSummary
+    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ScopeSummary
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.events import RunEvent
@@ -280,11 +279,9 @@ class _AttemptStorage:
     scope: HistoryScope | None
 
 
-@timed("system_prompt_assembly.system_enrichment_render")
-def _render_system_enrichment_context(
-    system_enrichment_items: Sequence[EnrichmentItem],
-) -> str:
-    return render_system_enrichment_block(system_enrichment_items)
+_render_system_enrichment_context = timed("system_prompt_assembly.system_enrichment_render")(
+    render_system_enrichment_block,
+)
 
 
 @dataclass
@@ -637,6 +634,32 @@ def agent_run_metadata_content(
     )
 
 
+def _attempt_run_metadata(
+    collector: dict[str, Any] | None,
+    run_context: _AgentRunContext,
+    record: AnyRunRecord | None,
+    status: RunStatus,
+    *,
+    run_id: str | None,
+    last_request: MessageMetrics | None = None,
+) -> dict[str, Any] | None:
+    """Return the run metadata one attempt publishes, or None when its caller collects none."""
+    if collector is None:
+        return None
+    prepared = run_context.prepared_run
+    return agent_run_metadata_content(
+        run_context.config,
+        record,
+        runtime_paths=run_context.runtime_paths,
+        model_name=prepared.runtime_model_name,
+        run_id=run_id,
+        session_id=run_context.session_id,
+        status=status,
+        prepared_history=prepared.prepared_history,
+        last_request=last_request,
+    )
+
+
 def _track_stream_tool_started(
     state: _StreamingAttemptState,
     tool: ToolExecution,
@@ -977,18 +1000,6 @@ async def _run_non_streaming_agent_attempts(
         ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=run_context.agent_name)
 
 
-def _failed_agent_attempt(
-    ctx: ResponseTurnContext,
-    error: Exception,
-    runtime_paths: RuntimePaths,
-) -> BlockingAttemptResolution:
-    """Keep pre-decision failures quiet; approved turns retain ordinary error replies."""
-    return skip_unapproved_attempt(ctx.participation, reason="preparation_failed") or ExcludedAttempt(
-        RunStatus.error,
-        get_user_friendly_error_message(error, ctx.entity_label, runtime_paths=runtime_paths),
-    )
-
-
 def _assert_agent_target(agent_name: str, config: Config) -> None:
     """Reject configured team names in the agent-only AI helper path."""
     if agent_name in config.teams:
@@ -1081,17 +1092,6 @@ async def _prepare_turn_memory(
     )
 
 
-def _replayed_history(
-    scope_context: ScopeSessionContext | None,
-    build: AgentBuild,
-    plan: ResolvedReplayPlan | None,
-) -> tuple[list[Message], ScopeSummary | None]:
-    """Return the stored history this request replays under the resolved plan, and the scope summary it follows."""
-    if scope_context is None:
-        return [], None
-    return replayed_history(scope_context.session, scope_context.scope, build.history_settings, plan)
-
-
 async def _system_message_after_compaction(
     system_message: Message,
     build: AgentBuild,
@@ -1152,8 +1152,6 @@ async def _prepare_agent_and_prompt(
     Returns the prepared run input plus history bookkeeping for one agent turn.
     """
     agent_name = ctx.entity_label
-    _assert_agent_target(agent_name, config)
-    storage_path = runtime_paths.storage_root
 
     def _resolve_model_and_build_agent() -> tuple[ResolvedRuntimeModel, AgentBuild]:
         """Resolve the runtime model and build the agent off the event loop (#1260).
@@ -1200,7 +1198,7 @@ async def _prepare_agent_and_prompt(
             agent_build_can_overlap_file_memory,
             agent_name,
             config,
-            storage_path,
+            runtime_paths.storage_root,
         )
         if not parallel_branches:
             serial_reason = "default_workspace_scaffold_pending"
@@ -1303,7 +1301,16 @@ async def _prepare_agent_and_prompt(
         scope_context,
         memory_conversation,
     )
-    history, summary = _replayed_history(scope_context, build, prepared_execution.replay_plan)
+    history, summary = (
+        replayed_history(
+            scope_context.session,
+            scope_context.scope,
+            build.history_settings,
+            prepared_execution.replay_plan,
+        )
+        if scope_context is not None
+        else ([], None)
+    )
     turn = prepared_execution.turn
 
     # Routine logs stay content-safe; detailed prompt text is emitted separately only at DEBUG.
@@ -1615,26 +1622,6 @@ async def ai_response(  # noqa: C901
         execution_identity=execution_identity,
     )
 
-    def _blocking_metadata(
-        prepared_run: _PreparedAgentRun,
-        record: AnyRunRecord | None,
-        status: RunStatus,
-        *,
-        run_id: str | None,
-    ) -> dict[str, Any] | None:
-        if run_metadata_collector is None:
-            return None
-        return agent_run_metadata_content(
-            config,
-            record,
-            runtime_paths=runtime_paths,
-            model_name=prepared_run.runtime_model_name,
-            run_id=run_id,
-            session_id=session_id,
-            status=status,
-            prepared_history=prepared_run.prepared_history,
-        )
-
     async def _run_blocking_attempt(
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
@@ -1665,21 +1652,32 @@ async def ai_response(  # noqa: C901
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)
-            return _failed_agent_attempt(ctx, e, runtime_paths)
+            # A failure before the participation decision stays quiet; an approved turn replies with the error.
+            return skip_unapproved_attempt(ctx.participation, reason="preparation_failed") or ExcludedAttempt(
+                RunStatus.error,
+                get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths),
+            )
         prepared_run = run_context.prepared_run
         storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs)
         holder.attempt = attempt
-        attempt_result = await ai_runtime.run_attempt_with_model(
-            attempt_model_runtime,
-            active_model_name=prepared_run.runtime_model_name,
-            operation=lambda: _run_non_streaming_agent_attempts(
+
+        def operation() -> Awaitable[_NonStreamingAttemptResult]:
+            return _run_non_streaming_agent_attempts(
                 run_context=run_context,
                 attempt=attempt,
                 storage=storage,
                 run_id_callback=run_id_callback,
                 scope_context=run.scope_context,
                 pipeline_timing=pipeline_timing,
-            ),
+            )
+
+        attempt_result = await (
+            operation()
+            if attempt_model_runtime is None
+            else attempt_model_runtime.run_with_model(
+                active_model_name=prepared_run.runtime_model_name,
+                operation=operation,
+            )
         )
         record = attempt_result.record
         if attempt_result.user_error is not None:
@@ -1702,7 +1700,13 @@ async def ai_response(  # noqa: C901
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
                 run_id=attempt.run_id,
-                metadata_content=_blocking_metadata(prepared_run, record, RunStatus.error, run_id=attempt.run_id),
+                metadata_content=_attempt_run_metadata(
+                    run_metadata_collector,
+                    run_context,
+                    record,
+                    RunStatus.error,
+                    run_id=attempt.run_id,
+                ),
             )
         if record is None:
             raise _without_terminal_record(attempt.run_id)
@@ -1720,7 +1724,13 @@ async def ai_response(  # noqa: C901
         response_tool_trace = _extract_tool_trace(record)
         if tool_trace_collector is not None:
             tool_trace_collector.extend(response_tool_trace)
-        metadata_content = _blocking_metadata(prepared_run, record, record.status, run_id=record.run_id)
+        metadata_content = _attempt_run_metadata(
+            run_metadata_collector,
+            run_context,
+            record,
+            record.status,
+            run_id=record.run_id,
+        )
 
         if record.status is RunStatus.paused:
             paused_attempt = paused_attempt_from_response(
@@ -1989,7 +1999,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         yield get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
         return
 
-    holder = _AgentTurnHolder(state=_StreamingAttemptState())
+    holder = _AgentTurnHolder()
     callbacks = _build_agent_turn_callbacks(
         holder,
         agent_name=agent_name,
@@ -2048,28 +2058,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         holder.attempt = attempt
         holder.attempt_started = True
         turn_state = run.turn_state
-
-        def _attempt_metadata(
-            attempt_state: _StreamingAttemptState,
-            status: RunStatus,
-            *,
-            run_id: str | None,
-            event_session_id: str | None,
-        ) -> dict[str, Any] | None:
-            if run_metadata_collector is None:
-                return None
-            return agent_run_metadata_content(
-                config,
-                attempt_state.terminal.record,
-                runtime_paths=runtime_paths,
-                model_name=prepared_run.runtime_model_name,
-                run_id=run_id,
-                session_id=event_session_id or session_id,
-                status=status,
-                prepared_history=prepared_run.prepared_history,
-                last_request=attempt_state.latest_request_usage,
-            )
-
         state = _StreamingAttemptState()
         holder.state = state
 
@@ -2121,11 +2109,13 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 yield get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths)
                 yield AttemptResolved(
                     HandledAttempt(
-                        metadata_content=_attempt_metadata(
-                            state,
+                        metadata_content=_attempt_run_metadata(
+                            run_metadata_collector,
+                            run_context,
+                            record,
                             RunStatus.error,
                             run_id=attempt.run_id,
-                            event_session_id=session_id,
+                            last_request=state.latest_request_usage,
                         ),
                     ),
                 )
@@ -2189,11 +2179,13 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 tool_executions=tuple(state.completed_tool_executions),
                 control_executions=cli_control_executions(attempt.run_id),
                 completed_tools=tuple(state.completed_tools),
-                metadata_content=_attempt_metadata(
-                    state,
+                metadata_content=_attempt_run_metadata(
+                    run_metadata_collector,
+                    run_context,
+                    record,
                     final_status,
                     run_id=record.run_id,
-                    event_session_id=record.session_id,
+                    last_request=state.latest_request_usage,
                 ),
             ),
         )

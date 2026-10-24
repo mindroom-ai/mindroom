@@ -74,11 +74,10 @@ logger = get_logger(__name__)
 
 _NO_MEMBER_DISPLAY_NAMES: Mapping[str, str] = MappingProxyType({})
 
-_PARTIAL_REPLY_SENDER_LABELS = {
-    "interrupted": "You (interrupted reply draft)",
-    "in_progress": "You (reply still streaming)",
-}
-_PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
+_IN_PROGRESS_REPLY_LABEL = "You (reply still streaming)"
+_PARTIAL_REPLY_GUIDANCE_LABELS = frozenset(
+    {"You (interrupted reply draft)", _IN_PROGRESS_REPLY_LABEL, "You (partial reply)"},
+)
 _HOOK_OUTPUT_LABEL = "[posted automatically by hook {hook_source}, not written by you or any agent]"
 # Claims about who wrote a message; only MindRoom's own accounts may make them.
 _AUTHORSHIP_CLAIM_KEYS = (ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY)
@@ -134,35 +133,6 @@ class _ThreadAttachmentContext:
         return attachment_records_for_visible_message(self.storage_path, message, room_id=self.room_id)
 
 
-def _build_matrix_prompt_with_history(
-    prompt: str,
-    history_messages: list[tuple[str, str]],
-    *,
-    header: str,
-    prompt_intro: str,
-    current_sender: str | None,
-    current_ts: str | None = None,
-    current_event_id: str | None = None,
-    current_prompt_is_structured: bool = False,
-    current_display_name: str | None = None,
-) -> str:
-    if current_sender is not None and not current_prompt_is_structured:
-        current_block = render_msg_tag(
-            sender=current_sender,
-            body=prompt,
-            event_id=current_event_id,
-            ts=current_ts,
-            display_name=current_display_name,
-        )
-    else:
-        current_block = prompt
-    standalone_prompt = f"{prompt_intro}{current_block}" if current_sender is not None else prompt
-    if not history_messages:
-        return standalone_prompt
-    rendered_history = "\n".join(render_msg_tag(sender=sender, body=body) for sender, body in history_messages)
-    return f"{header}\n<conversation>\n{rendered_history}\n</conversation>\n\n{prompt_intro}{current_block}"
-
-
 def _classify_partial_reply(
     msg: ResolvedVisibleMessage,
     *,
@@ -207,18 +177,10 @@ def _without_untrusted_authorship_claims(
     ]
 
 
-def _message_speaker_label(message: ResolvedVisibleMessage) -> str:
-    """Return the speaker label that should be shown for one visible Matrix message."""
+def _relayed_sender(message: ResolvedVisibleMessage) -> str | None:
+    """Return the user whose message an internal Matrix sender relayed, or None for a message its sender wrote."""
     original_sender = message.content.get(ORIGINAL_SENDER_KEY)
-    if isinstance(original_sender, str) and original_sender:
-        return original_sender
-    return message.sender
-
-
-def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
-    """Return whether an internal Matrix sender is relaying a user-authored message."""
-    original_sender = message.content.get(ORIGINAL_SENDER_KEY)
-    return isinstance(original_sender, str) and bool(original_sender)
+    return original_sender if isinstance(original_sender, str) and original_sender else None
 
 
 def _is_own_reply(message: ResolvedVisibleMessage, response_sender_id: str | None) -> bool:
@@ -230,7 +192,7 @@ def _is_own_reply(message: ResolvedVisibleMessage, response_sender_id: str | Non
     return (
         bool(response_sender_id)
         and message.sender == response_sender_id
-        and not _is_relayed_user_message(message)
+        and _relayed_sender(message) is None
         and hook_source_from_content(message.content) is None
     )
 
@@ -253,21 +215,6 @@ def _cap_visible_message_body(body: str, max_length: int | None) -> str:
     if max_length <= 0:
         return ""
     return f"{body[: max_length - 1]}…"
-
-
-def _build_unseen_messages_header(
-    partial_reply_kinds: set[_PartialReplyKind],
-    *,
-    config: Config,
-) -> str:
-    """Choose the unseen-context guidance for the partial-reply mix present."""
-    if not partial_reply_kinds:
-        return config.get_prompt("DEFAULT_UNSEEN_MESSAGES_HEADER")
-    if partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}:
-        return config.get_prompt("INTERRUPTED_PARTIAL_REPLY_HEADER")
-    if partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}:
-        return config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")
-    return config.get_prompt("MIXED_PARTIAL_REPLY_HEADER")
 
 
 def _context_message_from_visible_message(
@@ -300,9 +247,7 @@ def _context_message_from_visible_message(
     if hook_source is not None:
         body = f"{_HOOK_OUTPUT_LABEL.format(hook_source=hook_source)}\n{body}"
     event_id = message.event_id or None
-    speaker_label = _message_speaker_label(message)
-    if not speaker_label:
-        speaker_label = missing_sender_label
+    speaker_label = _relayed_sender(message) or message.sender or missing_sender_label
     if speaker_label in _PARTIAL_REPLY_GUIDANCE_LABELS and response_sender_id is not None:
         content = render_msg_tag(
             sender=response_sender_id,
@@ -338,18 +283,12 @@ def _context_messages_from_visible_messages(
         # model-context budget or leave marker-only turns behind.
         body = _context_body_from_visible_message(message, response_sender_id=response_sender_id)
         attachment_records = attachment_context.records_for(message) if attachment_context is not None else []
-        if not body and not attachment_records:
+        capped_body = _cap_visible_message_body(body, max_message_length)
+        if not capped_body and not attachment_records:
             continue
-        capped_body = body
-        capped_message = replace_visible_message(message, body=capped_body)
-        if max_message_length is not None:
-            capped_body = _cap_visible_message_body(body, max_message_length)
-            if not capped_body and not attachment_records:
-                continue
-            capped_message = replace_visible_message(message, body=capped_body)
         context_messages.append(
             _context_message_from_visible_message(
-                capped_message,
+                replace_visible_message(message, body=capped_body),
                 response_sender_id=response_sender_id,
                 missing_sender_label=missing_sender_label,
                 body=capped_body,
@@ -402,21 +341,20 @@ def _messages_with_current_prompt(
 ) -> TurnMessages:
     """Return the canonical live turn: its context messages, the current user prompt, and its transient context."""
     current_ts = format_timestamp_ms(current_timestamp_ms, timezone=config.timezone)
-    current_prompt = (
-        _build_matrix_prompt_with_history(
-            prompt,
-            [],
-            header=config.get_prompt("PREVIOUS_CONVERSATION_THREAD_HEADER"),
-            prompt_intro=config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO"),
-            current_sender=current_sender_id,
-            current_ts=current_ts,
-            current_event_id=current_event_id,
-            current_prompt_is_structured=current_prompt_is_structured,
-            current_display_name=member_display_names.get(current_sender_id),
+    current_prompt = prompt
+    if current_sender_id is not None:
+        current_block = (
+            prompt
+            if current_prompt_is_structured
+            else render_msg_tag(
+                sender=current_sender_id,
+                body=prompt,
+                event_id=current_event_id,
+                ts=current_ts,
+                display_name=member_display_names.get(current_sender_id),
+            )
         )
-        if current_sender_id is not None
-        else prompt
-    )
+        current_prompt = f"{config.get_prompt('CURRENT_MESSAGE_PROMPT_INTRO')}{current_block}"
     return TurnMessages(
         prompt=Message(role="user", content=current_prompt),
         context=tuple(deepcopy(message) for message in context_messages),
@@ -472,9 +410,13 @@ def _build_unseen_context_messages(
         attachment_context=attachment_context,
         member_display_names=member_display_names,
     )
+    # Unseen context keeps only in-progress drafts of this sender, so only their header can apply.
+    # TODO(simplify): Nothing renders DEFAULT_UNSEEN_MESSAGES_HEADER, INTERRUPTED_PARTIAL_REPLY_HEADER,
+    # MIXED_PARTIAL_REPLY_HEADER, or PREVIOUS_CONVERSATION_THREAD_HEADER, yet each can be overridden. Retire the four
+    # from the prompt registry. Operators who override them would notice their overrides rejected.
     if partial_reply_kinds:
         context_messages = (
-            Message(role="user", content=_build_unseen_messages_header(partial_reply_kinds, config=config)),
+            Message(role="user", content=config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")),
             *context_messages,
         )
     return (
@@ -677,7 +619,7 @@ def _get_unseen_messages_for_sender(
     current_event_id: str | None,
     active_event_ids: Collection[str],
 ) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
-    """Filter thread_history to unseen messages for one Matrix sender."""
+    """Filter thread_history to unseen messages for one Matrix sender, leaving out its interrupted drafts."""
     unseen: list[ResolvedVisibleMessage] = []
     partial_reply_kinds: set[_PartialReplyKind] = set()
     in_progress_event_ids: set[str] = set()
@@ -696,21 +638,15 @@ def _get_unseen_messages_for_sender(
             )
             if partial_kind is _PartialReplyKind.INTERRUPTED:
                 continue
-            if partial_kind is not None:
+            if partial_kind is _PartialReplyKind.IN_PROGRESS:
                 # Strip live status notes before the canonical interrupted replay marker is added.
                 cleaned_body = clean_partial_reply_text(msg.body)
                 if not cleaned_body:
                     continue
                 partial_reply_kinds.add(partial_kind)
-                if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
+                if event_id is not None:
                     in_progress_event_ids.add(event_id)
-                unseen.append(
-                    replace_visible_message(
-                        msg,
-                        sender=_PARTIAL_REPLY_SENDER_LABELS.get(partial_kind.value, "You (partial reply)"),
-                        body=cleaned_body,
-                    ),
-                )
+                unseen.append(replace_visible_message(msg, sender=_IN_PROGRESS_REPLY_LABEL, body=cleaned_body))
                 continue
         unseen.append(msg)
     return unseen, partial_reply_kinds, in_progress_event_ids
@@ -983,7 +919,6 @@ async def prepare_agent_execution_context(
         prepare_scope_history_fn=_prepare_agent_scope_history,
         estimate_static_tokens_fn=static_token_estimator.estimate,
         render_messages_text_fn=render_prepared_messages_text,
-        thread_history_render_limits=None,
         fallback_static_token_budget=_fallback_static_token_budget(
             context_window=runtime_model.context_window,
             replay_window_tokens=compaction_config.replay_window_tokens,
