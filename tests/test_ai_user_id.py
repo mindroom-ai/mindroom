@@ -2455,6 +2455,69 @@ class TestUserIdPassthrough:
         assert payload["context"] == {"input_tokens": 120, "window_tokens": 1000}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
+    async def test_a_claude_reply_s_context_reads_its_last_request_s_final_iteration(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        streaming: bool,
+    ) -> None:
+        """A Claude reply's context reads its last request's final iteration, not the counters that request billed.
+
+        After a native compaction, the billed counters also count the transcript the checkpoint replaced.
+        """
+        config, runtime_paths = _bound(
+            tmp_path,
+            Config(
+                agents={"general": AgentConfig(display_name="General")},
+                models={
+                    "default": ModelConfig(
+                        provider="anthropic",
+                        id="claude-sonnet-5",
+                        context_window=200_000,
+                        extra_kwargs={"api_key": "test-key"},
+                    ),
+                },
+            ),
+        )
+        first = usage(3000, 50, cache_read_tokens=20_000)
+        compacted = MessageMetrics(
+            tokens=TokenCounts(input_tokens=5000, output_tokens=40, total_tokens=5040, cache_read_tokens=30_000),
+            provider_metrics={
+                "context_usage": {"input_tokens": 400, "cache_read_tokens": 1200, "cache_write_tokens": 0},
+            },
+        )
+        model = _scripted_like(
+            config,
+            runtime_paths,
+            [
+                calls(tool_call("read_file", "call-1", path="README.md"), content="step one", metrics=first),
+                answer("step two", compacted),
+            ],
+        )
+        install_model_providers(monkeypatch, {"default": model})
+        run_metadata: dict[str, Any] = {}
+
+        await _respond(
+            make_turn_context("general", session_id="session1"),
+            config,
+            runtime_paths,
+            streaming=streaming,
+            run_metadata_collector=run_metadata,
+        )
+
+        payload = run_metadata[AI_RUN_METADATA_KEY]
+        assert payload["usage"]["input_tokens"] == 8000
+        assert payload["usage"]["cache_read_tokens"] == 50_000
+        assert payload["context"] == {
+            "input_tokens": 1600,
+            "window_tokens": 200_000,
+            "cache_read_input_tokens": 1200,
+            "uncached_input_tokens": 400,
+        }
+
+    @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
     async def test_a_retried_streamed_reply_s_context_falls_back_to_the_estimate(
         self,
