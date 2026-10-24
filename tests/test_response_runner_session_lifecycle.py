@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import suppress
 from dataclasses import replace
 from types import SimpleNamespace
@@ -508,11 +509,8 @@ async def test_process_and_respond_does_not_emit_session_started_without_persist
     assert sequence == ["ai"]
 
 
-@pytest.mark.asyncio
-async def test_should_watch_session_started_returns_false_when_storage_probe_fails(
-    tmp_path: Path,
-) -> None:
-    """session:started eligibility should degrade to False when the session probe fails."""
+async def _session_started_probe(tmp_path: Path, create_storage: Callable[[], object]) -> tuple[ResponseRunner, bool]:
+    """Set up one reply's session:started watch with a registered hook; return the runner and whether it watches."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -520,11 +518,6 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
     @hook(EVENT_SESSION_STARTED)
     async def started(_ctx: SessionHookContext) -> None:
         return None
-
-    class BrokenStorage:
-        def has_session(self, _session_id: str, _kind: object) -> bool:
-            msg = "probe boom"
-            raise RuntimeError(msg)
 
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
     coordinator = _build_response_runner(
@@ -554,13 +547,46 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
         scope=HistoryScope(kind="agent", scope_id="general"),
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
-        create_storage=BrokenStorage,
+        create_storage=create_storage,
     )
+    return coordinator, watch.should_watch
 
-    assert watch.should_watch is False
+
+@pytest.mark.asyncio
+async def test_should_watch_session_started_returns_false_when_storage_probe_fails(
+    tmp_path: Path,
+) -> None:
+    """session:started eligibility should degrade to False when the session probe fails."""
+
+    class BrokenStorage:
+        def has_session(self, _session_id: str, _kind: object) -> bool:
+            msg = "probe boom"
+            raise RuntimeError(msg)
+
+    coordinator, should_watch = await _session_started_probe(tmp_path, BrokenStorage)
+
+    assert should_watch is False
+    target = MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg")
     coordinator.deps.logger.exception.assert_called_once()
     assert coordinator.deps.logger.exception.call_args.kwargs["session_id"] == target.session_id
     assert coordinator.deps.logger.exception.call_args.kwargs["failure_reason"] == "probe boom"
+
+
+@pytest.mark.asyncio
+async def test_session_started_probe_reads_storage_off_the_event_loop(tmp_path: Path) -> None:
+    """A slow session store must not stall the event loop while a reply decides whether to watch for session:started."""
+    probe_threads: list[int] = []
+
+    class MissingSessionStorage:
+        def has_session(self, _session_id: str, _kind: object) -> bool:
+            probe_threads.append(threading.get_ident())
+            return False
+
+    _, should_watch = await _session_started_probe(tmp_path, MissingSessionStorage)
+
+    assert should_watch is True
+    assert len(probe_threads) == 1
+    assert probe_threads[0] != threading.get_ident()
 
 
 @pytest.mark.asyncio

@@ -104,7 +104,7 @@ def _approval_history_scope(
 def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
     """Return the paused team run the approval names, from the loaded session or the store.
 
-    A run the store holds for another session of the scope than the one ``scope`` was opened for is refused, as the
+    A run the store holds for another session of the scope than the one ``scope`` was loaded for is refused, as the
     agent path refuses it.
     """
     persisted: AnyRunRecord | None = None

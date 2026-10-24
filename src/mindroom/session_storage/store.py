@@ -132,16 +132,7 @@ class ConversationStore:
     def has_session(self, session_id: str, kind: SessionKind) -> bool:
         """Return whether a ``kind`` session ``session_id`` is stored, the condition under which a load finds it."""
         with self.transaction(write=False) as connection:
-            if self.names.sessions not in table_names(connection):
-                return False
-            return (
-                connection.execute(
-                    f"SELECT 1 FROM {quote_identifier(self.names.sessions)} "  # noqa: S608
-                    "WHERE session_id = ? AND session_type = ?",
-                    (session_id, kind),
-                ).fetchone()
-                is not None
-            )
+            return self._session_row(connection, session_id, kind) is not None
 
     def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
         """Load one session with the runs a reply reasons over, or None when it is missing or of another kind.
@@ -172,8 +163,8 @@ class ConversationStore:
         """Read what a load of session ``session_id`` returns in the caller's transaction, its runs still encoded."""
         names = self.names
         tables = table_names(connection)
-        row = self._session_row(connection, session_id)
-        if row is None or row[0] != kind:
+        row = self._session_row(connection, session_id, kind)
+        if row is None:
             return None
         stored_kind, agent_id, team_id = row[:3]
         summaries = quote_identifier(names.summaries) if names.summaries in tables else None
@@ -209,14 +200,21 @@ class ConversationStore:
             loaded = self._read_load(connection, session.session_id, session.kind)
         _adopt_log(session, loaded)
 
-    def _session_row(self, connection: sqlite3.Connection, session_id: str) -> tuple[Any, ...] | None:
+    def _session_row(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        kind: SessionKind | None = None,
+    ) -> tuple[Any, ...] | None:
+        """Read session ``session_id``'s row, or None when it is missing or, given ``kind``, of another kind."""
         if self.names.sessions not in table_names(connection):
             return None
-        return connection.execute(
+        row = connection.execute(
             "SELECT session_type, agent_id, team_id, session_data, metadata, created_at, updated_at "  # noqa: S608
             f"FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",
             (session_id,),
         ).fetchone()
+        return None if row is None or (kind is not None and row[0] != kind) else row
 
     def ensure_session_row(self, session: ConversationSession) -> None:
         """Create ``session``'s row unless one exists, keeping a row another writer created meanwhile."""
