@@ -1,7 +1,7 @@
 """The provider wrapper every pipeline stage uses, and the attempt runner retrying stages share.
 
-A stage is an async generator function ``stage(inner, request)``; ``WrappedProvider`` presents it as a
-``ModelProvider`` so stages compose by nesting and callers never see the difference.
+A stage is a function ``stage(inner, request)`` that returns the request's event stream; ``WrappedProvider``
+presents it as a ``ModelProvider`` so stages compose by nesting and callers never see the difference.
 
 Usage invariant across retries: every attempt's ``UsageReported`` is forwarded, and the final
 ``TurnCompleted`` message's metrics add the usage of the attempts that failed before it, marked with
@@ -38,11 +38,7 @@ if TYPE_CHECKING:
     )
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = [
-    "Retry",
-    "WrappedProvider",
-    "attempts",
-]
+__all__ = ["Retry", "WrappedProvider", "attempts"]
 
 type _Stage = Callable[[ModelProvider, ModelRequest], AsyncIterator[StreamEvent]]
 
