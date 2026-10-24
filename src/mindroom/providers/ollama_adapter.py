@@ -61,7 +61,7 @@ _IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class OllamaSettings:
-    """The ``extra_kwargs`` an Ollama model accepts, named as Agno's ``Ollama`` fields."""
+    """The ``extra_kwargs`` an Ollama model accepts."""
 
     api_key: str | None = field(default=None, metadata=SECRET)
     timeout: float | None = None
@@ -101,10 +101,7 @@ class OllamaProvider:
         return settings_params(self.settings)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Send one chat request, streamed unless ``request.stream`` is False, and yield its events.
-
-        A reply that arrives whole has its ``<think>`` reasoning split out, as Agno did for non-streamed replies.
-        """
+        """Send one chat request, streamed unless ``request.stream`` is False, and yield its events."""
         messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
         model = self.identity.id.strip()
         chat_kwargs = self._chat_kwargs(request)
@@ -124,7 +121,7 @@ class OllamaProvider:
                 response = await client.chat(model=model, messages=messages, **chat_kwargs)
                 first_output_at = time.monotonic()
                 _read_chunk(reply, cast("ChatResponse", response))
-                # Agno's Ollama split only a reply that contains an opening ``<think>`` tag.
+                # Only a whole reply with an opening ``<think>`` tag has its reasoning split out, kept as main behaves.
                 if "<think>" in reply.content:
                     reply.reasoning, reply.content = split_thinking(reply.content)
         except Exception as error:
@@ -146,11 +143,10 @@ class OllamaProvider:
         yield TurnCompleted(message=message, stop_reason=_stop_reason(reply))
 
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
-        """Return the chat parameters of one request, in the order Agno's Ollama built them."""
+        """Return the chat parameters of one request; authored ``request_params`` override the settings and tools."""
         settings = self.settings
-        # TODO(simplify): a request's temperature override, such as a thread summary's, is ignored, as Agno's Ollama
-        # had no temperature field. Send it as ``options.temperature``, as other routes apply theirs. Models would
-        # notice (#3075).
+        # TODO(simplify): a request's temperature override, such as a thread summary's, is ignored. Send it as
+        # ``options.temperature``, as other routes apply theirs. Models would notice (#3075).
         authored = {"format": settings.format, "options": settings.options or None, "keep_alive": settings.keep_alive}
         kwargs: dict[str, Any] = {key: value for key, value in authored.items() if value is not None}
         # TODO(simplify): ``tool_choice: "none"`` still sends the tools, so the model can call them; only a decision
@@ -197,7 +193,7 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 
 
 def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
-    """Return Ollama tool definitions sorted by name; a tool without a description sends none, as Agno's did."""
+    """Return Ollama tool definitions sorted by name; a tool without a description sends none."""
     # TODO(simplify): the SDK's tool model keeps only a parameter's type, items, description, and enum, so an
     # ``anyOf`` parameter such as ``background_after`` reaches the model without a type. Send such a parameter
     # with its type. Models would notice (#3075).
@@ -257,10 +253,7 @@ def _read_image(path: Path, provider: str) -> bytes:
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
-    """Add one chunk to ``reply`` and return its events: the done chunk's usage first, then its text and tool calls.
-
-    The usage comes first, so a reply stopped while the done chunk's output is delivered still settles it.
-    """
+    """Add one chunk to ``reply`` and return its events: the done chunk's usage first, then its text and tool calls."""
     events: list[StreamEvent] = []
     if chunk.done:
         reply.done = True
