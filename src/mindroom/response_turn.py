@@ -997,7 +997,7 @@ async def run_blocking_response_turn(
             _raise_continuation_budget_exhausted()
     except asyncio.CancelledError:
         # Kept as main behaves: a blocking turn records a cancel from the recorder's state,
-        # a streaming turn from the adapter's live snapshot.
+        # a streaming turn from the running attempt's partial output.
         _record_turn_excluded_fallback(
             ctx,
             adapter,
