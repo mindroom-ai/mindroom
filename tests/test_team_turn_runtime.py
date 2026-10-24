@@ -908,10 +908,10 @@ async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
     writer: list[list[ScriptStep]],
     body: str,
 ) -> None:
-    """A resume whose document stays empty renders its runs' records, as the Agno-backed resume did.
+    """A resume whose runs write no text shows what they hand over, as the Agno-backed resume did.
 
-    The approved checker says nothing. A member the resumed leader hands a task and that fails before any text shows
-    its error; without member text the leader's own text stands.
+    A member the resumed leader hands a task and that fails before any text shows its error; without member text the
+    leader's own text stands. The approved checker says nothing, so the paused notice it carried over shows nowhere.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(leader)
@@ -1234,7 +1234,7 @@ async def test_a_member_that_pauses_again_after_approval_shows_its_earlier_text_
 ) -> None:
     """A member whose approved call leads only to another gated call keeps its earlier text once in the new pause.
 
-    The leader sends no request while its member waits, and its paused notice names the new call.
+    The leader sends no request while its member waits, and its paused notice says what the team waits for.
     """
     team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([])
