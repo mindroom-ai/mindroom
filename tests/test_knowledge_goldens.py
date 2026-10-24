@@ -305,7 +305,7 @@ def _expected_search_output(search: dict[str, Any]) -> list[dict[str, Any]] | st
 async def _search_tool_output(knowledge: AgentKnowledge, query: str) -> str:
     """Run the adapted ``search_knowledge_base`` tool the way the loop runs a tool call."""
     function = adapt_function(knowledge.search_function())
-    context = ToolCallContext(run_id="run", session_id="session")
+    context = ToolCallContext(run_id="run", session_id="session", user_id=None)
     outcome = await execute_tool_call(function, {"query": query}, context, middleware=())
     assert not outcome.is_error
     return outcome.content

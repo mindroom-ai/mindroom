@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 def _provider_call(call_id: str | None) -> ToolCallContext:
-    return ToolCallContext(run_id="run", session_id="session", call_id=call_id)
+    return ToolCallContext(run_id="run", session_id="session", call_id=call_id, user_id=None)
 
 
 @pytest.mark.asyncio

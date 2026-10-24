@@ -47,7 +47,7 @@ async def run_offered(
     return await execute_tool_call(
         offered_function(build, name),
         arguments or {},
-        context or ToolCallContext(run_id="run", session_id="session"),
+        context or ToolCallContext(run_id="run", session_id="session", user_id=None),
         middleware=agent_tool_middleware(build),
     )
 
@@ -74,7 +74,7 @@ def tool_policy(
 
     async def call(name: str, func: Callable[..., Awaitable[object]], arguments: dict[str, Any]) -> object:
         function = ToolFunction(name=name, description=None, parameters={}, entrypoint=func)
-        context = ToolCallContext(run_id="run", session_id="session")
+        context = ToolCallContext(run_id="run", session_id="session", user_id=None)
         return await middleware(
             ToolCall(function=function, arguments=arguments, context=context),
             lambda forwarded: func(**forwarded),

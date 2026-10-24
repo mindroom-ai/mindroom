@@ -268,7 +268,12 @@ async def _deny_in_the_callers_task(tools: DelegateTools) -> None:
     result = await run_tool_call(
         delegate,
         {"agent_name": "child", "task": "Skip"},
-        ToolCallContext(run_id="denied-parent-run", session_id="denied-parent-session", call_id="denied-call"),
+        ToolCallContext(
+            run_id="denied-parent-run",
+            session_id="denied-parent-session",
+            call_id="denied-call",
+            user_id=None,
+        ),
         middleware=(_deny_call,),
     )
     assert result == "denied before delegation"

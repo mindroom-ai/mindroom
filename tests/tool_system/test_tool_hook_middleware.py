@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 def _context() -> ToolCallContext:
-    return ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1")
+    return ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None)
 
 
 def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:

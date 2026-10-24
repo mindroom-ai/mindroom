@@ -129,7 +129,7 @@ async def _call(
     outcome = await execute_tool_call(
         function,
         arguments,
-        ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
+        ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
         middleware=[item for item in middleware if item is not None],
     )
     assert not outcome.is_error, outcome.content
@@ -386,7 +386,7 @@ async def test_a_deferred_browser_a_minimal_turn_builds_later_announces_the_comp
     outcome = await execute_tool_call(
         replace(function, entrypoint=body),
         {"action": "open", "target": "host"},
-        ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
+        ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
         middleware=agent_tool_middleware(build),
     )
     assert not outcome.is_error, outcome.content

@@ -187,7 +187,7 @@ async def test_reasoning_retains_primary_run_state(
         {"MINDROOM_SANDBOX_EXECUTION_MODE": "all", "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
         agent_settings={"tools": ["reasoning"], "worker_tools": worker_tools},
     )
-    context = ToolCallContext(run_id="reasoning-run", session_id="reasoning-session")
+    context = ToolCallContext(run_id="reasoning-run", session_id="reasoning-session", user_id=None)
     result = await run_offered(agent, "think", {"title": "Step", "thought": "Preserve run state"}, context=context)
 
     assert not result.is_error

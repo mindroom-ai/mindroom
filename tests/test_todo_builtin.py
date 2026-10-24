@@ -203,7 +203,7 @@ async def test_list_todos_reads_a_string_flag_as_the_boolean_it_names(tmp_path: 
     config = _config(tmp_path)
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
     list_todos = next(function for function in adapt_toolkit(tool).functions if function.name == "list_todos")
-    call = ToolCallContext(run_id="run-1", session_id="session-1")
+    call = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
     with tool_runtime_context(_tool_context(config)):
         tool.plan(tasks="Design API")

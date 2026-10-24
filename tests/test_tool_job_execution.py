@@ -985,6 +985,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
                         session_id="session",
                         call_id="state-call",
                         session_state=state,
+                        user_id=None,
                     ),
                     team=False,
                 )

@@ -252,7 +252,7 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
         else ("generate_speech", {"text_input": "Offline speech"})
     )
     # The primary's run state stays on the primary, though the call's injected agent carries it.
-    context = ToolCallContext(run_id="run", session_id="session", session_state={"secret": _MODEL_KEY})
+    context = ToolCallContext(run_id="run", session_id="session", session_state={"secret": _MODEL_KEY}, user_id=None)
     response = await run_offered(agent, name, arguments, context=context)
 
     assert not response.is_error
@@ -605,7 +605,7 @@ async def test_browser_host_override_keeps_worker_transport_schema_and_hooks(
         return result
 
     middleware = (*agent_tool_middleware(agent), observe)
-    run = ToolCallContext(run_id="run", session_id="session")
+    run = ToolCallContext(run_id="run", session_id="session", user_id=None)
     with tool_runtime_context(context):
         desktop = await execute_tool_call(
             function,

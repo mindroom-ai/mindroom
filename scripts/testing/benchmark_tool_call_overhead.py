@@ -102,7 +102,7 @@ async def _run_case(
 ) -> dict[str, object]:
     middleware = (build_tool_hook_middleware(hook_registry, agent_name="benchmark"),)
     function = ToolFunction(name="noop", description=None, parameters={}, entrypoint=func)
-    context = ToolCallContext(run_id="benchmark", session_id="benchmark")
+    context = ToolCallContext(run_id="benchmark", session_id="benchmark", user_id=None)
     for _ in range(warmup):
         await run_tool_call(function, {"value": 1}, context, middleware=middleware)
 

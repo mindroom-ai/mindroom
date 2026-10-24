@@ -289,7 +289,7 @@ async def _run_echo_through_middleware(toolkit: Toolkit, registry: HookRegistry)
     return await execute_tool_call(
         adapt_function(_first_function(toolkit)),
         {"text": "hi"},
-        ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1"),
+        ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1", user_id=None),
         middleware=(middleware,),
     )
 
@@ -623,7 +623,7 @@ async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
         await execute_tool_call(
             adapt_function(Function(name="sync_tool", entrypoint=sync_tool)),
             {},
-            ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1"),
+            ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1", user_id=None),
             middleware=(middleware,),
         )
 
@@ -1351,7 +1351,7 @@ async def test_a_call_whose_grant_is_revoked_while_its_before_hook_runs_never_en
     call = JobCall(
         tool=job_tool(sync_tool),
         arguments={},
-        context=ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1"),
+        context=ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1", user_id=None),
         team=False,
     )
     try:
@@ -1775,7 +1775,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             result = await execute_tool_call(
                 echo,
                 {"text": "hi"},
-                ToolCallContext(run_id="run-1", session_id=target.session_id or "", call_id="call-1"),
+                ToolCallContext(run_id="run-1", session_id=target.session_id or "", call_id="call-1", user_id=None),
                 middleware=agent_tool_middleware(build),
             )
 
@@ -2010,7 +2010,7 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
         outcome = await execute_tool_call(
             echo,
             {"text": "hello"},
-            ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
+            ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
             middleware=agent_tool_middleware(build),
         )
 

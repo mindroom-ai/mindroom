@@ -159,7 +159,7 @@ async def _call(function: ToolFunction, arguments: dict[str, object]) -> tuple[b
     outcome = await execute_tool_call(
         function,
         parsed,
-        ToolCallContext(run_id="run-1", session_id="session-1"),
+        ToolCallContext(run_id="run-1", session_id="session-1", user_id=None),
         middleware=(),
     )
     return outcome.is_error, json.loads(outcome.content) if not outcome.is_error else {"text": outcome.content}

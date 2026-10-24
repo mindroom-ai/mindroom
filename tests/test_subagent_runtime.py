@@ -507,7 +507,7 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
     call = JobCall(
         tool=tool,
         arguments={"tool_name": "read"},
-        context=ToolCallContext(run_id="run", session_id="session"),
+        context=ToolCallContext(run_id="run", session_id="session", user_id=None),
         team=False,
     )
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)

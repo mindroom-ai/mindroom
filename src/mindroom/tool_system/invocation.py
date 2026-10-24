@@ -72,7 +72,7 @@ class ToolCallContext:
 
     run_id: str
     session_id: str
-    user_id: str | None = None
+    user_id: str | None
     call_id: str | None = None
     session_state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)

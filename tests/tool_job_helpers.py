@@ -326,6 +326,7 @@ async def call_job_tool(
         session_id=session_id,
         call_id=call_id,
         session_state={} if session_state is None else session_state,
+        user_id=None,
     )
     return await execute_tool_call(
         actor.tools[name].function,
