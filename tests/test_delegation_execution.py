@@ -42,7 +42,7 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.usage.storage import usage_table_name
+from mindroom.usage.storage import quote_identifier
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation
 from tests.delegation_helpers import (
@@ -853,7 +853,7 @@ async def test_the_driver_rewrites_the_parent_without_touching_its_recorded_usag
 
     with store.transaction(write=False) as connection:
         rows = connection.execute(
-            f"SELECT run_id, usage_data FROM {usage_table_name(store.names.sessions)}",  # noqa: S608
+            f"SELECT run_id, usage_data FROM {quote_identifier(store.names.usage)}",  # noqa: S608
         ).fetchall()
     assert [(run_id, json.loads(data)["metrics"]["input_tokens"]) for run_id, data in rows] == [("parent-run", 5)]
     stored = store.get_run("parent-run")
