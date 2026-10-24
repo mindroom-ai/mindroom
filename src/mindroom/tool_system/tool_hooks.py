@@ -350,6 +350,20 @@ async def run_async_entrypoint_blocking_call(
     return await run_sync_tool_entrypoint(call)
 
 
+# Plugins wrap each tool call by replacing this function, so callers look it up through the module at call time:
+# mindroom-ai/agent-vault-bridge-plugin scopes the call's environment around it.
+# tests/test_plugin_patched_seams.py pins every private seam a public plugin patches.
+async def _call_tool(
+    func: Callable[..., Awaitable[_ToolHookResult]],
+    args: dict[str, Any],
+    *,
+    tool_name: str,
+    agent_name: str | None,
+) -> _ToolHookResult:
+    emit_timing_event("Tool hook dispatch timing", phase="tool_entry", tool_name=tool_name, agent_name=agent_name)
+    return await func(**args)
+
+
 async def _call_recorded_tool(
     func: Callable[..., Awaitable[_ToolHookResult]],
     args: dict[str, Any],
@@ -360,11 +374,10 @@ async def _call_recorded_tool(
     """Run the tool, first recording the call where the work that makes it keeps its durable state."""
     recorder = tool_call_recorder()
     call_id = None if recorder is None else await recorder.started(tool_name, args)
-    emit_timing_event("Tool hook dispatch timing", phase="tool_entry", tool_name=tool_name, agent_name=agent_name)
     if recorder is None or call_id is None:
-        return await func(**args)
+        return await _call_tool(func, args, tool_name=tool_name, agent_name=agent_name)
     try:
-        result = await func(**args)
+        result = await _call_tool(func, args, tool_name=tool_name, agent_name=agent_name)
     except Exception as exc:
         # It ran and failed. A cancelled call stays started, since it may have taken effect.
         await recorder.finished(call_id, tool_name, args, exc)
