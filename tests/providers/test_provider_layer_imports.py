@@ -1,10 +1,12 @@
-"""The owned provider layer imports nothing from Agno, directly or through the helpers it reuses."""
+"""The owned provider layer imports nothing from Agno, and loads each provider SDK when it builds a model of that family."""
 
 from __future__ import annotations
 
 import json
 import subprocess
 import sys
+
+import pytest
 
 OWNED_PROVIDER_MODULES = (
     "mindroom.providers.assistant_turn",
@@ -68,3 +70,44 @@ def test_importing_the_registry_loads_no_provider_sdk() -> None:
     probe = f"import json, sys; import mindroom.providers.registry; print(json.dumps(sorted(set({_PROVIDER_SDKS!r}) & set(sys.modules))))"
     completed = subprocess.run([sys.executable, "-c", probe], check=True, capture_output=True, text=True)
     assert json.loads(completed.stdout.strip().splitlines()[-1]) == []
+
+
+# Reports whether the family's SDK is loaded before and after the registry builds one model of that family.
+_BUILD_PROBE = """
+import json, sys, tempfile
+from pathlib import Path
+
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
+from mindroom.constants import resolve_runtime_paths
+from mindroom.providers.registry import build_model_provider
+
+provider, sdk = sys.argv[1:]
+with tempfile.TemporaryDirectory() as root:
+    config_path = Path(root) / "config.yaml"
+    config_path.write_text("router:\\n  model: default\\n", encoding="utf-8")
+    paths = resolve_runtime_paths(config_path=config_path, storage_path=Path(root) / "data", process_env={})
+    loaded_before = sdk in sys.modules
+    config = Config(models={"default": ModelConfig(provider=provider, id="test-model", api_key="test-key")})
+    build_model_provider(config, paths)
+    print(json.dumps([loaded_before, sdk in sys.modules]))
+"""
+
+
+@pytest.mark.parametrize(
+    ("provider", "sdk"),
+    [("anthropic", "anthropic"), ("google", "google.genai"), ("ollama", "ollama"), ("openai", "openai")],
+)
+def test_building_a_model_loads_its_sdk_before_its_first_request(provider: str, sdk: str) -> None:
+    """A model's first request imports none of its SDK: building the model loads it.
+
+    A reply builds its model off the event loop, so a first-time SDK import inside the request would stall every
+    reply the loop serves.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-c", _BUILD_PROBE, provider, sdk],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(completed.stdout.strip().splitlines()[-1]) == [False, True]

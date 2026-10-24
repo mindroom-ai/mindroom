@@ -12,10 +12,8 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
-from mindroom.providers.gemini.adapter import build_provider as build_gemini_provider
 from mindroom.providers.model_loading import dashboard_api_key
 from mindroom.providers.names import provider_route
-from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
 from mindroom.providers.openai.build import ENDPOINT_VARIABLES as OPENAI_ENDPOINT_VARIABLES
 from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
 from mindroom.providers.openai.build import build_provider as build_openai_provider
@@ -78,8 +76,16 @@ def _build_adapter(
 
         return build_claude_provider(model_config, runtime_paths)
     if provider == "google":
+        from mindroom.providers.gemini.adapter import (  # noqa: PLC0415 - keep the google-genai SDK out of import time
+            build_provider as build_gemini_provider,
+        )
+
         return build_gemini_provider(model_config, runtime_paths)
     if provider == "ollama":
+        from mindroom.providers.ollama_adapter import (  # noqa: PLC0415 - keep the ollama SDK out of import time
+            build_provider as build_ollama_provider,
+        )
+
         return build_ollama_provider(model_config, runtime_paths)
     if provider == "synthetic":
         return build_synthetic_provider(model_config, runtime_paths)

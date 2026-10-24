@@ -1,7 +1,7 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Gemini provider adapter over google-genai, for the Gemini API and Vertex AI (``vertexai: true``).
 
-The SDK is imported on first use, so importing this module stays cheap.
+The provider registry imports this module, and with it the SDK, when it builds a Gemini model.
 Credentials resolve to the configured or shared Google key, then ``GOOGLE_API_KEY``, and on Vertex AI
 ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_LOCATION``, and the SDK's application default credentials from the
 process environment.
@@ -16,6 +16,9 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+from google import genai
+from google.genai.errors import APIError
+from google.genai.types import HttpOptions
 from pydantic import ValidationError
 
 from mindroom.credentials.sync import get_api_key_for_provider
@@ -225,8 +228,6 @@ class GeminiProvider:
 
     def _decision_config(self, config: dict[str, Any]) -> dict[str, Any] | GenerateContentConfig:
         """Keep function schemas but disable function calling and native tools for a decision request."""
-        from google.genai.types import HttpOptions  # noqa: PLC0415 - provider SDK loads on first request
-
         client_http_options = (self.settings.client_params or {}).get("http_options")
         if client_http_options is not None and HttpOptions.model_validate(client_http_options).extra_body:
             msg = "Participation decisions cannot safely apply Gemini body overrides"
@@ -235,8 +236,6 @@ class GeminiProvider:
 
     def _sdk_client(self) -> Client:
         if self._client is None:
-            from google import genai  # noqa: PLC0415 - provider SDK loads on first request
-
             self._client = genai.Client(**self._client_params())
         return self._client
 
@@ -262,8 +261,6 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 
     Vertex AI mints its Google access token inside the request, so its failures arrive here too.
     """
-    from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
-
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
     if isinstance(error, APIError):

@@ -18,6 +18,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from google.genai.types import (
+    FunctionCallingConfig,
+    FunctionCallingConfigMode,
+    GenerateContentConfig,
+    Tool,
+    ToolConfig,
+)
+
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
 from mindroom.llm.media import IMAGE_HEADER_BYTES, image_mime_type
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
@@ -30,7 +38,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from google.genai.types import (
-        GenerateContentConfig,
         GenerateContentResponse,
         GenerateContentResponseUsageMetadata,
         Part,
@@ -317,14 +324,6 @@ def without_tool_selection(config: Mapping[str, Any], *, vertexai: bool) -> Gene
     ``config`` is the request dict this adapter builds. JSON output is requested except on Vertex AI when the
     request keeps function declarations.
     """
-    from google.genai.types import (  # noqa: PLC0415 - provider SDK loads on first request
-        FunctionCallingConfig,
-        FunctionCallingConfigMode,
-        GenerateContentConfig,
-        Tool,
-        ToolConfig,
-    )
-
     generation_config = GenerateContentConfig.model_validate(config)
     if generation_config.cached_content:
         # Cached content may contain native tools that this request cannot inspect.
