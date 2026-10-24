@@ -175,7 +175,6 @@ def _native_history(
 async def prepare_scope_history(
     *,
     agent_name: str,
-    scope: HistoryScope | None,
     model: ModelProvider | None,
     resolved_inputs: HistoryPreparationInputs,
     non_prompt_tokens: int,
@@ -194,7 +193,7 @@ async def prepare_scope_history(
     replay_estimator = model.replay_estimator if model is not None else None
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
-            scope=scope,
+            scope=None,
             session=None,
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
@@ -829,7 +828,6 @@ async def prepare_bound_scope_history(
 
     return await prepare_scope_history(
         agent_name=bound_scope.owner_agent_name,
-        scope=bound_scope.scope,
         model=model,
         resolved_inputs=resolved_inputs,
         runtime_paths=runtime_paths,

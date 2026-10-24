@@ -133,7 +133,6 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
 
     prepared = await prepare_scope_history(
         agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
@@ -274,7 +273,6 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
     prepared = await prepare_scope_history(
         agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
@@ -340,7 +338,6 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     seed_session(db, session)
     prepared = await prepare_scope_history(
         agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
@@ -426,7 +423,6 @@ async def test_native_activation_respects_history_policy(
 
     prepared = await prepare_scope_history(
         agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
@@ -457,7 +453,6 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     seed_session(db, session)
     prepared = await prepare_scope_history(
         agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
@@ -550,7 +545,6 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     resolved = _inputs(config)
     prepared = await prepare_scope_history(
         agent_name="test_agent",
-        scope=_SCOPE,
         model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
