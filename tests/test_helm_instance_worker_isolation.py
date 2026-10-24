@@ -290,7 +290,7 @@ def test_instance_chart_pods_satisfy_the_tenant_namespace_pod_security_baseline(
 
 
 def test_instance_chart_pods_run_under_the_runtime_default_seccomp_profile() -> None:
-    """Tenant pods share a node and tenant code runs in them, so no instance pod may run without the runtime's syscall filter."""
+    """Tenant pods share a node and the MindRoom pod runs tenant code, so no instance pod may run without the runtime's syscall filter."""
     docs = _render_chart(Path("cluster/k8s/instance"), "imagePullSecrets[0].name=ghcr-pull")
     pods = [doc["spec"]["template"]["spec"] for doc in docs if doc["kind"] == "Deployment"]
 
