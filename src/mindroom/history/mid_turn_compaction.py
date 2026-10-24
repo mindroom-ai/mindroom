@@ -139,8 +139,8 @@ def mid_turn_compaction_hook(
     storage: RunStorage | None,
     replay_plan: ResolvedReplayPlan | None,
     prompt_id: str | None,
-    lifecycle: CompactionLifecycle | None = None,
-    turn_recorder: TurnRecorder | None = None,
+    lifecycle: CompactionLifecycle | None,
+    turn_recorder: TurnRecorder | None,
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 

@@ -83,6 +83,8 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
         storage=None,
         replay_plan=None,
         prompt_id=None,
+        lifecycle=None,
+        turn_recorder=None,
     )
 
     _, record = await collect(
@@ -145,6 +147,8 @@ async def test_a_later_loop_of_the_run_sizes_and_falls_back_by_its_own_request_s
         storage=None,
         replay_plan=None,
         prompt_id=None,
+        lifecycle=None,
+        turn_recorder=None,
     )
 
     for prompt in ("Do the task", "Continue the task"):
@@ -197,6 +201,8 @@ def _run_local_hook(config: Config, runtime_paths: RuntimePaths, model: ModelPro
         storage=None,
         replay_plan=None,
         prompt_id=None,
+        lifecycle=None,
+        turn_recorder=None,
     )
 
 
