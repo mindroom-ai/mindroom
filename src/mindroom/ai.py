@@ -1000,18 +1000,6 @@ async def _run_non_streaming_agent_attempts(
         ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=run_context.agent_name)
 
 
-def _failed_agent_attempt(
-    ctx: ResponseTurnContext,
-    error: Exception,
-    runtime_paths: RuntimePaths,
-) -> BlockingAttemptResolution:
-    """Keep pre-decision failures quiet; approved turns retain ordinary error replies."""
-    return skip_unapproved_attempt(ctx.participation, reason="preparation_failed") or ExcludedAttempt(
-        RunStatus.error,
-        get_user_friendly_error_message(error, ctx.entity_label, runtime_paths=runtime_paths),
-    )
-
-
 def _assert_agent_target(agent_name: str, config: Config) -> None:
     """Reject configured team names in the agent-only AI helper path."""
     if agent_name in config.teams:
@@ -1165,7 +1153,6 @@ async def _prepare_agent_and_prompt(
     """
     agent_name = ctx.entity_label
     _assert_agent_target(agent_name, config)
-    storage_path = runtime_paths.storage_root
 
     def _resolve_model_and_build_agent() -> tuple[ResolvedRuntimeModel, AgentBuild]:
         """Resolve the runtime model and build the agent off the event loop (#1260).
@@ -1212,7 +1199,7 @@ async def _prepare_agent_and_prompt(
             agent_build_can_overlap_file_memory,
             agent_name,
             config,
-            storage_path,
+            runtime_paths.storage_root,
         )
         if not parallel_branches:
             serial_reason = "default_workspace_scaffold_pending"
@@ -1666,7 +1653,11 @@ async def ai_response(  # noqa: C901
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)
-            return _failed_agent_attempt(ctx, e, runtime_paths)
+            # A failure before the participation decision stays quiet; an approved turn replies with the error.
+            return skip_unapproved_attempt(ctx.participation, reason="preparation_failed") or ExcludedAttempt(
+                RunStatus.error,
+                get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths),
+            )
         prepared_run = run_context.prepared_run
         storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs)
         holder.attempt = attempt
