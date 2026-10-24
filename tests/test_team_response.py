@@ -920,6 +920,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
 
     scope_context = load_bound_scope_session(
         member_names=team.member_names,
+        team_name=None,
         session_id=SESSION_ID,
         runtime_paths=team.runtime_paths,
         config=team.config,

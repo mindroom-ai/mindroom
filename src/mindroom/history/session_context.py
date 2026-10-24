@@ -129,9 +129,12 @@ def load_bound_scope_session(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-    team_name: str | None = None,
+    team_name: str | None,
 ) -> ScopeSessionContext | None:
-    """Load the canonical scope-backed session context for one bound team run."""
+    """Load the canonical scope-backed session context for one bound team run.
+
+    ``team_name`` is the configured team's name, or None for an ad-hoc team.
+    """
     if not member_names and team_name is not None and team_name in config.teams:
         scope = HistoryScope(kind="team", scope_id=team_name)
     else:

@@ -4475,6 +4475,7 @@ class TestTeamCompletion:
 
         loaded = load_bound_scope_session(
             member_names=["general"],
+            team_name=None,
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
@@ -4526,6 +4527,7 @@ class TestTeamCompletion:
 
         scope_context = load_bound_scope_session(
             member_names=["general"],
+            team_name=None,
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
@@ -4571,6 +4573,7 @@ class TestTeamCompletion:
         assert prepared.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         scope_context = load_bound_scope_session(
             member_names=["general"],
+            team_name=None,
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
