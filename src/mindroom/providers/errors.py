@@ -78,10 +78,9 @@ def whole_words(*words: str) -> re.Pattern[str]:
 # auth family in either spelling, so text that names an ``author`` property, an ``authority``, or ``oauth`` is not one.
 _CREDENTIAL_WORDING = whole_words(r"(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?", r"api[ _]?keys?")
 
-# Wording providers use when a request does not fit the model's context window (Agno's
-# ``ModelProviderError.CONTEXT_WINDOW_PATTERNS`` without its over-broad ``max_tokens``, plus the
-# payload-size wording OpenAI-compatible servers and Anthropic use, older Claude models' "input length and
-# `max_tokens` exceed context limit", and llama.cpp's "the request exceeds the available context size").
+# Wording providers use when a request does not fit the model's context window, such as the payload-size wording of
+# OpenAI-compatible servers and Anthropic, older Claude models' "input length and `max_tokens` exceed context limit",
+# and llama.cpp's "the request exceeds the available context size". A bare ``max_tokens`` is too broad to count.
 _CONTEXT_WINDOW_MARKERS = (
     "context_length_exceeded",
     "context window",
