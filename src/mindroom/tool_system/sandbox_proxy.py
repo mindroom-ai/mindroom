@@ -202,6 +202,8 @@ def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
 
 def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
     """Return the hard cap for inline primary-to-worker attachment saves, by default the retained media limit."""
+    # TODO(simplify): Unlike other runtime settings, this falls back to the live os.environ after the runtime's env.
+    # Read it with runtime_paths.env_value alone. Operators who set it only outside the runtime's env would notice.
     raw_value = (
         runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV)
         or os.environ.get(INLINE_ATTACHMENT_BYTES_ENV)
@@ -550,13 +552,13 @@ def attachment_save_uses_worker(
     )
 
 
-def _record_worker_save_failure(
+def _record_worker_failure(
     *,
     worker_handle: WorkerHandle | None,
     worker_manager: WorkerBackend,
     error: str,
 ) -> None:
-    """Record a worker save protocol/integrity failure against worker health."""
+    """Record a worker save or view protocol or integrity failure against worker health."""
     if worker_handle is not None:
         worker_manager.record_failure(worker_handle.worker_key, error, startup_count=worker_handle.startup_count)
 
@@ -625,7 +627,7 @@ def save_attachment_to_worker(
 
         if not isinstance(data, dict):
             msg = "Sandbox save-attachment returned a non-object response."
-            _record_worker_save_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
+            _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
             raise TypeError(msg)
         response_data = {str(key): value for key, value in data.items()}
         if response_data.get("ok") is True:
@@ -636,7 +638,7 @@ def save_attachment_to_worker(
                 sha256=attachment_fields["sha256"],
             )
             if isinstance(receipt, str):
-                _record_worker_save_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=receipt)
+                _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=receipt)
                 raise RuntimeError(receipt)
             if worker_handle is not None:
                 worker_manager.touch_worker(worker_handle.worker_key)
@@ -709,7 +711,7 @@ def view_file_from_worker(
         )
         if not isinstance(data, dict):
             msg = "Sandbox view-file returned a non-object response."
-            _record_worker_save_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
+            _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
             raise TypeError(msg)
         response_data = {str(key): value for key, value in data.items()}
         if response_data.get("ok") is True:
@@ -719,11 +721,11 @@ def view_file_from_worker(
             try:
                 result = decode_media_result(response_data.get("result"))
             except ValueError as exc:
-                _record_worker_save_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=str(exc))
+                _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=str(exc))
                 raise
             if not isinstance(result, ToolResult):
                 msg = "Sandbox view-file returned a non-media result."
-                _record_worker_save_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
+                _record_worker_failure(worker_handle=worker_handle, worker_manager=worker_manager, error=msg)
                 raise TypeError(msg)
             if worker_handle is not None:
                 worker_manager.touch_worker(worker_handle.worker_key)

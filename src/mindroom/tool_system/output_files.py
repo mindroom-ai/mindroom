@@ -128,6 +128,9 @@ class _ToolOutputWriteResult:
 
 
 def _output_redirect_max_bytes(runtime_paths: RuntimePaths) -> int:
+    # TODO(simplify): Unlike other runtime settings, an empty value falls through to the next source, ending at the
+    # live os.environ. Read it with runtime_paths.env_value alone. Operators who set it only outside the runtime's env,
+    # or blank it to restore the default, would notice.
     raw_value = (
         runtime_paths.process_env.get(_MAX_BYTES_ENV)
         or runtime_paths.env_file_values.get(_MAX_BYTES_ENV)
@@ -370,6 +373,8 @@ def _has_tool_result_media(result: ToolResult | ToolValue) -> bool:
 
 
 def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
+    # TODO(simplify): The refusals below name an internal version ("in v1") the model cannot act on. Drop the suffix.
+    # Models would notice the changed error text.
     if isinstance(result, ToolResult | ToolValue):
         if _has_tool_result_media(result):
             return "ToolResult media artifacts cannot be redirected to workspace files in v1."
