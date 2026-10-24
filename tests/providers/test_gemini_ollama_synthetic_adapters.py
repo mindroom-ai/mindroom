@@ -13,6 +13,7 @@ import aiohttp
 import google.auth.exceptions
 import httpx
 import pytest
+from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 
 from mindroom.config.models import ModelConfig
@@ -174,6 +175,28 @@ async def test_gemini_reads_what_its_config_leaves_unset_from_the_process_enviro
     assert api.headers["x-goog-api-key"] == "env-key"
     assert "/projects/env-project/locations/europe-west4/" in str(vertex.url)
     assert "x-goog-api-key" not in vertex.headers
+
+
+@pytest.mark.asyncio
+async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GOOGLE_GENAI_USE_VERTEXAI=true sends a model without ``vertexai`` to Vertex AI, as Agno's Gemini did."""
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    config = _config(
+        {"provider": "google", "id": "gemini-3.8-flash"},
+        project_id="test-project",
+        location="us-central1",
+        credentials=Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+    )
+    adapter = build_adapter(config, tmp_path, respond)
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert "/projects/test-project/locations/us-central1/" in str(seen[0].url)
 
 
 def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -> None:
