@@ -928,6 +928,21 @@ def _remove_postgres_container(docker: str, container_name: str) -> None:
     raise RuntimeError(msg)
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Keep Google client libraries from authenticating as the developer.
+
+    With no credentials named, google-auth reads gcloud's application default credentials file and asks the GCE
+    metadata server, and it refreshes tokens through ``requests``, which the network guard does not cover. An
+    empty gcloud config directory, ``NO_GCE_CHECK``, and no inherited ``GOOGLE_APPLICATION_CREDENTIALS`` make a
+    test that builds a Google client without credentials fail instead.
+    """
+    gcloud_config = tempfile.mkdtemp(prefix="mindroom-test-gcloud-")
+    config.add_cleanup(lambda: shutil.rmtree(gcloud_config, ignore_errors=True))
+    os.environ["CLOUDSDK_CONFIG"] = gcloud_config
+    os.environ["NO_GCE_CHECK"] = "true"
+    os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+
+
 def pytest_configure_node(node: "WorkerController") -> None:
     """Own the shared Postgres server's run from the xdist controller.
 

@@ -5,6 +5,8 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+import google.auth
+import google.auth.exceptions
 import httpcore
 import httpx
 import httpx2
@@ -110,3 +112,9 @@ def test_every_patched_http_client_backend_is_refused(request: pytest.FixtureReq
     assert dials[start:] == [conftest._RefusedDial("192.0.2.1:80", test_thread) for _ in range(4)]
     # These refusals are the expected outcome, so keep them out of this test's network report.
     del dials[start:]
+
+
+def test_google_default_credentials_are_not_this_machines() -> None:
+    """A Google client built without credentials finds none, instead of the developer's gcloud login."""
+    with pytest.raises(google.auth.exceptions.DefaultCredentialsError):
+        google.auth.default()
