@@ -32,11 +32,7 @@ def create_state_storage(storage_name: str, state_root: Path) -> ConversationSto
     """
     names = TableNames(storage_name)
     db_path = names.database_path(state_root)
-    with session_storage_preflight(
-        state_root,
-        storage_name=storage_name,
-        timeout_seconds=BUSY_TIMEOUT_SECONDS,
-    ):
+    with session_storage_preflight(state_root, names, timeout_seconds=BUSY_TIMEOUT_SECONDS):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         migrate_usage_database(db_path, names)
         migrate_to_summary_rows(db_path, names)

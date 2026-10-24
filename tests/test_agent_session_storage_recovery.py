@@ -18,6 +18,7 @@ import pytest
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.preflight import session_storage_preflight
+from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import create_agno_2_sessions_db
 
@@ -217,11 +218,7 @@ def test_worker_planted_recovery_lock_fails_promptly(tmp_path: Path, plant: str)
 
     def preflight() -> None:
         try:
-            with session_storage_preflight(
-                state_root,
-                storage_name="general",
-                timeout_seconds=0.2,
-            ):
+            with session_storage_preflight(state_root, TableNames("general"), timeout_seconds=0.2):
                 pass
         except (OSError, ValueError) as error:
             errors.append(error)
