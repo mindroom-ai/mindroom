@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -42,7 +42,10 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
 from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
-from tests.team_turn_helpers import SESSION_ID, delegate, member_approval, squad_turn
+from tests.team_turn_helpers import SESSION_ID, TeamTurn, delegate, member_approval, squad_turn
+
+if TYPE_CHECKING:
+    from mindroom.llm.provider import ModelRequest
 
 _PAIR = TeamConfig(
     display_name="Pair",
@@ -255,6 +258,21 @@ def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
     assert ad_hoc.spec.max_tool_calls_per_turn == config.defaults.max_tool_calls_per_turn
 
 
+_PAST_2_ONLY = ["past-2 team question", "past-2 team answer"]
+
+
+def _store_two_past_runs_under_a_one_run_limit(team: TeamTurn) -> None:
+    """Author ``num_history_runs = 1`` on the squad and store two runs, where the defaults would replay both."""
+    team.config.teams["squad"].num_history_runs = 1
+    assert team.config.resolve_entity(None).history_settings.policy.mode == "all"
+    past = [_completed_team_run("past-1", team_id="squad"), _completed_team_run("past-2", team_id="squad")]
+    seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=past))
+
+
+def _replayed_history(request: ModelRequest) -> list[str]:
+    return [str(message.content) for message in request.messages if message.from_history]
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("squad_probe")
 async def test_a_team_turn_replays_the_history_its_configured_team_authors(
@@ -263,16 +281,12 @@ async def test_a_team_turn_replays_the_history_its_configured_team_authors(
 ) -> None:
     """The leader's request replays the one run the team authors, where the defaults would replay every run."""
     team = squad_turn(tmp_path, monkeypatch, leader=[answer("Done.")])
-    team.config.teams["squad"].num_history_runs = 1
-    assert team.config.resolve_entity(None).history_settings.policy.mode == "all"
-    past = [_completed_team_run("past-1", team_id="squad"), _completed_team_run("past-2", team_id="squad")]
-    seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=past))
+    _store_two_past_runs_under_a_one_run_limit(team)
 
     await team.stream(show_tool_calls=False)
 
     [request] = team.models["default"].requests
-    replayed = [str(message.content) for message in request.messages if message.from_history]
-    assert replayed == ["past-2 team question", "past-2 team answer"]
+    assert _replayed_history(request) == _PAST_2_ONLY
 
 
 @pytest.mark.asyncio
@@ -289,10 +303,7 @@ async def test_a_saved_team_approval_resumes_under_the_history_settings_its_conf
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
-    team.config.teams["squad"].num_history_runs = 1
-    assert team.config.resolve_entity(None).history_settings.policy.mode == "all"
-    past = [_completed_team_run("past-1", team_id="squad"), _completed_team_run("past-2", team_id="squad")]
-    seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=past))
+    _store_two_past_runs_under_a_one_run_limit(team)
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
@@ -301,8 +312,7 @@ async def test_a_saved_team_approval_resumes_under_the_history_settings_its_conf
     await team.resume(raised.value.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
 
     [resumed] = team.models["default"].requests
-    replayed = [str(message.content) for message in resumed.messages if message.from_history]
-    assert replayed == ["past-2 team question", "past-2 team answer"]
+    assert _replayed_history(resumed) == _PAST_2_ONLY
 
 
 def _private_pair_config(tmp_path: Path) -> tuple[Config, object]:
