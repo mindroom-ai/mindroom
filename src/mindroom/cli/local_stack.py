@@ -236,7 +236,7 @@ def _wait_for_service(
     response_matches: Callable[[httpx.Response], bool] | None = None,
 ) -> None:
     """Wait up to 60 seconds for a service URL to answer with success, or with a response ``response_matches``."""
-    import httpx  # noqa: PLC0415
+    import httpx  # noqa: PLC0415 - httpx loads only when the stack is probed, not during CLI help rendering
 
     console.print(f"Waiting for {service_name}: [dim]{url}[/dim]")
     deadline = time.monotonic() + 60
