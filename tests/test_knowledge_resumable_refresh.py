@@ -226,9 +226,9 @@ class _FakeClient:
                 raise NotFoundError(message)
             del _FakeVectorDb.store[name]
 
-    def list_collections(self) -> list[str]:
+    def list_collections(self) -> list[_FakeCollection]:
         with _FakeVectorDb.lock:
-            return sorted(_FakeVectorDb.store)
+            return [_FakeCollection(name) for name in sorted(_FakeVectorDb.store)]
 
     def get_max_batch_size(self) -> int:
         return 5461

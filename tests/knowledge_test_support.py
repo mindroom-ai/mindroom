@@ -205,9 +205,9 @@ class _Client:
                 raise NotFoundError(message)
             del _VectorDb.collections[name]
 
-    def list_collections(self) -> list[str]:
+    def list_collections(self) -> list[_Collection]:
         with _VectorDb.lock:
-            return sorted(_VectorDb.collections)
+            return [_Collection(name) for name in sorted(_VectorDb.collections)]
 
     def get_max_batch_size(self) -> int:
         return 5461
