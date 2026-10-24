@@ -1,4 +1,4 @@
-"""Drive durable external delegation requirements without retaining Python waits."""
+"""Run the children a paused run's delegation calls wait on, durably, and continue the run with their results."""
 
 from __future__ import annotations
 
@@ -1038,7 +1038,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             on_event(tag_call_event(requirement, event))
 
     emit_call(ToolStarted(deepcopy(tool)))
-    # A team member's id is its config name on the owned loop, so its delegations run as that member.
+    # A team member's id is its config name, so its delegations run as that member.
     caller = agent_name if requirement.member_agent_id is None else requirement.member_agent_id
     caller_identity = replace(execution_identity, agent_name=caller)
     resolve_result = partial(_resolve_delegation_requirement, requirement, emit_call=emit_call)
