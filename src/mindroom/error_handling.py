@@ -32,13 +32,10 @@ _MISSING_PROVIDER_KEY_PATTERN = re.compile(
     r"|missing credentials\. please pass an `api_key`"  # Newer OpenAI SDK
     r"|could not resolve authentication method",  # Anthropic SDK
 )
-# Wording of text without a provider payload, read as whole words: a 401 status, and a throttled request's ``429``,
-# ``rate``, ``quota``, ``quotas``, or any of ``ratelimit``, ``quotaexceeded``, and ``quotasexceeded`` followed by any
-# letters. Lowercased, an error's name is one word, so only a name that starts with one of those three holds the
-# wording (``RateLimitError``, ``QuotaExceededError``, ``QuotasExceededError``); ``RateError``, ``QuotaError``, and
-# ``OpenAIRateLimitError`` do not. Of the credential names, only the auth family's own (``AuthenticationError``,
-# ``AuthorizationError``, ``UnauthorizedError``) is read; ``AuthError``, ``GoogleAuthError``, and ``InvalidApiKeyError``
-# are not. Splitting CamelCase would also read a property name such as ``authToken`` as wording about the credentials.
+# Wording of text without a provider payload, read as whole words. A lowercased error name is one word, so only a name
+# that starts with ``ratelimit``, ``quotaexceeded``, or ``quotasexceeded`` reads as throttling (not ``RateError`` or
+# ``OpenAIRateLimitError``), and only an auth family name such as ``AuthenticationError`` as credentials (not
+# ``AuthError`` or ``InvalidApiKeyError``); splitting CamelCase would also read a property ``authToken`` as credentials.
 _UNAUTHORIZED_WORDING = whole_words("401")
 _RATE_LIMIT_WORDING = whole_words(r"rate(?:limit[a-z]*)?", "429", r"quotas?(?:exceeded[a-z]*)?")
 _PROVIDER_UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."

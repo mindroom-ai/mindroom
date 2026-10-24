@@ -34,7 +34,8 @@ __all__ = ["RequestLog", "logged_stream"]
 
 logger = get_logger(__name__)
 
-# Message fields that never reach a provider, left out of the request record.
+# TODO(simplify): The record leaves out `reasoning_content`, which the DeepSeek wire sends back, so a DeepSeek
+# record omits part of the request. Keep it in the record. Operators reading the request log would notice.
 _NON_API_MESSAGE_FIELDS = frozenset(
     {"id", "reasoning_content", "tool_name", "tool_args", "tool_call_error", "stop_after_tool_call", "from_history"},
 )
@@ -50,7 +51,7 @@ class RequestLog:
     model_name: str
     configured_provider: str
     debug: DebugConfig
-    default_log_dir: Path
+    storage_root: Path
 
 
 def _attribution(context: Mapping[str, Any]) -> dict[str, Any]:
@@ -85,8 +86,8 @@ def _write_request_record(
             "timestamp": datetime.now().astimezone().isoformat(),
             "request_log_id": request_log_id,
             # TODO(simplify): A request whose log context binds no `agent_id` records the model config name as its
-            # `agent_id`, here and in the response record. Leave `agent_id` out then; `LLM usage` names the model.
-            # Operators reading the request log would notice.
+            # `agent_id`, here and in the response record. Record that name as `model_name` and take `agent_id` only
+            # from the context. Operators reading the request log would notice.
             "agent_id": log.model_name,
             **context,
             "model_id": model_id,
@@ -101,9 +102,9 @@ def _write_request_record(
     )
 
 
-def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -> Path:
-    """Return the day's request-log file under the configured directory, else under ``default_log_dir``."""
-    base_dir = Path(log_dir) if log_dir else default_log_dir
+def _daily_log_path(log_dir: str | None, storage_root: Path, now: datetime) -> Path:
+    """Return the day's request-log file in the configured directory, else in ``<storage_root>/logs/llm_requests``."""
+    base_dir = Path(log_dir) if log_dir else storage_root / "logs" / "llm_requests"
     return base_dir / f"llm-requests-{now.date().isoformat()}.jsonl"
 
 
@@ -169,7 +170,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
     log_path: Path | None = None
     request_log_id = uuid4().hex
     if log.debug.log_llm_requests:
-        log_path = _daily_log_path(log.debug.llm_request_log_dir, log.default_log_dir, datetime.now().astimezone())
+        log_path = _daily_log_path(log.debug.llm_request_log_dir, log.storage_root, datetime.now().astimezone())
         try:
             await asyncio.to_thread(
                 _write_request_record,

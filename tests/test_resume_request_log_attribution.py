@@ -93,7 +93,7 @@ def _identity(agent_name: str, session_id: str) -> ToolExecutionIdentity:
 def _logged(model: ScriptedModel, log_dir: Path) -> WrappedProvider:
     """Put ``model`` behind the request log under a model key no entity shares."""
     debug = DebugConfig(log_llm_requests=True, llm_request_log_dir=str(log_dir))
-    log = RequestLog(model_name="scripted", configured_provider="openai", debug=debug, default_log_dir=log_dir)
+    log = RequestLog(model_name="scripted", configured_provider="openai", debug=debug, storage_root=log_dir)
     return WrappedProvider(model, partial(logged_stream, log=log))
 
 

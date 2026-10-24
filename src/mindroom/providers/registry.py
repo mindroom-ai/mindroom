@@ -113,7 +113,7 @@ def build_model_provider(
         model_name=model_name,
         configured_provider=model_config.provider,
         debug=config.debug,
-        default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
+        storage_root=runtime_paths.storage_root,
     )
     return wrap_provider(
         adapter,

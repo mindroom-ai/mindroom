@@ -104,7 +104,7 @@ def _install_logged_model(
                 model_name="default",
                 configured_provider="openai",
                 debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(llm_log_dir)),
-                default_log_dir=llm_log_dir / "unused",
+                storage_root=llm_log_dir / "unused",
             ),
         ),
     )

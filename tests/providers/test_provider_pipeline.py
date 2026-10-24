@@ -700,7 +700,7 @@ async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> 
         model_name="default",
         configured_provider="openai",
         debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
-        default_log_dir=tmp_path / "unused",
+        storage_root=tmp_path / "unused",
     )
     request = ModelRequest(messages=[Message(role="system", content="Be brief."), _user()], tools=[_tool("search")])
 
@@ -779,7 +779,7 @@ def _request_log(tmp_path: Path, *, enabled: bool = True, provider: str = "opena
         model_name="default",
         configured_provider=provider,
         debug=DebugConfig(log_llm_requests=enabled, llm_request_log_dir=str(tmp_path) if enabled else None),
-        default_log_dir=tmp_path / "default",
+        storage_root=tmp_path / "default",
     )
 
 

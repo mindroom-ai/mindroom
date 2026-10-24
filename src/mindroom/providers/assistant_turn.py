@@ -19,12 +19,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelIdentity, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = [
-    "finished_assistant_message",
-    "output_started",
-    "stamp_finished_turn",
-    "stamp_model",
-]
+__all__ = ["finished_assistant_message", "output_started", "stamp_finished_turn", "stamp_model"]
 
 
 def stamp_model(message: Message, identity: ModelIdentity) -> None:
@@ -77,7 +72,7 @@ def finished_assistant_message(
         content=content,
         reasoning_content=reasoning,
         tool_calls=list(tool_calls) or None,
-        provider_data=dict(provider_data or {}),
+        provider_data=provider_data,
     )
     if usage is not None:
         message.metrics = usage

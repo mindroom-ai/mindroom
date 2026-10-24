@@ -163,7 +163,7 @@ async def media_fallback_stream(
             status_code=error.status_code,
             error=redact_sensitive_text(str(error), max_length=500),
         )
-        return Retry(replace(request, messages=_without_media(request.messages, known | remaining, fallback_prompt)))
+        return Retry(replace(request, messages=_without_media(request.messages, present, fallback_prompt)))
 
     first = replace(request, messages=_without_media(request.messages, known, fallback_prompt))
     events = attempts(inner, first, without_remaining_media)

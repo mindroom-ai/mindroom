@@ -22,7 +22,6 @@ __all__ = (
     "CONFIG_INIT_MODEL_ALTERNATIVES",
     "CONFIG_INIT_MODEL_PRESETS",
     "DEEPSEEK_BASE_URL_DEFAULT",
-    "DEEPSEEK_V4_PRO",
     "ELEVENLABS_TTS",
     "FAL_VIDEO",
     "GOOGLE_IMAGE",
@@ -31,7 +30,6 @@ __all__ = (
     "GROQ_HOST_DEFAULT",
     "GROQ_TRANSCRIPTION",
     "GROQ_TTS",
-    "KIMI_K3",
     "LLAMA_CPP_BASE_URL_DEFAULT",
     "LLAMA_CPP_GEMMA",
     "LLAMA_CPP_QWEN",
@@ -134,7 +132,7 @@ CODEX_GPT_ALIAS = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
 # Just under the Codex catalog's 95% effective budget (258,400) of its 272k context window.
 _CODEX_CONTEXT_WINDOW = 258_000
-KIMI_K3 = "k3"
+_KIMI_K3 = "k3"
 _OPENAI_GPT = "gpt-6-astra"
 OPENAI_GPT_SOL = "gpt-6.1-sol"
 OPENAI_GPT_LUNA = "gpt-6-luna"
@@ -232,15 +230,13 @@ ELEVENLABS_TTS = "eleven_v4"
 FAL_VIDEO = "fal-ai/hunyuan-video-v1.5/text-to-video"
 REPLICATE_VIDEO = "minimax/h3"
 
-DEEPSEEK_V4_PRO = "deepseek-v4-pro"
-
 CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
         "bedrock_claude": ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", _AZURE_OPENAI_DEFAULT_DEPLOYMENT),
         "codex": ModelPreset("codex", _CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
-        "kimi": ModelPreset("kimi", KIMI_K3, 1_048_576),
+        "kimi": ModelPreset("kimi", _KIMI_K3, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),
         "openai": ModelPreset("openai", _OPENAI_GPT, 1_050_000),

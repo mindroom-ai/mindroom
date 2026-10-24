@@ -77,7 +77,7 @@ def _pipeline(adapter: ModelProvider, *, log_dir: Path | None = None, idle: floa
             model_name="default",
             configured_provider=adapter.identity.provider,
             debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(log_dir)),
-            default_log_dir=log_dir / "unused",
+            storage_root=log_dir / "unused",
         )
     return wrap_provider(
         adapter,
