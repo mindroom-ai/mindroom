@@ -327,8 +327,8 @@ def cut_at_event(
     """Delete the earliest element of the scope's log that holds ``event_id`` and everything after it.
 
     An edit matches what a run answered; a redaction (``"any"``) also what it read or wrote. Returns
-    whether any element held the event. ``session``, a loaded copy of the session, then holds the runs
-    and summary a load returns.
+    whether any element held the event. ``session``, when given, is the loaded session whose log is cut,
+    named by ``session_id``; it then holds the runs and summary a load returns.
     """
     with _write_transaction(storage, session_id, session) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
