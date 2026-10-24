@@ -807,7 +807,7 @@ async def _run_authorized_call_agent(
                     runtime_paths=runtime_paths,
                     config=config,
                     knowledge=knowledge_resolution.knowledge,
-                    run_id_callback=recorder.set_run_id,
+                    run_id_callback=lambda run_id, _model_name: recorder.set_run_id(run_id),
                     show_tool_calls=False,
                     run_metadata_collector=run_metadata,
                     execution_identity=execution_identity,
@@ -815,7 +815,6 @@ async def _run_authorized_call_agent(
                     turn_recorder=recorder,
                     eager_deferred_tools=True,
                     reusable_build=build,
-                    attempt_model_runtime=tool_support,
                 )
             finally:
                 recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})

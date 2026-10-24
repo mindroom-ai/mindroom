@@ -60,7 +60,6 @@ from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    ToolRuntimeModelBinding,
     get_tool_runtime_context,
     tool_runtime_context,
 )
@@ -813,8 +812,8 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
 
     async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
         calls.append((turn, kwargs))
-        run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-        run_id_callback("call-run-1")
+        run_id_callback = cast("Callable[[str, str], None]", kwargs["run_id_callback"])
+        run_id_callback("call-run-1", "default")
         recorder = kwargs["turn_recorder"]
         recorder.record_completed(  # type: ignore[union-attr]
             run_metadata={"model": "same-chat-model"},
@@ -959,8 +958,8 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     )
 
     async def cancel_before_playout(_turn: ResponseTurnContext, **cancel_kwargs: object) -> str:
-        run_id_callback = cast("Callable[[str], None]", cancel_kwargs["run_id_callback"])
-        run_id_callback("call-run-2")
+        run_id_callback = cast("Callable[[str, str], None]", cancel_kwargs["run_id_callback"])
+        run_id_callback("call-run-2", "default")
         recorder = cancel_kwargs["turn_recorder"]
         recorder.record_interrupted(  # type: ignore[union-attr]
             run_metadata={"model": "same-chat-model"},
@@ -1059,7 +1058,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     )
     persisted_interruptions: list[dict[str, object]] = []
 
-    class StrictToolSupport(ToolRuntimeModelBinding):
+    class StrictToolSupport:
         def build_context(
             self,
             target: MessageTarget,

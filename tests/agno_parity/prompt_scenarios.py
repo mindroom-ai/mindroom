@@ -70,7 +70,6 @@ from mindroom.teams.formation import _select_team_mode
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import _generate_summary, _ThreadEnrichment
 from mindroom.tool_system.runtime_context import (
-    ToolRuntimeModelBinding,
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
@@ -898,7 +897,7 @@ async def _caller_admitted() -> AsyncIterator[bool]:
 
 
 @dataclass
-class _CallToolSupport(ToolRuntimeModelBinding):
+class _CallToolSupport:
     """The call manager's tool support, reduced to the context and identity one call binds."""
 
     context: Callable[[MessageTarget, str], ToolRuntimeContext]

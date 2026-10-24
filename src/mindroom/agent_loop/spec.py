@@ -40,7 +40,8 @@ class RunContext:
     stored on the run record. ``session`` is the stored session the run belongs to, whose ``session_state`` every
     tool call of the run shares and may change in place, and which the store writes back; a run no store keeps has
     none. ``history_scope`` is the stored conversation a team run and its member runs belong to, which tools that
-    address history by scope read; None for an agent's own run, whose scope is its agent's.
+    address history by scope read; None for an agent's own run, whose scope is its agent's. ``model_name`` is the
+    configured model the run resolved, which its tool calls carry; a team's member runs carry the leader's.
     """
 
     run_id: str
@@ -50,6 +51,7 @@ class RunContext:
     metadata: dict[str, Any] | None = None
     session: ConversationSession | None = None
     history_scope: HistoryScope | None = None
+    model_name: str | None = None
     # The state a run without a session shares with its tools, and with the member runs ``replace`` makes of it.
     # It is an ``__init__`` field so that ``replace`` carries it over: ``replace`` passes on only ``__init__`` fields,
     # so a member run's context would otherwise start with a new empty dict.
@@ -70,6 +72,7 @@ class RunContext:
             session_state=self.session_state,
             metadata=self.metadata or {},
             history_scope=self.history_scope,
+            model_name=self.model_name,
         )
 
 

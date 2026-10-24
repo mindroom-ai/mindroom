@@ -348,7 +348,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
                 denial_reasons={call.tool_call_id: None for call in continuation.calls},
                 tool_trace_collector=trace,
                 typing_log_context={},
-                run_id_callback=run_ids.append,
+                run_id_callback=lambda run_id, _model_name: run_ids.append(run_id),
                 progress=None,
             )
 

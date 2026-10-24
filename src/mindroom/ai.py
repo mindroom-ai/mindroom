@@ -105,7 +105,7 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     format_tool_combined,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -853,6 +853,7 @@ async def _start_agent_run(
         user_id=run_context.turn.requester_id,
         metadata=run_context.metadata,
         session=storage.session,
+        model_name=prepared.runtime_model_name,
     )
     spec = prepared.spec
     hooks = _agent_loop_hooks(run_context, attempt, storage)
@@ -939,6 +940,7 @@ async def _continue_turn_run(
         settings=prepared.build.history_settings,
         plan=prepared.prepared_history.replay_plan,
         user_id=run_context.turn.requester_id,
+        model_name=prepared.runtime_model_name,
         hooks=hooks,
         persist=_persist_into(terminal, storage),
         request_template=run_context.request_template,
@@ -953,11 +955,12 @@ async def _run_cached_agent_attempt(
     *,
     storage: _AttemptStorage,
     terminal: _TerminalRecord,
-    run_id_callback: Callable[[str], None] | None,
+    run_id_callback: Callable[[str, str], None] | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> AnyRunRecord:
     """Run one non-streaming agent attempt and return its finished record."""
-    ai_runtime.note_attempt_run_id(run_id_callback, attempt.run_id)
+    if run_id_callback is not None:
+        run_id_callback(attempt.run_id, run_context.prepared_run.runtime_model_name)
     if pipeline_timing is not None:
         pipeline_timing.mark_model_request()
     events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal, stream=False)
@@ -976,7 +979,7 @@ async def _run_non_streaming_agent_attempts(
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
     storage: _AttemptStorage,
-    run_id_callback: Callable[[str], None] | None,
+    run_id_callback: Callable[[str, str], None] | None,
     scope_context: ScopeSessionContext | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> _NonStreamingAttemptResult:
@@ -1501,14 +1504,18 @@ async def run_delegated_child_response(
                 runtime_paths=runtime_paths,
                 config=active_config,
                 knowledge=knowledge.knowledge,
-                run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
+                run_id_callback=lambda run_id, model_name: note_child_run_id(
+                    child,
+                    run_id,
+                    runtime_paths,
+                    model_name=model_name,
+                ),
                 include_interactive_questions=False,
                 include_openai_compat_guidance=identity.channel == "openai_compat",
                 tool_function_filter=context.tool_function_filter if context is not None else None,
                 execution_identity=identity,
                 delegation_depth=child.depth,
                 refresh_scheduler=refresh_scheduler,
-                attempt_model_runtime=ToolRuntimeModelBinding(),
                 supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
                 collect_streamed_response=True,
                 show_tool_calls=False,
@@ -1539,7 +1546,7 @@ async def ai_response(  # noqa: C901
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     knowledge: AgentKnowledge | None = None,
-    run_id_callback: Callable[[str], None] | None = None,
+    run_id_callback: Callable[[str, str], None] | None = None,
     include_interactive_questions: bool = True,
     tool_function_filter: Callable[[Function], bool] | None = None,
     include_openai_compat_guidance: bool = False,
@@ -1556,7 +1563,6 @@ async def ai_response(  # noqa: C901
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
     supports_native_tool_approval: bool = False,
-    attempt_model_runtime: ai_runtime.AttemptModelRuntime | None = None,
     reusable_build: AgentBuild | None = None,
 ) -> str:
     """Generate one agent response with memory integration and return its text.
@@ -1596,7 +1602,6 @@ async def ai_response(  # noqa: C901
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
                 supports_native_tool_approval=supports_native_tool_approval,
-                attempt_model_runtime=attempt_model_runtime,
                 reusable_build=reusable_build,
             ),
             show_tool_calls=show_tool_calls,
@@ -1661,23 +1666,13 @@ async def ai_response(  # noqa: C901
         storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs)
         holder.attempt = attempt
 
-        def operation() -> Awaitable[_NonStreamingAttemptResult]:
-            return _run_non_streaming_agent_attempts(
-                run_context=run_context,
-                attempt=attempt,
-                storage=storage,
-                run_id_callback=run_id_callback,
-                scope_context=run.scope_context,
-                pipeline_timing=pipeline_timing,
-            )
-
-        attempt_result = await (
-            operation()
-            if attempt_model_runtime is None
-            else attempt_model_runtime.run_with_model(
-                active_model_name=prepared_run.runtime_model_name,
-                operation=operation,
-            )
+        attempt_result = await _run_non_streaming_agent_attempts(
+            run_context=run_context,
+            attempt=attempt,
+            storage=storage,
+            run_id_callback=run_id_callback,
+            scope_context=run.scope_context,
+            pipeline_timing=pipeline_timing,
         )
         record = attempt_result.record
         if attempt_result.user_error is not None:
@@ -1878,13 +1873,14 @@ async def _stream_agent_attempt_chunks(
     storage: _AttemptStorage,
     state: _StreamingAttemptState,
     show_tool_calls: bool,
-    run_id_callback: Callable[[str], None] | None,
+    run_id_callback: Callable[[str, str], None] | None,
     state_updated: Callable[[], None] | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Start and consume one streaming agent attempt."""
     try:
-        ai_runtime.note_attempt_run_id(run_id_callback, attempt.run_id)
+        if run_id_callback is not None:
+            run_id_callback(attempt.run_id, run_context.prepared_run.runtime_model_name)
         request_context = _attempt_request_log_context(run_context)
         with bind_llm_request_log_context(**request_context):
             if pipeline_timing is not None:
@@ -1919,7 +1915,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     knowledge: AgentKnowledge | None = None,
-    run_id_callback: Callable[[str], None] | None = None,
+    run_id_callback: Callable[[str, str], None] | None = None,
     include_interactive_questions: bool = True,
     tool_function_filter: Callable[[Function], bool] | None = None,
     include_openai_compat_guidance: bool = False,
@@ -1934,7 +1930,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
     supports_native_tool_approval: bool = False,
-    attempt_model_runtime: ai_runtime.AttemptModelRuntime | None = None,
     reusable_build: AgentBuild | None = None,
     resumed_attempt: ResumedAttempt | None = None,
     initial_continuation_count: int = 0,
@@ -1954,8 +1949,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
         current_prompt_is_structured: Whether the current prompt already carries trusted message tags.
         knowledge: Optional shared knowledge base for RAG-enabled agents
-        run_id_callback: Optional callback that receives the active run_id
-            before each real streaming attempt starts.
+        run_id_callback: Optional callback that receives each attempt's run id and configured model name
+            before the attempt starts.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
@@ -1978,7 +1973,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         eager_deferred_tools: Whether to send deferred toolkits as ordinary tools instead of through `call_tool`;
             models with native tool search keep native deferral.
         supports_native_tool_approval: Whether this caller can resume confirmation pauses.
-        attempt_model_runtime: Optional composition-root boundary that exposes each attempt's model to tools.
         reusable_build: Optional caller-owned agent build materialized for repeated sequential turns.
         resumed_attempt: Restored attempt to settle before preparing a fresh model request.
         initial_continuation_count: Same-turn attempts consumed before the first fresh request.
@@ -2075,19 +2069,15 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 interrupted_tools=[pending.trace_entry for pending in state_ref.pending_tools],
             )
 
-        attempt_stream = ai_runtime.stream_attempt_with_model(
-            attempt_model_runtime,
-            _stream_agent_attempt_chunks(
-                run_context=run_context,
-                attempt=attempt,
-                storage=storage,
-                state=state,
-                show_tool_calls=show_tool_calls,
-                run_id_callback=run_id_callback,
-                state_updated=_sync_live_turn_recorder,
-                pipeline_timing=pipeline_timing,
-            ),
-            active_model_name=prepared_run.runtime_model_name,
+        attempt_stream = _stream_agent_attempt_chunks(
+            run_context=run_context,
+            attempt=attempt,
+            storage=storage,
+            state=state,
+            show_tool_calls=show_tool_calls,
+            run_id_callback=run_id_callback,
+            state_updated=_sync_live_turn_recorder,
+            pipeline_timing=pipeline_timing,
         )
         async with closing_async_stream(attempt_stream):
             async for stream_chunk in attempt_stream:

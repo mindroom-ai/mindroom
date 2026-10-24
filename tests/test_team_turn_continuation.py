@@ -26,7 +26,6 @@ from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.envelope import _TeamTurnHolder
 from mindroom.teams.members import materialize_exact_team_members, materialize_team_members
 from mindroom.teams.presentation import TeamStreamPresentation
-from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call
 from tests.team_turn_helpers import (
@@ -229,7 +228,7 @@ async def test_an_after_call_switch_rebuilds_the_leader_and_members_on_the_new_m
         ],
     )
 
-    text = await team.reply(stream=stream, message=PROMPT, attempt_model_runtime=ToolRuntimeModelBinding())
+    text = await team.reply(stream=stream, message=PROMPT)
 
     assert text.endswith("Finished with the new model.")
     # A member's tools run under the member's own model: its configured one first, the switched one after the rebuild.
@@ -256,7 +255,7 @@ async def test_the_last_successful_switch_wins_over_a_later_rejected_one(
         large=[answer("Finished with the successful model.")],
     )
 
-    text = await team.respond(message=PROMPT, attempt_model_runtime=ToolRuntimeModelBinding())
+    text = await team.respond(message=PROMPT)
 
     assert text.endswith("Finished with the successful model.")
     session = team.storage.load_session(SESSION_ID, "team")

@@ -91,7 +91,6 @@ from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeContext,
-    ToolRuntimeModelBinding,
     get_tool_runtime_context,
     tool_runtime_context,
 )
@@ -198,16 +197,6 @@ def _install_by_name(monkeypatch: pytest.MonkeyPatch, models: dict[str, ModelPro
 
 def _switch(call_id: str, model_name: str, when: str) -> list[ScriptStep]:
     return calls(tool_call("switch_thread_model", call_id, model_name=model_name, when=when))
-
-
-def _active_model(observed: list[str | None]) -> Await:
-    """A scripted step that notes the model the ambient tool context names while the model streams."""
-
-    async def note() -> None:
-        context = get_tool_runtime_context()
-        observed.append(context.active_model_name if context is not None else None)
-
-    return Await(note)
 
 
 def _final_only(text: str) -> list[ScriptStep]:
@@ -1688,7 +1677,7 @@ class TestUserIdPassthrough:
                 runtime_paths,
                 streaming=streaming,
                 model_prompt="test\n\nUse attachment att_1.",
-                run_id_callback=run_ids.append,
+                run_id_callback=lambda run_id, _model_name: run_ids.append(run_id),
                 show_tool_calls=False,
                 **({} if streaming else {"tool_trace_collector": tool_trace}),
             )
@@ -1719,13 +1708,32 @@ class TestUserIdPassthrough:
         config.models["large"] = ModelConfig(provider="openai", id="large-model")
         observed_tool_models: list[str | None] = []
         built: list[str] = []
+
+        async def inspect(_self: ProbeTools, path: str) -> str:
+            """Note the model the call's tool context names.
+
+            Args:
+                path: The file.
+
+            """
+            del path
+            context = get_tool_runtime_context()
+            observed_tool_models.append(context.active_model_name if context is not None else None)
+            return "ready"
+
+        monkeypatch.setattr(ProbeTools, "inspect", inspect)
         _install_by_name(
             monkeypatch,
             {
                 "default": ScriptedModel(
-                    [[_active_model(observed_tool_models), *_switch("call-switch-model", "large", "after-toolcall")]],
+                    [
+                        calls(tool_call("inspect", "call-inspect", path="a")),
+                        _switch("call-switch-model", "large", "after-toolcall"),
+                    ],
                 ),
-                "large": ScriptedModel([[_active_model(observed_tool_models), *answer("Finished.")]]),
+                "large": ScriptedModel(
+                    [calls(tool_call("inspect", "call-inspect-large", path="a")), answer("Finished.")],
+                ),
             },
             built,
         )
@@ -1740,7 +1748,6 @@ class TestUserIdPassthrough:
                 runtime_paths,
                 streaming=streaming,
                 show_tool_calls=False,
-                attempt_model_runtime=ToolRuntimeModelBinding(),
             )
 
         assert response == "Finished."

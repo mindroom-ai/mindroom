@@ -183,7 +183,8 @@ class TeamResume:
     """Continue one paused team run under a turn's hooks and storage; the ``ContinueRun`` the delegation driver calls.
 
     ``plan`` selects the stored history the leader's resume request replays: the turn's own plan within a turn, the
-    configured policy for a saved approval.
+    configured policy for a saved approval. ``model_name`` is the turn's model within a turn, which the resumed run's
+    tool calls carry; a saved approval's resume has none, so its calls keep the model of the tool context it runs in.
     """
 
     spec: TeamSpec
@@ -195,6 +196,7 @@ class TeamResume:
     plan: ResolvedReplayPlan | None
     user_id: str | None
     toolkit_owners: Mapping[tuple[str, str], str]
+    model_name: str | None = None
 
     def events(self, paused: TeamRunRecord, decisions: ResumeDecisions) -> AsyncIterator[TeamRunEvent]:
         """Resume ``paused`` with ``decisions`` routed to the calls the team waits for; the stream ends with ``RunFinished``.
@@ -226,6 +228,7 @@ class TeamResume:
                 metadata=deepcopy(paused.metadata),
                 session=session,
                 history_scope=self.storage.scope,
+                model_name=self.model_name,
             ),
             hooks=self.hooks,
             persist=persist_into(self.records, self.storage),

@@ -5486,6 +5486,7 @@ depends_on = [
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
 ]
 
@@ -6945,7 +6946,6 @@ expose = [
     "detached_requester_context",
     "current_budget_monitor",
     "get_detached_requester_context",
-    "ToolRuntimeModelBinding",
     "ToolRuntimeHookBindings",
     "ToolRuntimeSupport",
     "append_tool_runtime_attachment_id",
@@ -6963,6 +6963,7 @@ expose = [
     "resolve_tool_runtime_hook_bindings",
     "runtime_context_from_dispatch_context",
     "tool_runtime_context",
+    "tool_runtime_model_context",
     "worker_progress_pump_scope",
     "worker_runtime_context",
 ]

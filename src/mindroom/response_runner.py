@@ -2700,7 +2700,7 @@ class ResponseRunner:
                         request,
                         response_run_id=continuation.run_id,
                     ),
-                    run_id_callback=self._note_run_id,
+                    run_id_callback=lambda run_id, _model_name: self._note_run_id(run_id),
                     progress=progress,
                 )
         return response_text
@@ -4824,7 +4824,6 @@ class ResponseRunner:
                             else None,
                             reason_prefix=team_request.reason_prefix,
                             pipeline_timing=request.pipeline_timing,
-                            attempt_model_runtime=self.deps.tool_runtime,
                             turn_recorder=team_turn_recorder,
                         )
 
@@ -4919,7 +4918,6 @@ class ResponseRunner:
                                     else None,
                                     reason_prefix=team_request.reason_prefix,
                                     pipeline_timing=request.pipeline_timing,
-                                    attempt_model_runtime=self.deps.tool_runtime,
                                     turn_recorder=team_turn_recorder,
                                 )
 
@@ -5178,7 +5176,7 @@ class ResponseRunner:
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
 
-        def note_attempt_run_id(current_run_id: str) -> None:
+        def note_attempt_run_id(current_run_id: str, _model_name: str) -> None:
             self._note_run_id(current_run_id)
             turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
@@ -5227,7 +5225,6 @@ class ResponseRunner:
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 supports_native_tool_approval=True,
-                attempt_model_runtime=self.deps.tool_runtime,
             )
 
         try:
@@ -5282,7 +5279,7 @@ class ResponseRunner:
             request=request,
         )
 
-        def note_attempt_run_id(current_run_id: str) -> None:
+        def note_attempt_run_id(current_run_id: str, _model_name: str) -> None:
             self._note_run_id(current_run_id)
             turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
@@ -5332,7 +5329,6 @@ class ResponseRunner:
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 supports_native_tool_approval=True,
-                attempt_model_runtime=self.deps.tool_runtime,
             )
 
             async with _response_typing_indicator(

@@ -294,12 +294,13 @@ async def prepare_materialized_team_execution(
 
 @dataclass(frozen=True)
 class _LeaderRun:
-    """How the leader of one prepared team turn runs: where it stores, the hooks around its loop, its request settings."""
+    """How the leader of one prepared team turn runs: where it stores, its hooks, request settings, and model."""
 
     spec: TeamSpec
     storage: TeamStorage | None
     hooks: LoopHooks
     request_template: ModelRequest
+    model_name: str
 
     def start(
         self,
@@ -322,6 +323,7 @@ class _LeaderRun:
                 metadata=metadata,
                 session=self.storage.session if self.storage is not None else None,
                 history_scope=self.storage.scope if self.storage is not None else None,
+                model_name=self.model_name,
             ),
             hooks=self.hooks,
             persist=persist_into(records, self.storage),
@@ -367,6 +369,7 @@ def _leader_run(
             jobs=built.leader_jobs,
         ),
         request_template=with_native_history(ModelRequest(messages=(), stream=stream), history.native_history),
+        model_name=prepared.runtime_model_name,
     )
 
 
@@ -483,7 +486,6 @@ class _TeamTurn:
     run_metadata_collector: dict[str, Any] | None
     configured_team_name: str | None
     pipeline_timing: DispatchPipelineTiming | None
-    attempt_model_runtime: ai_runtime.AttemptModelRuntime | None
     turn_recorder: TurnRecorder
     reason_prefix: str
     holder: _TeamTurnHolder
@@ -613,7 +615,8 @@ class _TeamTurn:
             compaction_lifecycle=self.compaction_lifecycle,
             turn_recorder=self.turn_recorder,
         )
-        ai_runtime.note_attempt_run_id(self.run_id_callback, attempt.run_id)
+        if self.run_id_callback is not None:
+            self.run_id_callback(attempt.run_id)
         request_context = _team_request_log_context(
             self.ctx,
             team_name=self.entity_name,
@@ -645,6 +648,7 @@ class _TeamTurn:
                     plan=prepared.prepared_history.replay_plan,
                     user_id=self.user_id,
                     toolkit_owners=tool_owners_by_agent(*members.builds),
+                    model_name=prepared.runtime_model_name,
                 ),
                 team_name=self.entity_name,
                 config=config,
@@ -652,11 +656,7 @@ class _TeamTurn:
                 execution_identity=self.execution_identity,
                 refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
             )
-        return attempt, ai_runtime.stream_attempt_with_model(
-            self.attempt_model_runtime,
-            stream_with_llm_request_log_context(events, request_context=request_context),
-            active_model_name=prepared.runtime_model_name,
-        )
+        return attempt, stream_with_llm_request_log_context(events, request_context=request_context)
 
     async def run_blocking_attempt(
         self,
@@ -924,7 +924,6 @@ def _team_turn(
     run_metadata_collector: dict[str, Any] | None,
     configured_team_name: str | None,
     pipeline_timing: DispatchPipelineTiming | None,
-    attempt_model_runtime: ai_runtime.AttemptModelRuntime | None,
     turn_recorder: TurnRecorder,
     reason_prefix: str,
     member_model_names: Mapping[str, str] | None,
@@ -994,7 +993,6 @@ def _team_turn(
         run_metadata_collector=run_metadata_collector,
         configured_team_name=configured_team_name,
         pipeline_timing=pipeline_timing,
-        attempt_model_runtime=attempt_model_runtime,
         turn_recorder=turn_recorder,
         reason_prefix=reason_prefix,
         holder=_TeamTurnHolder(team_members=team_members, member_model_names=team_members.model_names),
@@ -1026,7 +1024,6 @@ async def team_response(
     run_metadata_collector: dict[str, Any] | None = None,
     configured_team_name: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-    attempt_model_runtime: ai_runtime.AttemptModelRuntime | None = None,
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
@@ -1055,7 +1052,6 @@ async def team_response(
         run_metadata_collector=run_metadata_collector,
         configured_team_name=configured_team_name,
         pipeline_timing=pipeline_timing,
-        attempt_model_runtime=attempt_model_runtime,
         turn_recorder=turn_recorder,
         reason_prefix=reason_prefix,
         member_model_names=member_model_names,
@@ -1104,7 +1100,6 @@ async def team_response_stream(
     run_metadata_collector: dict[str, Any] | None = None,
     configured_team_name: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-    attempt_model_runtime: ai_runtime.AttemptModelRuntime | None = None,
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
@@ -1134,7 +1129,6 @@ async def team_response_stream(
         run_metadata_collector=run_metadata_collector,
         configured_team_name=configured_team_name,
         pipeline_timing=pipeline_timing,
-        attempt_model_runtime=attempt_model_runtime,
         turn_recorder=turn_recorder,
         reason_prefix=reason_prefix,
         member_model_names=member_model_names,
