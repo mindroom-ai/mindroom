@@ -74,11 +74,10 @@ logger = get_logger(__name__)
 
 _NO_MEMBER_DISPLAY_NAMES: Mapping[str, str] = MappingProxyType({})
 
-_PARTIAL_REPLY_SENDER_LABELS = {
-    "interrupted": "You (interrupted reply draft)",
-    "in_progress": "You (reply still streaming)",
-}
-_PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
+_IN_PROGRESS_REPLY_LABEL = "You (reply still streaming)"
+_PARTIAL_REPLY_GUIDANCE_LABELS = frozenset(
+    {"You (interrupted reply draft)", _IN_PROGRESS_REPLY_LABEL, "You (partial reply)"},
+)
 _HOOK_OUTPUT_LABEL = "[posted automatically by hook {hook_source}, not written by you or any agent]"
 # Claims about who wrote a message; only MindRoom's own accounts may make them.
 _AUTHORSHIP_CLAIM_KEYS = (ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY)
@@ -216,21 +215,6 @@ def _cap_visible_message_body(body: str, max_length: int | None) -> str:
     if max_length <= 0:
         return ""
     return f"{body[: max_length - 1]}…"
-
-
-def _build_unseen_messages_header(
-    partial_reply_kinds: set[_PartialReplyKind],
-    *,
-    config: Config,
-) -> str:
-    """Choose the unseen-context guidance for the partial-reply mix present."""
-    if not partial_reply_kinds:
-        return config.get_prompt("DEFAULT_UNSEEN_MESSAGES_HEADER")
-    if partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}:
-        return config.get_prompt("INTERRUPTED_PARTIAL_REPLY_HEADER")
-    if partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}:
-        return config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")
-    return config.get_prompt("MIXED_PARTIAL_REPLY_HEADER")
 
 
 def _context_message_from_visible_message(
@@ -426,9 +410,13 @@ def _build_unseen_context_messages(
         attachment_context=attachment_context,
         member_display_names=member_display_names,
     )
+    # Unseen context keeps only in-progress drafts of this sender, so only their header can apply.
+    # TODO(simplify): Nothing renders DEFAULT_UNSEEN_MESSAGES_HEADER, INTERRUPTED_PARTIAL_REPLY_HEADER,
+    # MIXED_PARTIAL_REPLY_HEADER, or PREVIOUS_CONVERSATION_THREAD_HEADER, yet each can be overridden. Retire the four
+    # from the prompt registry. Operators who override them would notice their overrides rejected.
     if partial_reply_kinds:
         context_messages = (
-            Message(role="user", content=_build_unseen_messages_header(partial_reply_kinds, config=config)),
+            Message(role="user", content=config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")),
             *context_messages,
         )
     return (
@@ -631,7 +619,7 @@ def _get_unseen_messages_for_sender(
     current_event_id: str | None,
     active_event_ids: Collection[str],
 ) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
-    """Filter thread_history to unseen messages for one Matrix sender."""
+    """Filter thread_history to unseen messages for one Matrix sender, leaving out its interrupted drafts."""
     unseen: list[ResolvedVisibleMessage] = []
     partial_reply_kinds: set[_PartialReplyKind] = set()
     in_progress_event_ids: set[str] = set()
@@ -650,21 +638,15 @@ def _get_unseen_messages_for_sender(
             )
             if partial_kind is _PartialReplyKind.INTERRUPTED:
                 continue
-            if partial_kind is not None:
+            if partial_kind is _PartialReplyKind.IN_PROGRESS:
                 # Strip live status notes before the canonical interrupted replay marker is added.
                 cleaned_body = clean_partial_reply_text(msg.body)
                 if not cleaned_body:
                     continue
                 partial_reply_kinds.add(partial_kind)
-                if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
+                if event_id is not None:
                     in_progress_event_ids.add(event_id)
-                unseen.append(
-                    replace_visible_message(
-                        msg,
-                        sender=_PARTIAL_REPLY_SENDER_LABELS.get(partial_kind.value, "You (partial reply)"),
-                        body=cleaned_body,
-                    ),
-                )
+                unseen.append(replace_visible_message(msg, sender=_IN_PROGRESS_REPLY_LABEL, body=cleaned_body))
                 continue
         unseen.append(msg)
     return unseen, partial_reply_kinds, in_progress_event_ids
