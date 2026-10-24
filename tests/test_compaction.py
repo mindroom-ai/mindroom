@@ -217,6 +217,7 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
     )
 
     metadata = build_ai_run_metadata_content(
+        prices={},
         config=config,
         model_name="default",
         run_id="run-1",
@@ -251,6 +252,7 @@ def test_ai_run_metadata_fallback_usage_only_backfills_missing_fields(tmp_path: 
     config, _runtime_paths = _make_prepare_config(tmp_path)
 
     metadata = build_ai_run_metadata_content(
+        prices={},
         config=config,
         model_name="default",
         run_id="run-1",
@@ -293,6 +295,7 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
     )
 
     metadata = build_ai_run_metadata_content(
+        prices={},
         config=config,
         model_name="default",
         run_id="run-1",

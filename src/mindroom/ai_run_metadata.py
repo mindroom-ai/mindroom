@@ -7,12 +7,14 @@ from typing import TYPE_CHECKING, Any
 from agno.metrics import RunMetrics
 from agno.run.base import RunStatus
 
+from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.model_usage import context_input_tokens_from_counts
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.budgets.pricing import PricedModel
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.history.types import PreparedHistoryState
@@ -240,6 +242,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     status: RunStatus | str | None,
     model: str | None,
     model_provider: str | None,
+    prices: Mapping[tuple[str, str], PricedModel],
     metrics: RunMetrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
     context_metrics: RunMetrics | None = None,
@@ -257,6 +260,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     mid-run (for example via `switch_thread_model`), and this metadata must
     describe the model that actually produced the response.
     `context_metrics` belongs to that model run before team-member billing is aggregated.
+    `prices` maps recorded (provider, model ID) identities to prices for the reply's cost.
     """
     model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
@@ -332,6 +336,15 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     payload["model"] = model_payload
     if usage_payload:
         payload["usage"] = usage_payload
+    cost = run_cost_usd(
+        metrics if isinstance(metrics, RunMetrics) else None,
+        usage_payload,
+        model_provider=model_provider,
+        model_id=model_id,
+        prices=prices,
+    )
+    if cost is not None:
+        payload["cost"] = {"usd": format_cost_usd(cost)}
     context_payload = _build_context_payload(
         context_input_tokens=resolved_context_input_tokens,
         cache_read_tokens=resolved_context_cache_read_tokens,

@@ -1063,6 +1063,7 @@ class TestChatCompletions:
             if isinstance(collector, dict):
                 collector.update(
                     build_ai_run_metadata_content(
+                        prices={},
                         config=Config(
                             agents={},
                             models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},

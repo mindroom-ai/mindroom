@@ -37,6 +37,7 @@ from mindroom.approval.tool_owners import (
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
 )
+from mindroom.budgets.pricing import model_prices
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import DelegationState
 from mindroom.error_handling import run_error_event_text
@@ -262,6 +263,7 @@ async def _continue_persisted_agent(
         completed_tools=tuple(presentation.tool_trace),
         metadata_content=build_ai_run_metadata_content(
             config=config,
+            prices=model_prices(config, runtime_paths),
             model_name=model_name,
             run_id=response.run_id,
             session_id=response.session_id or continuation.session_id,

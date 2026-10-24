@@ -68,6 +68,15 @@ Usage from session history that predates usage tracking is imported once at star
 Because of these gaps, model, user, and daily rows do not necessarily sum to the top-level totals.
 Totals support cost estimates, but provider-specific charging rules and calls outside retained storage are not captured.
 
+## Reply Cost
+
+With [prices](https://docs.mindroom.chat/configuration/models/#model-config-fields) set on a model, each agent or team reply that uses it records its cost in USD, priced the same way as [budget spend](https://docs.mindroom.chat/budgets/#how-spend-is-counted).
+MindRoom Chat shows the cost beside each reply, the conversation's cost up to that reply in the reply's details, and the thread's total in the thread banner.
+A reply's cost covers its own model calls, including team members on other models; helper work such as compaction summaries, memory extraction, and thread titles is not shown on messages but still counts toward budgets.
+A thread total adds up the replies MindRoom Chat has loaded and reads "at least" while older messages are not loaded.
+A regenerated reply shows the cost of its latest run only.
+Replies on models without prices show no cost.
+
 ## Usage Report API
 
 `GET /api/usage` returns the organization-wide report under standard dashboard authentication, like other administrator APIs.

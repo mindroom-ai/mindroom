@@ -531,6 +531,7 @@ def test_native_usage_metadata_separates_billing_from_context(
         },
     )
     metadata = build_ai_run_metadata_content(
+        prices={},
         config=config,
         model_name="default",
         run_id="run",
@@ -631,6 +632,7 @@ def test_team_context_uses_leader_metrics_for_shared_model(tmp_path: Path, *, st
     if stream:
         metadata = _build_streamed_team_run_metadata_content(
             config=config,
+            prices={},
             prepared_execution=prepared,
             completed_run_event=TeamRunCompletedEvent(metrics=leader, member_responses=[member]),
             usage=_TeamStreamUsage(latest_model_id="claude-sonnet-5", latest_model_provider="Anthropic"),
@@ -642,6 +644,7 @@ def test_team_context_uses_leader_metrics_for_shared_model(tmp_path: Path, *, st
     else:
         metadata = _build_team_run_metadata_content(
             config=config,
+            prices={},
             prepared_execution=prepared,
             response=TeamRunOutput(
                 model="claude-sonnet-5",

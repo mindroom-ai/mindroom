@@ -42,6 +42,7 @@ from mindroom.ai_run_metadata import (
 )
 from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.budgets.pricing import model_prices
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -1833,6 +1834,7 @@ async def ai_response(  # noqa: C901, PLR0915
         if run_metadata_collector is not None:
             metadata_content = build_ai_run_metadata_content(
                 config=config,
+                prices=model_prices(config, runtime_paths),
                 model_name=prepared_run.runtime_model_name,
                 run_id=response.run_id,
                 session_id=response.session_id or session_id,
@@ -2317,6 +2319,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
             return build_ai_run_metadata_content(
                 config=config,
+                prices=model_prices(config, runtime_paths),
                 model_name=prepared_run.runtime_model_name,
                 run_id=event_run_id,
                 session_id=event_session_id or session_id,
@@ -2518,6 +2521,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
             metadata_content = build_ai_run_metadata_content(
                 config=config,
+                prices=model_prices(config, runtime_paths),
                 model_name=prepared_run.runtime_model_name,
                 run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
                 session_id=(

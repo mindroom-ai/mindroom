@@ -557,6 +557,7 @@ def _blocking_supersession_final(case: _SupersessionCase) -> dict[str, Any]:
         "msgtype": "m.text",
         "body": "LIVE-FUZZ call=2 END call=2",
         **build_ai_run_metadata_content(
+            prices={},
             config=Config(models={}),
             model_name="default",
             run_id="run-new",

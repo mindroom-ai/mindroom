@@ -51,6 +51,7 @@ from mindroom.approval.tool_owners import (
     validate_approval_tool_owners,
 )
 from mindroom.authorization import get_available_responders_in_room
+from mindroom.budgets.pricing import model_prices
 from mindroom.constants import (
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     ROUTER_AGENT_NAME,
@@ -157,6 +158,7 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
     from agno.run.requirement import RunRequirement
 
+    from mindroom.budgets.pricing import PricedModel
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
@@ -1815,6 +1817,7 @@ def _aggregate_team_usage_metrics(
 def _build_team_run_metadata_content(
     *,
     config: Config,
+    prices: Mapping[tuple[str, str], PricedModel],
     prepared_execution: _PreparedMaterializedTeamExecution,
     response: TeamRunOutput | RunOutput,
     session_id: str | None,
@@ -1827,6 +1830,7 @@ def _build_team_run_metadata_content(
     """
     return build_ai_run_metadata_content(
         config=config,
+        prices=prices,
         model_name=prepared_execution.runtime_model_name,
         run_id=response.run_id,
         session_id=response.session_id or session_id,
@@ -1885,6 +1889,7 @@ class _TeamStreamUsage:
 def _build_streamed_team_run_metadata_content(
     *,
     config: Config,
+    prices: Mapping[tuple[str, str], PricedModel],
     prepared_execution: _PreparedMaterializedTeamExecution,
     completed_run_event: TeamRunCompletedEvent | None,
     usage: _TeamStreamUsage,
@@ -1907,6 +1912,7 @@ def _build_streamed_team_run_metadata_content(
     fallback_payload = usage.fallback_payload()
     return build_ai_run_metadata_content(
         config=config,
+        prices=prices,
         model_name=prepared_execution.runtime_model_name,
         run_id=run_id,
         session_id=session_id,
@@ -2817,6 +2823,7 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
             response_text=response_text,
             metadata_content=build_ai_run_metadata_content(
                 config=config,
+                prices=model_prices(config, runtime_paths),
                 model_name=model_name,
                 run_id=continued.run_id,
                 session_id=continued.session_id or session_id,
@@ -3169,6 +3176,7 @@ async def team_response(  # noqa: C901, PLR0915
         if run_metadata_collector is not None and isinstance(response, (TeamRunOutput, RunOutput)):
             metadata_content = _build_team_run_metadata_content(
                 config=config,
+                prices=model_prices(config, orchestrator.runtime_paths),
                 prepared_execution=prepared_execution,
                 response=response,
                 session_id=ctx.session_id,
@@ -3663,6 +3671,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 return None
             return _build_streamed_team_run_metadata_content(
                 config=config,
+                prices=model_prices(config, orchestrator.runtime_paths),
                 prepared_execution=prepared_execution,
                 completed_run_event=None,
                 usage=usage,
@@ -3747,6 +3756,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 if run_metadata_collector is not None:
                     event_metadata_content = _build_team_run_metadata_content(
                         config=config,
+                        prices=model_prices(config, orchestrator.runtime_paths),
                         prepared_execution=prepared_execution,
                         response=event,
                         session_id=ctx.session_id,
@@ -4004,6 +4014,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         if run_metadata_collector is not None:
             end_metadata_content = _build_streamed_team_run_metadata_content(
                 config=config,
+                prices=model_prices(config, orchestrator.runtime_paths),
                 prepared_execution=prepared_execution,
                 completed_run_event=completed_run_event,
                 usage=usage,
