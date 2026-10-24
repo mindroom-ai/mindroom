@@ -343,15 +343,15 @@ class TeamStreamPresentation:
         tool_name, result, pending_tool, completed_trace = completion
         if pending_tool is None or pending_tool.visible_tool_index is None or completed_trace is None:
             return
-        completed_trace.scope_key = pending_tool.scope_key or scope_key
+        completed_trace.scope_key = scope_key
         if self.show_tool_calls:
             updated_text, _ = complete_pending_tool_block(
-                self._slot_text(pending_tool.scope_key),
+                self._slot_text(scope_key),
                 tool_name,
                 result,
                 tool_index=pending_tool.visible_tool_index,
             )
-            self._set_slot_text(pending_tool.scope_key, updated_text)
+            self._set_slot_text(scope_key, updated_text)
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
 
     def start_member_tool(self, member_id: str, tool: ToolExecution | None) -> None:
