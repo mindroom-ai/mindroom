@@ -1,21 +1,16 @@
 """Tests for the Google Drive OAuth-backed tool."""
 
-# ruff: noqa: D102, D103, TC003
+# ruff: noqa: D103, TC003
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.agent._tools import parse_tools
-from agno.models.base import Model
-from agno.models.response import ModelResponse
-from agno.tools.function import Function
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 import mindroom.custom_tools.google_drive as google_drive_module
@@ -26,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, GOOGLE_DRIVE_READ_OAUTH_SCOPES
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
@@ -46,33 +42,6 @@ def _save_oauth_credentials(
         credentials_manager=credentials_manager,
         worker_target=None,
     )
-
-
-class MinimalModel(Model):
-    """Minimal model surface for Agno tool parsing tests."""
-
-    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        return ModelResponse(content="ok")
-
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        return ModelResponse(content="ok")
-
-    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
-        yield ModelResponse(content="ok")
-
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        yield ModelResponse(content="ok")
-
-    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
-        return response
-
-    def _parse_provider_response_delta(
-        self,
-        response: ModelResponse,
-        *_args: object,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        return response
 
 
 _DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -293,11 +262,7 @@ def test_google_drive_model_functions_do_not_collide_with_local_file_tools(tmp_p
         )
         for tool_name in ("file", "coding", "google_drive")
     ]
-    model = MinimalModel(id="fake-model", provider="fake")
-    agent = Agent(id="code", model=model)
-
-    parsed_tools = parse_tools(agent, toolkits, model, async_mode=True)
-    function_names = {function.name for function in parsed_tools if isinstance(function, Function)}
+    function_names = {function.name for toolkit in toolkits for function in adapt_toolkit(toolkit).functions}
 
     assert {"read_file", "list_files", "search_files"} <= function_names
     assert {
