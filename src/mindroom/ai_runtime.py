@@ -41,7 +41,6 @@ __all__ = [
     "queued_message_signal_context",
     "queued_notice_after_tool_batch",
     "queued_notice_on_resume_entry",
-    "register_queued_notice_storage",
     "register_scope_notice_storage",
     "scrub_queued_notice_session_context",
 ]
@@ -373,37 +372,24 @@ def _finalize_queued_notice_in_new_session_storage(
         storage.save_runs(session, changed_runs)
 
 
-def register_queued_notice_storage(
-    *,
-    storage_factory: Callable[[], ConversationStore] | None,
-    session_id: str | None,
-    session_kind: SessionKind,
-    entity_name: str,
-) -> None:
-    """Register storage touched by one response for queued-notice finalization; the first registration wins."""
+def register_scope_notice_storage(*, scope_context: ScopeSessionContext | None, entity_name: str) -> None:
+    """Register the scope one response ran in for queued-notice finalization; the first registration wins.
+
+    A response without a scope, or whose scope context opens no storage of its own, registers none.
+    """
     notice_context = _queued_message_notice_context.get()
-    if notice_context is None or storage_factory is None or not session_id:
+    if notice_context is None or scope_context is None or scope_context.storage_factory is None:
         return
+    session_id = scope_context.session_id
+    session_kind = scope_context.scope.kind
     notice_context.storage_targets.setdefault(
         (entity_name, session_id, session_kind),
         _QueuedNoticeStorageTarget(
-            storage_factory=storage_factory,
+            storage_factory=scope_context.storage_factory,
             session_id=session_id,
             session_kind=session_kind,
             entity_name=entity_name,
         ),
-    )
-
-
-def register_scope_notice_storage(*, scope_context: ScopeSessionContext | None, entity_name: str) -> None:
-    """Register the storage of the scope one response ran in, by its context; a response without a scope has none."""
-    if scope_context is None:
-        return
-    register_queued_notice_storage(
-        storage_factory=scope_context.storage_factory,
-        session_id=scope_context.session_id,
-        session_kind=scope_context.scope.kind,
-        entity_name=entity_name,
     )
 
 

@@ -100,9 +100,8 @@ async def record_system_usage(
     *,
     runtime_paths: RuntimePaths,
     kind: IndependentUsageKind,
-    requester_id: str | None = None,
 ) -> None:
-    """Persist one internal provider result under an admin-only, content-free source."""
+    """Persist one internal provider result under an admin-only, content-free source that names no requester."""
     if response.metrics is None:
         return
     try:
@@ -120,7 +119,7 @@ async def record_system_usage(
             owner=owner,
             invocation_id=response.run_id,
             kind=kind,
-            requester_id=requester_id,
+            requester_id=None,
         )
     except Exception as exc:
         logger.warning("system_usage_recording_failed", kind=kind, error_type=type(exc).__name__)

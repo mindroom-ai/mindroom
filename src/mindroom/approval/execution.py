@@ -139,8 +139,6 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
     """Retain exact delegated approval anchors alongside the parent's own tools."""
     paused = paused_attempt_from_response(
         response,
-        fallback_session_id=response.session_id,
-        fallback_run_id=response.run_id,
         toolkit_owners={},
     )
     if paused is not None:
@@ -227,8 +225,6 @@ async def _continue_persisted_agent(
     response = collected.response
     paused = paused_attempt_from_response(
         response,
-        fallback_session_id=continuation.session_id,
-        fallback_run_id=continuation.run_id,
         toolkit_owners=tool_owners_by_agent(build),
     )
     if paused is not None:

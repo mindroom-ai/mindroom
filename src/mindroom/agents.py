@@ -1103,7 +1103,7 @@ def _approval_may_gate(
     config: Config,
     function_name: str,
     approval_type: str | None,
-    registered_tool_name: str | None,
+    registered_tool_name: str,
 ) -> bool:
     """Return whether a config approval rule may gate one function of the toolkit registered as this name."""
     is_matrix_room_runtime_function = (
@@ -1124,7 +1124,7 @@ def _hide_unresumable_approval_functions(
     toolkit: Toolkit,
     config: Config,
     *,
-    registered_tool_name: str | None = None,
+    registered_tool_name: str,
 ) -> Toolkit | None:
     """Drop the functions that ask for approval, for a caller that cannot resume a paused run.
 
@@ -1147,8 +1147,8 @@ def apply_tool_approval_capability(
     toolkit: Toolkit,
     config: Config,
     *,
-    registered_tool_name: str | None = None,
-    approvals_as_jobs: bool = False,
+    registered_tool_name: str,
+    approvals_as_jobs: bool,
 ) -> AdaptedToolkit:
     """Mark the functions of ``adapted`` that pause the run for approval, or whose call's job asks first.
 

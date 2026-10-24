@@ -152,9 +152,7 @@ def _classify_partial_reply(
     if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED}:
         return _PartialReplyKind.INTERRUPTED
     if status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
-        if isinstance(msg.event_id, str) and msg.event_id not in active_event_ids:
-            return _PartialReplyKind.INTERRUPTED
-        return _PartialReplyKind.IN_PROGRESS
+        return _PartialReplyKind.IN_PROGRESS if msg.event_id in active_event_ids else _PartialReplyKind.INTERRUPTED
     return _PartialReplyKind.INTERRUPTED if is_interrupted_partial_reply(msg.body) else None
 
 
@@ -645,8 +643,7 @@ def _get_unseen_messages_for_sender(
                 if not cleaned_body:
                     continue
                 partial_reply_kinds.add(partial_kind)
-                if event_id is not None:
-                    in_progress_event_ids.add(event_id)
+                in_progress_event_ids.add(event_id)
                 unseen.append(replace_visible_message(msg, sender=_IN_PROGRESS_REPLY_LABEL, body=cleaned_body))
                 continue
         unseen.append(msg)
