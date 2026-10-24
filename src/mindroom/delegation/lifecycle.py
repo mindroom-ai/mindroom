@@ -22,7 +22,7 @@ from mindroom.delegation.audit import observe_child_event as record_child_event
 from mindroom.delegation.personas import caller_toolkit_names, self_only_refusal
 from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
-from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.llm.events import ContentDelta, RunFinished, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import SubagentPersona
+    from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
     from mindroom.llm.events import RunEvent
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -46,9 +46,6 @@ if TYPE_CHECKING:
 MAX_DELEGATION_DEPTH = 3
 
 type _DelegationGrant = Literal["delegate", "dynamic_workflow"]
-
-type _ChildTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]
-_TERMINAL = frozenset({"completed", "failed", "cancelled", "denied"})
 
 
 @dataclass
@@ -209,11 +206,11 @@ async def settle_child_response(
             denial_reasons=denial_reasons,
         )
     except DelegationRecordLimitError:
-        if child.status not in _TERMINAL:
+        if child.status not in TERMINAL_CHILD_STATUSES:
             raise
         # A full record keeps room for its terminal event, so settle it without the remaining ordinary events.
         usage = child_response_usage(response)
-    if child.status in _TERMINAL:
+    if child.status in TERMINAL_CHILD_STATUSES:
         await finish_child_record(child, config=config, runtime_paths=runtime_paths, usage=usage)
 
 
@@ -222,14 +219,14 @@ async def finish_child_turn(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    status: _ChildTerminalStatus | None = None,
+    status: DelegationTerminalStatus | None = None,
     reason: str | None = None,
 ) -> str:
     """Settle an interruption without overwriting an already retained terminal outcome."""
-    if status is not None and child.status not in _TERMINAL:
+    if status is not None and child.status not in TERMINAL_CHILD_STATUSES:
         child.status = status
         child.result = reason
-    if child.status not in _TERMINAL:
+    if child.status not in TERMINAL_CHILD_STATUSES:
         msg = f"Cannot finish active delegation: {child.delegation_id}"
         raise ValueError(msg)
     await update_subagent_turn(child, runtime_paths)

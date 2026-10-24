@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls
 from mindroom.delegation.lifecycle import live_delegation_config
+from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.approvals import ask_job_approvals
 from mindroom.tool_jobs.runtime import get_background_runtime
 
@@ -33,8 +34,6 @@ async def request_child_approvals(
 
     Returns each call's decision and denial reason, and the planned calls the child resumes with.
     """
-    from mindroom.response_turn import paused_attempt_from_response  # noqa: PLC0415 - response_turn imports delegation
-
     paused = paused_attempt_from_response(
         response,
         fallback_session_id=child.session_id,

@@ -64,10 +64,17 @@ from mindroom.delegation.state import (
 )
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.history.types import HistoryScope
+from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
+from mindroom.response_turn import (
+    ResponsePausedForApproval,
+    apply_exact_approval_decisions,
+    local_approval_requirements,
+    paused_attempt_from_response,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -109,8 +116,12 @@ if TYPE_CHECKING:
     from mindroom.approval.resume import ContinueRun, ResumeEvents
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.records import DelegationTerminalStatus
-    from mindroom.delegation.state import ChildResponseRunner, DelegationHookState, SubagentPersona
+    from mindroom.delegation.state import (
+        ChildResponseRunner,
+        DelegationHookState,
+        DelegationTerminalStatus,
+        SubagentPersona,
+    )
     from mindroom.event_journal import ApprovalCall
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent
@@ -169,22 +180,23 @@ class _DelegationTarget:
     model: str | None = None
 
 
+def _delegation_call(requirement: RunRequirement) -> bool:
+    tool = requirement.tool_execution
+    return tool.tool_name in DELEGATION_FUNCTIONS and bool(tool.external_execution_required)
+
+
 def _external_requirements(response: AnyRunRecord) -> list[RunRequirement]:
+    """Return the run's delegation calls still waiting for their answers."""
     return [
         requirement
         for requirement in response.requirements or ()
-        if requirement.needs_external_execution and requirement.tool_execution.tool_name in DELEGATION_FUNCTIONS
+        if _delegation_call(requirement) and requirement.external_execution_result is None
     ]
 
 
 def has_delegation_state(response: AnyRunRecord) -> bool:
     """Return whether the native delegation driver owns this run's pause."""
     return bool(_external_requirements(response) or (response.metadata or {}).get(DELEGATION_STATE_KEY))
-
-
-def _delegation_call(requirement: RunRequirement) -> bool:
-    tool = requirement.tool_execution
-    return tool.tool_name in DELEGATION_FUNCTIONS and bool(tool.external_execution_required)
 
 
 def answered_delegation_calls(response: AnyRunRecord) -> dict[tuple[str | None, str], str]:
@@ -291,10 +303,8 @@ async def _execute_child(
     fresh: bool,
 ) -> _ChildOutcome:
     """Start a fresh envelope or resume the exact stored child under its own scope."""
-    # These imports cross the creation/envelope cycle only during execution.
+    # mindroom.agents imports this module, so the child's agent is created through a deferred import.
     from mindroom.agents import create_agent  # noqa: PLC0415
-    from mindroom.knowledge.utils import resolve_agent_knowledge_access_async  # noqa: PLC0415
-    from mindroom.response_turn import local_approval_requirements  # noqa: PLC0415
 
     identity = child_execution_identity(child)
     context = get_tool_runtime_context()
@@ -328,15 +338,14 @@ async def _execute_child(
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    if decisions is not None:
-        await settle_child_response(
-            child,
-            persisted,
-            config=config,
-            runtime_paths=runtime_paths,
-            decisions=decisions,
-            denial_reasons=denial_reasons,
-        )
+    await settle_child_response(
+        child,
+        persisted,
+        config=config,
+        runtime_paths=runtime_paths,
+        decisions=decisions,
+        denial_reasons=denial_reasons,
+    )
     knowledge = await resolve_agent_knowledge_access_async(
         child.child_agent_name,
         config,
@@ -431,8 +440,6 @@ async def _start_child_envelope(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> _ChildOutcome:
     """Run the normal response loop in the child's retained conversation scope."""
-    from mindroom.response_turn import ResponsePausedForApproval  # noqa: PLC0415
-
     result = None
     toolkit_owners = {}
     try:
@@ -473,7 +480,7 @@ async def _continue_child(
     runtime_paths: RuntimePaths,
     identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    decisions: dict[str, bool] | None,
+    decisions: dict[str, bool],
     denial_reasons: dict[str, str | None] | None,
     approval_calls: Sequence[ApprovalCall],
 ) -> RunRecord:
@@ -482,15 +489,14 @@ async def _continue_child(
     async def continue_run(paused: RunRecord, resume: ResumeDecisions, _on_event: ResumeEvents | None) -> RunRecord:
         return await forward_resume(_observed_child_events(runner.events(paused, resume)), None, record_type=RunRecord)
 
+    driver_decisions: dict[str, bool] | None = decisions
     if not has_delegation_state(persisted):
-        if decisions is None:
-            return persisted
         persisted = await continue_run(
             persisted,
             approval_decisions(approval_calls, decisions, denial_reasons or {}),
             None,
         )
-        decisions = None
+        driver_decisions = None
         denial_reasons = None
         approval_calls = ()
     return await _drive_delegations(
@@ -505,15 +511,13 @@ async def _continue_child(
         execution_identity=identity,
         delegation_depth=child.depth,
         refresh_scheduler=refresh_scheduler,
-        decisions=decisions,
+        decisions=driver_decisions,
         denial_reasons=denial_reasons,
         approval_calls=approval_calls,
     )
 
 
 def _pending_child(state: DelegationState, child: DelegationChild, outcome: _ChildOutcome) -> None:
-    from mindroom.response_turn import paused_attempt_from_response  # noqa: PLC0415
-
     response = outcome.response
     paused = paused_attempt_from_response(
         response,
@@ -543,25 +547,6 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
         state.pending_requirements.append(requirement.to_dict())
 
 
-async def _resolved_child_tool(
-    source: DelegationPendingTool,
-    call_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> ToolExecution | None:
-    """Read the exact approved attempt, even after the child starts another run."""
-    response = await read_child_run(source.child, config, runtime_paths)
-    if response is None:
-        return None
-    for tool in response.tools or ():
-        if tool.tool_call_id == source.tool_call_id and not tool.is_paused:
-            projected = deepcopy(tool)
-            projected.tool_call_id = call_id
-            return projected
-    return None
-
-
 async def _complete_approved_child_tools(
     pending_tools: list[dict[str, object]],
     tool_sources: Mapping[str, DelegationPendingTool],
@@ -570,17 +555,17 @@ async def _complete_approved_child_tools(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> None:
-    """Publish each resumed tool's retained result in the parent's live trace."""
+    """Publish each resumed tool's result, read from its exact approved attempt, in the parent's live trace."""
     for pending_tool in pending_tools:
         call_id = str(pending_tool["tool_call_id"])
-        completed_tool = await _resolved_child_tool(
-            tool_sources[call_id],
-            call_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-        if completed_tool is not None:
-            on_event(ToolCompleted(completed_tool))
+        source = tool_sources[call_id]
+        response = await read_child_run(source.child, config, runtime_paths)
+        for tool in (response.tools or ()) if response is not None else ():
+            if tool.tool_call_id == source.tool_call_id and not tool.is_paused:
+                projected = deepcopy(tool)
+                projected.tool_call_id = call_id
+                on_event(ToolCompleted(projected))
+                break
 
 
 def _settle_pending_child_tools(
@@ -645,8 +630,8 @@ def _resolve_delegation_requirement(
 ) -> str:
     """Answer one external call with its finished result and close its live tool trace, including rejections.
 
-    The answer stays on the parent's requirement, as Agno's driver stored it, so a later entry never advances the
-    call again; the parent's continuation hands every answer to the loop's own decision check.
+    The answer stays on the parent's requirement, so a later entry never advances the call again; the parent's
+    continuation hands every answer to the loop's own decision check.
     """
     result = _finalize_delegation_output(result, output_request)
     requirement.set_external_execution_result(result)
@@ -1088,12 +1073,11 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if card_decision is not None or child_decisions is not None:
         # The run that made the call continues with its result, so that run reads the approval's receipt.
         add_approval_receipt_reader(requirement.member_run_id or response.run_id)
-    excluded = toolkit_is_background_excluded("delegate", config, runtime_paths)
     # A child saved before a crash keeps its accepted owner when startup policy changes.
     if retained is not None:
         if background is not None and not background.has_job(retained.delegation_id):
             background = None
-    elif excluded:
+    elif toolkit_is_background_excluded("delegate", config, runtime_paths):
         # An excluded delegate toolkit runs its child natively, outside the job runtime.
         background = None
         if BACKGROUND_AFTER in (tool.tool_args or {}):
@@ -1118,7 +1102,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     )
     if isinstance(target, str):
         return resolve_result(target)
-    model = target.model
 
     # Recheck current authorization and output policy, including resumed calls.
     authorization = authorize_delegation(
@@ -1129,7 +1112,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         runtime_paths=runtime_paths,
         execution_identity=caller_identity,
         depth=delegation_depth,
-        model=model,
+        model=target.model,
     )
     output_request = None
     if not isinstance(authorization, str):
@@ -1231,7 +1214,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             runtime_paths=runtime_paths,
             depth=delegation_depth,
             budget_monitor=current_budget_monitor(),
-            model=model,
+            model=target.model,
             agent_mode=target.agent_mode,
             previous=target.previous_child,
             parent_tool_call_id=tool.tool_call_id,
@@ -1389,8 +1372,6 @@ def prepare_delegation_state(
     Decisions on the parent's own calls, asked about after its delegations, resume the parent; decisions on a
     delegation's gate are kept as gates for the call they name.
     """
-    from mindroom.response_turn import apply_exact_approval_decisions  # noqa: PLC0415
-
     state = DelegationState.from_metadata(response.metadata)
     if not state.storage_bindings and isinstance(response, RunRecord):
         state.storage_bindings = freeze_delegation_storage(config, (agent_name,))

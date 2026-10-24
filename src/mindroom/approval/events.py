@@ -9,7 +9,6 @@ from typing import Any, Literal, cast
 from mindroom.approval.legacy_approval_payloads import legacy_approval_card_id
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import sidecar_upload_is_usable
-from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, SCHEDULED_SCOPE_OPTIONS
 
 _PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
@@ -49,7 +48,7 @@ class PendingApproval:
         if not isinstance(content, dict):
             msg = "Approval card event is missing content."
             raise TypeError(msg)
-        if _is_replace_content(content):
+        if EventInfo.from_event({"content": content}).is_edit:
             msg = "Approval card event is a replacement edit, not an original card."
             raise ValueError(msg)
 
@@ -99,18 +98,6 @@ class PendingApproval:
             if content.get("scheduled_scope_options") == list(SCHEDULED_SCOPE_OPTIONS)
             else (),
         )
-
-    def latest_status(self, latest_edit: dict[str, Any] | None) -> _PendingApprovalStatus:
-        """Return the visible approval status after applying the latest cached edit."""
-        if latest_edit is None:
-            return self.initial_status
-        content = latest_edit.get("content")
-        if not isinstance(content, dict):
-            return self.initial_status
-        status = visible_content_from_content(cast("dict[str, object]", content)).get("status")
-        if status in {"pending", "approved", "denied", "expired"}:
-            return cast("_PendingApprovalStatus", status)
-        return self.initial_status
 
 
 def _approvable(content: dict[str, Any]) -> bool:
@@ -168,7 +155,3 @@ def parse_approval_datetime(value: str | None) -> datetime | None:
         return None
     parsed = datetime.fromisoformat(value)
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
-
-
-def _is_replace_content(content: dict[str, Any]) -> bool:
-    return EventInfo.from_event({"content": content}).is_edit

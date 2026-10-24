@@ -59,7 +59,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     import nio
 
@@ -132,11 +132,11 @@ async def _collect_agent_continuation(
     current_tools = [tool for tool in current_tools if tool.tool_call_id in parent_call_ids]
     _reconcile_agent_tools(presentation, response)
     # A run that completed without streaming its text hands the text over for the lifecycle to append.
-    terminal_content = str(response.content or "") if response.status is RunStatus.completed else ""
+    hands_over_text = response.status is RunStatus.completed and not saw_content_delta
     return _CollectedAgentContinuation(
         response=response,
         tool_executions=tuple(current_tools),
-        terminal_content=terminal_content if terminal_content and not saw_content_delta else "",
+        terminal_content=str(response.content or "") if hands_over_text else "",
         has_visible_content=saw_content_delta,
     )
 
@@ -508,8 +508,9 @@ class AgentApprovalExecution:
                 log_context=typing_log_context,
             ):
                 with helper_usage_context(scope_context):
+                    runtime_context = runtime_context_from_dispatch_context(tool_dispatch)
+                    operation: Callable[[], Awaitable[CompletedApprovalRun | PausedAttempt]]
                     if cli_call is not None:
-                        runtime_context = runtime_context_from_dispatch_context(tool_dispatch)
                         if runtime_context is None:
                             msg = "CLI approval recovery requires its authenticated runtime context"
                             raise RuntimeError(msg)
@@ -557,43 +558,40 @@ class AgentApprovalExecution:
                                 progress=progress,
                             )
 
-                        return await self.tool_runtime.run_in_context(
-                            tool_context=runtime_context,
-                            operation=lambda: run_with_tool_execution_identity(
-                                tool_dispatch.execution_identity,
-                                operation=recover_cli_call,
-                            ),
+                        operation = recover_cli_call
+                    else:
+                        # The resume itself refuses decisions that do not cover the waiting calls exactly; this binds
+                        # each approval to the toolkit it was granted for before the agent's tools are reached.
+                        validate_approval_tool_owners(
+                            tool_owners_by_agent(build),
+                            approved_calls,
+                            local_approval_requirements(persisted),
                         )
-                    # The resume itself refuses decisions that do not cover the waiting calls exactly; this binds
-                    # each approval to the toolkit it was granted for before the agent's tools are reached.
-                    validate_approval_tool_owners(
-                        tool_owners_by_agent(build),
-                        approved_calls,
-                        local_approval_requirements(persisted),
-                    )
+                        operation = partial(
+                            _continue_persisted_agent,
+                            build,
+                            continuation,
+                            persisted,
+                            store=store,
+                            session=session,
+                            paused_answer=paused_answer,
+                            config=config,
+                            runtime_paths=self.runtime_paths,
+                            execution_identity=execution_identity,
+                            refresh_scheduler=self.refresh_scheduler(),
+                            decisions=decisions,
+                            denial_reasons=denial_reasons,
+                            knowledge=knowledge,
+                            tool_trace_collector=tool_trace_collector,
+                            run_id_callback=run_id_callback,
+                            tool_dispatch=tool_dispatch,
+                            progress=progress,
+                        )
                     result = await self.tool_runtime.run_in_context(
-                        tool_context=runtime_context_from_dispatch_context(tool_dispatch),
+                        tool_context=runtime_context,
                         operation=lambda: run_with_tool_execution_identity(
                             tool_dispatch.execution_identity,
-                            operation=lambda: _continue_persisted_agent(
-                                build,
-                                continuation,
-                                persisted,
-                                store=store,
-                                session=session,
-                                paused_answer=paused_answer,
-                                config=config,
-                                runtime_paths=self.runtime_paths,
-                                execution_identity=execution_identity,
-                                refresh_scheduler=self.refresh_scheduler(),
-                                decisions=decisions,
-                                denial_reasons=denial_reasons,
-                                knowledge=knowledge,
-                                tool_trace_collector=tool_trace_collector,
-                                run_id_callback=run_id_callback,
-                                tool_dispatch=tool_dispatch,
-                                progress=progress,
-                            ),
+                            operation=operation,
                         ),
                     )
         finally:

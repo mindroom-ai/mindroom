@@ -15,8 +15,8 @@ from mindroom.delegation.records import (
     DelegationRecordHandle,
     DelegationRecordLocator,
     DelegationRecordOwner,
-    DelegationTerminalStatus,
 )
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
 from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import DelegationChild
+    from mindroom.delegation.state import DelegationChild, DelegationTerminalStatus
     from mindroom.llm.events import RunEvent
     from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -159,8 +159,7 @@ async def record_child_response(
     decisions: Mapping[str, bool] | None = None,
     denial_reasons: Mapping[str, str | None] | None = None,
 ) -> dict[str, object] | None:
-    """Record one retained attempt snapshot and return its usage without finishing the child."""
-    _validate_response_identity(child, response)
+    """Record one snapshot of the child's run, which its lifecycle owner checked, and return its usage."""
     run_id = child.run_id
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
     usage, pending_approval = await _append_response_events(
@@ -213,9 +212,9 @@ async def _append_response_events(
     pending_approval = False
     for tool in response.tools or ():
         await _append_tool_call(owner, handle, tool, run_id=run_id)
-        if _tool_has_result(tool):
+        if tool.result is not None or tool.tool_call_error:
             await _append_tool_result(owner, handle, tool, run_id=run_id)
-        if response.status == RunStatus.paused and _tool_waits_for_approval(tool):
+        if response.status == RunStatus.paused and tool.requires_confirmation:
             pending_approval = True
             await owner.append_event(
                 handle,
@@ -270,7 +269,7 @@ async def finish_child_record(
 ) -> str:
     """Idempotently project lifecycle-owned terminal state and usage."""
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
-    if child.status not in {"completed", "failed", "cancelled", "denied"}:
+    if child.status not in TERMINAL_CHILD_STATUSES:
         msg = f"Cannot finish active delegation record: {child.delegation_id}"
         raise ValueError(msg)
     status = cast("DelegationTerminalStatus", child.status)
@@ -286,6 +285,8 @@ async def finish_child_record(
     return f"{receipt}\nSubagent ID: {child.subagent_id}" if child.subagent_id is not None else receipt
 
 
+# TODO(simplify): This repeats lifecycle.child_execution_identity's check with its own error type and text. Take
+# the identity from that one check. Nobody would notice: only the error for a mismatch no prepared child has changes.
 def _child_identity(child: DelegationChild) -> ToolExecutionIdentity:
     identity = parse_tool_execution_identity_payload(
         child.execution_identity,
@@ -315,12 +316,6 @@ async def _open_record(
     return owner, await owner.reopen(_record_locator(child))
 
 
-def _validate_response_identity(child: DelegationChild, response: RunRecord) -> None:
-    if response.run_id != child.run_id or response.session_id != child.session_id:
-        msg = "Delegation child response does not match its retained run"
-        raise ValueError(msg)
-
-
 def _tool_event_id(
     run_id: str,
     tool: ToolExecution,
@@ -337,14 +332,6 @@ def _tool_event_id(
 def _stream_prefix(run_id: str) -> str:
     """Return the id prefix of this run's events that are numbered by the binding rather than by a tool call."""
     return f"run:{run_id}:stream:"
-
-
-def _tool_has_result(tool: ToolExecution) -> bool:
-    return tool.result is not None or bool(tool.tool_call_error)
-
-
-def _tool_waits_for_approval(tool: ToolExecution) -> bool:
-    return bool(tool.requires_confirmation)
 
 
 async def _append_tool_call(

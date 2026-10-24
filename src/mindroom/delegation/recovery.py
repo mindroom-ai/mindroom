@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.delegation.hooks import after_delegation
 from mindroom.delegation.lifecycle import child_execution_identity, finish_child_turn, settle_child_response
 from mindroom.delegation.sessions import load_retained_subagent_turn, load_subagent, subagent_recovery_lock
-from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState
+from mindroom.delegation.state import DELEGATION_STATE_KEY, TERMINAL_CHILD_STATUSES, DelegationChild, DelegationState
 from mindroom.delegation.storage import delegation_storage_config
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
@@ -129,7 +129,7 @@ async def interrupt_child(
     if retained is not None:
         child.run_id = retained.run_id
         child.model_name = retained.model_name
-        if retained.status in {"completed", "failed", "cancelled", "denied"}:
+        if retained.status in TERMINAL_CHILD_STATUSES:
             # A settlement saved before a crash stands; only finish projecting it.
             child.status, child.result = retained.status, retained.result
             await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
@@ -181,7 +181,7 @@ async def _cancel_delegations(
     state = DelegationState.from_metadata(response.metadata)
     background = get_background_runtime(runtime_paths)
     for child in state.children:
-        if child.status not in {"completed", "failed", "cancelled", "denied"}:
+        if child.status not in TERMINAL_CHILD_STATUSES:
             if background is not None and background.has_job(child.delegation_id):
                 # The job runtime owns this child and its approvals; its own cancellation settles it.
                 continue

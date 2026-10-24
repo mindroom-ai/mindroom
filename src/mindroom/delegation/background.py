@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.records import DelegationTerminalStatus
+    from mindroom.delegation.state import DelegationTerminalStatus
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
