@@ -32,7 +32,6 @@ from mindroom.debug_report import (
 )
 from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
-from mindroom.history.session_context import _team_scope_state_root
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.session_ids import create_session_id
@@ -349,7 +348,7 @@ def test_read_runs_reads_only_the_runtime_session_database_layouts(tmp_path: Pat
     root = runtime_paths.storage_root
     state_roots = [
         agent_state_root_path(root, "general"),
-        _team_scope_state_root(storage_name="crew", runtime_paths=runtime_paths),
+        root / "teams" / "crew",
         private_instance_scope_root_path(root, "worker-1") / "helper",
         root / SYSTEM_USAGE_STORAGE_NAME,
     ]
