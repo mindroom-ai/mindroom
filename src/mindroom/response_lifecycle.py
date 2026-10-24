@@ -600,7 +600,7 @@ class ResponseLifecycleCoordinator:
 
 
 @dataclass(frozen=True)
-class _SessionStartedWatch:
+class SessionStartedWatch:
     """Pre-computed session:started eligibility and emission arguments."""
 
     should_watch: bool
@@ -711,9 +711,9 @@ class ResponseLifecycle:
         room_id: str,
         thread_id: str | None,
         create_storage: Callable[[], ConversationStore],
-    ) -> _SessionStartedWatch:
+    ) -> SessionStartedWatch:
         """Pre-compute session:started eligibility for one response path."""
-        return _SessionStartedWatch(
+        return SessionStartedWatch(
             should_watch=await self._session_started_watch_is_needed(
                 tool_context=tool_context,
                 session_id=session_id,
@@ -729,7 +729,7 @@ class ResponseLifecycle:
             create_storage=create_storage,
         )
 
-    async def _maybe_emit_session_started(self, watch: _SessionStartedWatch) -> None:
+    async def _maybe_emit_session_started(self, watch: SessionStartedWatch) -> None:
         if watch.tool_context is None or not watch.should_watch:
             return
         if not await asyncio.to_thread(_session_exists, watch.create_storage, watch.session_id, watch.scope.kind):
@@ -757,7 +757,7 @@ class ResponseLifecycle:
         )
         await emit(watch.tool_context.hook_registry, EVENT_SESSION_STARTED, context)
 
-    async def emit_session_started(self, watch: _SessionStartedWatch) -> None:
+    async def emit_session_started(self, watch: SessionStartedWatch) -> None:
         """Emit session:started without aborting delivery on ordinary failures."""
         if self.deps.process_shutdown_requested():
             return
