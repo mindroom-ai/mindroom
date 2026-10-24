@@ -85,8 +85,8 @@ def _write_request_record(
             "timestamp": datetime.now().astimezone().isoformat(),
             "request_log_id": request_log_id,
             # TODO(simplify): A request whose log context binds no `agent_id` records the model config name as its
-            # `agent_id`, here and in the response record. Leave `agent_id` out then; `LLM usage` names the model.
-            # Operators reading the request log would notice.
+            # `agent_id`, here and in the response record. Record that name as `model_name` and take `agent_id` only
+            # from the context. Operators reading the request log would notice.
             "agent_id": log.model_name,
             **context,
             "model_id": model_id,
