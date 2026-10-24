@@ -147,14 +147,9 @@ def _is_background_job_excluded(tool: JobTool) -> bool:
     )
 
 
-def wait_mode(tool: JobTool | None, *, depth: int) -> ToolWaitMode:
+def wait_mode(tool: JobTool, *, depth: int) -> ToolWaitMode:
     """Classify one call from current policy: run it unchanged, run it here, or let it become a managed job."""
-    if (
-        tool is None
-        or isinstance(tool.toolkit, JobTools)
-        or _is_background_job_excluded(tool)
-        or connects_per_run(tool.toolkit)
-    ):
+    if isinstance(tool.toolkit, JobTools) or _is_background_job_excluded(tool) or connects_per_run(tool.toolkit):
         return "native"
     # A call a CLI command makes returns to that command, whose own result is what the reply saves.
     if job_owns_execution() or depth > 0 or tool.function.stop_after_call or cli_dispatch_active():
