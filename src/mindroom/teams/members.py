@@ -396,7 +396,7 @@ def build_team_spec(
 ) -> BuiltTeam:
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
-    The team is named for its requested members, as main stores its ``team_name``. The leader prompt holds each
+    The team is named for its requested members, as Agno named it. The leader prompt holds each
     member's roster role, the leader's tool instructions in offer order, the provider family's note, and the date
     context with ``system_enrichment`` appended; the team's own history settings and call budget come from the
     configured team ``configured_team_name``, or the defaults when it is None for an ad hoc one.
