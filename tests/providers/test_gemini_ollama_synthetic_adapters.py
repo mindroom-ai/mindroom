@@ -149,6 +149,26 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
     assert requested == ["google"]
 
 
+def test_gemini_passes_the_environment_key_project_and_location_as_explicit_client_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK ranks an explicit argument above its own environment reads, so these variables stay explicit, as in Agno."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-project")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "europe-west4")
+    runtime_paths = runtime_paths_for(tmp_path)
+
+    api = gemini_adapter.build_provider(ModelConfig(provider="google", id="gemini-3.8-flash"), runtime_paths)
+    vertex = gemini_adapter.build_provider(
+        ModelConfig(**_config({"provider": "gemini", "id": "gemini-3.8-flash"}, vertexai=True)),
+        runtime_paths,
+    )
+
+    assert api._client_params() == {"api_key": "env-key"}
+    assert vertex._client_params() == {"vertexai": True, "project": "env-project", "location": "europe-west4"}
+
+
 @pytest.mark.asyncio
 async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """GOOGLE_GENAI_USE_VERTEXAI=true sends a model without ``vertexai`` to Vertex AI, as Agno's Gemini did."""

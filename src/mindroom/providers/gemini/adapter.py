@@ -242,6 +242,8 @@ class GeminiProvider:
 
     def _client_params(self) -> dict[str, Any]:
         settings = self.settings
+        # The environment variables are read here as well as by google-genai, which ranks an explicit argument above
+        # an environment value; Agno passed them explicitly too, so a ``client_params`` key and a set project conflict.
         if self.vertexai:
             params: dict[str, Any] = {
                 "vertexai": True,
