@@ -2440,14 +2440,9 @@ class ResponseRunner:
         final: FinalDeliveryOutcome,
     ) -> ResponseOutcome:
         """Build normal post-response facts for one resumed native run."""
-        execution_identity = parse_tool_execution_identity_payload(
-            continuation.execution_identity,
-            error_prefix="Approval continuation execution_identity",
-        )
         return ResponseOutcome(
             response_run_id=final.response_run_id or continuation.run_id,
             session_id=continuation.session_id,
-            execution_identity=execution_identity,
             run_succeeded=final.terminal_status == "completed",
             response_target=target,
             thread_summary_room_id=continuation.room_id if target.resolved_thread_id is not None else None,
@@ -5025,7 +5020,6 @@ class ResponseRunner:
             return ResponseOutcome(
                 response_run_id=team_turn_recorder.run_id or response_run_id,
                 session_id=session_id,
-                execution_identity=tool_dispatch.execution_identity,
                 run_succeeded=team_turn_recorder.outcome == "completed",
                 response_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
@@ -6031,7 +6025,6 @@ class ResponseRunner:
                 # returned generation outcome never materialized.
                 response_run_id=attempt_run_ids[-1] if attempt_run_ids else response_run_id,
                 session_id=session_id,
-                execution_identity=execution_identity,
                 run_succeeded=(
                     generation.run_succeeded
                     if generation is not None

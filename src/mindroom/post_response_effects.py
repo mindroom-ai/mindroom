@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @dataclass(frozen=True)
@@ -35,7 +34,6 @@ class ResponseOutcome:
 
     response_run_id: str | None = None
     session_id: str | None = None
-    execution_identity: ToolExecutionIdentity | None = None
     run_succeeded: bool = True
     response_target: MessageTarget | None = None
     thread_summary_room_id: str | None = None
