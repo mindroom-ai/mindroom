@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 from openai.types.chat import ChatCompletion
@@ -20,9 +20,11 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides
+from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import chat_request_kwargs, parse_chat_completion
+from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
 from mindroom.providers.openai.legacy_replay import repair_legacy_responses_span
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import (
@@ -996,23 +998,28 @@ def test_codex_session_headers_keep_authored_headers(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("provider", "model_id", "base_url", "expected"),
+    ("route", "model_id", "base_url", "expected"),
     [
-        ("codex", "gpt-5.6", None, True),
-        ("openai_codex", "openai-codex/gpt-5.6", None, True),
-        ("codex", "gpt-5.6-codex", None, True),
-        ("codex", "gpt-5.4-mini", None, True),
+        ("codex", "gpt-5.6", CODEX_BASE_URL, True),
+        ("codex", "gpt-5.6-codex", CODEX_BASE_URL, True),
+        ("codex", "gpt-5.4-mini", CODEX_BASE_URL, True),
         # Unreleased GPT versions default to the native path, including major-only spellings.
-        ("codex", "gpt-6.0", None, True),
-        ("codex", "gpt-6", None, True),
-        ("openai", "gpt-5.4", None, True),
-        ("openai", "gpt-5.3", None, False),
-        ("openai", "gpt-4o", None, False),
-        ("anthropic", "gpt-5.6", None, False),
+        ("codex", "gpt-6.0", CODEX_BASE_URL, True),
+        ("codex", "gpt-6", CODEX_BASE_URL, True),
+        ("codex", "gpt-6-astra", "http://localhost:9292/v1", True),
+        ("openai", "gpt-5.4", OPENAI_BASE_URL_DEFAULT, True),
+        ("openai", "gpt-5.3", OPENAI_BASE_URL_DEFAULT, False),
+        ("openai", "gpt-4o", OPENAI_BASE_URL_DEFAULT, False),
         ("openai", "gpt-6-astra", "http://localhost:9292/v1", False),
         ("openai", "gpt-6-astra", "https://api.openai.com/v1/", True),
     ],
 )
-def test_native_tool_search_gating(provider: str, model_id: str, base_url: str | None, *, expected: bool) -> None:
-    """The OpenAI API and Codex qualify from GPT-5.4 on; compatible endpoints do not opt into Responses search."""
-    assert openai_native_tool_search_supported(provider, model_id, base_url=base_url) is expected
+def test_native_tool_search_gating(
+    route: Literal["openai", "codex"],
+    model_id: str,
+    base_url: str,
+    *,
+    expected: bool,
+) -> None:
+    """The OpenAI API and Codex qualify from GPT-5.4 on; compatible OpenAI endpoints do not opt into Responses search."""
+    assert openai_native_tool_search_supported(route, model_id, base_url=base_url) is expected

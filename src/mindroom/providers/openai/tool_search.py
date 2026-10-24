@@ -10,35 +10,25 @@ the cached prompt prefix.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT, OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
-from mindroom.providers.names import provider_route
 
 __all__ = ["openai_native_tool_search_supported", "request_params_with_deferred_tool_search"]
 
-_NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"codex", "openai"})
-# LLM-plugin-style ``openai-codex/gpt-N.M`` ids match the same way as bare or ``-codex``-suffixed ids, so no
-# prefix normalization is needed before the search. A missing minor version counts as .0, so a major-only future
-# release gates native while ``gpt-5`` stays on portable tool search.
+# A missing minor version counts as .0, so a major-only future release gates native while ``gpt-5`` stays on
+# portable tool search.
 _GPT_VERSION_PATTERN = re.compile(r"gpt-(\d+)(?:\.(\d+))?")
 
 
-def openai_native_tool_search_supported(provider: str, model_id: str, *, base_url: object = None) -> bool:
-    """Return whether one authored provider/model pair supports server-side tool search.
+def openai_native_tool_search_supported(route: Literal["openai", "codex"], model_id: str, *, base_url: str) -> bool:
+    """Return whether a model on the ``openai`` or ``codex`` route supports server-side tool search.
 
-    Tool search is a Responses-API feature on gpt-5.4 and later, so the gate covers the OpenAI API and Codex
-    providers and parses the ``gpt-N.M`` version from the model id instead of keeping an allowlist that goes stale
-    with each release.
+    Tool search is a Responses-API feature on gpt-5.4 and later, so the gate parses the ``gpt-N.M`` version from the
+    model id instead of keeping an allowlist that goes stale with each release. On the ``openai`` route only the
+    public API endpoint at ``base_url`` offers it.
     """
-    canonical = provider_route(provider)
-    if canonical not in _NATIVE_TOOL_SEARCH_PROVIDERS:
-        return False
-    if (
-        canonical == "openai"
-        and base_url not in (None, "")
-        and (not isinstance(base_url, str) or base_url.rstrip("/") != OPENAI_BASE_URL_DEFAULT)
-    ):
+    if route == "openai" and base_url.rstrip("/") != OPENAI_BASE_URL_DEFAULT:
         return False
     version_match = _GPT_VERSION_PATTERN.search(model_id)
     if version_match is None:
