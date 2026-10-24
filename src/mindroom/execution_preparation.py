@@ -956,7 +956,6 @@ async def prepare_agent_execution_context(
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
         )
         return await prepare_scope_history(
-            agent_name=agent_name,
             model=build.spec.model,
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=static_token_estimator.non_prompt_tokens(),

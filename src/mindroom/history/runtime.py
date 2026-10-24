@@ -34,7 +34,6 @@ from mindroom.history.replay import (
     scope_visible_runs,
 )
 from mindroom.history.session_context import (
-    BoundTeamScopeContext,
     ScopeSessionContext,
     resolve_bound_history_owner,
     resolve_bound_team_scope_context,
@@ -174,7 +173,6 @@ def _native_history(
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_scope_history(
     *,
-    agent_name: str,
     model: ModelProvider | None,
     resolved_inputs: HistoryPreparationInputs,
     non_prompt_tokens: int,
@@ -263,7 +261,7 @@ async def prepare_scope_history(
     )
     logger.info(
         "History preparation check",
-        agent=agent_name,
+        scope=scope_context.scope.key,
         auto_enabled=execution_plan.authored_compaction_enabled and execution_plan.text_compaction_available,
         compaction_available=execution_plan.text_compaction_available,
         trigger_budget=execution_plan.replay_budget_tokens,
@@ -336,7 +334,7 @@ async def prepare_scope_history(
         if outcome is not None:
             logger.info(
                 "Compaction completed",
-                agent=agent_name,
+                scope=scope_context.scope.key,
                 outcome_mode=outcome.mode,
                 before_tokens=outcome.before_tokens,
                 after_tokens=outcome.after_tokens,
@@ -798,19 +796,13 @@ async def prepare_bound_scope_history(
     ``model`` is the leader's provider, whose native compaction the scope may use.
     """
     if scope_context is not None:
-        owner_agent_name = resolve_bound_history_owner(member_names)
-        bound_scope = (
-            BoundTeamScopeContext(owner_agent_name=owner_agent_name, scope=scope_context.scope)
-            if owner_agent_name is not None
-            else None
-        )
+        # A team without a named member has no history, whether or not its scope is open.
+        has_scope = resolve_bound_history_owner(member_names) is not None
     elif team_name is None and ad_hoc_team_has_private_member(member_names, config.agents):
-        bound_scope = None
+        has_scope = False
     else:
-        bound_scope = resolve_bound_team_scope_context(
-            member_names=member_names,
-            config=config,
-            team_name=team_name,
+        has_scope = (
+            resolve_bound_team_scope_context(member_names=member_names, config=config, team_name=team_name) is not None
         )
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
@@ -819,15 +811,9 @@ async def prepare_bound_scope_history(
         active_model_name=active_model_name,
         active_context_window=active_context_window,
     )
-    if bound_scope is None:
-        return PreparedScopeHistory(
-            scope=None,
-            session=None,
-            resolved_inputs=resolved_inputs,
-        )
-
+    if not has_scope:
+        return PreparedScopeHistory(scope=None, session=None, resolved_inputs=resolved_inputs)
     return await prepare_scope_history(
-        agent_name=bound_scope.owner_agent_name,
         model=model,
         resolved_inputs=resolved_inputs,
         runtime_paths=runtime_paths,

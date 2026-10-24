@@ -549,7 +549,6 @@ async def prepare_history_for_run_for_test(
             ),
         )
     scope_history_kwargs = {
-        "agent_name": agent_name,
         "model": model,
         "resolved_inputs": resolved_inputs,
         "non_prompt_tokens": static_token_estimator.non_prompt_tokens(),
