@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path  # noqa: TC003 - typer resolves the command's annotations at runtime.
 from typing import TYPE_CHECKING, Any
 
 import typer
 
 from mindroom.cli.config import activate_cli_runtime
-from mindroom.constants import resolve_session_state_root
+from mindroom.constants import llm_request_log_dir, resolve_session_state_root
 from mindroom.debug_report import DebugReportSources, build_debug_report, collect_ids
 
 if TYPE_CHECKING:
@@ -78,16 +78,10 @@ def _read_config_source(runtime_paths: RuntimePaths) -> tuple[dict[str, Any], st
 
 
 def _llm_request_log_dir(config_source: dict[str, Any], storage_root: Path) -> Path:
-    """Return the directory the runtime writes LLM request logs to (see `pipeline/request_log._daily_log_path`).
-
-    The configured value is used as given, so a relative directory is relative to the working directory, like the
-    runtime's.
-    """
+    """Return the directory the runtime writes LLM request logs to, from the raw config's ``debug`` section."""
     debug = config_source.get("debug")
     configured = debug.get("llm_request_log_dir") if isinstance(debug, dict) else None
-    if isinstance(configured, str) and configured:
-        return Path(configured)
-    return storage_root / "logs" / "llm_requests"
+    return llm_request_log_dir(configured if isinstance(configured, str) else None, storage_root)
 
 
 def _resolve_sources(runtime_paths: RuntimePaths) -> DebugReportSources:

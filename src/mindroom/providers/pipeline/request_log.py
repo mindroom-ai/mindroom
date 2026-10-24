@@ -12,10 +12,10 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from mindroom.constants import llm_request_log_dir
 from mindroom.llm.provider import ReportedUsage, TurnCompleted
 from mindroom.llm.request_context import REQUEST_ATTRIBUTION_FIELDS, current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
@@ -25,6 +25,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
+    from pathlib import Path
 
     from mindroom.config.models import DebugConfig
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
@@ -34,8 +35,10 @@ __all__ = ["RequestLog", "logged_stream"]
 
 logger = get_logger(__name__)
 
-# TODO(simplify): The record leaves out `reasoning_content`, which the DeepSeek wire sends back, so a DeepSeek
-# record omits part of the request. Keep it in the record. Operators reading the request log would notice.
+# Message fields the request record leaves out.
+# TODO(simplify): the record leaves out `reasoning_content`, which the DeepSeek wire sends back and the Claude wire
+# replays as a signed thinking block, so their records omit part of the request. Keep it in the record. Operators
+# reading the request log would notice.
 _NON_API_MESSAGE_FIELDS = frozenset(
     {"id", "reasoning_content", "tool_name", "tool_args", "tool_call_error", "stop_after_tool_call", "from_history"},
 )
@@ -103,9 +106,8 @@ def _write_request_record(
 
 
 def _daily_log_path(log_dir: str | None, storage_root: Path, now: datetime) -> Path:
-    """Return the day's request-log file in the configured directory, else in ``<storage_root>/logs/llm_requests``."""
-    base_dir = Path(log_dir) if log_dir else storage_root / "logs" / "llm_requests"
-    return base_dir / f"llm-requests-{now.date().isoformat()}.jsonl"
+    """Return the day's request-log file in the request-log directory."""
+    return llm_request_log_dir(log_dir, storage_root) / f"llm-requests-{now.date().isoformat()}.jsonl"
 
 
 def _write_line(path: Path, payload: dict[str, Any]) -> None:

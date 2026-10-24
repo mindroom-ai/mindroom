@@ -6010,6 +6010,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.providers.pipeline"
 depends_on = [
+    "mindroom.constants",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_usage",

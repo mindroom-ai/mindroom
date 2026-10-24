@@ -203,6 +203,11 @@ def resolve_session_state_root(state_root: Path, runtime_paths: RuntimePaths) ->
     return resolved_session_state_root
 
 
+def llm_request_log_dir(configured: str | None, storage_root: Path) -> Path:
+    """Return the LLM request-log directory: the configured one as given, else ``<storage_root>/logs/llm_requests``."""
+    return Path(configured) if configured else storage_root / "logs" / "llm_requests"
+
+
 def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, str]:
     if process_env is not None:
         return dict(process_env)
