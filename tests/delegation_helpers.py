@@ -20,7 +20,7 @@ from mindroom import agents
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
-from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.ai import ai_response
 from mindroom.approval.execution import AgentApprovalExecution
 from mindroom.approval.resume import ResumeRunner
@@ -406,7 +406,7 @@ async def pause_parent(
     )
     session = new_scope_session(session_id=identity.session_id or "", scope_id=agent_name, is_team=False)
     request = [prompt_for_turn(build), OwnedMessage(role="user", content=prompt)]
-    ctx = RunContext(run_id=run_id, session_id=session.session_id, user_id=identity.requester_id)
+    ctx = RunContext(run_id=run_id, session=UnstoredSession(session.session_id), user_id=identity.requester_id)
     record: RunRecord | None = None
     async for event in run_agent(
         build.spec,

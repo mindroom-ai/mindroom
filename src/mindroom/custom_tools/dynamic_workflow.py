@@ -14,7 +14,7 @@ from agno.tools import Toolkit
 
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
-from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.budgets.monitor import budget_model
@@ -971,7 +971,11 @@ async def _arun_agent(context: ToolRuntimeContext, build: AgentBuild, prompt: st
     events = run_agent(
         replace(build.spec, system_message=prompt_for_turn(build)),
         [Message(role="user", content=prompt)],
-        ctx=RunContext(run_id=invocation_id, session_id=context.session_id, user_id=context.requester_id),
+        ctx=RunContext(
+            run_id=invocation_id,
+            session=UnstoredSession(context.session_id),
+            user_id=context.requester_id,
+        ),
         persist=(
             None
             if usage_owner is None

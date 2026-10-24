@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
-from mindroom.agent_loop.spec import AgentSpec, RunContext
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
@@ -152,7 +152,7 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
         events = run_agent(
             spec,
             [Message(role="user", content="run the tool")],
-            ctx=RunContext(run_id="real-child-run", session_id=ctx.session_id or ""),
+            ctx=RunContext(run_id="real-child-run", session=UnstoredSession(ctx.session_id or "")),
             persist=persist,
             request_template=EMPTY_REQUEST,
         )
@@ -252,7 +252,7 @@ async def _deny_through_the_loop(tools: DelegateTools) -> None:
             [Message(role="user", content="delegate")],
             ctx=RunContext(
                 run_id="denied-parent-run",
-                session_id="denied-parent-session",
+                session=UnstoredSession("denied-parent-session"),
                 user_id=_identity().requester_id,
             ),
             hooks=LoopHooks(tool_middleware=(_deny_call,)),

@@ -19,7 +19,7 @@ import pytest
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopHooks
 from mindroom.agent_loop.run import paused_content, resume_agent, run_agent
-from mindroom.agent_loop.spec import AgentSpec
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
@@ -36,6 +36,8 @@ from tests.llm.agno_dict_helpers import expected_run_dict
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from agno.run import RunContext as AgnoRunContext
 
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolkitClose
 
@@ -93,6 +95,52 @@ async def test_a_completed_run_is_stored_once_before_it_is_announced() -> None:
     assert stored["metrics"]["duration"] > 0
     assert [tool["tool_call_id"] for tool in stored["tools"]] == ["c1"]
     assert "requirements" not in stored
+
+
+def remember(note: str, run_context: AgnoRunContext) -> str:
+    """Keep a note in the run's session state.
+
+    Args:
+        note: What to keep.
+        run_context: The run's context, which the loop injects.
+
+    """
+    assert run_context.session_state is not None
+    run_context.session_state["note"] = note
+    return "kept"
+
+
+def recall(run_context: AgnoRunContext) -> str:
+    """Return the note the run's session state keeps.
+
+    Args:
+        run_context: The run's context, which the loop injects.
+
+    """
+    assert run_context.session_state is not None
+    return str(run_context.session_state.get("note"))
+
+
+@pytest.mark.asyncio
+async def test_the_calls_of_a_run_no_store_keeps_share_its_session_s_state() -> None:
+    session = UnstoredSession("session-1")
+    model = ScriptedModel(
+        [calls(tool_call("remember", "c1", note="blue")), calls(tool_call("recall", "c2")), answer("Blue.")],
+    )
+
+    _, record = await collect(
+        run_agent(
+            spec(model, toolkit(remember, recall)),
+            _prompt(),
+            ctx=RunContext(run_id="run-1", session=session),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+
+    assert [tool.result for tool in record.tools or ()] == ["kept", "blue"]
+    assert session.session_state == {"note": "blue"}
+    assert record.session_id == "session-1"
 
 
 @pytest.mark.asyncio

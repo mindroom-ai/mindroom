@@ -77,7 +77,6 @@ async def _attempt(build, runtime, session: ConversationSession, *, run_id: str 
     """Bind one managed minimal attempt of ``build`` as a reply does, returning the run's spec, hooks, and context."""
     run = RunContext(
         run_id=run_id,
-        session_id=runtime.session_id,
         user_id=runtime.requester_id,
         session=session,
     )
@@ -600,7 +599,6 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
             minimal,
             run=RunContext(
                 run_id="run",
-                session_id=runtime.session_id,
                 user_id=runtime.requester_id,
                 session=session,
             ),

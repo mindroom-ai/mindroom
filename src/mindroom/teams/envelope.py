@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
@@ -313,10 +313,9 @@ class _LeaderRun:
             run_input,
             ctx=RunContext(
                 run_id=run_id,
-                session_id=session_id,
+                session=self.storage.session if self.storage is not None else UnstoredSession(session_id),
                 user_id=user_id,
                 metadata=metadata,
-                session=self.storage.session if self.storage is not None else None,
                 history_scope=self.storage.scope if self.storage is not None else None,
                 model_name=self.model_name,
             ),

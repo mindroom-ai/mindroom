@@ -8642,6 +8642,7 @@ visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.read_worker"
 path = "mindroom.tool_system.agent_tool_calls"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
+    "mindroom.agent_loop",
     "mindroom.background_tasks",
     "mindroom.tool_jobs.control",
     "mindroom.tool_system.context_bound_streams",

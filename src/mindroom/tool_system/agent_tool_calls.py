@@ -17,6 +17,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
+from mindroom.agent_loop.spec import UnstoredSession
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.llm.events import ReportedCall
 from mindroom.llm.runs import RunRequirement, ToolExecution
@@ -119,16 +120,16 @@ class PreparedAgentToolCatalog:
     _closes: list[ToolkitClose] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
-        """Refuse a run outside a session, since the catalog's checkpoints and delegations write its session."""
-        if self.run.session is None:
+        """Refuse a run outside a stored session, since the catalog's checkpoints and delegations write its session."""
+        if isinstance(self.run.session, UnstoredSession):
             msg = "A tool catalog needs a run that belongs to a session"
-            raise ValueError(msg)
+            raise TypeError(msg)
 
     @property
     def session(self) -> ConversationSession:
         """Return the session the turn's run belongs to, which the catalog's checkpoints and delegations write."""
         session = self.run.session
-        assert session is not None
+        assert not isinstance(session, UnstoredSession)
         return session
 
     @contextmanager

@@ -220,7 +220,6 @@ class TeamResume:
             external_results=routed.external_results,
             ctx=RunContext(
                 run_id=paused.run_id,
-                session_id=session.session_id,
                 user_id=self.user_id,
                 metadata=deepcopy(paused.metadata),
                 session=session,

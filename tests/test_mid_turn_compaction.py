@@ -19,7 +19,7 @@ from agno.tools.function import Function
 from mindroom import helper_usage
 from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
-from mindroom.agent_loop.spec import AgentSpec, RunContext
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner
@@ -254,7 +254,7 @@ async def _run(
             history=history,
             turn=turn,
         ),
-        ctx=RunContext(run_id=str(uuid4()), session_id=session_id, metadata=metadata),
+        ctx=RunContext(run_id=str(uuid4()), session=UnstoredSession(session_id), metadata=metadata),
         hooks=LoopHooks(before_request=(*agent.before_request, compaction_hook)),
         persist=persist,
         request_template=ModelRequest(messages=(), stream=stream, native_compaction=agent.native_compaction),

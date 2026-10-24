@@ -16,7 +16,7 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
-from mindroom.agent_loop.spec import AgentSpec, RunContext
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.config.models import DebugConfig
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
@@ -1135,7 +1135,7 @@ async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_part
         async for _ in run_agent(
             spec,
             [_user()],
-            ctx=RunContext(run_id="run", session_id="session"),
+            ctx=RunContext(run_id="run", session=UnstoredSession("session")),
             persist=persist,
             request_template=EMPTY_REQUEST,
         ):
@@ -1183,7 +1183,7 @@ async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attem
         async for _ in run_agent(
             spec,
             [_user()],
-            ctx=RunContext(run_id="run", session_id="session"),
+            ctx=RunContext(run_id="run", session=UnstoredSession("session")),
             persist=persist,
             request_template=EMPTY_REQUEST,
         ):

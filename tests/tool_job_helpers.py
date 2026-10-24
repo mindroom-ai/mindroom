@@ -14,7 +14,7 @@ from uuid import uuid4
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import resume_agent, run_agent
-from mindroom.agent_loop.spec import AgentSpec, RunContext
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.approval.resume import ResumeRunner
@@ -402,7 +402,7 @@ async def run_job_turn(
         middleware=middleware,
         participation=participation,
     )
-    run = RunContext(run_id=run_id, session_id=session_id, session=session)
+    run = RunContext(run_id=run_id, session=session)
     events = run_agent(
         spec,
         [Message(role="user", content=prompt)],
@@ -453,7 +453,7 @@ async def resume_job_turn(
         approved=approved,
         denied={},
         external_results={},
-        ctx=RunContext(run_id=paused.run_id, session_id=session_id, session=session),
+        ctx=RunContext(run_id=paused.run_id, session=session),
         hooks=hooks,
         persist=persist,
         request_template=EMPTY_REQUEST,
@@ -493,7 +493,7 @@ async def run_built_turn(
         async for event in run_agent(
             replace(build.spec, system_message=prompt_for_turn(build)),
             [Message(role="user", content=prompt)],
-            ctx=RunContext(run_id=run_id, session_id=session_id),
+            ctx=RunContext(run_id=run_id, session=UnstoredSession(session_id)),
             hooks=hooks,
             request_template=build.request_template,
             persist=None,
@@ -775,7 +775,6 @@ class DelegatingLeader:
             [Message(role="user", content="Delegate")],
             ctx=RunContext(
                 run_id=run_id,
-                session_id=self.session.session_id,
                 user_id=self.identity.requester_id,
                 session=self.session,
             ),

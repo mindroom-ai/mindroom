@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agent_loop.spec import AgentSpec, RunContext
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -75,7 +75,7 @@ class _Squad:
         return {row.model: row.totals.total_tokens for row in report.model_breakdown}
 
     def ctx(self) -> RunContext:
-        return RunContext(run_id="team-run", session_id="session", user_id="@alice:localhost")
+        return RunContext(run_id="team-run", session=UnstoredSession("session"), user_id="@alice:localhost")
 
     async def run(self) -> TeamRunRecord:
         """Run the team to its end and return the stored team record."""

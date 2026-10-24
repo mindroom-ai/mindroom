@@ -15,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mindroom.agent_loop.spec import AgentSpec, RunContext
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
 from mindroom.llm.events import RunFinished
@@ -138,7 +138,7 @@ def squad(
 
 def run_context(run_id: str, session_id: str, metadata: dict[str, Any] | None = None) -> RunContext:
     """Return the team run's context for Alice's turn."""
-    return RunContext(run_id=run_id, session_id=session_id, user_id=REQUESTER, metadata=metadata)
+    return RunContext(run_id=run_id, session=UnstoredSession(session_id), user_id=REQUESTER, metadata=metadata)
 
 
 def golden_metadata(team_row: dict[str, Any]) -> dict[str, Any]:

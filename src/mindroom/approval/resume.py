@@ -107,7 +107,6 @@ def resume_from_session(
         },
         ctx=RunContext(
             run_id=paused.run_id,
-            session_id=session.session_id,
             user_id=user_id,
             metadata=deepcopy(paused.metadata),
             session=session,
