@@ -1038,7 +1038,7 @@ def _call_proxy_sync(
 
 async def _run_sync_tool_call(call: Callable[[], object]) -> object:
     """Run one call of a synchronous tool function exactly as its sync entrypoint would run, completion owners included."""
-    # Deferred: the tool hook bridge loads Agno, which the slim tool registry must not import.
+    # Deferred: the tool hook bridge loads OAuth and the job runtime, which the slim tool registry must not import.
     from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint  # noqa: PLC0415
 
     return await run_sync_tool_entrypoint(call)
@@ -1046,7 +1046,7 @@ async def _run_sync_tool_call(call: Callable[[], object]) -> object:
 
 async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
     """Run one blocking worker proxy call outside asyncio's default executor."""
-    # Deferred: the tool hook bridge loads Agno, which the slim tool registry must not import.
+    # Deferred: the tool hook bridge loads OAuth and the job runtime, which the slim tool registry must not import.
     from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call  # noqa: PLC0415
 
     return await run_async_entrypoint_blocking_call(call, executor=WORKER_PROXY_CALL_EXECUTOR)
