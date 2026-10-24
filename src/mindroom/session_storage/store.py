@@ -127,7 +127,7 @@ class ConversationStore:
             row = self._session_row(connection, session_id)
         if row is None:
             return None
-        return SessionFields(metadata=_decoded_mapping(row[4]), session_state=_session_state(row[3]))
+        return SessionFields(metadata=decoded_mapping(row[4]), session_state=_session_state(row[3]))
 
     def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
         """Load one session with the runs a reply reasons over, or None when it is missing or of another kind.
@@ -145,7 +145,7 @@ class ConversationStore:
             session_id=session_id,
             kind=kind,
             owner_id=(team_id if kind == "team" else agent_id) or "",
-            metadata=_decoded_mapping(metadata),
+            metadata=decoded_mapping(metadata),
             session_state=state,
             stored_session_state=copy.deepcopy(state),
             runs=loaded.runs(),
@@ -332,7 +332,7 @@ class ConversationStore:
                 f"SELECT metadata FROM {sessions} WHERE session_id = ?",  # noqa: S608
                 (session.session_id,),
             ).fetchone()
-            current = _decoded_mapping(stored[0]) if stored is not None else session.metadata
+            current = decoded_mapping(stored[0]) if stored is not None else session.metadata
             updated = update(copy.deepcopy(current))
             if updated != current:
                 created = _ensure_session_row(connection, self.names, session)
@@ -582,7 +582,7 @@ async def write_with_session_state[Result](
     return await run_session_storage_operation(lambda: store, lambda opened: write(opened, state))
 
 
-def _decoded_mapping(raw_value: object, *, null: dict[str, Any] | None = None) -> dict[str, Any] | None:
+def decoded_mapping(raw_value: object, *, null: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Return a stored JSON object column, ``null`` for SQL or JSON null, or None when unreadable or not an object.
 
     An odd row therefore never fails a load.
@@ -598,7 +598,7 @@ def _decoded_mapping(raw_value: object, *, null: dict[str, Any] | None = None) -
 
 def _session_state(raw_session_data: object) -> dict[str, Any]:
     """Return the ``session_state`` object inside a row's ``session_data``, or an empty one."""
-    state = (_decoded_mapping(raw_session_data) or {}).get("session_state")
+    state = (decoded_mapping(raw_session_data) or {}).get("session_state")
     return state if isinstance(state, dict) else {}
 
 
@@ -672,7 +672,7 @@ def _write_session_state(
     ).fetchone()
     connection.execute(
         f"UPDATE {sessions} SET session_data = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
-        (json.dumps({**(_decoded_mapping(stored) or {}), "session_state": state}), int(time()), session_id),
+        (json.dumps({**(decoded_mapping(stored) or {}), "session_state": state}), int(time()), session_id),
     )
 
 
@@ -778,13 +778,13 @@ def _record_run_usage(
         f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
         (session_id,),
     ).fetchone()
-    session_data = _decoded_mapping(raw_session_data, null={})
+    session_data = decoded_mapping(raw_session_data, null={})
     if session_data is not None:
         stored_totals = session_data.get("session_metrics")
         totals = SessionMetrics.from_dict(stored_totals) if isinstance(stored_totals, dict) else SessionMetrics()
         totals.count_run(
             _counted_usage(snapshot),
-            replacing=None if previous is None else _counted_usage(_decoded_mapping(previous[0]) or {}),
+            replacing=None if previous is None else _counted_usage(decoded_mapping(previous[0]) or {}),
         )
         session_data["session_metrics"] = totals.to_dict()
     # An unreadable row keeps its bytes, so the ledger alone records this run; its update time moves either way.
@@ -929,6 +929,7 @@ __all__ = [
     "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
     "connect_conversation_database",
+    "decoded_mapping",
     "delete_run_subtrees_in_transaction",
     "migrate_database",
     "persist_to",

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 # Last legacy release: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) wrote each column's JSON once.
 # Handling: Readers decode a column once and again when the first decode yields a string; owned writers
 # encode once, so a column the owned store rewrites is single-encoded from then on.
-# Coverage: tests/session_storage/test_legacy_agno2_runs.py::test_blob_runs_become_rows_when_the_store_opens,
+# Coverage: tests/session_storage/test_legacy_agno2_runs.py::test_blob_runs_become_rows_when_the_summary_rows_migrate,
 # tests/session_storage/test_store.py::test_double_encoded_session_columns_load_and_are_rewritten_once,
 # tests/test_legacy_compaction_state.py::test_opening_storage_reads_double_encoded_legacy_metadata, and
 # tests/test_usage_stats.py::test_daily_models_read_real_agno_2_history.
@@ -38,14 +38,15 @@ def decode_session_json(raw_value: object) -> object:
 # Legacy format: Agno 2 sessions stored run history in a single- or double-encoded JSON `runs` blob on the session
 # row, which Agno 3 merged into every read ahead of the run rows; the column exists only on files Agno 2 created.
 # Last legacy release: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) wrote first-class run rows.
-# Handling: When the open-time summary-row migration finds a sessions table that still has the column, every blob
-# entry with a string run id that has no row yet becomes a run row, the session's rows are renumbered in the order
-# Agno's merge read them, and the blob is cleared, all in one write transaction, so no read has to merge a blob.
+# Handling: When the open-time summary-row migration, which runs only while the database has no summary-row table,
+# finds a sessions table that still has the column, every blob entry with a string run id that has no row yet becomes
+# a run row, the session's rows are renumbered in the order Agno's merge read them, and the blob is cleared, all in
+# one write transaction, so no read has to merge a blob.
 # Entries without a string run id are dropped, as no read could address them.
 # Coverage: tests/session_storage/test_legacy_agno2_runs.py and
 # tests/session_storage/test_factories.py::test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order.
-def has_blob_runs(connection: sqlite3.Connection, names: TableNames) -> bool:
-    """Return whether the sessions table may still hold Agno 2 run blobs: whether it still has their column."""
+def has_blob_column(connection: sqlite3.Connection, names: TableNames) -> bool:
+    """Return whether the sessions table still has the column Agno 2 kept run blobs in, which may hold some."""
     return "runs" in {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(names.sessions)})")}
 
 
@@ -156,7 +157,7 @@ def _legacy_entries(blob: object) -> dict[str, dict[str, Any]]:
 
 __all__ = [
     "decode_session_json",
-    "has_blob_runs",
+    "has_blob_column",
     "insert_run_entry",
     "move_blob_runs_to_rows",
     "number_unindexed_runs",

@@ -1,4 +1,4 @@
-"""Runs Agno 2 kept in a JSON blob on the session row move into run rows once, when storage opens."""
+"""Runs Agno 2 kept in a JSON blob on the session row move into run rows once, when the summary rows migrate."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def _comparable(row: dict[str, Any]) -> dict[str, Any]:
     return {**row, "updated_at": None, "run_data": {**row["run_data"], "messages": messages}}
 
 
-def test_blob_runs_become_rows_when_the_store_opens(tmp_path: Path) -> None:
+def test_blob_runs_become_rows_when_the_summary_rows_migrate(tmp_path: Path) -> None:
     """The rows equal the ones MindRoom's Agno-backed migration wrote from the same Agno 2.6.12 database."""
     db_file = create_agno_2_sessions_db(tmp_path / "code.db")
     [golden] = [store for store in golden_stores() if store.label == "agno2_migrated"]
@@ -139,8 +139,8 @@ def test_a_database_with_summary_rows_is_never_migrated_again(tmp_path: Path) ->
     assert _blob(db_file) is not None
 
 
-def test_databases_agno_3_created_open_untouched(tmp_path: Path) -> None:
-    """A database Agno 3 created has no blob column, so opening it writes nothing."""
+def test_databases_agno_3_created_are_left_untouched(tmp_path: Path) -> None:
+    """A database Agno 3 created already has summary rows, so the migration writes nothing."""
     [golden] = [store for store in golden_stores() if store.label == "agent_code"]
     db_file = golden.restore(tmp_path)
     before = db_file.read_bytes()
@@ -150,17 +150,17 @@ def test_databases_agno_3_created_open_untouched(tmp_path: Path) -> None:
     assert db_file.read_bytes() == before
 
 
-def test_owners_opening_at_once_move_the_blob_runs_once(tmp_path: Path) -> None:
-    """Owners racing to open one Agno 2 database write each run row once."""
+def test_owners_migrating_at_once_move_the_blob_runs_once(tmp_path: Path) -> None:
+    """Owners racing to migrate one Agno 2 database write each run row once."""
     db_file = create_agno_2_sessions_db(tmp_path / "code.db")
     start = threading.Barrier(4)
 
-    def open_store(_index: int) -> None:
+    def migrate(_index: int) -> None:
         start.wait()
         migrate_to_summary_rows(db_file, _NAMES)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(open_store, range(4)))
+        list(pool.map(migrate, range(4)))
 
     assert [(run_id, index) for run_id, index, _ in _log(db_file)] == [("run-1", 0), ("run-2", 1), ("run-3", 2)]
 
@@ -169,7 +169,7 @@ def test_a_move_that_fails_part_way_leaves_the_database_as_agno_2_left_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failure after the rows are written and the blob cleared commits nothing, so the next open moves them."""
+    """A failure after the rows are written and the blob cleared commits nothing, so the next migration moves them."""
     db_file = create_agno_2_sessions_db(tmp_path / "code.db")
     with closing(sqlite3.connect(db_file)) as connection:
         before = list(connection.iterdump())

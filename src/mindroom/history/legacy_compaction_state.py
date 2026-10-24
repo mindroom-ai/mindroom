@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.summary_rows_schema import owner_scope_key, summary_rows_schema_sql
 from mindroom.session_storage.legacy_agno2_runs import (
-    decode_session_json,
-    has_blob_runs,
+    has_blob_column,
     insert_run_entry,
     move_blob_runs_to_rows,
     number_unindexed_runs,
@@ -18,7 +17,7 @@ from mindroom.session_storage.legacy_agno2_runs import (
     renumber_runs,
 )
 from mindroom.session_storage.schema import run_log_sql, table_names
-from mindroom.session_storage.store import delete_run_subtrees_in_transaction, migrate_database
+from mindroom.session_storage.store import decoded_mapping, delete_run_subtrees_in_transaction, migrate_database
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
@@ -61,7 +60,7 @@ def migrate_to_summary_rows(path: Path, names: TableNames) -> None:
 def _create_summary_rows(connection: sqlite3.Connection, names: TableNames) -> None:
     for statement in run_log_sql(names):
         connection.execute(statement)
-    if has_blob_runs(connection, names):
+    if has_blob_column(connection, names):
         move_blob_runs_to_rows(connection, names)
     number_unindexed_runs(connection, names)
     for statement in summary_rows_schema_sql(names.sessions):
@@ -84,14 +83,14 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: TableNames) ->
         f"SELECT session_id, session_type, agent_id, team_id, metadata, summary FROM {sessions}",  # noqa: S608
     ).fetchall()
     for session_id, session_type, agent_id, team_id, raw_metadata, raw_summary in rows:
-        metadata = _decoded_mapping(raw_metadata)
+        metadata = decoded_mapping(raw_metadata) or {}
         scopes = {
             scope_key: tombstones
             for scope_key, state in _scope_states(metadata, MINDROOM_COMPACTION_METADATA_KEY).items()
             if isinstance(state, dict) and (tombstones := _legacy_tombstones(state)) is not None
         }
         seen_states = _scope_states(metadata, MINDROOM_MATRIX_HISTORY_METADATA_KEY)
-        summary = _summary_text(_decoded_mapping(raw_summary))
+        summary = _summary_text(decoded_mapping(raw_summary) or {})
         summary_scope = owner_scope_key(session_type, agent_id, team_id) if summary is not None else None
         if summary_scope is not None:
             scope_seen = json.dumps(_seen_event_ids(seen_states.get(summary_scope)))
@@ -275,12 +274,3 @@ def _seen_event_ids(raw_state: dict[str, Any] | None) -> list[str]:
 def _summary_text(summary: dict[str, Any]) -> str | None:
     text = summary.get("summary")
     return text if isinstance(text, str) and text.strip() else None
-
-
-def _decoded_mapping(raw_value: object) -> dict[str, Any]:
-    """Decode one JSON object column; unreadable or non-object values read as empty."""
-    try:
-        value = decode_session_json(raw_value)
-    except (TypeError, ValueError):
-        return {}
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
