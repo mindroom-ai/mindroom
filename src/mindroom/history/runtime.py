@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.history.compaction import (
     ConversationChangedError,
+    clear_manual_compaction_request,
     compact_running_turn,
     compact_scope_history,
     load_summarizer,
@@ -91,10 +92,6 @@ def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
 
 
-def _compaction_failure_status(error: BaseException) -> Literal["failed", "timeout"]:
-    return "timeout" if is_summary_timeout(error) else "failed"
-
-
 def note_prepared_history_timing(
     pipeline_timing: DispatchPipelineTiming | None,
     prepared_history: PreparedHistoryState,
@@ -114,34 +111,6 @@ def note_prepared_history_timing(
         prepared_context_tokens=prepared_history.prepared_context_tokens,
         fitted_replay_tokens=(
             prepared_history.replay_plan.estimated_tokens if prepared_history.replay_plan is not None else None
-        ),
-    )
-
-
-async def _clear_forced_compaction_after_failure(
-    *,
-    storage: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-) -> None:
-    """Clear a consumed manual force marker after a compaction failure.
-
-    Clears against the freshest row unconditionally so a failing manual
-    compaction cannot retry-loop on every reply. This deliberately differs
-    from the no-candidates path (_persist_cleared_force_state_if_needed in
-    compaction.py), which refuses to clear when a concurrent write moved the
-    durable row, so a fresh manual request placed mid-run survives.
-    """
-    if not state.force_compact_before_next_run:
-        return
-    await run_session_storage_operation(
-        lambda: storage,
-        partial(
-            update_scope_state_on_latest,
-            session=session,
-            scope=scope,
-            update=lambda latest: replace(latest, force_compact_before_next_run=False),
         ),
     )
 
@@ -179,75 +148,6 @@ class PreparedScopeHistory:
     native_history: NativeHistory | None = None
     # The route's own estimate of explicitly replayed history, which the final replay plan sizes with.
     replay_estimator: PortableReplayEstimator | None = None
-
-
-@dataclass(frozen=True)
-class _SafeCompactionLifecycle:
-    """Best-effort compaction notice delivery: failures are logged, never raised."""
-
-    lifecycle: CompactionLifecycle | None
-
-    @property
-    def enabled(self) -> bool:
-        """Return whether lifecycle notices are delivered at all."""
-        return self.lifecycle is not None
-
-    async def start(self, event: CompactionLifecycleStart) -> str | None:
-        """Send the initial compaction notice and return its Matrix event id."""
-        if self.lifecycle is None:
-            return None
-        return await self._deliver(
-            self.lifecycle.start(event),
-            phase="start",
-            session_id=event.session_id,
-            scope=event.scope,
-        )
-
-    async def complete_success(self, outcome: CompactionOutcome) -> None:
-        """Edit the lifecycle notice after successful compaction."""
-        if self.lifecycle is None or outcome.lifecycle_notice_event_id is None:
-            return
-        await self._deliver(
-            self.lifecycle.complete_success(outcome),
-            phase="success",
-            session_id=outcome.session_id,
-            scope=outcome.scope,
-        )
-
-    async def progress(self, event: CompactionLifecycleProgress) -> None:
-        """Edit the lifecycle notice after persisted compaction progress."""
-        if self.lifecycle is None or event.notice_event_id is None:
-            return
-        await self._deliver(
-            self.lifecycle.progress(event),
-            phase="progress",
-            session_id=event.session_id,
-            scope=event.scope,
-        )
-
-    async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
-        """Edit the lifecycle notice after failed compaction."""
-        if self.lifecycle is None or event.notice_event_id is None:
-            return
-        await self._deliver(
-            self.lifecycle.complete_failure(event),
-            phase=f"failure:{event.status}",
-            session_id=event.session_id,
-            scope=event.scope,
-        )
-
-    @staticmethod
-    async def _deliver[T](delivery: Awaitable[T], *, phase: str, session_id: str, scope: str) -> T | None:
-        try:
-            return await delivery
-        except Exception:
-            logger.exception(
-                "Compaction lifecycle notice delivery failed",
-                phase=phase,
-                session_id=session_id,
-                scope=scope,
-            )
-            return None
 
 
 def _native_history(
@@ -485,22 +385,26 @@ def _reported_history_tokens(
         return None
     answer = messages[anchor]
     summary = session.summary
-    # A summary written after that request started folded runs it held. Agno creates the answer's message before a
-    # mid-turn fold of that request runs, so such a fold also counts as later and the estimate decides. Both stamps
-    # are whole seconds, which cannot order a summary written in the same second, so a tie counts as later too.
+    # A summary written after that request started folded runs it held. Both stamps are whole seconds, which cannot
+    # order a summary written in the same second, so a tie counts as later too.
     if summary is not None and (summary.updated_at is None or summary.updated_at.timestamp() >= answer.created_at):
         return None
-    configured = config.models.get(resolved_inputs.active_model_name)
-    reported = response_context_tokens(
-        answer,
-        provider=model.identity.provider_name,
-        configured_provider=configured.provider if configured is not None else None,
-        model_id=model.identity.id,
-    )
+    reported = reported_context_tokens(answer, model=model, config=config, model_name=resolved_inputs.active_model_name)
     if reported is None:
         return None
     newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=replay_estimator)
     return reported + newer_tokens - non_prompt_tokens
+
+
+def reported_context_tokens(message: Message, *, model: ModelProvider, config: Config, model_name: str) -> int | None:
+    """Return the request-context size ``model`` reported with ``message``, configured as ``model_name``, if any."""
+    configured = config.models.get(model_name)
+    return response_context_tokens(
+        message,
+        provider=model.identity.provider_name,
+        configured_provider=configured.provider if configured is not None else None,
+        model_id=model.identity.id,
+    )
 
 
 # Runs one compaction under the lifecycle wrapper, given the callbacks that report its progress and its success.
@@ -525,28 +429,30 @@ async def _run_scope_compaction_with_lifecycle(
     compaction_lifecycle: CompactionLifecycle | None,
     compact: _ScopeCompactor,
 ) -> _ScopeCompactionLifecycleResult:
-    lifecycle = _SafeCompactionLifecycle(compaction_lifecycle if runs_before else None)
+    lifecycle = compaction_lifecycle if runs_before else None
     compaction_start = time.monotonic()
-    notice_event_id = await lifecycle.start(
-        CompactionLifecycleStart(
-            mode=mode,
-            session_id=session_id,
-            scope=scope.key,
-            summary_model=execution_plan.compaction_model_name,
-            before_tokens=current_history_tokens,
-            history_budget_tokens=history_budget,
-            runs_before=runs_before,
-            threshold_tokens=execution_plan.trigger_threshold_tokens,
-        ),
+    notify = partial(_send_notice, session_id=session_id, scope=scope)
+    start = CompactionLifecycleStart(
+        mode=mode,
+        session_id=session_id,
+        scope=scope.key,
+        summary_model=execution_plan.compaction_model_name,
+        before_tokens=current_history_tokens,
+        history_budget_tokens=history_budget,
+        runs_before=runs_before,
+        threshold_tokens=execution_plan.trigger_threshold_tokens,
     )
+    notice_event_id = await notify(lifecycle, "start", lambda lifecycle: lifecycle.start(start))
+    # Later notices edit the start notice, so they are sent only when it was.
+    notices = lifecycle if notice_event_id is not None else None
 
     # Progress events report the model that actually served each persisted
     # chunk, so failure notices after a fallback switch name the fallback
     # instead of the configured primary.
     serving_summary_model = execution_plan.compaction_model_name
 
-    def _failure_event(status: Literal["failed", "timeout"], failure_reason: str) -> CompactionLifecycleFailure:
-        return CompactionLifecycleFailure(
+    async def _fail(status: Literal["failed", "timeout"], failure_reason: str) -> None:
+        failure = CompactionLifecycleFailure(
             notice_event_id=notice_event_id,
             mode=mode,
             session_id=session_id,
@@ -557,32 +463,32 @@ async def _run_scope_compaction_with_lifecycle(
             failure_reason=redact_sensitive_text(failure_reason),
             history_budget_tokens=history_budget,
         )
+        await notify(notices, f"failure:{status}", lambda lifecycle: lifecycle.complete_failure(failure))
 
     async def _progress(event: CompactionLifecycleProgress) -> None:
         nonlocal serving_summary_model
         serving_summary_model = event.summary_model
-        await lifecycle.progress(
-            replace(event, notice_event_id=notice_event_id, duration_ms=_elapsed_ms(compaction_start)),
-        )
+        event = replace(event, notice_event_id=notice_event_id, duration_ms=_elapsed_ms(compaction_start))
+        await notify(notices, "progress", lambda lifecycle: lifecycle.progress(event))
 
     completed_successfully = False
 
     async def _complete(outcome: CompactionOutcome) -> CompactionOutcome:
         nonlocal completed_successfully
         outcome = replace(outcome, lifecycle_notice_event_id=notice_event_id, duration_ms=_elapsed_ms(compaction_start))
-        await lifecycle.complete_success(outcome)
+        await notify(notices, "success", lambda lifecycle: lifecycle.complete_success(outcome))
         completed_successfully = True
         return outcome
 
     try:
-        outcome = await compact(_progress if lifecycle.enabled else None, _complete)
+        outcome = await compact(_progress if lifecycle is not None else None, _complete)
     except asyncio.CancelledError as error:
         if not completed_successfully:
-            await lifecycle.complete_failure(_failure_event("failed", str(error) or type(error).__name__))
+            await _fail("failed", str(error) or type(error).__name__)
         raise
     except Exception as error:
-        status = _compaction_failure_status(error)
-        await lifecycle.complete_failure(_failure_event(status, str(error) or type(error).__name__))
+        status = "timeout" if is_summary_timeout(error) else "failed"
+        await _fail(status, str(error) or type(error).__name__)
         logger.exception(
             "Compaction failed; continuing without compaction",
             session_id=session_id,
@@ -592,10 +498,34 @@ async def _run_scope_compaction_with_lifecycle(
         return _ScopeCompactionLifecycleResult(outcome=None, reply_outcome=status)
 
     if outcome is None:
-        await lifecycle.complete_failure(_failure_event("failed", "No compactable history remained."))
+        await _fail("failed", "No compactable history remained.")
         return _ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed")
 
     return _ScopeCompactionLifecycleResult(outcome=outcome, reply_outcome="success")
+
+
+async def _send_notice[T](
+    lifecycle: CompactionLifecycle | None,
+    phase: str,
+    send: Callable[[CompactionLifecycle], Awaitable[T]],
+    *,
+    session_id: str,
+    scope: HistoryScope,
+) -> T | None:
+    """Send one compaction notice through ``lifecycle``, if any; notices are best-effort, so a failure is only logged."""
+    if lifecycle is None:
+        return None
+    delivery = send(lifecycle)
+    try:
+        return await delivery
+    except Exception:
+        logger.exception(
+            "Compaction lifecycle notice delivery failed",
+            phase=phase,
+            session_id=session_id,
+            scope=scope.key,
+        )
+        return None
 
 
 async def _compact_before_reply(
@@ -641,7 +571,13 @@ async def _compact_before_reply(
         raise
     except Exception:
         # A failing manual compaction must not retry on every reply.
-        await _clear_forced_compaction_after_failure(storage=storage, session=session, scope=scope, state=state)
+        await clear_manual_compaction_request(
+            storage=storage,
+            session=session,
+            scope=scope,
+            state=state,
+            keep_concurrent_request=False,
+        )
         raise
 
 
@@ -751,8 +687,6 @@ def finalize_history_preparation(
         active_context_window=resolved_inputs.active_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
-    # hard_replay_budget_tokens and replay_budget_tokens are resolved together,
-    # so no further fallback is needed when the hard budget is unset.
     history_budget = (
         execution_plan.hard_replay_budget_tokens
         if execution_plan.authored_compaction_enabled
@@ -766,12 +700,9 @@ def finalize_history_preparation(
         )
 
     history_settings = resolved_inputs.history_settings
-    session, scope, native_history, replay_estimator = (
-        prepared_scope_history.session,
-        prepared_scope_history.scope,
-        prepared_scope_history.native_history,
-        prepared_scope_history.replay_estimator,
-    )
+    session, scope = prepared_scope_history.session, prepared_scope_history.scope
+    native_history = prepared_scope_history.native_history
+    replay_estimator = prepared_scope_history.replay_estimator
     if scope is None or session is None:
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
         replays_persisted_history = False
@@ -984,11 +915,10 @@ def _prepare_scope_state_for_run(
             scope=scope,
             update=lambda latest: replace(latest, force_compact_before_next_run=False),
         )
-        description = describe_compaction_unavailability(execution_plan)
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",
             session_id=session.session_id,
             scope=scope.key,
-            reason=description,
+            reason=describe_compaction_unavailability(execution_plan),
         )
     return state

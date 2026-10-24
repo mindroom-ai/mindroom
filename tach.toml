@@ -9469,7 +9469,6 @@ depends_on = [
     "mindroom.history.summary_rows",
     "mindroom.history.types",
     "mindroom.llm",
-    "mindroom.model_usage",
     "mindroom.native_compaction",
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.session_storage.agent_storage",

@@ -121,24 +121,22 @@ def _compaction_fallback_is_distinct(
     variants like ``vertexai-claude`` and ``vertexai_claude`` and aliases like
     ``openai_codex`` and ``codex`` count as the same serving model.
     """
-    if fallback_model_name == primary_model_name:
-        is_distinct = False
-    else:
+    if fallback_model_name != primary_model_name:
         primary_config = config.models.get(primary_model_name)
         fallback_config = config.models.get(fallback_model_name)
         if primary_config is None or fallback_config is None:
             return True
-        is_distinct = (provider_route(primary_config.provider), primary_config.id) != (
+        if (provider_route(primary_config.provider), primary_config.id) != (
             provider_route(fallback_config.provider),
             fallback_config.id,
-        )
-    if not is_distinct:
-        logger.warning(
-            "Compaction fallback resolves to the primary serving model; continuing without a fallback",
-            compaction_model=primary_model_name,
-            fallback_model=fallback_model_name,
-        )
-    return is_distinct
+        ):
+            return True
+    logger.warning(
+        "Compaction fallback resolves to the primary serving model; continuing without a fallback",
+        compaction_model=primary_model_name,
+        fallback_model=fallback_model_name,
+    )
+    return False
 
 
 def load_summarizer(
@@ -231,25 +229,31 @@ class _CompactionRewriteResult:
     served_by: SummaryModel
 
 
-async def _persist_cleared_force_state_if_needed(
+async def clear_manual_compaction_request(
     *,
     storage: ConversationStore,
     session: ConversationSession,
     scope: HistoryScope,
     state: HistoryScopeState,
+    keep_concurrent_request: bool = True,
 ) -> None:
+    """Clear the manual compaction request this run read in ``state``, if it read one.
+
+    By default the request clears only while the durable row still matches ``state``, so a concurrent write, such as a
+    fresh manual request, wins. A failed compaction clears it regardless, so a failing manual compaction cannot retry
+    on every reply.
+    """
     if not state.force_compact_before_next_run:
         return
+
+    def update(latest: HistoryScopeState) -> HistoryScopeState:
+        if keep_concurrent_request and latest != state:
+            return latest
+        return replace(latest, force_compact_before_next_run=False)
+
     await run_session_storage_operation(
         lambda: storage,
-        partial(
-            update_scope_state_on_latest,
-            session=session,
-            scope=scope,
-            # Only clear when the durable row still matches the state this run read;
-            # a concurrent write (for example a fresh manual request) wins otherwise.
-            update=lambda latest: replace(latest, force_compact_before_next_run=False) if latest == state else latest,
-        ),
+        partial(update_scope_state_on_latest, session=session, scope=scope, update=update),
     )
 
 
@@ -260,8 +264,8 @@ async def _emit_compaction_hook(
     messages: Sequence[Message],
     session_id: str,
     token_count_before: int,
-    token_count_after: int | None,
-    compaction_summary: str | None,
+    token_count_after: int | None = None,
+    compaction_summary: str | None = None,
 ) -> None:
     runtime_context = get_tool_runtime_context()
     if runtime_context is None or not runtime_context.hook_registry.has_hooks(event_name):
@@ -297,10 +301,9 @@ async def _emit_compaction_hook(
 
 def _should_collect_compaction_hook_messages() -> bool:
     runtime_context = get_tool_runtime_context()
-    if runtime_context is None:
-        return False
-    return runtime_context.hook_registry.has_hooks(EVENT_COMPACTION_BEFORE) or runtime_context.hook_registry.has_hooks(
-        EVENT_COMPACTION_AFTER,
+    return runtime_context is not None and any(
+        runtime_context.hook_registry.has_hooks(event_name)
+        for event_name in (EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER)
     )
 
 
@@ -334,7 +337,7 @@ async def compact_scope_history(
         else []
     )
     if not runs:
-        await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
+        await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
         return None
 
     mode = "manual" if state.force_compact_before_next_run else "auto"
@@ -350,8 +353,6 @@ async def compact_scope_history(
             messages=messages_for_runs(included_runs, history_settings) if collect_compaction_hook_messages else (),
             session_id=session.session_id,
             token_count_before=before_tokens,
-            token_count_after=None,
-            compaction_summary=None,
         )
 
     async def after_persist(chunk: _SummaryChunk, compacted_run_count: int, runs_remaining: int) -> None:
@@ -398,7 +399,7 @@ async def compact_scope_history(
         await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
     if rewrite_result is None:
-        await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
+        await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
         return None
 
     compacted_at = _iso_utc_now()
@@ -406,7 +407,7 @@ async def compact_scope_history(
         lambda: storage,
         partial(save_working_run_changes, session=session, loaded_runs=loaded_runs, working_session=working_session),
     )
-    await _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
+    await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
     logger.info(
         "Compaction summary generated",
         session_id=session.session_id,
@@ -606,8 +607,6 @@ async def compact_running_turn(
         messages=messages,
         session_id=session.session_id,
         token_count_before=before_tokens,
-        token_count_after=None,
-        compaction_summary=None,
     )
     summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
 
@@ -636,6 +635,9 @@ async def compact_running_turn(
             summary=summary,
             summary_model=summarizer.model.name,
             before_tokens=before_tokens,
+            # TODO(simplify): this notice compares the whole request before the fold with the summary text alone
+            # after it. Report both sides in the same units, such as the rewritten request's size. Users would see
+            # different "after" numbers in mid-turn compaction notices.
             after_tokens=estimate_text_tokens(summary),
             window_tokens=replay_window_tokens or 0,
             threshold_tokens=threshold_tokens or 0,
@@ -685,21 +687,17 @@ def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], in
     return estimator, kind
 
 
-async def _summarize_chunk(  # noqa: C901, PLR0915
+async def _summarize_chunk(  # noqa: PLR0915
     summarizer: Summarizer,
     previous_summary: str | None,
     runs: Sequence[AnyRunRecord],
 ) -> _SummaryChunk | None:
     """Summarize the longest prefix of ``runs`` that fits one summary input; None when not even one run fits.
 
-    A failed attempt retries the same or a smaller input when safe. A safeguard
-    refusal from the primary model switches once to the fallback model. The
-    input remains unchanged when it fits the fallback model, otherwise it is
-    rebuilt under that model's own budget. A refusal or failure from the
-    fallback propagates. The switch shares the retry policy's attempt bound,
-    so a refusal after an earlier shrink or transient retry propagates without
-    a fallback call. All other failures keep the shrink and transient
-    same-input retry behavior.
+    A failed attempt retries the same or a smaller input when safe. A safeguard refusal from the primary model
+    switches once to the fallback model, rebuilding the input only when it exceeds the fallback's own budget; a
+    refusal or failure from the fallback propagates. The switch counts against the retry policy's attempt bound, so a
+    refusal after an earlier shrink or transient retry propagates without a fallback call.
     """
     summary_model = summarizer.model
     fallback_model = summarizer.fallback
@@ -765,9 +763,6 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
                 error=str(exc) or type(exc).__name__,
             )
-            # The attempt bound covers the fallback call too: a refusal after an
-            # earlier shrink or transient retry propagates instead of issuing a
-            # third provider call.
             if fallback_model is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
                 fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model.model)
                 fits_fallback = (
@@ -806,22 +801,21 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 minimum_progress_input_tokens=minimum_progress_input_tokens,
                 error=exc,
             )
-            if retry_decision is not None:
-                if retry_decision.kind == "same-budget-transient":
-                    await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
-                    attempt += 1
-                    continue
-                rebuilt_input, rebuilt_runs = await build(retry_decision.budget, token_estimator)
-                if rebuilt_runs:
-                    rebuilt_input_tokens = await asyncio.to_thread(token_estimator, rebuilt_input)
-                    if retry_decision.kind == "shrink" and rebuilt_input_tokens >= summary_input_estimate:
-                        raise
-                    summary_input = rebuilt_input
-                    included_runs = rebuilt_runs
-                    budget = retry_decision.budget
-                    attempt += 1
-                    continue
-            raise
+            if retry_decision is None:
+                raise
+            if retry_decision.kind == "same-budget-transient":
+                await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
+                attempt += 1
+                continue
+            rebuilt_input, rebuilt_runs = await build(retry_decision.budget, token_estimator)
+            # A shrink that does not rebuild a smaller input with some run in it cannot help.
+            if not rebuilt_runs or await asyncio.to_thread(token_estimator, rebuilt_input) >= summary_input_estimate:
+                raise
+            summary_input = rebuilt_input
+            included_runs = rebuilt_runs
+            budget = retry_decision.budget
+            attempt += 1
+            continue
         logger.info(
             "Compaction summary chunk completed",
             **attempt_fields,
@@ -841,7 +835,7 @@ def _runs_with_stable_ids(
     session_id: str,
     scope: HistoryScope,
 ) -> list[AnyRunRecord]:
-    stable_runs = [run for run in runs if _has_stable_run_id(run)]
+    stable_runs = [run for run in runs if run.run_id]
     if len(stable_runs) < len(runs):
         logger.warning(
             "Compaction skipped runs without stable run IDs",
@@ -852,10 +846,6 @@ def _runs_with_stable_ids(
     return stable_runs
 
 
-def _has_stable_run_id(run: AnyRunRecord) -> bool:
-    return bool(run.run_id)
-
-
 def _iso_utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -864,6 +854,7 @@ __all__ = [
     "ConversationChangedError",
     "Summarizer",
     "SummaryModel",
+    "clear_manual_compaction_request",
     "compact_running_turn",
     "compact_scope_history",
     "load_summarizer",

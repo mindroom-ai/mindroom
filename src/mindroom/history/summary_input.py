@@ -55,11 +55,9 @@ class _ExcerptBlock:
     content: str
     close_tag: str
 
-    def render(self, *, max_chars: int | None = None) -> str | None:
-        snippet = self.content if max_chars is None else _truncate_excerpt(self.content, max_chars)
-        if not snippet:
-            return None
-        return "\n".join([self.open_tag, _escape_xml_content(snippet), self.close_tag])
+    def render(self, max_chars: int) -> str:
+        snippet = _escape_xml_content(_truncate_excerpt(self.content, max_chars))
+        return f"{self.open_tag}\n{snippet}\n{self.close_tag}"
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.summary_input_build")
@@ -73,67 +71,38 @@ def build_summary_input(
 ) -> tuple[str, list[AnyRunRecord]]:
     """Fit prior summary and ordered runs into one serialized summary request."""
     summary_block = _previous_summary_block(previous_summary)
-
-    empty_input = _compose_summary_input(summary_block, "")
-    remaining = max_input_tokens - token_estimator(empty_input) - _WRAPPER_OVERHEAD_TOKENS
-
-    if remaining <= 0:
-        return _build_oversized_summary_input(
-            previous_summary=previous_summary,
-            compacted_runs=compacted_runs[:1],
-            history_settings=history_settings,
-            max_input_tokens=max_input_tokens,
-            token_estimator=token_estimator,
-        )
+    envelope_tokens = token_estimator(_compose_summary_input(summary_block, ""))
+    remaining = max_input_tokens - envelope_tokens - _WRAPPER_OVERHEAD_TOKENS
 
     included_runs: list[AnyRunRecord] = []
     serialized_runs: list[str] = []
-    for index, run in enumerate(compacted_runs):
-        serialized_run = _serialize_run(run, index, history_settings)
-        separator = "\n\n" if serialized_runs else ""
-        run_tokens = token_estimator(f"{separator}{serialized_run}")
-        if run_tokens > remaining:
-            if not included_runs:
-                return _build_oversized_summary_input(
-                    previous_summary=previous_summary,
-                    compacted_runs=[run],
-                    history_settings=history_settings,
-                    max_input_tokens=max_input_tokens,
-                    token_estimator=token_estimator,
-                )
-            break
-        included_runs.append(run)
-        serialized_runs.append(serialized_run)
-        remaining -= run_tokens
+    if remaining > 0:
+        for index, run in enumerate(compacted_runs):
+            serialized_run = _serialize_run(run, index, history_settings)
+            separator = "\n\n" if serialized_runs else ""
+            run_tokens = token_estimator(f"{separator}{serialized_run}")
+            if run_tokens > remaining:
+                break
+            included_runs.append(run)
+            serialized_runs.append(serialized_run)
+            remaining -= run_tokens
+    if included_runs:
+        return _compose_summary_input(summary_block, "\n\n".join(serialized_runs)), included_runs
 
-    if not included_runs:
-        return summary_block, []
-
-    return _compose_summary_input(summary_block, "\n\n".join(serialized_runs)), included_runs
-
-
-def _build_oversized_summary_input(
-    *,
-    previous_summary: str | None,
-    compacted_runs: Sequence[AnyRunRecord],
-    history_settings: ResolvedHistorySettings,
-    max_input_tokens: int,
-    token_estimator: Callable[[str], int],
-) -> tuple[str, list[AnyRunRecord]]:
-    summary_block = _previous_summary_block(previous_summary)
-    if not compacted_runs:
-        return summary_block, []
-    first_run = compacted_runs[0]
-    oversized_excerpt = _serialize_oversized_run_excerpt(
-        first_run,
-        index=0,
-        history_settings=history_settings,
-        max_tokens=max_input_tokens - token_estimator(_compose_summary_input(summary_block, "")),
-        token_estimator=token_estimator,
+    # Not even the first run fits whole, so it is excerpted.
+    oversized_excerpt = (
+        _serialize_oversized_run_excerpt(
+            compacted_runs[0],
+            history_settings=history_settings,
+            max_tokens=max_input_tokens - envelope_tokens,
+            token_estimator=token_estimator,
+        )
+        if compacted_runs
+        else None
     )
     if oversized_excerpt is None:
         return summary_block, []
-    return _compose_summary_input(summary_block, oversized_excerpt), [first_run]
+    return _compose_summary_input(summary_block, oversized_excerpt), [compacted_runs[0]]
 
 
 def minimum_summary_input_tokens(
@@ -152,14 +121,13 @@ def minimum_summary_input_tokens(
     tokenizer boundary effects.
     """
     summary_block = _previous_summary_block(previous_summary)
-    minimal_excerpt = _serialize_run_excerpt(first_run, index=0, blocks=(), content_budget_chars=0)
+    minimal_excerpt = _serialize_run_excerpt(first_run, blocks=(), content_budget_chars=0)
     return token_estimator(_compose_summary_input(summary_block, minimal_excerpt)) + _WRAPPER_OVERHEAD_TOKENS
 
 
 def _serialize_oversized_run_excerpt(
     run: AnyRunRecord,
     *,
-    index: int,
     history_settings: ResolvedHistorySettings,
     max_tokens: int,
     token_estimator: Callable[[str], int],
@@ -167,19 +135,19 @@ def _serialize_oversized_run_excerpt(
     if max_tokens <= 0:
         return None
 
-    full_run = _serialize_run(run, index, history_settings)
+    full_run = _serialize_run(run, 0, history_settings)
     if token_estimator(full_run) <= max_tokens:
         return full_run
 
     blocks = _excerpt_blocks(run, history_settings)
     budget_chars = max_tokens * 4
     while budget_chars > 0:
-        excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=budget_chars)
+        excerpt = _serialize_run_excerpt(run, blocks=blocks, content_budget_chars=budget_chars)
         if token_estimator(excerpt) <= max_tokens:
             return excerpt
         budget_chars //= 2
 
-    minimal_excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=0)
+    minimal_excerpt = _serialize_run_excerpt(run, blocks=blocks, content_budget_chars=0)
     if token_estimator(minimal_excerpt) <= max_tokens:
         return minimal_excerpt
     return None
@@ -188,23 +156,19 @@ def _serialize_oversized_run_excerpt(
 def _serialize_run_excerpt(
     run: AnyRunRecord,
     *,
-    index: int,
     blocks: Sequence[_ExcerptBlock],
     content_budget_chars: int,
 ) -> str:
-    lines = [_run_open_tag(run, index), f"<note>{_OVERSIZED_RUN_NOTE}</note>"]
+    """Render the only run of an oversized summary input, ``blocks`` cut to ``content_budget_chars`` characters."""
+    lines = [_run_open_tag(run, 0), f"<note>{_OVERSIZED_RUN_NOTE}</note>"]
     remaining_chars = content_budget_chars
     for block in blocks:
         if remaining_chars <= 0:
             break
-        rendered = block.render(max_chars=remaining_chars)
-        if rendered is None:
-            continue
-        lines.append(rendered)
-        if len(block.content) <= remaining_chars:
-            remaining_chars -= len(block.content)
-        else:
+        lines.append(block.render(remaining_chars))
+        if len(block.content) > remaining_chars:
             break
+        remaining_chars -= len(block.content)
 
     lines.append("</run>")
     return "\n".join(lines)
@@ -225,11 +189,8 @@ def _compaction_replay_messages(
 
 
 def _excerpt_blocks(run: AnyRunRecord, history_settings: ResolvedHistorySettings) -> list[_ExcerptBlock]:
-    blocks: list[_ExcerptBlock] = []
-    if run.metadata:
-        metadata = _metadata_for_summary(run.metadata)
-        if metadata:
-            blocks.append(_ExcerptBlock("<run_metadata>", stable_serialize(metadata), "</run_metadata>"))
+    metadata = _summary_metadata(run)
+    blocks = [] if metadata is None else [_ExcerptBlock("<run_metadata>", metadata, "</run_metadata>")]
     for message in _compaction_replay_messages(run, history_settings):
         content = render_message_content(message)
         if content:
@@ -243,27 +204,20 @@ def _excerpt_blocks(run: AnyRunRecord, history_settings: ResolvedHistorySettings
     return blocks
 
 
-def _metadata_for_summary(metadata: dict[str, object]) -> dict[str, object]:
-    """Omit bulky request metadata from compaction summary inputs."""
-    return {key: value for key, value in metadata.items() if key not in _SUMMARY_METADATA_OMIT_KEYS}
+def _summary_metadata(run: AnyRunRecord) -> str | None:
+    """Return the run's metadata without bulky request records, serialized, or None when nothing is left."""
+    metadata = {key: value for key, value in (run.metadata or {}).items() if key not in _SUMMARY_METADATA_OMIT_KEYS}
+    return stable_serialize(metadata) if metadata else None
 
 
 def _truncate_excerpt(text: str, max_chars: int) -> str:
-    if max_chars <= 0:
-        return ""
-    if len(text) <= max_chars:
-        return text
-    if max_chars == 1:
-        return "…"
-    return f"{text[: max_chars - 1].rstrip()}…"
+    """Cut ``text`` to ``max_chars`` characters, a positive count, ending a cut text with an ellipsis."""
+    return text if len(text) <= max_chars else f"{text[: max_chars - 1].rstrip()}…"
 
 
 def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
-    parts: list[str] = []
-    if summary_block:
-        parts.append(summary_block)
-    parts.append(f"<new_conversation>\n{serialized_runs}\n</new_conversation>")
-    return "\n\n".join(parts)
+    conversation = f"<new_conversation>\n{serialized_runs}\n</new_conversation>"
+    return f"{summary_block}\n\n{conversation}" if summary_block else conversation
 
 
 def _previous_summary_block(summary: str | None) -> str:
@@ -286,10 +240,9 @@ def messages_for_runs(
 
 def _serialize_run(run: AnyRunRecord, index: int, history_settings: ResolvedHistorySettings) -> str:
     lines = [_run_open_tag(run, index)]
-    if run.metadata:
-        metadata = _metadata_for_summary(run.metadata)
-        if metadata:
-            lines.extend(["<run_metadata>", _escape_xml_content(stable_serialize(metadata)), "</run_metadata>"])
+    metadata = _summary_metadata(run)
+    if metadata is not None:
+        lines.extend(["<run_metadata>", _escape_xml_content(metadata), "</run_metadata>"])
     for message in _compaction_replay_messages(run, history_settings):
         lines.extend(_serialize_message(message))
     lines.append("</run>")
@@ -303,10 +256,9 @@ def _serialize_message(message: Message) -> list[str]:
     if message.tool_calls:
         lines.extend(["<tool_calls>", _escape_xml_content(stable_serialize(message.tool_calls)), "</tool_calls>"])
     for tag, media_value in message_media_entries(message):
-        serialized = _serialize_media_payload(media_value)
-        if not serialized:
-            continue
-        lines.extend([f"<{tag}>", _escape_xml_content(serialized), f"</{tag}>"])
+        serialized = "" if media_value is None else stable_serialize(media_payload_snapshot(media_value))
+        if serialized:
+            lines.extend([f"<{tag}>", _escape_xml_content(serialized), f"</{tag}>"])
     return lines
 
 
@@ -344,15 +296,6 @@ def _bounded_arg(value: object) -> object:
     return value if len(serialized) <= _TOOL_RESULT_ARG_CHARS else _truncate_excerpt(serialized, _TOOL_RESULT_ARG_CHARS)
 
 
-def _serialize_media_payload(media_value: object | None) -> str:
-    if media_value is None:
-        return ""
-    return stable_serialize(media_payload_snapshot(media_value))
-
-
-def _unescape_xml_content(text: str) -> str:
-    return text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
-
-
 def _escape_xml_content(text: str) -> str:
-    return escape(_unescape_xml_content(text), quote=False)
+    """Escape ``text`` for an XML body, unescaping it first so already-escaped text is not escaped twice."""
+    return escape(text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&"), quote=False)

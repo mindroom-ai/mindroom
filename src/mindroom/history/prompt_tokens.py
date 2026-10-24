@@ -1,15 +1,13 @@
-"""Static prompt-token estimation: what the model sees before any history replay.
+"""Static prompt-token estimation: the rendered system message, the offered tool definitions, and the prompt text.
 
-Estimates the non-history cost of one prepared request — the rendered system message, the offered tool
-definitions, and the current prompt text. ``build_static_token_estimator`` sizes an owned build's rendered system
-message and tool definitions as the request sends them; the team path sizes the leader's prompt and every tool it
-offers through the same estimator. Nothing here touches history scopes, sessions, or summaries; compaction consumes
-these numbers through the resolved execution plan.
+Compaction consumes these numbers through the resolved execution plan; an agent and a team leader size their
+requests through the same estimator.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
+from functools import cache
 from typing import TYPE_CHECKING
 
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
@@ -20,24 +18,16 @@ if TYPE_CHECKING:
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ToolSpec
 
-type _ToolDefinition = dict[str, object]
 
-
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class _StaticTokenEstimator:
-    """Request-local static-token estimator that caches the non-prompt cost once."""
+    """Request-local static-token estimator."""
 
-    non_prompt_tokens_fn: Callable[[], int]
-    _non_prompt_tokens: int | None = field(default=None, init=False)
-
-    def non_prompt_tokens(self) -> int:
-        """Estimate the system message and tool tokens, which do not depend on the prompt text."""
-        if self._non_prompt_tokens is None:
-            self._non_prompt_tokens = self.non_prompt_tokens_fn()
-        return self._non_prompt_tokens
+    # The system message and tool tokens, which do not depend on the prompt text; computed once, on first use.
+    non_prompt_tokens: Callable[[], int]
 
     def estimate(self, full_prompt: str) -> int:
-        """Estimate the prompt text's tokens plus the non-prompt cost, which is computed once."""
+        """Estimate the prompt text's tokens plus the non-prompt cost."""
         return estimate_text_tokens(full_prompt) + self.non_prompt_tokens()
 
 
@@ -57,10 +47,7 @@ def build_static_token_estimator(
             for tool in tools
             if tool.name not in deferred_tool_names
         ]
-        return estimate_text_tokens(str(system_message.content or "")) + _definition_tokens(payloads)
+        tool_tokens = estimate_text_tokens(stable_serialize(payloads))
+        return estimate_text_tokens(str(system_message.content or "")) + tool_tokens
 
-    return _StaticTokenEstimator(non_prompt_tokens)
-
-
-def _definition_tokens(payloads: Sequence[_ToolDefinition]) -> int:
-    return len(stable_serialize(list(payloads))) // 4 if payloads else 0
+    return _StaticTokenEstimator(cache(non_prompt_tokens))

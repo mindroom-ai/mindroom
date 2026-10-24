@@ -28,6 +28,7 @@ from mindroom.history.replay import (
 from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
     compact_scope_mid_turn,
+    reported_context_tokens,
     resolve_entity_preparation_inputs,
     summarize_run_locally,
 )
@@ -43,7 +44,6 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
-from mindroom.model_usage import response_context_tokens
 from mindroom.native_compaction import checkpoint_items, native_replay_messages
 from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
@@ -110,16 +110,6 @@ class _MidTurnCompaction:
         """Return the session a fold appends its summary row to, or None when the run's requests replay no history."""
         replays_history = self.replay_plan is not None and self.replay_plan.add_history_to_context
         return self.session if replays_history and self.store is not None and self.scope is not None else None
-
-    def resolved_inputs(self) -> HistoryPreparationInputs:
-        return resolve_entity_preparation_inputs(
-            config=self.config,
-            entity_name=self.entity_name,
-            static_prompt_tokens=0,
-            active_model_name=self.model_name,
-            active_context_window=None,
-            history_settings=self.history_settings,
-        )
 
 
 @dataclass(frozen=True)
@@ -239,7 +229,9 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
             "Native compaction left the request over its limit; compacted as text",
             run_id=state.record.run_id,
         )
-        _stop_native_compaction(state)
+        # The fold replaced the checkpoints the provider's compaction replayed, so the loop's later requests carry no
+        # native settings: each route sends them as plain requests, and this hook sizes and compacts them as text.
+        state.request_template = replace(state.request_template, native_compaction=None)
     rewritten_tokens = await asyncio.to_thread(_estimated_request_tokens, binding, messages, state.tools)
     _require_fit(policy, rewritten_tokens, summary_message)
     if rewritten_tokens > policy.limit:
@@ -250,15 +242,6 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
             run_id=state.record.run_id,
         )
         binding.stopped = True
-
-
-def _stop_native_compaction(state: LoopState) -> None:
-    """Turn the provider's compaction off for the rest of this loop; the fold replaced the checkpoints it replayed.
-
-    Later requests of the loop carry no native settings, so each route sends them as plain requests (Responses with
-    its storage setting restored), and the hook, which reads them from the request, sizes and compacts them as text.
-    """
-    state.request_template = replace(state.request_template, native_compaction=None)
 
 
 async def _summarize(
@@ -283,8 +266,6 @@ async def _summarize(
             _finish(messages, layout, summary_message, record)
             return summary_message
         return await _compact_scope(binding, inputs, layout, messages, record, session, request_tokens)
-    except asyncio.CancelledError:
-        raise
     except Exception:
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=record.run_id)
         return None
@@ -378,12 +359,18 @@ def _segment(record: AnyRunRecord, layout: _Layout, folded_member_ids: set[str])
 
 def _policy(binding: _MidTurnCompaction, state: LoopState) -> _Policy | None:
     """Return the limit text compaction keeps requests under, or None when it cannot run for this request."""
-    inputs = binding.resolved_inputs()
+    inputs = resolve_entity_preparation_inputs(
+        config=binding.config,
+        entity_name=binding.entity_name,
+        static_prompt_tokens=0,
+        active_model_name=binding.model_name,
+        active_context_window=None,
+        history_settings=binding.history_settings,
+    )
     plan = inputs.execution_plan
     if not (plan.authored_compaction_enabled and plan.text_compaction_available) or plan.replay_window_tokens is None:
         return None
-    configured = binding.config.models.get(binding.model_name)
-    model_window = configured.context_window if configured is not None else None
+    model_window = binding.config.get_model_context_window(binding.model_name)
     native = state.request_template.native_compaction
     return _Policy(
         inputs=inputs,
@@ -439,13 +426,11 @@ def _request_tokens(
         None,
     )
     if anchor is not None:
-        configured = binding.config.models.get(binding.model_name)
-        identity = binding.model.identity
-        reported = response_context_tokens(
+        reported = reported_context_tokens(
             messages[anchor],
-            provider=identity.provider_name,
-            configured_provider=configured.provider if configured is not None else None,
-            model_id=identity.id,
+            model=binding.model,
+            config=binding.config,
+            model_name=binding.model_name,
         )
         if reported is not None:
             newer = messages[anchor:]
@@ -471,18 +456,16 @@ def _tool_tokens(binding: _MidTurnCompaction, tools: Sequence[ToolSpec], message
     Claude expands a search's tool references into definitions; OpenAI replays them inside the search output, and
     portable tool search returns them as an ordinary tool result, both of which the message estimate already counts.
     """
-    if not tools:
-        return 0
     deferred = binding.deferred_tool_names
     if deferred:
         deferred -= claude_loaded_tool_names(messages)
-    sent = [tool for tool in tools if tool.name not in deferred]
-    if not sent:
-        return 0
-    # The wire shape of each definition, as Agno's ``Function.to_dict()`` sent it.
+    # TODO(simplify): this sizes each definition inside a Chat ``function`` envelope while the static estimate
+    # (``prompt_tokens.py``) sizes the bare fields, so one tool costs two amounts. Size both through one helper.
+    # Operators would see compaction trigger, and models see replay trimmed, a few tokens per tool differently.
     payloads = [
         {"type": "function", "function": {key: value for key, value in asdict(tool).items() if value is not None}}
-        for tool in sent
+        for tool in tools
+        if tool.name not in deferred
     ]
     return estimate_text_tokens(stable_serialize(payloads))
 
