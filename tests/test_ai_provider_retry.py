@@ -17,8 +17,6 @@ from mindroom.config.models import ModelConfig
 from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.provider import TextDelta
 from mindroom.providers.pipeline import wrapped as provider_attempts
-from mindroom.providers.pipeline.compose import wrap_provider
-from mindroom.providers.pipeline.request_log import RequestLog
 from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
@@ -27,6 +25,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.providers.golden_support import pipeline_provider
 from tests.scripted_agent_helpers import raising, registered_toolkit, stored_runs, streamed_text
 
 if TYPE_CHECKING:
@@ -86,16 +85,7 @@ def _install_agent(
     )
     config.memory.backend = "none"
     model = ScriptedModel([list(turn) for turn in turns])
-    request_log = RequestLog(
-        model_name="default",
-        configured_provider="openai",
-        debug=config.debug,
-        storage_root=runtime_paths.storage_root,
-    )
-    install_model_providers(
-        monkeypatch,
-        {"default": wrap_provider(model, idle_timeout_seconds=None, media_fallback_prompt="", request_log=request_log)},
-    )
+    install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
     return config, model
 
 

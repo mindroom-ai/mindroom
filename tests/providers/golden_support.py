@@ -406,17 +406,28 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
     )
 
 
-def pipeline_provider(adapter: ModelProvider, *, idle_timeout_seconds: float | None = None) -> ModelProvider:
-    """Wrap a bare adapter in the production pipeline stages, with the request log off."""
+def pipeline_provider(
+    adapter: ModelProvider,
+    *,
+    idle_timeout_seconds: float | None = None,
+    log_dir: Path | None = None,
+) -> ModelProvider:
+    """Wrap a bare adapter in the production pipeline stages, as the registry does.
+
+    The request log is off, so only the usage line is emitted, unless ``log_dir`` names where its records go.
+    """
+    debug = DebugConfig() if log_dir is None else DebugConfig(log_llm_requests=True, llm_request_log_dir=str(log_dir))
     return wrap_provider(
         adapter,
         idle_timeout_seconds=idle_timeout_seconds,
         media_fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
-        # With the request log off, only the usage line is emitted and the storage root is never read.
         request_log=RequestLog(
             model_name="default",
-            configured_provider=adapter.identity.provider,
-            debug=DebugConfig(),
+            # An authored ``provider`` value, as the registry passes. The usage line reads it only to recognize
+            # ``vertexai_claude``, which the adapter's own provider and Claude model id also identify in these tests.
+            configured_provider="openai",
+            debug=debug,
+            # Records go to ``log_dir`` or nowhere, so the storage root is never read.
             storage_root=Path("unused"),
         ),
     )

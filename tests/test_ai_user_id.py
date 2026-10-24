@@ -35,7 +35,7 @@ from mindroom.budgets.pricing import PricedModel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DebugConfig, ModelConfig, ModelPricing
+from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -69,8 +69,6 @@ from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCo
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
-from mindroom.providers.pipeline.compose import wrap_provider
-from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.registry import build_model_provider
 from mindroom.response_runner import (
     _paused_with_committed_presentation,
@@ -119,6 +117,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
+from tests.providers.golden_support import pipeline_provider
 from tests.scripted_agent_helpers import (
     PROBE_TOOL,
     ProbeTools,
@@ -1558,22 +1557,7 @@ class TestUserIdPassthrough:
         config, runtime_paths = _bound(tmp_path)
         refused = Message(role="assistant", content="", metrics=usage(5, 0))
         model = ScriptedModel([[UsageReported(usage(5, 0)), TurnCompleted(message=refused, stop_reason="refusal")]])
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": wrap_provider(
-                    model,
-                    idle_timeout_seconds=None,
-                    media_fallback_prompt="",
-                    request_log=RequestLog(
-                        model_name="default",
-                        configured_provider="openai",
-                        debug=config.debug,
-                        storage_root=runtime_paths.storage_root,
-                    ),
-                ),
-            },
-        )
+        install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
         document_file = File(filepath=str(tmp_path / "report.pdf"), filename="report.pdf", mime_type="application/pdf")
 
         response = await _respond(
@@ -1599,24 +1583,8 @@ class TestUserIdPassthrough:
     ) -> None:
         """A streamed reply's request log names its turn: agent, session, room, thread, event, and prompts."""
         config, runtime_paths = _bound(tmp_path)
-        debug = DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path))
         model = ScriptedModel([answer("Deferred stream")])
-        install_model_providers(
-            monkeypatch,
-            {
-                "default": wrap_provider(
-                    model,
-                    idle_timeout_seconds=None,
-                    media_fallback_prompt="",
-                    request_log=RequestLog(
-                        model_name="default",
-                        configured_provider="openai",
-                        debug=debug,
-                        storage_root=tmp_path / "unused",
-                    ),
-                ),
-            },
-        )
+        install_model_providers(monkeypatch, {"default": pipeline_provider(model, log_dir=tmp_path)})
 
         chunks = [
             chunk

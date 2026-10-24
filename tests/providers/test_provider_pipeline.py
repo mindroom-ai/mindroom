@@ -50,7 +50,6 @@ from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE, guidance_retry_stream
 from mindroom.providers.pipeline.media import FALLBACK_MARKER, media_fallback_stream
 from mindroom.providers.pipeline.refusal import refusal_stream
@@ -58,12 +57,13 @@ from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.fakes.scripted_model import Await
+from tests.providers.golden_support import pipeline_provider
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.llm.provider import ModelProvider, StreamEvent
+    from mindroom.llm.provider import StreamEvent
 
 _PROMPT = "Use the attached image."
 _FALLBACK_PROMPT = "Media was not inspected."
@@ -641,11 +641,11 @@ async def test_a_refused_turn_raises_the_typed_refusal_after_its_usage() -> None
 
 
 @pytest.mark.asyncio
-async def test_a_refusal_is_neither_retried_nor_resent_without_media(tmp_path: Path) -> None:
+async def test_a_refusal_is_neither_retried_nor_resent_without_media() -> None:
     """A transient failure before still retries; the refused attempt ends the request with its media intact."""
     usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=9, total_tokens=49))
     inner = _ScriptedProvider([[_transient()], [UsageReported(usage), _refusal(usage)]])
-    provider = _composed(inner, tmp_path)
+    provider = pipeline_provider(inner)
 
     with pytest.raises(ModelSafeguardRefusal):
         await complete(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
@@ -789,16 +789,6 @@ def _request_log(tmp_path: Path, *, enabled: bool = True, provider: str = "opena
         configured_provider=provider,
         debug=DebugConfig(log_llm_requests=enabled, llm_request_log_dir=str(tmp_path) if enabled else None),
         storage_root=tmp_path / "default",
-    )
-
-
-def _composed(inner: ModelProvider, tmp_path: Path) -> ModelProvider:
-    """Wrap ``inner`` in the full pipeline as the registry does, with the request log off."""
-    return wrap_provider(
-        inner,
-        idle_timeout_seconds=None,
-        media_fallback_prompt="x",
-        request_log=_request_log(tmp_path, enabled=False),
     )
 
 
@@ -1010,9 +1000,9 @@ def _request() -> ModelRequest:
 
 
 @pytest.mark.asyncio
-async def test_composed_pipeline_drains_with_complete(tmp_path: Path) -> None:
+async def test_composed_pipeline_drains_with_complete() -> None:
     inner = _ScriptedProvider([[_transient()], [TextDelta("done"), _turn()]])
-    provider = _composed(inner, tmp_path)
+    provider = pipeline_provider(inner)
 
     turn = await complete(provider, ModelRequest(messages=[_user()]))
 
@@ -1029,7 +1019,7 @@ async def test_composed_pipeline_drains_with_complete(tmp_path: Path) -> None:
     ],
     ids=["media-retry", "guidance-retry"],
 )
-async def test_reported_usage_always_sums_to_the_finished_turn(rejection: ProviderError, tmp_path: Path) -> None:
+async def test_reported_usage_always_sums_to_the_finished_turn(rejection: ProviderError) -> None:
     """Usage of transient retries inside a media or guidance retry is counted once, in reports and final metrics."""
     inner = _ScriptedProvider(
         [
@@ -1041,7 +1031,7 @@ async def test_reported_usage_always_sums_to_the_finished_turn(rejection: Provid
             ],
         ],
     )
-    provider = _composed(inner, tmp_path)
+    provider = pipeline_provider(inner)
 
     events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
@@ -1061,10 +1051,7 @@ async def test_reported_usage_always_sums_to_the_finished_turn(rejection: Provid
     ],
     ids=["stream-retry", "media-retry", "guidance-retry"],
 )
-async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_turn(
-    failure: ProviderError,
-    tmp_path: Path,
-) -> None:
+async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_turn(failure: ProviderError) -> None:
     """Usage an attempt reported only partially before it failed is settled as final once, then carried over.
 
     Claude reports a request's input and cache usage when its message starts and its full usage when it stops, so an
@@ -1091,7 +1078,7 @@ async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_tu
             [UsageReported(restarted, final=False), TextDelta("done"), UsageReported(final), _turn(usage=final)],
         ],
     )
-    provider = _composed(inner, tmp_path)
+    provider = pipeline_provider(inner)
 
     events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 

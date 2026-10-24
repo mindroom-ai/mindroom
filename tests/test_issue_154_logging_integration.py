@@ -25,8 +25,6 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.providers.pipeline.compose import wrap_provider
-from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
@@ -42,6 +40,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.providers.golden_support import pipeline_provider
 from tests.scripted_agent_helpers import registered_toolkit, stored_runs, streamed_text
 
 if TYPE_CHECKING:
@@ -95,22 +94,7 @@ def _install_logged_model(
             answer(stream_text, usage(4, 2, time_to_first_token=0.12)),
         ],
     )
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": wrap_provider(
-                model,
-                idle_timeout_seconds=None,
-                media_fallback_prompt="",
-                request_log=RequestLog(
-                    model_name="default",
-                    configured_provider="openai",
-                    debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(llm_log_dir)),
-                    storage_root=llm_log_dir / "unused",
-                ),
-            ),
-        },
-    )
+    install_model_providers(monkeypatch, {"default": pipeline_provider(model, log_dir=llm_log_dir)})
     return model
 
 
