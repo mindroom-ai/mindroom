@@ -28,9 +28,11 @@ if TYPE_CHECKING:
 class JobTool:
     """One function a MindRoom-assembled toolkit offers an actor, with the evidence its grant is checked against.
 
-    ``toolkit_name`` is the authored toolkit, ``toolkit`` the concrete toolkit built for the actor, and
-    ``authority`` the actor's execution scope and file access with the toolkit's construction, as they were when the
-    actor was built.
+    ``function`` is what the toolkit's configured entry offers, which names the call and says whether it stops the
+    model step; the function the loop calls and a job runs is the call's own, which can differ, as the CLI shell
+    window's does. ``toolkit_name`` is the authored toolkit, ``toolkit`` the concrete toolkit built for the actor,
+    and ``authority`` the actor's execution scope and file access with the toolkit's construction, as they were
+    when the actor was built.
     """
 
     function: ToolFunction
