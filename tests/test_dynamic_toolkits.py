@@ -11,6 +11,7 @@ from agno.tools.function import Function
 
 from mindroom import agents as agents_module
 from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import (
     _context_hidden_toolkits,
@@ -39,6 +40,7 @@ from mindroom.tool_system.dynamic_toolkits import (
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit
+from tests.fakes.scripted_model import ScriptedModel
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -1001,11 +1003,12 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
         add_instructions=True,
     )
     toolkit = Toolkit(name="deferred", tools=[function])
-    defer_toolkit("deferred", "", toolkit)
+    deferral = defer_toolkit("deferred", "", toolkit)
 
     assert toolkit.functions["deferred_tool"].add_instructions is False
-    # Adapting refuses a function that still asks for prompt instructions; the deferred toolkit adds none.
-    assert adapt_toolkit(toolkit).instructions is None
+    assert deferral.function_instructions == {"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"}
+    # Adapting refuses a function that still asks for prompt instructions.
+    adapt_toolkit(toolkit)
 
 
 def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
@@ -1042,8 +1045,14 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
     assert active_toolkit.functions["shared_tool"].add_instructions is True
     assert deferred_toolkit.add_instructions is False
     assert deferred_toolkit.functions["shared_tool"].add_instructions is False
-    assert adapt_toolkit(active_toolkit).instructions == active_toolkit_marker
-    assert adapt_toolkit(deferred_toolkit).instructions is None
+    spec = AgentSpec(
+        id="code",
+        name="code",
+        model=ScriptedModel([]),
+        system_message=None,
+        toolkits=(adapt_toolkit(active_toolkit), adapt_toolkit(deferred_toolkit)),
+    )
+    assert prepare_run_tools(spec).instructions == (active_toolkit_marker,)
 
 
 def test_native_tool_search_keeps_initial_toolkit_instructions(
