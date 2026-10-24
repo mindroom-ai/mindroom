@@ -28,10 +28,10 @@ from anthropic.types.beta import (
 
 from mindroom.llm.media import canonical_mime_type, image_format
 from mindroom.llm.messages import Message
+from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.providers.claude_wire_blocks import as_dict
-from mindroom.providers.stored_tool_calls import call_arguments
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

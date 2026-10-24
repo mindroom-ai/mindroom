@@ -257,7 +257,6 @@ Matrix sync callback
 | `providers/assistant_turn.py` | What every adapter does to finish a turn: the `mindroom_model` provenance stamp and timings |
 | `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
 | `providers/remote_media.py` | Downloads URL media for the adapters that send media only inline |
-| `providers/stored_tool_calls.py` | How a wire that sends tool-call arguments as an object reads a stored call's arguments, so a call another provider stored replays on any route |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
@@ -403,7 +402,7 @@ Matrix sync callback
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments and runs one call through middleware, to its outcome for the loop or to the tool's own value for runners outside it: injection, synchronous offload, generator draining, error text |
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before and after hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |
 | `llm/` | Provider-neutral values the owned runtime shares: messages, media, usage, run records and their pause requirements, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
-| `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share |
+| `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share, which every wire that sends tool-call arguments as an object uses to replay a call another provider stored |
 | `agent_loop/model_loop.py` | `run_model_loop`, the request and tool loop agents, team leaders, and skill reviews share: send the messages, append the answer, run its tool calls, and stop on a final answer, a stopping tool, a pause, a hook, or the request cap |
 | `agent_loop/run.py` | `run_agent` and `resume_agent`: agent runs and approval resumes over the model loop, each ending in one terminal record handed to the persist callback before the run ends |
 | `agent_loop/spec.py` | `AgentSpec` and `RunContext`: what an agent run is built from and the run's own identity |

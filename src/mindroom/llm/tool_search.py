@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 from mindroom.llm.provider import DeferredTools
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Container
+    from collections.abc import AsyncIterator, Container, Mapping
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 _CALL_TOOL_NAME: Final = "call_tool"
 
 
-def arguments_object(value: object) -> dict[str, Any] | None:
+def _arguments_object(value: object) -> dict[str, Any] | None:
     """Return call arguments parsed like the tool executor parses them when they are a JSON-serializable object.
 
     Model output can be malformed in many ways (unhashable literals, sets, deep nesting), so any failure returns None,
@@ -47,6 +47,16 @@ def arguments_object(value: object) -> dict[str, Any] | None:
     except Exception:  # Any failure means undecodable, as the tool executor treats arguments.
         return None
     return cast("dict[str, Any]", value)
+
+
+def call_arguments(function: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a stored call's arguments as an object, ``{}`` when they are missing or not a JSON object.
+
+    A thread can switch models mid-conversation, so a request may replay calls another provider stored, with their
+    arguments as that provider produced them: JSON text, possibly cut off by the output limit or empty, or an object.
+    Every wire that sends arguments as an object, and the portable ``call_tool`` wrapper, reads them this way.
+    """
+    return _arguments_object(function.get("arguments")) or {}
 
 
 def portable_tool_search_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
@@ -76,9 +86,7 @@ def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, A
     function = call["function"]
     if function["name"] not in deferred:
         return call
-    # Malformed stored arguments wrap as empty, as the other wires read them (``providers/stored_tool_calls.py``).
-    arguments = arguments_object(function.get("arguments")) or {}
-    wrapped = json.dumps({"name": function["name"], "arguments": arguments}, ensure_ascii=False)
+    wrapped = json.dumps({"name": function["name"], "arguments": call_arguments(function)}, ensure_ascii=False)
     return {**call, "function": {**function, "name": _CALL_TOOL_NAME, "arguments": wrapped}}
 
 
@@ -95,7 +103,7 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     function = call.get("function")
     if not isinstance(function, dict) or function.get("name") != _CALL_TOOL_NAME:
         return call
-    payload = arguments_object(function.get("arguments") or "{}")
+    payload = _arguments_object(function.get("arguments") or "{}")
     if payload is None:
         return call
     name = payload.get("name")
@@ -103,7 +111,7 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
         return call
     # Weaker models sometimes send the nested arguments as a JSON string.
     raw_arguments = payload.get("arguments")
-    arguments = {} if raw_arguments in (None, "") else arguments_object(raw_arguments)
+    arguments = {} if raw_arguments in (None, "") else _arguments_object(raw_arguments)
     if arguments is None:
         return call
     # Keys beside name and arguments, such as background_after or arguments flattened by a weaker model, belong to
@@ -113,4 +121,4 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     return {**call, "function": {**function, "name": name, "arguments": resolved_arguments}}
 
 
-__all__ = ["arguments_object", "portable_tool_search_stream", "resolve_call_tool_calls"]
+__all__ = ["call_arguments", "portable_tool_search_stream", "resolve_call_tool_calls"]

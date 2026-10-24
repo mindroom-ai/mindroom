@@ -2723,7 +2723,6 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.providers.claude_wire_blocks",
-    "mindroom.providers.stored_tool_calls",
 ]
 visibility = ["mindroom.providers.anthropic.messages"]
 
@@ -7941,11 +7940,6 @@ depends_on = ["mindroom.llm"]
 path = "mindroom.providers.remote_media"
 depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config"]
 
-# How a wire reads the arguments of a stored tool call.
-[[modules]]
-path = "mindroom.providers.stored_tool_calls"
-depends_on = ["mindroom.llm"]
-
 [[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
@@ -7958,7 +7952,6 @@ depends_on = [
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.model_loading",
     "mindroom.providers.remote_media",
-    "mindroom.providers.stored_tool_calls",
     "mindroom.providers.tool_policy",
 ]
 
@@ -7973,7 +7966,6 @@ depends_on = [
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.remote_media",
-    "mindroom.providers.stored_tool_calls",
     "mindroom.providers.tool_policy",
 ]
 
