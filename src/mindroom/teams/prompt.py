@@ -1,10 +1,9 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""The team leader's system message, laid out as Agno 3.0.9's team builder rendered it for MindRoom's teams.
+"""The team leader's system message: the ``<team>`` block, the tool instructions, the model note, and the context.
 
-MindRoom gives a team no description, role, or instructions of its own, so the leader prompt is the ``<team>`` block
-(the capability sentence, the member roster, and the mode's ``<delegation>`` block) followed by the tool
-instructions, the provider family's note, and the ``<additional_context>`` block. The texts are Agno's verbatim: they
-are part of every leader request's prompt-cache prefix.
+A team has no description, role, or instructions of its own, so the ``<team>`` block (the capability sentence, the
+member roster, and the mode's ``<delegation>`` block) opens the prompt. Texts and layout are kept byte for byte as
+main sends them: they are part of every leader request's prompt-cache prefix.
 """
 
 from __future__ import annotations
@@ -78,15 +77,6 @@ def render_members_roster(members: Sequence[TeamMember]) -> str:
     )
 
 
-def _delegation_block(mode: TeamMode) -> str:
-    content = "\n<delegation>\n"
-    if mode is TeamMode.COLLABORATE:
-        content += _TEAM_COLLABORATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE
-    else:
-        content += _TEAM_COORDINATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE + _TEAM_MEMBER_IDS_NOTE
-    return content + "</delegation>\n"
-
-
 def render_leader_system_message(
     members: Sequence[TeamMember],
     mode: TeamMode,
@@ -101,13 +91,18 @@ def render_leader_system_message(
     text (``agent_loop.prompt.model_note_for``), and ``additional_context`` the per-turn context MindRoom adds: the
     date context and any appended system enrichment.
     """
+    delegation = (
+        _TEAM_COLLABORATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE
+        if mode is TeamMode.COLLABORATE
+        else _TEAM_COORDINATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE + _TEAM_MEMBER_IDS_NOTE
+    )
     content = (
         "<team>\n"
         f"{_TEAM_OPENING_PROMPT}"
         "\n<team_members>\n"
         f"{render_members_roster(members)}"
         "</team_members>\n"
-        f"{_delegation_block(mode)}"
+        f"\n<delegation>\n{delegation}</delegation>\n"
         "</team>\n\n"
     )
     content += "".join(f"{instruction}\n" for instruction in tool_instructions)
