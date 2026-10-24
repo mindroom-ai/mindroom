@@ -20,7 +20,6 @@ from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.tool_jobs.control import job_owns_execution
-from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -36,7 +35,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
-    from mindroom.tool_system.invocation import ToolCallContext, ToolMiddleware
+    from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolkitClose, ToolValue
 
@@ -249,10 +248,6 @@ class PreparedAgentToolCatalog:
             for item in self._deferred.values()
         ]
 
-    def call_context(self, call_id: str) -> ToolCallContext:
-        """Return the execution context of one call: the turn's run and the call's own id."""
-        return self.run.call_context(call_id)
-
     async def bind(
         self,
         key: ToolKey,
@@ -378,7 +373,7 @@ def execute_agent_tool_call(
     return _execute_agent_tool_call(binding, call_id, arguments, authorize=authorize, requirement=requirement)
 
 
-async def execute_agent_shell_call(
+def execute_agent_shell_call(
     binding: PreparedAgentToolBinding,
     call_id: str,
     arguments: dict[str, object],
@@ -395,7 +390,7 @@ async def execute_agent_shell_call(
     if binding.key.function not in SHELL_OPERATION_NAMES:
         msg = "Shell leaf replacement requires a canonical shell operation"
         raise ValueError(msg)
-    stream = _execute_agent_tool_call(
+    return _execute_agent_tool_call(
         binding,
         call_id,
         arguments,
@@ -403,9 +398,6 @@ async def execute_agent_shell_call(
         authorize=authorize,
         requirement=requirement,
     )
-    async with closing_async_stream(stream):
-        async for event in stream:
-            yield event
 
 
 async def _execute_agent_tool_call(
@@ -452,9 +444,8 @@ async def _execute_agent_tool_call(
         yield AgentToolCallEvent("started", call_id, binding.key, execution=deepcopy(execution))
         function = binding.function
         if shell_leaf is not None:
-            original = function.entrypoint
 
-            @wraps(original)
+            @wraps(function.entrypoint)
             async def pinned_leaf(**kwargs: object) -> object:
                 catalog._lock.release()
                 try:
@@ -472,7 +463,7 @@ async def _execute_agent_tool_call(
                 outcome = await execute_tool_call(
                     function,
                     arguments,
-                    catalog.call_context(call_id),
+                    catalog.run.call_context(call_id),
                     middleware=catalog.middleware,
                 )
         finally:

@@ -67,12 +67,15 @@ def register_mcp_functions(toolkit: Toolkit) -> None:
     loop of its own and closes that session once the functions are registered. Each run connects it again.
     Building such a toolkit on an event loop's thread raises ``RuntimeError``, since it cannot list there.
     """
-    if not is_unconnected_mcp_toolkit(toolkit):
+    mcp = _mcp_toolkit(toolkit)
+    if mcp is None or mcp.initialized:
         return
+    # TODO(simplify): Listing starts the MCP server and closes it, and each run starts it again, also for team
+    # members built but never delegated to. The functions could be listed on the run's own connection or kept from
+    # one listing. Operators would notice fewer MCP server starts per turn (#3075).
     if _on_event_loop():
         msg = f"MCP toolkit {toolkit.name!r} must be built off the event loop, since it lists on a loop of its own"
         raise RuntimeError(msg)
-    mcp = cast("_McpToolkit", toolkit)
 
     async def list_functions() -> None:
         await mcp.connect()
@@ -130,6 +133,9 @@ async def _connect_on_thread(toolkit: Toolkit) -> None:
     await shielded_lifecycle(run_toolkit_lifecycle(toolkit.connect), retain=close_once_connected)
 
 
+# TODO(simplify): This cleanup closes the toolkit instance, so after a slow connect is cancelled, it can close a
+# later run's reconnect of the same toolkit. A reconnect should wait for its toolkit's pending cleanup first.
+# Users would notice a tool call failing on a connection closed mid-run (#3075).
 async def _close_once_connected(toolkit: Toolkit, connecting: asyncio.Task[None]) -> None:
     try:
         await connecting

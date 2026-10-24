@@ -16,7 +16,6 @@ its own call id reads it there instead of taking it as a parameter.
 from __future__ import annotations
 
 import ast
-import asyncio
 import inspect
 import json
 from collections.abc import AsyncIterator, Iterator
@@ -227,6 +226,8 @@ def parse_tool_arguments(
             decoded = ast.literal_eval(raw_arguments)
     except Exception as error:
         return ToolArgumentError(_DECODE_ERROR_TEXT.format(error=error))
+    # TODO(simplify): ``[]`` decodes to None while an empty string decodes to ``{}``, two forms of "no arguments".
+    # Both could decode to ``{}``. Stored data would notice: such a call's ``tool_args`` is stored as ``{}``, not null.
     if isinstance(decoded, list) and not decoded:
         return None
     if not isinstance(decoded, dict):
@@ -272,8 +273,6 @@ async def execute_tool_call(
     """
     try:
         value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
-    except asyncio.CancelledError:
-        raise
     except Exception as error:
         return ToolOutcome(content=str(error), stop_after_call=function.stop_after_tool_call, is_error=True)
     return ToolOutcome(
@@ -313,7 +312,7 @@ async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], con
     if inspect.iscoroutinefunction(entrypoint) or inspect.isasyncgenfunction(entrypoint):
         result = entrypoint(**kwargs)
     else:
-        result = await run_sync_tool_entrypoint(partial(_invoke_and_drain_sync, entrypoint, kwargs), {})
+        result = await run_sync_tool_entrypoint(partial(_invoke_and_drain_sync, entrypoint, kwargs))
     if inspect.isawaitable(result):
         result = await result
     if isinstance(result, AsyncIterator):

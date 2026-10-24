@@ -124,13 +124,12 @@ def adapt_toolkit(toolkit: Toolkit) -> AdaptedToolkit:
 
     The functions share one ``actor_state``, as the functions of one toolkit shared the Agno agent that ran them.
     """
-    functions = toolkit.get_async_functions()
-    added = toolkit.add_instructions and toolkit.instructions is not None
+    functions = toolkit.get_async_functions().values()
     actor_state: dict[str, Any] = {}
     return AdaptedToolkit(
         name=toolkit.name,
-        functions=tuple(replace(adapt_function(function), actor_state=actor_state) for function in functions.values()),
-        instructions=toolkit.instructions if added else None,
+        functions=tuple(replace(adapt_function(function), actor_state=actor_state) for function in functions),
+        instructions=toolkit.instructions if toolkit.add_instructions else None,
         guidance=toolkit.instructions or None,
     )
 
