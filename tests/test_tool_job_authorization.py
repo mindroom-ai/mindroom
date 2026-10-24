@@ -22,11 +22,13 @@ from mindroom.tool_jobs.authorization import (
     locally_allowed,
     toolkit_authority,
 )
+from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_system.agno_toolkits import Function, Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry_state import TOOL_REGISTRY
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.tool_job_helpers import toolkit_job_tools
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -354,9 +356,9 @@ async def test_mcp_cross_owner_exclusion_wins_for_construction_and_retained_auth
     )
 
 
-def test_mcp_oauth_helpers_bypass_remote_tool_filters(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MCP assignment filters apply to remote names, not always-visible local OAuth helpers."""
-    config = Config.model_validate(
+def _oauth_demo_config() -> Config:
+    """Return a config whose MCP server ``demo`` is OAuth-backed, so its toolkit offers the local bridge functions."""
+    return Config.model_validate(
         {
             "agents": {"lead": {"display_name": "Lead"}},
             "mcp_servers": {
@@ -373,6 +375,11 @@ def test_mcp_oauth_helpers_bypass_remote_tool_filters(monkeypatch: pytest.Monkey
             },
         },
     )
+
+
+def test_mcp_oauth_helpers_bypass_remote_tool_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP assignment filters apply to remote names, not always-visible local OAuth helpers."""
+    config = _oauth_demo_config()
     overrides = {"include_tools": [], "exclude_tools": ["demo_connection_status"]}
     toolkit = MindRoomMCPToolkit(
         server_id="demo",
@@ -397,6 +404,26 @@ def test_mcp_oauth_helpers_bypass_remote_tool_filters(monkeypatch: pytest.Monkey
         {"mcp_server_id": "demo"},
         {"name": "mcp_demo", "factory_origin": construction_origin},
     )
+
+
+def test_a_retained_mcp_bridge_call_names_the_remote_tool_it_calls() -> None:
+    """A job's provenance names its MCP server and the remote tool the call names, which retained grants filter."""
+    config = _oauth_demo_config()
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=None,
+        catalog=None,
+        tool_name="mcp_demo",
+        server_config=config.mcp_servers["demo"],
+    )
+    tools = toolkit_job_tools(toolkit, authored_name="mcp_demo")
+
+    assert function_provenance(tools["demo_call_tool"], {"tool_name": "read", "arguments": {}}) == {
+        "mcp_server_id": "demo",
+        "mcp_tool_name": "read",
+    }
+    # Listing the remote tools calls none of them.
+    assert function_provenance(tools["demo_list_tools"]) == {"mcp_server_id": "demo", "mcp_tool_name": None}
 
 
 def test_deferred_job_policy_uses_authored_grants_but_rejects_new_filters_and_origin(
