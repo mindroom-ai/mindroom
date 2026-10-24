@@ -263,6 +263,12 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
             )
             run_file = json.loads((record.child_workspace / record.scoped_path / "run.json").read_text())
             assert run_file["status"] == ("completed" if outcome == "cancel_completed" else "cancelled")
+            # The parent's stored state settles the child too, so no later entry asks about it again.
+            parent_state = DelegationState.from_metadata(
+                _parent_record(original_config, paths, identity, "parent-run").metadata,
+            )
+            assert [item.status for item in parent_state.children] == [run_file["status"]]
+            assert parent_state.pending_child_id is None
             assert report.written == []
             return
         if outcome == "revoke":
