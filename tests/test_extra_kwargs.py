@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 from copy import deepcopy
 from dataclasses import fields
@@ -594,48 +593,39 @@ def _vertex_config() -> ModelConfig:
 
 
 @pytest.mark.parametrize(
-    ("adc_type", "module_name"),
-    [("authorized_user", "google.oauth2.credentials"), ("service_account", "google.oauth2.service_account")],
+    ("adc_type", "loader"),
+    [
+        ("authorized_user", "google.oauth2.credentials.Credentials.from_authorized_user_file"),
+        ("service_account", "google.oauth2.service_account.Credentials.from_service_account_file"),
+    ],
 )
 def test_vertex_claude_loads_the_runtime_application_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     adc_type: str,
-    module_name: str,
+    loader: str,
 ) -> None:
     """A runtime ``GOOGLE_APPLICATION_CREDENTIALS`` file becomes the client's credentials without google.auth."""
     credentials_path = tmp_path / "google-credentials.json"
     credentials_path.write_text(json.dumps({"type": adc_type}), encoding="utf-8")
     fake_credentials = object()
-    imported: list[str] = []
 
-    class _Credentials:
-        @classmethod
-        def from_authorized_user_file(cls, path: str, *, scopes: list[str]) -> object:
-            assert Path(path).resolve() == credentials_path.resolve()
-            assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
-            return fake_credentials
+    def load(path: str, *, scopes: list[str]) -> object:
+        assert Path(path).resolve() == credentials_path.resolve()
+        assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
+        return fake_credentials
 
-        from_service_account_file = from_authorized_user_file
+    def load_through_google_auth(*_args: object, **_kwargs: object) -> object:
+        msg = "google.auth should not be used for this credential type"
+        raise AssertionError(msg)
 
-    original_import_module = importlib.import_module
-
-    def fake_import_module(name: str) -> object:
-        imported.append(name)
-        if name == "google.auth":
-            msg = "google.auth should not be used for this credential type"
-            raise AssertionError(msg)
-        if name == module_name:
-            return type("FakeCredentialsModule", (), {"Credentials": _Credentials})
-        return original_import_module(name)
-
-    monkeypatch.setattr("mindroom.providers.google_adc.importlib.import_module", fake_import_module)
+    monkeypatch.setattr(loader, load)
+    monkeypatch.setattr("google.auth.load_credentials_from_file", load_through_google_auth)
     runtime_paths = _runtime_paths(tmp_path, GOOGLE_APPLICATION_CREDENTIALS=str(credentials_path))
 
     provider = build_claude_provider(_vertex_config(), runtime_paths)
 
     assert provider.settings.client_params == {"credentials": fake_credentials}
-    assert imported == [module_name]
 
 
 @pytest.mark.parametrize(

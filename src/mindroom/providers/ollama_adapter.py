@@ -106,31 +106,27 @@ class OllamaProvider:
         A reply that arrives whole has its ``<think>`` reasoning split out, as Agno did for non-streamed replies.
         """
         messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
+        model = self.identity.id.strip()
         chat_kwargs = self._chat_kwargs(request)
         reply = _OllamaReply()
         started = time.monotonic()
         first_output_at: float | None = None
         try:
+            client = self._sdk_client()
             if request.stream:
-                chunks = await self._sdk_client().chat(
-                    model=self.identity.id.strip(),
-                    messages=messages,
-                    stream=True,
-                    **chat_kwargs,
-                )
+                chunks = await client.chat(model=model, messages=messages, stream=True, **chat_kwargs)
                 async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
                     async for chunk in responses:
                         for event in _read_chunk(reply, chunk) or [StreamProgress()]:
                             first_output_at = output_started(first_output_at, event)
                             yield event
             else:
-                response = await self._sdk_client().chat(
-                    model=self.identity.id.strip(),
-                    messages=messages,
-                    **chat_kwargs,
-                )
+                response = await client.chat(model=model, messages=messages, **chat_kwargs)
                 first_output_at = time.monotonic()
-                _read_whole_reply(reply, cast("ChatResponse", response))
+                _read_chunk(reply, cast("ChatResponse", response))
+                # Agno's Ollama split only a reply that contains an opening ``<think>`` tag.
+                if "<think>" in reply.content:
+                    reply.reasoning, reply.content = split_thinking(reply.content)
         except Exception as error:
             raise _provider_error(error, provider=self.identity.provider_name) from error
         if request.stream and not reply.done:
@@ -150,21 +146,15 @@ class OllamaProvider:
         yield TurnCompleted(message=message, stop_reason=_stop_reason(reply))
 
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
-        """Return the chat parameters of one request, in the order Agno's Ollama built them.
-
-        Agno's Ollama model had no temperature field, so a request's temperature override, such as a thread
-        summary's, never replaced the sampling the model authors in ``options``.
-        """
+        """Return the chat parameters of one request, in the order Agno's Ollama built them."""
         settings = self.settings
-        kwargs: dict[str, Any] = {
-            key: value
-            for key, value in (
-                ("format", settings.format),
-                ("options", settings.options or None),
-                ("keep_alive", settings.keep_alive),
-            )
-            if value is not None
-        }
+        # TODO(simplify): a request's temperature override, such as a thread summary's, is ignored, as Agno's Ollama
+        # had no temperature field. Send it as ``options.temperature``, as other routes apply theirs. Models would
+        # notice (#3075).
+        authored = {"format": settings.format, "options": settings.options or None, "keep_alive": settings.keep_alive}
+        kwargs: dict[str, Any] = {key: value for key, value in authored.items() if value is not None}
+        # TODO(simplify): ``tool_choice: "none"`` still sends the tools, so the model can call them; only a decision
+        # request drops them. Drop the tools whenever ``tool_choice`` is "none". Models would notice (#3075).
         if tools := _format_tools(request.tools):
             kwargs["tools"] = tools
         kwargs.update(settings.request_params or {})
@@ -208,6 +198,9 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 
 def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
     """Return Ollama tool definitions sorted by name; a tool without a description sends none, as Agno's did."""
+    # TODO(simplify): the SDK's tool model keeps only a parameter's type, items, description, and enum, so an
+    # ``anyOf`` parameter such as ``background_after`` reaches the model without a type. Send such a parameter
+    # with its type. Models would notice (#3075).
     return [
         {
             "type": "function",
@@ -227,8 +220,8 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
     An image that cannot be read raises ``InvalidRequest``, so the media fallback replaces it with its note.
     """
     formatted: dict[str, Any] = {"role": message.role, "content": message.content}
-    if message.role == "assistant" and message.tool_calls is not None:
-        tool_calls = [
+    if message.role == "assistant" and message.tool_calls:
+        formatted["tool_calls"] = [
             {
                 "id": call.get("id"),
                 "type": "function",
@@ -236,8 +229,6 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
             }
             for call in message.tool_calls
         ]
-        if tool_calls:
-            formatted["tool_calls"] = tool_calls
     if message.role == "user":
         images = [data for image in message.images or () if (data := await _image_bytes(image, provider))]
         if images:
@@ -263,16 +254,6 @@ def _read_image(path: Path, provider: str) -> bytes:
         logger.warning("ollama_media_file_unreadable", path=str(path), error=str(error))
         msg = "The image attachment could not be read"
         raise InvalidRequest(msg, provider=provider) from error
-
-
-def _read_whole_reply(reply: _OllamaReply, response: ChatResponse) -> None:
-    """Read a reply that arrived whole, splitting out its ``<think>`` reasoning.
-
-    Agno's Ollama split only a reply that contains an opening ``<think>`` tag.
-    """
-    _read_chunk(reply, response)
-    if "<think>" in reply.content:
-        reply.reasoning, reply.content = split_thinking(reply.content)
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:

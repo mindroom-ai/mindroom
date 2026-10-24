@@ -122,16 +122,12 @@ async def format_contents(
         parts = _message_parts(message, role)
         if role == "user" and message.tool_calls is None and not _is_tool_result(message):
             parts = await _with_media(message, parts, route)
-        if parts:
+        # Gemini rejects consecutive contents with the same role.
+        if parts and contents and contents[-1]["role"] == role:
+            contents[-1]["parts"].extend(parts)
+        elif parts:
             contents.append({"role": role, "parts": parts})
-    # Gemini rejects consecutive contents with the same role.
-    merged: list[dict[str, Any]] = []
-    for content in contents:
-        if merged and merged[-1]["role"] == content["role"]:
-            merged[-1]["parts"].extend(content["parts"])
-        else:
-            merged.append(content)
-    return merged, system_instruction
+    return contents, system_instruction
 
 
 def _is_tool_result(message: Message) -> bool:
@@ -217,6 +213,9 @@ async def _local_part(
     ``mime_type`` gets the file's bytes, or only its header when the file is uploaded.
     """
     file_path = Path(path)
+    # TODO(simplify): local audio and video always go through the Files API where there is one, even when small
+    # enough to inline, as Agno sent them. Inline them up to the limit like other media and drop ``always_upload``.
+    # Operators would see fewer Files API uploads; models get the same media.
     inline_limit = 0 if always_upload and route.upload is not None else _INLINE_MEDIA_LIMIT_BYTES
     size, data = await asyncio.to_thread(_read_local_media, file_path, kind, route.provider, inline_limit)
     if not size:
@@ -262,7 +261,6 @@ async def _audio_part(audio: Audio, route: MediaRoute) -> dict[str, Any] | None:
         data, _ = await _downloaded(audio.url, "audio", route)
         return _inline(data, mime_type)
     if audio.filepath is not None:
-        # Local audio goes through the Files API where there is one, as Agno sent it.
         return await _local_part(audio.filepath, "audio", route, lambda _: mime_type, always_upload=True)
     return _inline(audio.content, mime_type) if audio.content else None
 
@@ -272,7 +270,6 @@ async def _video_part(video: Video, route: MediaRoute) -> dict[str, Any] | None:
     if video.url is not None:
         return _file_uri(video.url, mime_type)
     if video.filepath is not None:
-        # Local video goes through the Files API where there is one, as Agno sent it.
         return await _local_part(video.filepath, "video", route, lambda _: mime_type, always_upload=True)
     return _inline(video.content, mime_type) if video.content else None
 
@@ -281,22 +278,18 @@ async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
     if file.content:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
         return _inline(data, file.mime_type or mimetypes.guess_type(file.filename or "")[0] or "application/pdf")
-    if file.url is not None:
-        return await _remote_file_part(file, file.url, route)
+    if (url := file.url) is not None:
+        # Gemini fetches a Cloud Storage file, or an HTTPS file of known type, itself; other files are downloaded.
+        if url.startswith("gs://"):
+            return _file_uri(url, file.mime_type or mimetypes.guess_type(url)[0] or "application/pdf")
+        if url.startswith("https://") and file.mime_type:
+            return _file_uri(url, file.mime_type)
+        data, declared = await _downloaded(url, "file", route)
+        return _inline(data, file.mime_type or declared or mimetypes.guess_type(url)[0] or "application/pdf")
     if file.filepath is None:
         return None
     mime_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
     return await _local_part(file.filepath, "file", route, lambda _: mime_type)
-
-
-async def _remote_file_part(file: File, url: str, route: MediaRoute) -> dict[str, Any]:
-    """Reference a Cloud Storage file, or an HTTPS file of known type, which Gemini fetches itself; download others."""
-    if url.startswith("gs://"):
-        return _file_uri(url, file.mime_type or mimetypes.guess_type(url)[0] or "application/pdf")
-    if url.startswith("https://") and file.mime_type:
-        return _file_uri(url, file.mime_type)
-    data, declared = await _downloaded(url, "file", route)
-    return _inline(data, file.mime_type or declared or mimetypes.guess_type(url)[0] or "application/pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -366,9 +359,7 @@ def without_tool_selection(config: Mapping[str, Any], *, vertexai: bool) -> Gene
 
 def tool_config(tool_choice: ToolChoice | None) -> dict[str, Any] | None:
     """Return the function-calling config for ``tool_choice``; ``"none"`` turns function calling off."""
-    if tool_choice is None:
-        return None
-    return {"function_calling_config": {"mode": "NONE"}}
+    return None if tool_choice is None else {"function_calling_config": {"mode": "NONE"}}
 
 
 def response_schema(response_format: object) -> type[BaseModel] | dict[str, Any] | None:
@@ -418,6 +409,9 @@ def convert_schema(  # noqa: C901, PLR0911, PLR0912
 
     The input is never modified.
     """
+    # TODO(simplify): tool and output schemas are rewritten into Gemini's OpenAPI subset, as Agno did, which drops
+    # some descriptions and invents an ``example_key`` property for dicts. Send them as authored, in the SDK's
+    # recommended ``parameters_json_schema`` and ``response_json_schema``, and delete this. Models would notice.
     root = schema if root is None else root
     if "$ref" in schema:
         ref = schema["$ref"]
@@ -489,6 +483,8 @@ def convert_schema(  # noqa: C901, PLR0911, PLR0912
         converted = [convert_schema(sub, root, visited) for sub in schema["anyOf"]]
         alternatives = [sub for sub in converted if sub is not None]
         if len(alternatives) == 1:
+            # TODO(simplify): a nullable ``anyOf`` keeps only its alternative's fields, so a parameter such as
+            # ``background_after`` loses its description. Keep the outer description. Models would notice (#3075).
             alternatives[0]["nullable"] = any(sub is None for sub in converted)
             return alternatives[0]
         return _without_none(any_of=alternatives, description=description, default=default, title=title)
@@ -573,16 +569,17 @@ def read_chunk(
     Gemini repeats the reply's cumulative usage on every chunk, so each chunk that carries usage reports it first, as
     a partial report that replaces the one before: a reply stopped, stalled, or failed after any chunk, or while a
     chunk's output is delivered, still settles what was billed. Only a finished candidate's usage counts toward the
-    reply's own usage, as Agno counted it. A whole response without candidates, such as a blocked prompt, still
-    counts its prompt usage, as Agno's non-streaming parser did; Agno's streaming parser dropped it, so a streamed
-    one reports none. A candidate that ended in a malformed tool call reports its usage and nothing else;
-    ``malformed_tool_call_error`` then ends the reply. A chunk that shows Google Search grounding or code execution
-    at work reports that hosted tool's start.
+    reply's own usage, as Agno counted it. A candidate that ended in a malformed tool call reports its usage and
+    nothing else; ``malformed_tool_call_error`` then ends the reply. A chunk that shows Google Search grounding or
+    code execution at work reports that hosted tool's start.
     """
     if not chunk.candidates:
         if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason is not None:
             # A blocked prompt gets feedback instead of a candidate, which ends the reply.
             reply.prompt_blocked = True
+        # TODO(simplify): a chunk without candidates, such as a blocked prompt, counts its prompt usage only when the
+        # reply arrives whole, as Agno's two parsers differed. Count it in both modes and drop ``whole_response``.
+        # Operators would see the usage of streamed blocked prompts.
         if not whole_response or chunk.usage_metadata is None:
             return []
         reply.usage = _usage_metrics(chunk.usage_metadata)
