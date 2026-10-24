@@ -305,6 +305,40 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("flags", "paused"),
+    [
+        (
+            {"requires_confirmation": True, "approval_type": "audit", "external_execution_silent": True},
+            {"requires_confirmation": True, "external_execution_required": None},
+        ),
+        (
+            {"external_execution": True, "approval_type": "audit", "external_execution_silent": True},
+            {"requires_confirmation": None, "external_execution_required": True},
+        ),
+    ],
+    ids=["confirmation", "external"],
+)
+async def test_a_waiting_cli_call_keeps_its_function_s_approval_type_and_silence(
+    tmp_path: Path,
+    flags: dict[str, object],
+    paused: dict[str, object],
+) -> None:
+    """Whichever way a CLI call pauses, its stored execution names the function's approval type and silence."""
+
+    def action(value: int) -> int:
+        return value
+
+    catalog = await _catalog(tmp_path, [_function(action, **flags)])
+    events = await _events(catalog, "actions", "action", {"value": 3})
+
+    assert [event.kind for event in events] == ["waiting"]
+    stored = events[0].requirement.tool_execution.to_dict()
+    expected = {**paused, "approval_type": "audit", "external_execution_silent": True, "tool_args": {"value": 3}}
+    assert {key: stored[key] for key in expected} == expected
+
+
+@pytest.mark.asyncio
 async def test_catalog_keeps_qualified_names_and_rejects_collisions(tmp_path: Path) -> None:
     """Each function is reached under its authored toolkit; the run's first function of a name is the one bound."""
 

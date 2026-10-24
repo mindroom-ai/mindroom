@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.llm.events import ReportedCall
-from mindroom.llm.runs import RunRequirement, ToolExecution
+from mindroom.llm.runs import RunRequirement
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import execute_tool_call
@@ -335,20 +335,6 @@ def _check_resolves(
         raise ValueError(msg)
 
 
-def _paused_execution(function: ToolFunction, call_id: str, arguments: dict[str, object]) -> ToolExecution | None:
-    """Return the waiting execution of a call its function pauses for a decision, or None when it runs now."""
-    if not (function.requires_confirmation or function.external_execution):
-        return None
-    execution = ToolExecution(tool_call_id=call_id, tool_name=function.name, tool_args=deepcopy(arguments))
-    if function.requires_confirmation:
-        execution.requires_confirmation = True
-        execution.approval_type = function.approval_type
-    if function.external_execution:
-        execution.external_execution_required = True
-        execution.external_execution_silent = function.external_execution_silent
-    return execution
-
-
 def execute_agent_tool_call(
     binding: PreparedAgentToolBinding,
     call_id: str,
@@ -420,8 +406,8 @@ async def _execute_agent_tool_call(
         if limit is not None and catalog._call_count >= limit:
             yield _failure(binding, call_id, arguments, "Tool call limit reached")
             return
-        paused = None if requirement is not None else _paused_execution(binding.function, call_id, arguments)
-        if paused is not None:
+        paused = None if requirement is not None else binding.function.planned_execution(call_id, arguments)
+        if paused is not None and paused.is_paused:
             if paused.external_execution_required:
                 catalog._call_count += 1
             yield AgentToolCallEvent(

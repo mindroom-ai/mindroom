@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 
     from mindroom.llm.media import Audio, File, Image, Video
+    from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.invocation import ToolMiddleware
 
 type ToolkitClose = Callable[[], Awaitable[None]]
@@ -68,6 +69,25 @@ class ToolFunction:
             external_execution=self.external_execution,
             approval_type=self.approval_type,
         )
+
+    def planned_execution(self, call_id: str | None, arguments: dict[str, Any] | None) -> ToolExecution:
+        """Return the execution a call of this function starts as, before it runs.
+
+        The call is paused when the function requires confirmation or external execution, and a paused call carries
+        the function's approval type and silence, as Agno's paused calls did.
+        """
+        # Deferred so that these tool values import no pydantic, which run records pull in through redaction.
+        from mindroom.llm.runs import ToolExecution  # noqa: PLC0415
+
+        execution = ToolExecution(tool_call_id=call_id, tool_name=self.name, tool_args=arguments)
+        if self.requires_confirmation:
+            execution.requires_confirmation = True
+        if self.external_execution:
+            execution.external_execution_required = True
+        if execution.is_paused:
+            execution.approval_type = self.approval_type
+            execution.external_execution_silent = self.external_execution_silent
+        return execution
 
 
 @dataclass(frozen=True, slots=True)
