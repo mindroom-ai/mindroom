@@ -234,9 +234,7 @@ class ClaudeProvider:
         streaming and yields its usage and finished turn once the response arrives.
         """
         started = time.monotonic()
-        messages = await inline_url_media(request.messages, self.http_client)
-        if messages is not request.messages:
-            request = replace(request, messages=messages)
+        request = replace(request, messages=await inline_url_media(request.messages, self.http_client))
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None

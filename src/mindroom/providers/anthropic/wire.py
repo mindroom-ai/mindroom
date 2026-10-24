@@ -292,25 +292,22 @@ async def _inlined_files(files: Sequence[File] | None, http_client: httpx.AsyncC
     return inlined
 
 
-async def inline_url_media(messages: Sequence[Message], http_client: httpx.AsyncClient) -> Sequence[Message]:
+async def inline_url_media(messages: Sequence[Message], http_client: httpx.AsyncClient) -> list[Message]:
     """Fetch URL-backed images and URL documents Claude would not read itself, so they are sent inline.
 
     A URL that cannot be read drops its media with a warning instead of failing the request, because the
-    message replays on every later request and an expired or private URL would fail them all. The input is
-    returned unchanged when no message carries such media.
+    message replays on every later request and an expired or private URL would fail them all.
     """
-    inlined: list[Message] | None = None
-    for index, message in enumerate(messages):
-        if message.role != "user" or not _has_remote_media(message):
-            continue
-        if inlined is None:
-            inlined = list(messages)
-        inlined[index] = replace(
+    return [
+        replace(
             message,
             images=await _inlined_images(message.images, http_client),
             files=await _inlined_files(message.files, http_client),
         )
-    return messages if inlined is None else inlined
+        if message.role == "user" and _has_remote_media(message)
+        else message
+        for message in messages
+    ]
 
 
 def _has_remote_media(message: Message) -> bool:
