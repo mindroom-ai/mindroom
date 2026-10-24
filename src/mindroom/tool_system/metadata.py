@@ -296,14 +296,14 @@ def _validate_authored_file_access(
     raise ToolConfigOverrideError(msg)
 
 
-def _validate_authored_overrides(
+def validate_authored_tool_entry_overrides(
     tool_name: str,
     overrides: dict[str, object] | None,
     *,
     config_path_prefix: str | None = None,
     tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> dict[str, object]:
-    """Validate authored YAML overrides against one tool's declared config fields."""
+    """Validate authored YAML overrides against one tool's declared config fields and its validation mode."""
     if not overrides:
         return {}
 
@@ -357,6 +357,10 @@ def _validate_authored_overrides(
             full_path=full_path,
             tool_metadata=tool_metadata,
         )
+    try:
+        _run_authored_override_validator(tool_name, validated, validator=metadata.authored_override_validator)
+    except ValueError as exc:
+        raise ToolConfigOverrideError(str(exc)) from exc
     return validated
 
 
@@ -371,35 +375,6 @@ def _run_authored_override_validator(
         from mindroom.mcp.registry import validate_mcp_agent_overrides  # noqa: PLC0415
 
         validate_mcp_agent_overrides(tool_name, overrides)
-
-
-def validate_authored_tool_entry_overrides(
-    tool_name: str,
-    overrides: dict[str, object] | None,
-    *,
-    config_path_prefix: str | None = None,
-    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
-) -> dict[str, object]:
-    """Validate authored overrides, including any tool-specific validation mode."""
-    validated_overrides = _validate_authored_overrides(
-        tool_name,
-        overrides,
-        config_path_prefix=config_path_prefix,
-        tool_metadata=tool_metadata,
-    )
-    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
-    metadata = metadata_by_name.get(tool_name)
-    if metadata is None:
-        return validated_overrides
-    try:
-        _run_authored_override_validator(
-            tool_name,
-            validated_overrides,
-            validator=metadata.authored_override_validator,
-        )
-    except ValueError as exc:
-        raise ToolConfigOverrideError(str(exc)) from exc
-    return validated_overrides
 
 
 def sanitize_tool_init_overrides(
