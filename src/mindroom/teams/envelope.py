@@ -592,7 +592,11 @@ class _TeamTurn:
         self.holder.attempt_started = True
         logger.info("executing_team_response", agent_count=len(members.builds), mode=self.mode.value)
         run_input = prepared.run_input(self.media)
-        logger.info("team_prompt_preview", agents=members.display_names, prompt_preview=prepared.prompt_text[:500])
+        logger.info(
+            "team_prompt_preview",
+            agents=members.display_names,
+            prompt_preview=prepared.prompt_text[:_MAX_LOG_MESSAGE_LENGTH],
+        )
         # The turn's scope context keeps the session a run first gave it; a team without a bound scope stores nothing.
         storage: TeamStorage | None = None
         if run.scope_context is not None:
