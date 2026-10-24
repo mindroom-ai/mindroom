@@ -668,13 +668,14 @@ class _TeamTurn:
                         self.sync_live_turn_recorder(run, attempt)
         except Exception as error:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
+            partial = attempt.partial_snapshot()
             return ExcludedAttempt(
                 original_status=RunStatus.error,
                 response_text=self.error_text(error),
                 reason=str(error),
-                partial_text=attempt.interrupted_text(),
-                completed_tools=tuple(attempt.tool_tracker.completed_tools),
-                interrupted_tools=tuple(pending.trace_entry for pending in attempt.tool_tracker.pending_tools),
+                partial_text=partial.assistant_text,
+                completed_tools=partial.completed_tools,
+                interrupted_tools=partial.interrupted_tools,
                 run_id=attempt.run_id,
                 metadata_content=self.failure_metadata(attempt),
             )
@@ -755,12 +756,13 @@ class _TeamTurn:
 
     def sync_live_turn_recorder(self, run: TurnRunState, attempt: TeamAttempt) -> None:
         """Refresh the live turn state from the attempt, so an interruption records its text and its tool calls."""
+        partial = attempt.partial_snapshot()
         run.turn_state.sync_partial(
             self.turn_recorder,
             run_metadata=run.run_metadata,
-            assistant_text=attempt.interrupted_text(),
-            completed_tools=attempt.tool_tracker.completed_tools,
-            interrupted_tools=[pending.trace_entry for pending in attempt.tool_tracker.pending_tools],
+            assistant_text=partial.assistant_text,
+            completed_tools=partial.completed_tools,
+            interrupted_tools=partial.interrupted_tools,
         )
 
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord, *, blocking: bool) -> PausedAttempt:
@@ -866,7 +868,7 @@ class _TeamTurn:
             runtime_model_name=attempt.runtime_model_name,
             output_tokens=record.metrics.output_tokens if record.metrics is not None else None,
             tool_executions=tuple(tool_executions),
-            completed_tools=tuple(attempt.tool_tracker.completed_tools),
+            completed_tools=tuple(attempt.presentation.tool_tracker.completed_tools),
             metadata_content=metadata_content,
         )
 

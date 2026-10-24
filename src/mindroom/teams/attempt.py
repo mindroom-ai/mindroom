@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from mindroom.teams.members import ResolvedExactTeamMembers
     from mindroom.teams.presentation import TeamStreamPresentation
     from mindroom.teams.runtime import TeamRunEvent
-    from mindroom.tool_system.events import StreamingToolTracker
 
 
 def team_tool_executions(record: TeamRunRecord) -> list[ToolExecution]:
@@ -123,17 +122,13 @@ class TeamAttempt:
         """Start the reply's text from the presentation's member slots."""
         self.reply = TeamReplyText(self.presentation)
 
-    @property
-    def tool_tracker(self) -> StreamingToolTracker:
-        """The tracker of the document's tool calls, completed and pending."""
-        return self.presentation.tool_tracker
-
     def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return the live partial-output view of this attempt, for a turn cancelled from outside."""
+        """Return the live partial-output view of this attempt: what a stopped or failed turn records."""
+        tracker = self.presentation.tool_tracker
         return TurnPartialSnapshot(
             assistant_text=self.interrupted_text(),
-            completed_tools=tuple(self.tool_tracker.completed_tools),
-            interrupted_tools=tuple(pending.trace_entry for pending in self.tool_tracker.pending_tools),
+            completed_tools=tuple(tracker.completed_tools),
+            interrupted_tools=tuple(pending.trace_entry for pending in tracker.pending_tools),
             attempt_run_id=self.run_id,
         )
 
