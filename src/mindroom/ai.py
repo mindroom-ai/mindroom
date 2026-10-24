@@ -397,11 +397,11 @@ class _AgentRunContext:
 
 
 @dataclass(frozen=True)
-class _NonStreamingAttemptResult:
-    """Result of running one non-streaming agent attempt sequence."""
+class _FailedAgentAttempt:
+    """A blocking agent attempt that raised: its error, and the record its run stored before it failed, if any."""
 
-    record: AnyRunRecord | None
-    user_error: Exception | None = None
+    error: Exception
+    record: RunRecord | None
 
 
 async def collect_streamed_response_content(
@@ -884,7 +884,7 @@ async def _run_blocking_agent_attempt(
     terminal: TerminalRecord[RunRecord],
     on_attempt_start: Callable[[str, str], None] | None,
     pipeline_timing: DispatchPipelineTiming | None,
-) -> AnyRunRecord:
+) -> RunRecord:
     """Run one non-streaming agent attempt and return its finished record."""
     if on_attempt_start is not None:
         on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
@@ -897,7 +897,7 @@ async def _run_blocking_agent_attempt(
     return terminal.terminal(attempt.run_id)
 
 
-async def _run_non_streaming_agent_attempts(
+async def _try_blocking_agent_attempt(
     *,
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
@@ -905,12 +905,12 @@ async def _run_non_streaming_agent_attempts(
     on_attempt_start: Callable[[str, str], None] | None,
     scope_context: ScopeSessionContext | None,
     pipeline_timing: DispatchPipelineTiming | None,
-) -> _NonStreamingAttemptResult:
-    """Run one non-streaming agent response attempt."""
+) -> RunRecord | _FailedAgentAttempt:
+    """Run one non-streaming agent response attempt: its finished record, or how it failed."""
     terminal = TerminalRecord(RunRecord)
     try:
         with bind_llm_request_log_context(**_attempt_request_log_context(run_context)):
-            record = await _run_blocking_agent_attempt(
+            return await _run_blocking_agent_attempt(
                 run_context,
                 attempt,
                 storage=storage,
@@ -918,10 +918,9 @@ async def _run_non_streaming_agent_attempts(
                 on_attempt_start=on_attempt_start,
                 pipeline_timing=pipeline_timing,
             )
-        return _NonStreamingAttemptResult(record=record)
     except Exception as e:
         logger.exception("Error generating AI response", agent=run_context.agent_name)
-        return _NonStreamingAttemptResult(record=terminal.record, user_error=e)
+        return _FailedAgentAttempt(error=e, record=terminal.record)
     finally:
         ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=run_context.agent_name)
 
@@ -1585,7 +1584,7 @@ async def ai_response(  # noqa: C901
         prepared_run = run_context.prepared_run
         storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs)
 
-        attempt_result = await _run_non_streaming_agent_attempts(
+        outcome = await _try_blocking_agent_attempt(
             run_context=run_context,
             attempt=attempt,
             storage=storage,
@@ -1593,9 +1592,8 @@ async def ai_response(  # noqa: C901
             scope_context=run.scope_context,
             pipeline_timing=pipeline_timing,
         )
-        record = attempt_result.record
-        if attempt_result.user_error is not None:
-            error = attempt_result.user_error
+        if isinstance(outcome, _FailedAgentAttempt):
+            failed = outcome.record
             if skipped := skip_unapproved_attempt(
                 ctx.participation,
                 reason="run_failed_before_decision",
@@ -1604,24 +1602,23 @@ async def ai_response(  # noqa: C901
             ):
                 return skipped
             completed_tools, interrupted_tools = split_interrupted_tool_trace(
-                record.tools if record is not None else None,
+                failed.tools if failed is not None else None,
             )
             return ExcludedAttempt(
-                response_text=get_user_friendly_error_message(error, agent_name, runtime_paths=runtime_paths),
-                partial_text=_own_assistant_text(record),
+                response_text=get_user_friendly_error_message(outcome.error, agent_name, runtime_paths=runtime_paths),
+                partial_text=_own_assistant_text(failed),
                 completed_tools=tuple(completed_tools),
                 interrupted_tools=tuple(interrupted_tools),
                 run_id=attempt.run_id,
                 metadata_content=_attempt_run_metadata(
                     run_metadata_collector,
                     run_context,
-                    record,
+                    failed,
                     RunStatus.error,
                     run_id=attempt.run_id,
                 ),
             )
-        if record is None:
-            raise without_terminal_record(RunRecord, attempt.run_id)
+        record = outcome
         if record.status is RunStatus.completed and (
             skipped := skip_unapproved_attempt(
                 ctx.participation,
