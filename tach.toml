@@ -5275,9 +5275,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.tool_access"
-depends_on = [
-    "mindroom.tool_system.agno_toolkits",
-]
+depends_on = []
 
 [[interfaces]]
 from = ["mindroom.tool_system.tool_access"]
@@ -5285,7 +5283,6 @@ expose = [
     "ToolDescriptor",
     "ToolKey",
     "UnknownToolError",
-    "function_definition",
     "search_tool_metadata",
     "validate_tool_arguments",
 ]

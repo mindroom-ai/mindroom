@@ -13,9 +13,10 @@ from agno.tools.function import Function
 from mindroom.custom_tools import microsoft_sharepoint
 from mindroom.custom_tools.microsoft_sharepoint import MicrosoftSharePointTools
 from mindroom.oauth.microsoft import microsoft_sharepoint_oauth_provider
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
-from mindroom.tool_system.tool_access import function_definition, validate_tool_arguments
+from mindroom.tool_system.tool_access import validate_tool_arguments
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -477,7 +478,7 @@ def test_write_schemas_accept_column_values(
 ) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
-    validate_tool_arguments(function_definition(tools.functions[function])["parameters"], arguments)
+    validate_tool_arguments(dict(adapt_function(tools.functions[function]).parameters), arguments)
 
 
 def test_create_item_posts_the_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
