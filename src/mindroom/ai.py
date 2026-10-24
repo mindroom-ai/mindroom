@@ -558,8 +558,8 @@ def agent_run_metadata_content(
     *,
     runtime_paths: RuntimePaths,
     model_name: str,
-    run_id: str | None,
-    session_id: str | None,
+    run_id: str,
+    session_id: str,
     status: RunStatus,
     prepared_history: PreparedHistoryState | None,
     last_request: MessageMetrics | None = None,
@@ -576,7 +576,7 @@ def agent_run_metadata_content(
         prices=model_prices(config, runtime_paths),
         model_name=model_name,
         run_id=run_id,
-        session_id=(record.session_id if record is not None else None) or session_id,
+        session_id=session_id,
         status=status,
         model=record.model if record is not None else None,
         model_provider=record.model_provider if record is not None else None,
@@ -597,7 +597,7 @@ def _attempt_run_metadata(
     record: AnyRunRecord | None,
     status: RunStatus,
     *,
-    run_id: str | None,
+    run_id: str,
     last_request: MessageMetrics | None = None,
 ) -> dict[str, Any] | None:
     """Return the run metadata one attempt publishes, or None when its caller collects none."""
@@ -1623,7 +1623,7 @@ async def ai_response(  # noqa: C901
             skipped := skip_unapproved_attempt(
                 ctx.participation,
                 reason="participation_declined",
-                session_id=record.session_id or session_id,
+                session_id=session_id,
                 run_id=record.run_id,
                 output_tokens=_reported_tokens(record.metrics).output_tokens or None,
             )
