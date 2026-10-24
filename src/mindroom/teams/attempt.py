@@ -1,12 +1,7 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
-``TeamReplyText`` is the reply's text without tool markers as the run's events build it, which a streamed turn records,
-also when it is interrupted, and which tells the attempt the runs that streamed text. When the team run ends, a resume
-adds what each of its runs hands over beyond what it carried over from the pause and its events did not show, and a
-live streamed turn adds each failed member run's reason (``TeamAttempt.show_failure_reasons``); both go through
-``TeamAttempt.show_unshown_handover``, which adds to the document and to that text alike. A blocking attempt adds
-nothing: the attempt collects the records the run hands over, which a blocking turn renders its reply from and records
-however it ends, and renders the run's metadata from them.
+A streamed attempt records ``TeamReplyText``, the reply's text without tool markers, however it ends; a blocking
+attempt renders its reply, what it records, and the run's metadata from the records the run hands over.
 """
 
 from __future__ import annotations
@@ -135,10 +130,9 @@ class TeamAttempt:
     def interrupted_text(self) -> str:
         """Return the text the turn records when this attempt is stopped or fails.
 
-        A streamed attempt records its reply's text (``TeamReplyText``). A blocking attempt records its stored runs'
-        document, stripped, as Agno's blocking turn did, or nothing before the run stored a record. A stopped leader
-        that wrote nothing contributes nothing, as Agno's stopped run then held only its cancellation notice, which it
-        dropped; a failed one contributes the reason its run recorded, credentials redacted.
+        A streamed attempt records its reply's text (``TeamReplyText``); a blocking one its stored runs' document,
+        stripped, or nothing before the run stored a record, kept as main behaves. A stopped leader that wrote nothing
+        contributes nothing; a failed one contributes the reason its run recorded, credentials redacted.
         """
         if self.stream:
             return self.reply.canonical_text()
@@ -190,8 +184,8 @@ class TeamAttempt:
     def show_failure_reasons(self, record: TeamRunRecord) -> bool:
         """Add the reason each failed member run of ``record`` recorded, credentials redacted, that its deltas did not show.
 
-        A live streamed turn shows its runs' deltas, as Agno's did, and each failed member run's reason when the team
-        run ends, as a resumed reply shows it (``show_unshown_handover``). Return whether any reason was added.
+        A live streamed turn shows its runs' deltas and, when the team run ends, each failed member run's reason, as a
+        resumed reply shows it (``show_unshown_handover``). Return whether any reason was added.
         """
         shown = False
         for member in record.ended_member_runs:

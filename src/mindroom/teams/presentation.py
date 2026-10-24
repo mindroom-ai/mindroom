@@ -3,9 +3,9 @@
 
 ``TeamStreamPresentation`` is the structured document a streamed or collected team run renders from and the durable
 ``team_stream`` snapshot an approval continuation restores. Member slots are keyed by ``url_safe_member_id`` of the
-member's config name, the id Agno derived for its members, which stored snapshots and reply records carry.
-``publish_team_presentation`` shows a resumed run's document live in the reply it continues. ``format_team_response``
-renders a finished run from its records instead, as Agno's blocking team reply did.
+member's config name, the id stored snapshots and reply records carry. ``publish_team_presentation`` shows a resumed
+run's document live in the reply it continues. ``format_team_response`` renders a finished run from its records
+instead, as a blocking reply shows it, kept as main behaves.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def finished_run_text(record: AnyRunRecord) -> str:
 
 
 def format_team_response(record: TeamRunRecord) -> str:
-    """Return a finished team run's text as Agno's blocking team reply rendered it, without the header.
+    """Return a finished team run's text as a blocking team reply shows it, without the header.
 
     Each member run that ended (``ended_member_runs``, in the order they ended) contributes its ``finished_run_text``,
     so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
