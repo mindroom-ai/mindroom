@@ -1910,7 +1910,7 @@ def create_agent(
             attaches directly instead of through mindroom-agent.
 
     Returns:
-        The agent as the agent loop runs it.
+        The agent build the agent loop runs.
 
     Raises:
         ValueError: If agent_name is not found in configuration
