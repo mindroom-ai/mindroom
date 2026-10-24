@@ -211,7 +211,7 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
         max_tool_calls_per_turn=None,
     )
 
-    results = await dispatch_tool_calls(batch.planned, run=context())
+    results = await dispatch_tool_calls(batch.planned, run=context(), middleware=())
 
     assert [(m.tool_call_id, m.content, m.tool_call_error) for m in results] == [
         ("c1", "one met two", False),
@@ -258,7 +258,7 @@ async def test_a_call_cancelled_on_its_own_lets_its_siblings_finish_before_the_b
         calls_so_far=0,
         max_tool_calls_per_turn=None,
     )
-    dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context()))
+    dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context(), middleware=()))
     for _ in range(5):
         await asyncio.sleep(0)
     assert not dispatch.done()  # give_up is gone, but linger still runs: the batch waits for it.
@@ -276,7 +276,7 @@ async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
 
     functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(_linger(release, finished)))).functions
     batch = plan_tool_batch([tool_call("linger", "c1")], functions, [], calls_so_far=0, max_tool_calls_per_turn=None)
-    dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context()))
+    dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context(), middleware=()))
     for _ in range(5):
         await asyncio.sleep(0)
 
@@ -301,7 +301,7 @@ async def test_dispatch_coerces_arguments_and_turns_failures_into_error_results(
         max_tool_calls_per_turn=None,
     )
 
-    results = await dispatch_tool_calls(batch.planned, run=context())
+    results = await dispatch_tool_calls(batch.planned, run=context(), middleware=())
 
     coerced, invalid, failed = results
     assert (coerced.content, coerced.tool_call_error, coerced.tool_args) == ('{"sum": 7}', False, {"a": "3", "b": 4})
@@ -358,7 +358,7 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
         calls_so_far=0,
         max_tool_calls_per_turn=None,
     )
-    results = await dispatch_tool_calls(batch.planned, run=context())
+    results = await dispatch_tool_calls(batch.planned, run=context(), middleware=())
     assert [len(m.images or ()) for m in results] == [1, 0, 1]
 
     follow_up = media_follow_up(results)
