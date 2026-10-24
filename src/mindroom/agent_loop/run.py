@@ -397,7 +397,7 @@ async def _store_interrupted[R: AnyRunRecord](
         record.error = redact_sensitive_text(str(error))
         if not record.content:
             record.content = str(error)
-    # TODO(simplify): a failed or cancelled approval resume stores its record over the paused run's row, as Agno did,
+    # TODO(simplify): a failed or cancelled approval resume stores its record over the paused run's row, as main does,
     # so that approval can no longer be resumed. Keep the paused row when a resume ends this way.
     # Users and stored data would notice: the approval could be retried. (#3075)
     if persist is not None:

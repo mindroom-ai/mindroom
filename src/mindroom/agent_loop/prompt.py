@@ -67,7 +67,7 @@ def _is_block(instruction: str) -> bool:
 
 def model_note_for(capabilities: Capabilities, *, offers_tools: bool) -> str | None:
     """Return the text a provider family adds to the system message of a request, given whether it offers tools."""
-    # TODO(simplify): every Claude request that offers any tool gets Agno's note about search results, whatever the
+    # TODO(simplify): every Claude request that offers any tool gets a note about search results, whatever the
     # tools are. Drop the note, which removes this function and the prompts' ``model_note`` inputs.
     # Models would notice: system prompts on Claude routes lose the line.
     return CLAUDE_TOOLS_NOTE if capabilities.claude_family and offers_tools else None
