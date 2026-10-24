@@ -861,55 +861,46 @@ async def test_a_member_continued_after_its_own_delegation_in_an_approval_resume
 
 
 @pytest.mark.asyncio
-async def test_a_chained_approval_s_receipt_names_every_call_the_run_s_approvals_decided(
+async def test_each_approval_of_a_chained_team_approval_reaches_the_runs_it_resumes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The second approval's receipt names both of the checker's calls, so the leader learns how each was authorized.
+    """The checker reads each approval's receipt on its resume, and the leader reads the second approval's.
 
     The checker's first approved call leads only to a second gated call, and the leader's first request comes after
-    the second approval. Each resume binds the receipt the response runner builds, which covers every call the run's
-    approvals decided so far.
+    the second approval. What a receipt covers is the response runner's to compose, so each approval here binds an
+    opaque receipt of its own.
     """
     team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([answer("Both touches were approved.")])
     team.models["checker-model"] = ScriptedModel(
         [calls(tool_call("touch", "call-touch-2", label="again")), answer("Touched twice.")],
     )
-    decided: list[ApprovalCall] = []
+    receipts = ("receipt of the first approval", "receipt of the second approval")
 
-    async def approve(attempt: PausedAttempt, call: ApprovalCall) -> CompletedApprovalRun | PausedAttempt:
-        decided.append(replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True))
-        with approval_receipt_context(build_approval_receipt(tuple(decided)), run_id=attempt.run_id):
+    async def approve(
+        attempt: PausedAttempt,
+        call: ApprovalCall,
+        receipt: str,
+    ) -> CompletedApprovalRun | PausedAttempt:
+        with approval_receipt_context(receipt, run_id=attempt.run_id):
             return await team.resume(attempt, approved=True, approvals=(call,))
 
-    repaused = await approve(paused, member_approval("call-touch", "dangerous"))
+    repaused = await approve(paused, member_approval("call-touch", "dangerous"), receipts[0])
     assert isinstance(repaused, PausedAttempt)
-    result = await approve(repaused, member_approval("call-touch-2", "again"))
+    result = await approve(repaused, member_approval("call-touch-2", "again"), receipts[1])
 
-    def receipt_lines(model: str) -> list[list[str]]:
-        """Return, per request ``model`` received, the receipt's line for each call it covers."""
+    def receipts_read(model: str) -> list[list[str]]:
+        """Return, per request ``model`` received, the receipts it carries."""
         return [
-            [
-                line
-                for message in request.messages
-                if (message.provider_data or {}).get("mindroom_approval_receipt")
-                for line in str(message.content).partition("TOOL APPROVAL RECEIPT]")[2].splitlines()
-                if line.startswith("- ")
-            ]
+            [receipt for receipt in receipts if any(receipt in str(message.content) for message in request.messages)]
             for request in team.models[model].requests
         ]
 
-    granted = (
-        "human approval was required and granted before execution, directly or through a matching timed approval "
-        "window."
-    )
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous", "again"]
-    first = f"- `touch` (tool call id `call-touch`): {granted}"
-    second = f"- `touch` (tool call id `call-touch-2`): {granted}"
-    assert receipt_lines("checker-model") == [[first], [first, second]]
-    assert receipt_lines("default") == [[first, second]]
+    assert receipts_read("checker-model") == [[receipts[0]], [receipts[1]]]
+    assert receipts_read("default") == [[receipts[1]]]
 
 
 @pytest.mark.asyncio
