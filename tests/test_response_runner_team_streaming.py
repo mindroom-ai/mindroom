@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.delivery_gateway import StreamingDeliveryRequest
     from mindroom.session_storage.store import ConversationStore
 
 TEAM_SESSION_ID = "!test:localhost:$thread-root"
@@ -1838,12 +1839,23 @@ async def test_generate_team_response_helper_links_its_reply_event_to_the_report
             orchestrator=team_orchestrator(config, runtime_paths),
         )
 
-        async def consume_delivery(request: object) -> StreamTransportOutcome:
+        async def consume_delivery(request: StreamingDeliveryRequest) -> StreamTransportOutcome:
             async for _chunk in request.response_stream:
                 pass
             return _stream_outcome("$team-final", "Team hello")
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
+        # The runner's state writer is a test double; its linkage writes through the real writer.
+        coordinator.deps.state_writer.apersist_response_event_id_in_session_run = AsyncMock(
+            side_effect=ConversationStateWriter(
+                ConversationStateWriterDeps(
+                    runtime=SimpleNamespace(config=config),
+                    logger=MagicMock(),
+                    runtime_paths=runtime_paths,
+                    agent_name="ultimate",
+                ),
+            ).apersist_response_event_id_in_session_run,
+        )
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
@@ -1856,17 +1868,6 @@ async def test_generate_team_response_helper_links_its_reply_event_to_the_report
     assert outcome.response_run_id == "team-run"
     assert post_response_deps.persist_response_event_id is not None
     await post_response_deps.persist_response_event_id(outcome.response_run_id, "$reply")
-    # The runner's state writer is a test double; run the real linkage with the arguments the reply gave it.
-    linkage = coordinator.deps.state_writer.apersist_response_event_id_in_session_run
-    writer = ConversationStateWriter(
-        ConversationStateWriterDeps(
-            runtime=MagicMock(),
-            logger=MagicMock(),
-            runtime_paths=runtime_paths,
-            agent_name="ultimate",
-        ),
-    )
-    await writer.apersist_response_event_id_in_session_run(**linkage.await_args.kwargs)
     assert [run.metadata for run in _persisted_runs(store)] == [{MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$reply"}]
 
 
