@@ -30,12 +30,10 @@ def wrap_provider(
     *,
     idle_timeout_seconds: float | None,
     media_fallback_prompt: str,
-    request_log: RequestLog | None,
+    request_log: RequestLog,
 ) -> ModelProvider:
     """Return ``adapter`` with the full request pipeline around its ``stream``."""
-    provider = adapter
-    if request_log is not None:
-        provider = WrappedProvider(provider, partial(logged_stream, log=request_log))
+    provider = WrappedProvider(adapter, partial(logged_stream, log=request_log))
     provider = WrappedProvider(provider, refusal_stream)
     provider = WrappedProvider(provider, partial(retrying_stream, idle_timeout_seconds=idle_timeout_seconds))
     provider = WrappedProvider(provider, partial(media_fallback_stream, fallback_prompt=media_fallback_prompt))

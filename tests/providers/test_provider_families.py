@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -46,7 +47,6 @@ from tests.providers.golden_support import Wire, ndjson_response, sse_response
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from mindroom.llm.provider import ModelProvider
 
@@ -71,19 +71,19 @@ def _tool(name: str) -> ToolSpec:
 
 
 def _pipeline(adapter: ModelProvider, *, log_dir: Path | None = None, idle: float | None = None) -> ModelProvider:
-    log = None
-    if log_dir is not None:
-        log = RequestLog(
-            model_name="default",
-            configured_provider=adapter.identity.provider,
-            debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(log_dir)),
-            storage_root=log_dir / "unused",
-        )
+    """Wrap ``adapter`` as the registry does, writing request records to ``log_dir`` when one is given."""
+    debug = DebugConfig() if log_dir is None else DebugConfig(log_llm_requests=True, llm_request_log_dir=str(log_dir))
     return wrap_provider(
         adapter,
         idle_timeout_seconds=idle,
         media_fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
-        request_log=log,
+        # Records go to ``log_dir`` or nowhere, so the storage root is never read.
+        request_log=RequestLog(
+            model_name="default",
+            configured_provider=adapter.identity.provider,
+            debug=debug,
+            storage_root=Path("unused"),
+        ),
     )
 
 

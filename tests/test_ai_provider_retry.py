@@ -18,6 +18,7 @@ from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.provider import TextDelta
 from mindroom.providers.pipeline import wrapped as provider_attempts
 from mindroom.providers.pipeline.compose import wrap_provider
+from mindroom.providers.pipeline.request_log import RequestLog
 from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
@@ -75,18 +76,32 @@ def _install_agent(
     turns: Sequence[Sequence[ScriptStep]],
 ) -> tuple[Config, ScriptedModel]:
     """Configure the worker agent on the scripted model inside the production request pipeline."""
+    runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={"worker": AgentConfig(display_name="Worker", tools=["retry_steps"])},
             models={"default": ModelConfig(provider="openai", id="test-model", api_key="test-key")},
         ),
-        test_runtime_paths(tmp_path),
+        runtime_paths,
     )
     config.memory.backend = "none"
     model = ScriptedModel([list(turn) for turn in turns])
+    request_log = RequestLog(
+        model_name="default",
+        configured_provider="openai",
+        debug=config.debug,
+        storage_root=runtime_paths.storage_root,
+    )
     install_model_providers(
         monkeypatch,
-        {"default": wrap_provider(model, idle_timeout_seconds=None, media_fallback_prompt="", request_log=None)},
+        {
+            "default": wrap_provider(
+                model,
+                idle_timeout_seconds=None,
+                media_fallback_prompt="",
+                request_log=request_log,
+            ),
+        },
     )
     return config, model
 

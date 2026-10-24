@@ -22,10 +22,12 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from pydantic import BaseModel
 
+from mindroom.config.models import DebugConfig
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, TurnCompleted
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline.compose import wrap_provider
+from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.tool_policy import without_provider_tools
 from mindroom.routing import _RoutingSuggestion
 from mindroom.scheduling.tasks import ScheduledWorkflow
@@ -405,12 +407,18 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
 
 
 def pipeline_provider(adapter: ModelProvider, *, idle_timeout_seconds: float | None = None) -> ModelProvider:
-    """Wrap a bare adapter in the production pipeline stages, without request logging."""
+    """Wrap a bare adapter in the production pipeline stages, with the request log off."""
     return wrap_provider(
         adapter,
         idle_timeout_seconds=idle_timeout_seconds,
         media_fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
-        request_log=None,
+        # With the request log off, only the usage line is emitted and the storage root is never read.
+        request_log=RequestLog(
+            model_name="default",
+            configured_provider=adapter.identity.provider,
+            debug=DebugConfig(),
+            storage_root=Path("unused"),
+        ),
     )
 
 

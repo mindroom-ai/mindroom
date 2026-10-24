@@ -1560,7 +1560,19 @@ class TestUserIdPassthrough:
         model = ScriptedModel([[UsageReported(usage(5, 0)), TurnCompleted(message=refused, stop_reason="refusal")]])
         install_model_providers(
             monkeypatch,
-            {"default": wrap_provider(model, idle_timeout_seconds=None, media_fallback_prompt="", request_log=None)},
+            {
+                "default": wrap_provider(
+                    model,
+                    idle_timeout_seconds=None,
+                    media_fallback_prompt="",
+                    request_log=RequestLog(
+                        model_name="default",
+                        configured_provider="openai",
+                        debug=config.debug,
+                        storage_root=runtime_paths.storage_root,
+                    ),
+                ),
+            },
         )
         document_file = File(filepath=str(tmp_path / "report.pdf"), filename="report.pdf", mime_type="application/pdf")
 
