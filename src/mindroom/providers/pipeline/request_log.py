@@ -34,7 +34,8 @@ __all__ = ["RequestLog", "logged_stream"]
 
 logger = get_logger(__name__)
 
-# Message fields that never reach a provider, left out of the request record.
+# TODO(simplify): The record leaves out `reasoning_content`, which the DeepSeek wire sends back, so a DeepSeek
+# record omits part of the request. Keep it in the record. Operators reading the request log would notice.
 _NON_API_MESSAGE_FIELDS = frozenset(
     {"id", "reasoning_content", "tool_name", "tool_args", "tool_call_error", "stop_after_tool_call", "from_history"},
 )
