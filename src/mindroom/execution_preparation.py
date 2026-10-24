@@ -877,7 +877,7 @@ async def prepare_agent_execution_context(
     static_token_estimator = build_static_token_estimator(
         system_message,
         prepare_run_tools(build.spec).specs(),
-        build.request_template.deferred_tool_names,
+        build.request_template.deferred_tools.names,
     )
     compaction_config = config.resolve_entity(agent_name).compaction_config
 

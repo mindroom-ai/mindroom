@@ -52,10 +52,7 @@ from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeModelBinding,
-    runtime_context_from_dispatch_context,
-)
+from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -357,7 +354,6 @@ async def _stream_continuation_turn(
         show_tool_calls=show_tool_calls,
         tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
         supports_native_tool_approval=True,
-        attempt_model_runtime=ToolRuntimeModelBinding(),
         reusable_build=reusable_build,
         resumed_attempt=resumed_attempt,
         initial_continuation_count=initial_continuation_count,

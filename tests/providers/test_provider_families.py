@@ -22,7 +22,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
 from mindroom.llm.media import Audio, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, ToolSpec, complete
+from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, complete
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import wrap_provider
@@ -289,7 +289,7 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
     request = ModelRequest(
         messages=[Message(role="system", content="Be brief."), _media_message(spec, tmp_path)],
         tools=[_tool("call_tool"), _tool("lookup_order"), _tool("tool_search")],
-        deferred_tool_names=frozenset({"lookup_order"}),
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
     )
 
     turn = await complete(provider, request)
@@ -337,7 +337,7 @@ async def test_composed_pipeline_serves_the_synthetic_family(tmp_path: Path) -> 
     request = ModelRequest(
         messages=[Message(role="user", content="Hi")],
         tools=[_tool("call_tool"), _tool("lookup_order"), _tool(SHELL_TOOL), _tool("tool_search")],
-        deferred_tool_names=frozenset({"lookup_order"}),
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
     )
 
     calling = await complete(provider, request)

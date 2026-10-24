@@ -22,7 +22,7 @@ from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
+    from collections.abc import Callable, Generator, Sequence
 
     from mindroom.agent_loop.model_loop import AfterToolBatchHook
     from mindroom.history.session_context import ScopeSessionContext
@@ -34,57 +34,19 @@ if TYPE_CHECKING:
 
 __all__ = [
     "EMPTY_RESPONSE_NOTICE",
-    "AttemptModelRuntime",
     "bind_mid_turn_conversation_context",
     "discard_empty_completed_run",
     "finalize_queued_notice_response_turn_async",
     "is_empty_completed_run",
-    "note_attempt_run_id",
     "queued_message_signal_context",
     "queued_notice_after_tool_batch",
     "queued_notice_on_resume_entry",
     "register_queued_notice_storage",
     "register_scope_notice_storage",
     "scrub_queued_notice_session_context",
-    "stream_attempt_with_model",
 ]
 
 logger = get_logger(__name__)
-
-
-class AttemptModelRuntime(Protocol):
-    """Bind attempt-local model identity around provider execution."""
-
-    async def run_with_model[ResultT](
-        self,
-        *,
-        active_model_name: str,
-        operation: Callable[[], Awaitable[ResultT]],
-    ) -> ResultT:
-        """Run one blocking attempt with its model bound to runtime state."""
-
-    def stream_with_model[ChunkT](
-        self,
-        stream: AsyncIterator[ChunkT],
-        *,
-        active_model_name: str,
-    ) -> AsyncIterator[ChunkT]:
-        """Bind one streaming attempt's model during stream pulls and close."""
-
-
-def stream_attempt_with_model[ChunkT](
-    runtime: AttemptModelRuntime | None,
-    stream: AsyncIterator[ChunkT],
-    *,
-    active_model_name: str,
-) -> AsyncIterator[ChunkT]:
-    """Wrap a stream in its optional model-aware runtime boundary."""
-    if runtime is None:
-        return stream
-    return runtime.stream_with_model(
-        stream,
-        active_model_name=active_model_name,
-    )
 
 
 _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
@@ -609,9 +571,3 @@ def discard_empty_completed_run(
             session_id=session_id,
             run_id=run_id,
         )
-
-
-def note_attempt_run_id(run_id_callback: Callable[[str], None] | None, run_id: str | None) -> None:
-    """Publish the current run_id before starting a real run attempt."""
-    if run_id_callback is not None and run_id is not None:
-        run_id_callback(run_id)

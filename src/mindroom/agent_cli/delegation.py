@@ -121,7 +121,7 @@ async def advance_cli_delegation(
         raise RuntimeError(msg)
     return replace(
         paused,
-        runtime_model_name=context.active_model_name,
+        runtime_model_name=catalog.run.model_name,
         cli_call=CliApprovalCall(
             toolkit=binding.key.toolkit,
             function=binding.key.function,

@@ -32,7 +32,14 @@ from mindroom.constants import TURN_INTENT_RUN_METADATA_KEY, resolve_runtime_pat
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.history import summary_rows
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, TurnCompleted, UsageReported
+from mindroom.llm.provider import (
+    Capabilities,
+    DeferredTools,
+    ModelIdentity,
+    ModelRequest,
+    TurnCompleted,
+    UsageReported,
+)
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
@@ -1554,7 +1561,7 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     deploy_calls: list[str] = []
     model = _model()
     capture = SkillReviewCapture()
-    settings = ModelRequest(messages=(), deferred_tool_names=frozenset({"shell"}))
+    settings = ModelRequest(messages=(), deferred_tools=DeferredTools(names=frozenset({"shell"})))
     tools = _agent_tools(config, paths, shell_calls, deploy_calls=deploy_calls)
     await _answer(model, capture, tools, settings=settings)
     model.script = [
@@ -1572,7 +1579,7 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     # The fork offers every tool definition the response offered, the approved deploy too, with its settings.
     assert forked.tools == sent.tools
     assert "deploy" in {tool.name for tool in forked.tools}
-    assert forked.deferred_tool_names == sent.deferred_tool_names == {"shell"}
+    assert forked.deferred_tools == sent.deferred_tools == settings.deferred_tools
     assert (sent.stream, forked.stream) == (True, False)
     assert shell_calls == deploy_calls == []
     assert denied[-1] == (
@@ -1685,7 +1692,7 @@ async def test_the_capture_keeps_only_its_attempts_final_request_as_sent() -> No
             [Message(role="user", content="Deploy the web service")],
             ctx=context(),
             hooks=hooks,
-            request_template=ModelRequest(messages=(), deferred_tool_names=frozenset({"search"})),
+            request_template=ModelRequest(messages=(), deferred_tools=DeferredTools(names=frozenset({"search"}))),
         ),
     )
     record.messages[-1].content = "rewritten after the loop"
@@ -1698,7 +1705,7 @@ async def test_the_capture_keeps_only_its_attempts_final_request_as_sent() -> No
         "Deploy the web service",
         "Done.",
     ]
-    assert (request.tools, request.tool_choice, request.deferred_tool_names) == ((), None, {"search"})
+    assert (request.tools, request.tool_choice, request.deferred_tools.names) == ((), None, {"search"})
 
 
 @pytest.mark.asyncio

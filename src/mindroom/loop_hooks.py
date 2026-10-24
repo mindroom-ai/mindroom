@@ -22,9 +22,10 @@ from typing import TYPE_CHECKING
 from mindroom import ai_runtime
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.output_limit import output_limit_answers
-from mindroom.agent_loop.tool_search import resolve_call_tool_calls
 from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
+from mindroom.llm.provider import DeferredTools
+from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.participation_hook import participation_hook
 from mindroom.skill_learning.capture import capture_final_request
 from mindroom.tool_jobs.execution import agent_tool_middleware, job_definitions_hook
@@ -93,7 +94,7 @@ def agent_loop_hooks(
         scope_id=turn.scope.scope_id if turn.scope is not None else agent_name,
         is_team=False,
         history_settings=build.history_settings,
-        deferred_tool_names=build.request_template.deferred_tool_names,
+        deferred_tools=build.request_template.deferred_tools,
         tool_middleware=agent_tool_middleware(build),
         participation=participation,
         job_definitions=jobs,
@@ -130,7 +131,7 @@ def leader_loop_hooks(
         scope_id=scope_id,
         is_team=True,
         history_settings=history_settings,
-        deferred_tool_names=frozenset(),
+        deferred_tools=DeferredTools(),
         tool_middleware=tool_middleware,
         participation=None,
         job_definitions=None,
@@ -149,7 +150,7 @@ def _loop_hooks(
     scope_id: str,
     is_team: bool,
     history_settings: ResolvedHistorySettings,
-    deferred_tool_names: frozenset[str],
+    deferred_tools: DeferredTools,
     tool_middleware: tuple[ToolMiddleware, ...],
     participation: ParticipationGate | None,
     job_definitions: JobActor | None,
@@ -189,7 +190,7 @@ def _loop_hooks(
             session=turn.session,
             scope=turn.scope,
             replay_plan=turn.replay_plan,
-            deferred_tool_names=deferred_tool_names,
+            deferred_tool_names=deferred_tools.names,
             prompt_id=turn.prompt_id,
             lifecycle=turn.lifecycle,
             turn_recorder=turn.turn_recorder,
@@ -200,9 +201,7 @@ def _loop_hooks(
     return LoopHooks(
         before_request=tuple(before_request),
         answer_tool_calls=output_limit_answers(capabilities),
-        rewrite_tool_calls=(
-            resolve_call_tool_calls if deferred_tool_names and not capabilities.native_tool_search else None
-        ),
+        rewrite_tool_calls=resolve_call_tool_calls if deferred_tools.portable else None,
         tool_middleware=tool_middleware,
         after_tool_batch=(
             *((ai_runtime.queued_notice_after_tool_batch(notice_text),) if queued_notices else ()),

@@ -30,6 +30,7 @@ from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import (
     Capabilities,
+    DeferredTools,
     ModelIdentity,
     ModelRequest,
     StreamProgress,
@@ -43,13 +44,13 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.tool_search import portable_tool_search_stream
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import wrap_provider
-from mindroom.providers.pipeline.deferred_tools import portable_tool_search_stream
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE, guidance_retry_stream
 from mindroom.providers.pipeline.media import FALLBACK_MARKER, media_fallback_stream
 from mindroom.providers.pipeline.refusal import refusal_stream
@@ -520,14 +521,14 @@ async def test_portable_tool_search_hides_deferred_tools_behind_call_tool() -> N
     request = ModelRequest(
         messages=messages,
         tools=[_tool("call_tool"), _tool("lookup_order"), _tool("tool_search")],
-        deferred_tool_names=frozenset({"lookup_order"}),
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
     )
 
     await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
 
     sent = inner.requests[0]
     assert [tool.name for tool in sent.tools] == ["call_tool", "tool_search"]
-    assert sent.deferred_tool_names == frozenset()
+    assert sent.deferred_tools == DeferredTools()
     assert sent.messages[0].tool_calls == [
         {
             "id": "call_1",
@@ -548,7 +549,7 @@ async def test_native_tool_search_routes_receive_the_deferred_names() -> None:
     request = ModelRequest(
         messages=[_user()],
         tools=[_tool("lookup_order")],
-        deferred_tool_names=frozenset({"lookup_order"}),
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"})),
     )
 
     await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
@@ -568,7 +569,10 @@ async def test_portable_tool_search_projects_stored_calls_byte_stably() -> None:
     assistant = Message(role="assistant", tool_calls=[_stored_call("call_1", "lookup_order", '{"note": "é"}'), eager])
     untouched = Message(role="assistant", tool_calls=[legacy])
     inner = _ScriptedProvider([[_turn()], [_turn()]])
-    request = ModelRequest(messages=[assistant, untouched], deferred_tool_names=frozenset({"lookup_order"}))
+    request = ModelRequest(
+        messages=[assistant, untouched],
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
+    )
 
     await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
     await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
@@ -596,7 +600,10 @@ async def test_portable_tool_search_wraps_stored_arguments_as_an_object(stored: 
     """Stored arguments Agno accepted keep their values; malformed ones wrap as empty instead of breaking the thread."""
     assistant = Message(role="assistant", tool_calls=[_stored_call("call_1", "lookup_order", stored)])
     inner = _ScriptedProvider([[_turn()]])
-    request = ModelRequest(messages=[assistant], deferred_tool_names=frozenset({"lookup_order"}))
+    request = ModelRequest(
+        messages=[assistant],
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
+    )
 
     await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
 
@@ -737,7 +744,7 @@ async def test_request_log_names_the_deferred_tools(
     request = ModelRequest(
         messages=[_user()],
         tools=[_tool("search"), _tool("lookup_order"), _tool("archive_order")],
-        deferred_tool_names=deferred,
+        deferred_tools=DeferredTools(names=deferred),
     )
 
     await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)

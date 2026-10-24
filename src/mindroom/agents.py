@@ -35,7 +35,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.hooks import HookRegistry
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
-from mindroom.llm.provider import ModelRequest
+from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, mcp_function_collisions
@@ -1998,15 +1998,15 @@ def create_agent(
         worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
         include_identity=persona is None,
     )
+    deferred_names = tool_assembly.deferred_wire_tool_names
+    deferred_tools = DeferredTools(names=deferred_names, portable=portable_deferred_tools and bool(deferred_names))
     logger.info(
         "create_agent",
         agent=agent_name,
         model_provider=provider.identity.provider,
         model_id=provider.identity.id,
-        deferred_tool_search=("portable" if portable_deferred_tools else "native")
-        if tool_assembly.deferred_wire_tool_names
-        else None,
-        deferred_tools=sorted(tool_assembly.deferred_wire_tool_names),
+        deferred_tool_search=("portable" if deferred_tools.portable else "native") if deferred_names else None,
+        deferred_tools=sorted(deferred_names),
     )
 
     workspace = agent_runtime.workspace
@@ -2175,7 +2175,7 @@ def create_agent(
     return AgentBuild(
         spec=spec,
         prompt=prompt,
-        request_template=ModelRequest(messages=(), deferred_tool_names=tool_assembly.deferred_wire_tool_names),
+        request_template=ModelRequest(messages=(), deferred_tools=deferred_tools),
         history_settings=entity_view.history_settings,
         store=store,
         tool_owners=tool_owners,

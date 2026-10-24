@@ -571,7 +571,7 @@ class LiveTurnTools(TurnToolBridge):
                         (self.catalog.runtime_context.agent_name, binding.key.function): binding.key.toolkit,
                     },
                     requirements=(waiting,),
-                    runtime_model_name=self.catalog.runtime_context.active_model_name,
+                    runtime_model_name=self.catalog.run.model_name,
                     response_text=presentation.final_text(),
                     tool_trace=tuple(presentation.tool_trace),
                     cli_call=CliApprovalCall(

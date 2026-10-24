@@ -70,7 +70,6 @@ from mindroom.teams.formation import _select_team_mode
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import _generate_summary, _ThreadEnrichment
 from mindroom.tool_system.runtime_context import (
-    ToolRuntimeModelBinding,
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
@@ -209,7 +208,7 @@ class Recorder:
             tools=[{"type": "function", "function": function_definition(tool)} for tool in request.tools],
             tool_choice=request.tool_choice,
             response_format=agno_response_format(request.output_schema, adapter.capabilities.structured_output),
-            deferred_tool_names=sorted(request.deferred_tool_names),
+            deferred_tool_names=sorted(request.deferred_tools.names),
         )
         self.calls.append(call)
         return self.responder(call)
@@ -916,7 +915,7 @@ async def _caller_admitted() -> AsyncIterator[bool]:
 
 
 @dataclass
-class _CallToolSupport(ToolRuntimeModelBinding):
+class _CallToolSupport:
     """The call manager's tool support, reduced to the context and identity one call binds."""
 
     context: Callable[[MessageTarget, str], ToolRuntimeContext]

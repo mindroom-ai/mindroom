@@ -133,14 +133,11 @@ def note_child_run_id(
     run_id: str,
     runtime_paths: RuntimePaths,
     *,
-    model_name: str | None = None,
+    model_name: str,
 ) -> None:
-    """Publish the exact attempt and bound model before it can execute tools."""
+    """Publish the exact attempt and the model it runs on before it can execute tools."""
     child.run_id = run_id
-    context = get_tool_runtime_context()
-    if model_name is None and context is not None:
-        model_name = context.active_model_name
-    if model_name is not None and model_name != child.model_name:
+    if model_name != child.model_name:
         # A model switch during the run is what the child's follow-ups ask for next.
         child.requested_model_name = model_name
         child.model_name = model_name

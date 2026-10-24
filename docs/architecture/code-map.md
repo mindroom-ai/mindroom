@@ -245,7 +245,7 @@ Matrix sync callback
 | `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, the Responses shared-prefix split and ordered output replay, and the history budget's size of explicitly replayed Responses input (`replay_estimate.py`) |
-| `providers/pipeline/` | Stages composed around a provider's `stream()`: the malformed tool-call guidance retry, portable deferred tool search, media fallback, stream retry with the idle limit, the typed safeguard refusal, and request logging |
+| `providers/pipeline/` | Stages composed around a provider's `stream()`: the malformed tool-call guidance retry, portable deferred tool search (`llm/tool_search.py`), media fallback, stream retry with the idle limit, the typed safeguard refusal, and request logging |
 | `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `model_capabilities` reads a configured model's route capabilities from its bare adapter |
 | `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, Google Search grounding, decision-request config, and reply parsing |
 | `providers/ollama_adapter.py` | Owned Ollama adapter over the native chat API |
@@ -403,7 +403,7 @@ Matrix sync callback
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments and runs one call through middleware, to its outcome for the loop or to the tool's own value for runners outside it: injection, synchronous offload, generator draining, error text |
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before and after hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |
 | `llm/` | Provider-neutral values the owned runtime shares: messages, media, usage, run records and their pause requirements, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
-| `llm/call_tool.py` | The `call_tool` wrapper name of portable tool search and the argument parsing its two ends share: the request projection that shows stored deferred calls as `call_tool` calls, and the loop that rewrites a model's `call_tool` calls to the functions they name |
+| `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share |
 | `agent_loop/model_loop.py` | `run_model_loop`, the request and tool loop agents, team leaders, and skill reviews share: send the messages, append the answer, run its tool calls, and stop on a final answer, a stopping tool, a pause, a hook, or the request cap |
 | `agent_loop/run.py` | `run_agent` and `resume_agent`: agent runs and approval resumes over the model loop, each ending in one terminal record handed to the persist callback before the run ends |
 | `agent_loop/spec.py` | `AgentSpec` and `RunContext`: what an agent run is built from and the run's own identity |
@@ -413,7 +413,6 @@ Matrix sync callback
 | `agent_loop/structured.py` | The JSON prompt a JSON-mode route needs for an output schema, and lenient parsing of answers into the schema |
 | `agent_loop/helper.py` | `complete_once`: one tool-less helper request, optionally read into a schema, with the run record its usage is saved from; `complete_prompt` renders the helper's system message for it |
 | `agent_loop/output_limit.py` | `output_limit_policy`: answers the tool calls of a response the output limit cut off instead of running them, and fails the run on the third cut-off response |
-| `agent_loop/tool_search.py` | `resolve_call_tool_calls`: routes a model's portable `call_tool` wrapper calls to the deferred functions they name before the loop resolves them |
 | `tools/agno_compat_*.py`, `custom_tools/agno_compat_*.py`, and `oauth/agno_compat_google_auth.py` | Repairs of Agno toolkits and of Google auth's toolkit binding; see `docs/architecture/agno-compatibility.md` for the boundary inventory and upstream tracking |
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |

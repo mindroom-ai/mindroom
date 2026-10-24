@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.runtime_context import tool_runtime_model_context
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 
@@ -64,6 +65,8 @@ class ToolCallContext:
     ``session_state`` is shared with the tool, which may mutate it in place; the caller persists it afterwards.
     ``call_id`` is the provider's id of the tool call being run, when the call came from a model.
     ``history_scope`` is the run's stored conversation when it is a team's, as ``RunContext`` names it.
+    ``model_name`` is the configured model the run resolved, which ``run_tool_call`` shows the call's tools as the
+    tool runtime context's ``active_model_name``; None leaves that as the surrounding context names it.
     """
 
     run_id: str
@@ -73,6 +76,7 @@ class ToolCallContext:
     session_state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     history_scope: HistoryScope | None = None
+    model_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -252,7 +256,8 @@ async def run_tool_call(
     call = ToolCall(function=function, arguments=model_arguments(arguments or {}, function), context=context)
     token = _CURRENT_CALL.set(call)
     try:
-        return await _run_chain(call, middleware)
+        with tool_runtime_model_context(context.model_name):
+            return await _run_chain(call, middleware)
     finally:
         _CURRENT_CALL.reset(token)
 

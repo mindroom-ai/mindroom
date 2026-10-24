@@ -1164,8 +1164,8 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-            run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-            run_id_callback("run-retry")
+            run_id_callback = cast("Callable[[str, str], None]", kwargs["run_id_callback"])
+            run_id_callback("run-retry", "default")
             started.set()
             await asyncio.sleep(60)
             return "unreachable"
@@ -1324,8 +1324,8 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-            run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-            run_id_callback("run-retry")
+            run_id_callback = cast("Callable[[str, str], None]", kwargs["run_id_callback"])
+            run_id_callback("run-retry", "default")
             started.set()
             await asyncio.sleep(60)
             return "unreachable"

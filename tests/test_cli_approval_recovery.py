@@ -294,7 +294,11 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     monkeypatch.setattr(
         approval_execution,
         "stream_agent_response",
-        lambda *args, **kwargs: stream_agent_response(*args, **kwargs, run_id_callback=run_ids.append),
+        lambda *args, **kwargs: stream_agent_response(
+            *args,
+            **kwargs,
+            run_id_callback=lambda run_id, _model_name: run_ids.append(run_id),
+        ),
     )
     with approval_receipt_context("Trusted approval receipt.", run_id=continuation.run_id):
         result = await execution.continue_run(

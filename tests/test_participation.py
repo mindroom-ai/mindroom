@@ -16,7 +16,7 @@ from mindroom.judgment.state import JudgmentMessage
 from mindroom.llm.events import ToolStarted
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, NativeCompactionReplay, RequestOverrides
+from mindroom.llm.provider import DeferredTools, ModelRequest, NativeCompactionReplay, RequestOverrides
 from mindroom.participation import ParticipationDecision, ParticipationGate
 from mindroom.participation_hook import parse_decision, participation_hook
 from mindroom.providers.tool_policy import provider_tools_disabled
@@ -135,7 +135,7 @@ async def test_the_decision_request_keeps_every_setting_of_the_reply_request() -
     template = ModelRequest(
         messages=(),
         overrides=RequestOverrides(temperature=0.2, prompt_cache=True),
-        deferred_tool_names=frozenset({"operate"}),
+        deferred_tools=DeferredTools(names=frozenset({"operate"}), portable=True),
         portable_replay=True,
         native_compaction=NativeCompactionReplay(route="route-1", threshold=1000),
     )

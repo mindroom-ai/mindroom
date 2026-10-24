@@ -88,11 +88,14 @@ def resume_from_session(
     hooks: LoopHooks,
     persist: Persist[RunRecord],
     request_template: ModelRequest,
+    model_name: str | None = None,
 ) -> AsyncIterator[RunEvent]:
     """Resume ``paused`` in ``session`` with ``decisions``: the history ``plan`` replays, then the paused request.
 
     The resume reuses the paused run's stored system message and shares the session's state with its tools; the
-    stream ends with ``RunFinished`` as ``resume_agent``'s does.
+    stream ends with ``RunFinished`` as ``resume_agent``'s does. ``model_name`` is the model a live turn's attempt
+    runs on, which its tool calls carry; ``ResumeRunner`` passes none, so its calls keep the model of the tool context
+    it runs in.
     """
     history, summary = replayed_history(session, scope, settings, plan)
     return resume_agent(
@@ -111,6 +114,7 @@ def resume_from_session(
             user_id=user_id,
             metadata=deepcopy(paused.metadata),
             session=session,
+            model_name=model_name,
         ),
         hooks=hooks,
         persist=persist,
@@ -216,6 +220,9 @@ class ResumeRunner:
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
         if decisions.approved or decisions.denied:
             add_approval_receipt_reader(paused.run_id)
+        # TODO(simplify): this resume, like a saved team approval's TeamResume, names no model, so its tools see the
+        # tool context's, none for an approval saved without one, while the run uses its agent's. Pass model_name.
+        # Tools that follow the reply's model, such as claude_agent, would notice.
         events = resume_from_session(
             build.spec,
             paused,

@@ -1293,6 +1293,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.approval.receipt",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.llm",
     "mindroom.participation_hook",
     "mindroom.skill_learning.capture",
     "mindroom.tool_jobs.execution",
@@ -5483,6 +5484,7 @@ depends_on = [
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
 ]
 
@@ -6012,7 +6014,6 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_usage",
-    "mindroom.providers.stored_tool_calls",
     "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.usage.storage",
@@ -6943,7 +6944,6 @@ expose = [
     "detached_requester_context",
     "current_budget_monitor",
     "get_detached_requester_context",
-    "ToolRuntimeModelBinding",
     "ToolRuntimeHookBindings",
     "ToolRuntimeSupport",
     "append_tool_runtime_attachment_id",
@@ -6961,6 +6961,7 @@ expose = [
     "resolve_tool_runtime_hook_bindings",
     "runtime_context_from_dispatch_context",
     "tool_runtime_context",
+    "tool_runtime_model_context",
     "worker_progress_pump_scope",
     "worker_runtime_context",
 ]

@@ -207,7 +207,7 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
     estimator = build_static_token_estimator(
         prepared.spec.system_message or Message(role="system", content=""),
         prepare_run_tools(build.spec).specs(),
-        build.request_template.deferred_tool_names,
+        build.request_template.deferred_tools.names,
     )
     assert prepare.await_args.kwargs["resolved_inputs"].execution_plan.static_prompt_tokens == estimator.estimate(
         "Current prompt",

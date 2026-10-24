@@ -13,7 +13,6 @@ OWNED_PROVIDER_MODULES = (
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.remote_media",
     "mindroom.providers.pipeline.compose",
-    "mindroom.providers.pipeline.deferred_tools",
     "mindroom.providers.pipeline.guidance_retry",
     "mindroom.providers.pipeline.media",
     "mindroom.providers.pipeline.refusal",

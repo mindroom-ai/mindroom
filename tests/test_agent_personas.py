@@ -295,8 +295,8 @@ def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
     persona = _child(runtime, ["file"])
 
     # Only the configured agent defers its toolkit; the persona's requests defer nothing.
-    assert "read_file" in configured.request_template.deferred_tool_names
-    assert persona.request_template.deferred_tool_names == frozenset()
+    assert "read_file" in configured.request_template.deferred_tools.names
+    assert persona.request_template.deferred_tools.names == frozenset()
     assert "read_file" in _function_names(persona)
 
 

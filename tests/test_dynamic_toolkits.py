@@ -129,13 +129,13 @@ def _function_names(build: AgentBuild) -> set[str]:
 def _native_deferred_names(build: AgentBuild) -> frozenset[str]:
     """The functions native tool search sends marked deferred; portable search sends none of them."""
     native = build.spec.model.capabilities.native_tool_search
-    return build.request_template.deferred_tool_names if native else frozenset()
+    return build.request_template.deferred_tools.names if native else frozenset()
 
 
 def _portable_deferred_names(build: AgentBuild) -> frozenset[str]:
     """The functions portable tool search keeps off the request behind tool_search and call_tool."""
     native = build.spec.model.capabilities.native_tool_search
-    return frozenset() if native else build.request_template.deferred_tool_names
+    return frozenset() if native else build.request_template.deferred_tools.names
 
 
 async def _search(build: AgentBuild, query: str) -> dict[str, object]:
@@ -1330,7 +1330,7 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
     function_names = _function_names(agent)
     assert "sleep" in function_names
     assert "add" in function_names
-    assert agent.request_template.deferred_tool_names == frozenset()
+    assert agent.request_template.deferred_tools.names == frozenset()
     assert "tool_search" not in function_names
     assert not any(block.startswith("## Deferred Tools\n") for block in agent.prompt.instructions)
 
@@ -1741,7 +1741,7 @@ async def test_config_order_decides_which_same_named_function_is_registered(
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
 
-    assert ("read_file" in agent.request_template.deferred_tool_names) is deferred_first
+    assert ("read_file" in agent.request_template.deferred_tools.names) is deferred_first
     if "tool_search" in _function_names(agent):
         matches = (await _search(agent, "read_file"))["matches"]
         offered = [match["toolkit"] for match in matches if match["name"] == "read_file"]
@@ -1783,7 +1783,7 @@ def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
         return build_static_token_estimator(
             prompt_for_turn(agent),
             prepare_run_tools(agent.spec).specs(),
-            agent.request_template.deferred_tool_names,
+            agent.request_template.deferred_tools.names,
         ).non_prompt_tokens()
 
     base = estimate(["sleep"])

@@ -325,34 +325,8 @@ class WorkerProgressPump:
     shutdown: threading.Event
 
 
-class ToolRuntimeModelBinding:
-    """Bind attempt-local model identity into the ambient tool context."""
-
-    async def run_with_model(
-        self,
-        *,
-        active_model_name: str,
-        operation: Callable[[], Awaitable[_ToolContextReturn]],
-    ) -> _ToolContextReturn:
-        """Run one provider attempt with its model visible to tools."""
-        with _tool_runtime_model_context(active_model_name):
-            return await operation()
-
-    def stream_with_model[ChunkT](
-        self,
-        stream: AsyncIterator[ChunkT],
-        *,
-        active_model_name: str,
-    ) -> AsyncIterator[ChunkT]:
-        """Bind one attempt's model while its stream is created, pulled, or closed."""
-        return context_bound_async_stream(
-            context_factory=lambda: _tool_runtime_model_context(active_model_name),
-            stream_factory=lambda: stream,
-        )
-
-
 @dataclass
-class ToolRuntimeSupport(ToolRuntimeModelBinding):
+class ToolRuntimeSupport:
     """Own shared tool-runtime context building and scoped execution helpers."""
 
     runtime: BotRuntimeView
@@ -738,11 +712,16 @@ def tool_runtime_context(context: ToolRuntimeContext | None) -> Iterator[None]:
 
 
 @contextmanager
-def _tool_runtime_model_context(active_model_name: str) -> Iterator[None]:
-    """Bind the model used by one provider attempt into the ambient tool context."""
+def tool_runtime_model_context(model_name: str | None) -> Iterator[None]:
+    """Bind ``model_name`` as the ambient context's ``active_model_name`` for one tool call; None binds nothing.
+
+    Agno-authored tools and plugins read the model a call runs for there.
+    """
     context = get_tool_runtime_context()
-    resolved_context = replace(context, active_model_name=active_model_name) if context is not None else None
-    with tool_runtime_context(resolved_context):
+    if model_name is None or context is None:
+        yield
+        return
+    with tool_runtime_context(replace(context, active_model_name=model_name)):
         yield
 
 

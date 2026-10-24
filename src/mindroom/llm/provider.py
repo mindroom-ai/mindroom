@@ -95,6 +95,19 @@ class RequestOverrides:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class DeferredTools:
+    """The tools a request keeps out of the rendered prompt until tool search finds them.
+
+    A route with native tool search defers ``names`` server-side. The build sets ``portable``, and only with ``names``,
+    for a route without it: portable tool search (``mindroom.llm.tool_search``) leaves them off the request, and the
+    model reaches them through ``call_tool``.
+    """
+
+    names: frozenset[str] = frozenset()
+    portable: bool = False
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class NativeCompactionReplay:
     """The provider-managed compaction route one request replays.
 
@@ -117,8 +130,7 @@ class ModelRequest:
     turn still arrive through ``stream()`` after the response completes, without deltas, so callers read its output
     from the finished turn. A route that only streams streams the request, deltas included.
     ``output_schema`` asks for an answer matching the pydantic class, in the wire format the adapter renders for it.
-    ``deferred_tool_names`` name tools kept out of the rendered prompt: routes with native tool search defer
-    them server-side, and the portable tool-search wrapper hides them behind ``call_tool`` everywhere else.
+    ``deferred_tools`` are the tools kept out of the rendered prompt and how tool search reaches them.
     ``portable_replay`` replays history explicitly instead of continuing provider-stored state, and
     ``native_compaction`` turns on provider-side compaction for routes that support it.
     """
@@ -129,7 +141,7 @@ class ModelRequest:
     output_schema: type[BaseModel] | None = None
     overrides: RequestOverrides = RequestOverrides()
     stream: bool = True
-    deferred_tool_names: frozenset[str] = frozenset()
+    deferred_tools: DeferredTools = DeferredTools()
     portable_replay: bool = False
     native_compaction: NativeCompactionReplay | None = None
 
@@ -360,6 +372,7 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
 
 __all__ = [
     "Capabilities",
+    "DeferredTools",
     "MediaKind",
     "ModelIdentity",
     "ModelProvider",

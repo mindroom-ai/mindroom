@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.call_tool import arguments_object
+from mindroom.llm.tool_search import arguments_object
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

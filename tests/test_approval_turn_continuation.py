@@ -335,7 +335,11 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     run_ids: list[str] = []
     monkeypatch.setattr(
         "mindroom.approval.execution.stream_agent_response",
-        lambda *args, **kwargs: stream_agent_response(*args, **kwargs, run_id_callback=run_ids.append),
+        lambda *args, **kwargs: stream_agent_response(
+            *args,
+            **kwargs,
+            run_id_callback=lambda run_id, _model_name: run_ids.append(run_id),
+        ),
     )
     paused_answer = PausedAnswer()
     resume_starts: list[int] = []

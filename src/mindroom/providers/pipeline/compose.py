@@ -11,7 +11,7 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.providers.pipeline.deferred_tools import portable_tool_search_stream
+from mindroom.llm.tool_search import portable_tool_search_stream
 from mindroom.providers.pipeline.guidance_retry import guidance_retry_stream
 from mindroom.providers.pipeline.media import media_fallback_stream
 from mindroom.providers.pipeline.refusal import refusal_stream
