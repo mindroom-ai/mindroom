@@ -21,7 +21,6 @@ from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
@@ -33,7 +32,7 @@ from mindroom.usage.stats_storage import (
     UsageStorageDiagnostic,
     UsageStorageSource,
 )
-from tests.conftest import create_agno_2_sessions_db, seed_session, seed_session_metrics
+from tests.conftest import create_agno_2_sessions_db, persist_runs, persist_session, seed_session_metrics
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -79,7 +78,6 @@ def _source(
         path=Path("/not-read.db"),
         path_label=f"{scope}/{agent_name or 'team'}.db",
         scope=scope,  # type: ignore[arg-type]
-        names=TableNames(agent_name or "team"),
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset({"code", "other"}),
         requester_isolated=requester_isolated,
@@ -786,7 +784,7 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
         "cache_read_tokens": 24,
         "cache_write_tokens": 7,
     }
-    seed_session(
+    persist_session(
         storage,
         ConversationSession(
             kind="agent",
@@ -898,7 +896,7 @@ def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: b
         with sqlite3.connect(database) as connection:
             runs = connection.execute("SELECT runs FROM code_sessions").fetchone()[0]
             connection.execute("UPDATE code_sessions SET runs = ?", (json.loads(runs),))
-    migrate_usage_database(database, TableNames("code"))
+    migrate_usage_database(database)
 
     report = collect_self_usage(
         agent_name="code",
@@ -943,7 +941,7 @@ def test_migration_keeps_valid_usage_beside_a_malformed_counter(tmp_path: Path) 
                 ),
             ),
         )
-    migrate_usage_database(database, TableNames("code"))
+    migrate_usage_database(database)
 
     report = collect_self_usage(
         agent_name="code",
@@ -974,7 +972,8 @@ def test_unusable_model_details_preserve_daily_totals(tmp_path: Path, details: o
     paths = _paths(tmp_path)
     config = Config(agents={"code": AgentConfig(display_name="Code")})
     storage = create_state_storage("code", paths.storage_root / "agents" / "code")
-    storage.save_run(
+    persist_runs(
+        storage,
         ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
         RunRecord(
             run_id="run-1",
@@ -984,7 +983,6 @@ def test_unusable_model_details_preserve_daily_totals(tmp_path: Path, details: o
             created_at=1_700_000_000,
             metrics=RunMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=8, total_tokens=20)),
         ),
-        record_usage=True,
     )
     # The ledger snapshot of an older release may carry model details the reporter cannot use.
     with storage.transaction(write=True) as connection:

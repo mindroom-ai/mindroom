@@ -110,7 +110,7 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
         msg = "injected database failure"
         raise OSError(msg)
 
-    monkeypatch.setattr(ConversationStore, "save_run", fail)
+    monkeypatch.setattr(ConversationStore, "save_runs", fail)
     await _capture(checkpoint, record, messages)
     with pytest.raises(OSError, match="injected"):
         await checkpoint.persist("bash-1")
@@ -291,7 +291,7 @@ async def test_a_checkpoint_saves_a_session_state_another_thread_keeps_changing(
             await write_with_session_state(
                 store,
                 session,
-                lambda opened, state: opened.save_run(session, record, record_usage=False, state=state),
+                lambda opened, state: opened.save_runs(session, [record], state=state),
             )
             fields = store.read_session_fields("session")
             assert fields is not None

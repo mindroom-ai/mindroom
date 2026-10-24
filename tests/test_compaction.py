@@ -334,7 +334,6 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
         owner_id="super_team",
         metadata={"source": "alice"},
         created_at=1,
-        updated_at=1,
     )
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(first_storage, session)

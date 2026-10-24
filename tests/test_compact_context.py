@@ -123,7 +123,6 @@ def _session(session_id: str, *, runs: list[RunRecord] | None = None) -> Convers
         owner_id="test_agent",
         runs=list(runs or []),
         created_at=1,
-        updated_at=1,
     )
 
 

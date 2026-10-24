@@ -21,12 +21,16 @@ STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "st
 
 @dataclass(frozen=True)
 class GoldenStore:
-    """One golden database: its dump label, path under the storage root, sessions table, and sessions."""
+    """One golden database: its dump label, path under the storage root, and sessions."""
 
     label: str
     db_path: str
-    names: TableNames
     sessions: dict[str, SessionKind]
+
+    @property
+    def names(self) -> TableNames:
+        """The names of the database ``db_path`` holds."""
+        return TableNames.of_database(Path(self.db_path))
 
     def restore(self, root: Path) -> Path:
         """Write this database under ``root`` from its dump and return the file."""
@@ -41,7 +45,7 @@ class GoldenStore:
 
     def open(self, root: Path) -> ConversationStore:
         """Restore this database under ``root`` and open it with the owned store."""
-        return ConversationStore(self.restore(root), self.names)
+        return ConversationStore(self.restore(root))
 
 
 def golden_stores() -> list[GoldenStore]:
@@ -51,7 +55,6 @@ def golden_stores() -> list[GoldenStore]:
         GoldenStore(
             label=label,
             db_path=spec["db_path"],
-            names=TableNames.of_database(Path(spec["db_path"])),
             sessions=cast("dict[str, SessionKind]", spec["sessions"]),
         )
         for label, spec in stores.items()

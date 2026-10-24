@@ -21,11 +21,11 @@ if TYPE_CHECKING:
 
 _LOCK = threading.Lock()
 # A lane lives while an operation holds it; the next operation on an idle database starts a fresh one.
-_LANES: weakref.WeakValueDictionary[tuple[str, str], ThreadPoolExecutor] = weakref.WeakValueDictionary()
+_LANES: weakref.WeakValueDictionary[str, ThreadPoolExecutor] = weakref.WeakValueDictionary()
 
 
 def _lane(store: ConversationStore) -> ThreadPoolExecutor:
-    target = (str(store.path.resolve()), store.names.sessions)
+    target = str(store.path.resolve())
     with _LOCK:
         lane = _LANES.get(target)
         if lane is None:

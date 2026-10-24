@@ -156,7 +156,6 @@ def _call_usage_owner(
             kind="agent",
             owner_id=agent_name,
             created_at=int(created_at),
-            updated_at=int(created_at),
         ),
     )
 

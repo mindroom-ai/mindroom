@@ -370,7 +370,7 @@ def test_an_agno_2_database_migrates_before_the_owned_store_opens_it(tmp_path: P
     migrate_to_summary_rows(db_file, _NAMES)
 
     assert _migrated_log(db_file) == _MIGRATED_LOG
-    session = ConversationStore(db_file, _NAMES).load_session("session-1", "agent")
+    session = ConversationStore(db_file).load_session("session-1", "agent")
     assert session is not None
     assert [run.run_id for run in session.runs] == ["run-1", "run-2", "run-3"]
     assert session.summary is not None

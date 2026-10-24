@@ -28,7 +28,7 @@ from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCo
 from mindroom.session_storage.codec import run_from_row, run_type
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json
-from mindroom.session_storage.schema import schema_sql, table_names
+from mindroom.session_storage.schema import TableNames, schema_sql, table_names
 from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
 from mindroom.usage.storage import project_usage, quote_identifier, usage_upsert_sql
 
@@ -37,8 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.schema import TableNames
-    from mindroom.session_storage.types import Refusal, SaveOutcome, SessionKind
+    from mindroom.session_storage.types import Refusal, SessionKind
     from mindroom.usage.storage import IndependentUsageKind
 
 # How long an operation waits for another connection's write lock on the database, its migrations included.
@@ -99,14 +98,17 @@ def migrate_database(
 class ConversationStore:
     """One conversation database; it holds no connection, so there is nothing to close.
 
-    With ``strip_system_messages``, stored runs leave out their system messages unless they are paused.
+    Stored runs leave out their system messages unless they are paused.
     Tables are created by the first write. Migrations that recognize an older database by a missing summary-row
     or usage table must run before that write.
     """
 
     path: Path
-    names: TableNames
-    strip_system_messages: bool = False
+
+    @property
+    def names(self) -> TableNames:
+        """The names of the database ``path`` holds."""
+        return TableNames.of_database(self.path)
 
     @contextmanager
     def transaction(self, *, write: bool) -> Iterator[sqlite3.Connection]:
@@ -144,7 +146,7 @@ class ConversationStore:
             loaded = self._read_load(connection, session_id, kind)
         if loaded is None:
             return None
-        _, agent_id, team_id, session_data, metadata, created_at, updated_at = loaded.row
+        _, agent_id, team_id, session_data, metadata, created_at = loaded.row
         state = _session_state(session_data)
         return ConversationSession(
             session_id=session_id,
@@ -156,7 +158,6 @@ class ConversationStore:
             runs=loaded.runs(),
             summary=loaded.summary,
             created_at=created_at,
-            updated_at=updated_at,
         )
 
     def _read_load(self, connection: sqlite3.Connection, session_id: str, kind: SessionKind) -> _Load | None:
@@ -210,7 +211,7 @@ class ConversationStore:
         if self.names.sessions not in table_names(connection):
             return None
         row = connection.execute(
-            "SELECT session_type, agent_id, team_id, session_data, metadata, created_at, updated_at "  # noqa: S608
+            "SELECT session_type, agent_id, team_id, session_data, metadata, created_at "  # noqa: S608
             f"FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",
             (session_id,),
         ).fetchone()
@@ -222,32 +223,6 @@ class ConversationStore:
             created = _ensure_session_row(connection, self.names, session)
         _record_stored_state(session, created)
 
-    def save_run(
-        self,
-        session: ConversationSession,
-        run: AnyRunRecord,
-        *,
-        record_usage: bool,
-        state: dict[str, Any] | None = None,
-    ) -> SaveOutcome:
-        """Save one run of ``session`` under the conversation log's insertion rules, creating the session row if needed.
-
-        A run a cut removed, or a member of one, writes no row (``"removed"``). A visible run behind its scope's
-        latest summary row, or a member of one, stays as stored (``"frozen"``). A run new to the session, or saved
-        visible over a stored paused, cancelled, or errored row, takes the next position after every run and
-        summary row. With ``record_usage``, the run's usage replaces its earlier snapshot in the usage ledger,
-        which outlives removed runs, and the session totals change by the difference, in the same transaction.
-        A frozen run's usage is final and changes neither. The first requester a written run names is stored on a
-        session row that has none; no other write of the store names a requester.
-
-        With ``state``, a ``session_state_snapshot`` of the state the run ran with, the run and the state commit in
-        one transaction, so a failure leaves neither. The state is written only when the row does not already hold it.
-
-        Once the save commits, ``session.runs`` holds the run as the store does (see ``_reconcile``).
-        """
-        (saved,) = self._save_encoded(session, [_encoded(run)], record_usage=record_usage, state=state)
-        return "written" if isinstance(saved.row, _WrittenRow) else saved.row
-
     def save_runs(
         self,
         session: ConversationSession,
@@ -255,14 +230,22 @@ class ConversationStore:
         *,
         state: dict[str, Any] | None = None,
     ) -> None:
-        """Write conversation-only changes to runs of ``session`` in one transaction, then reconcile its copies.
+        """Save ``runs`` of ``session`` in one transaction under the conversation log's insertion rules.
 
-        Conversation rewrites leave the usage ledger and session totals untouched. With ``state``, a
-        ``session_state_snapshot``, the session state commits in the same transaction (see ``save_run``). Once the
-        transaction commits, ``session.runs`` holds each run as the store does (see ``_reconcile``), so a removed run
-        leaves the session and a frozen one keeps the session's copy. Callers therefore edit a copy and hand the copy
-        here: a refused save must leave the session's copy as stored. A call with neither runs nor ``state`` writes
-        nothing.
+        The session row is created if needed. A run a cut removed, or a member of one, writes no row. A visible run
+        behind its scope's latest summary row, or a member of one, stays as stored. A run new to the session, or
+        saved visible over a stored paused, cancelled, or errored row, takes the next position after every run and
+        summary row. The first requester a written run names is stored on a session row that has none; no other
+        write of the store names a requester. The usage ledger and session totals are left alone: a run's terminal
+        record reaches them through ``persist_to``.
+
+        With ``state``, a ``session_state_snapshot`` of the state the runs ran with, the runs and the state commit in
+        one transaction, so a failure leaves neither. The state is written only when the row does not already hold it.
+
+        Once the transaction commits, ``session.runs`` holds each written run as the store does (see ``_reconcile``),
+        so a removed run leaves the session and a frozen one keeps the session's copy. Callers therefore edit a copy
+        and hand the copy here: a refused save must leave the session's copy as stored. A call with neither runs nor
+        ``state`` writes nothing.
         """
         runs = list(runs)
         if not runs and state is None:
@@ -355,22 +338,14 @@ class ConversationStore:
         _record_stored_state(session, created)
         session.metadata = updated
 
-    def delete_run_subtrees(
-        self,
-        run_ids: Collection[str],
-        *,
-        session_id: str | None = None,
-        session: ConversationSession | None = None,
-    ) -> set[str]:
-        """Delete ``run_ids`` with every member run below them, within session ``session_id`` when given.
+    def delete_run_subtrees(self, session: ConversationSession, run_ids: Collection[str]) -> set[str]:
+        """Delete ``session``'s runs ``run_ids`` with every member run below them.
 
-        Returns the deleted ids. Once the delete commits, ``session``, a loaded copy of that session, holds none of
-        them, nor any run below them.
+        Returns the deleted ids. Once the delete commits, ``session`` holds none of them, nor any run below them.
         """
         with self.transaction(write=True) as connection:
-            deleted = delete_run_subtrees_in_transaction(connection, self.names, run_ids, session_id=session_id)
-        if session is not None:
-            session.runs = runs_without(session.runs, deleted)
+            deleted = delete_run_subtrees_in_transaction(connection, self.names, run_ids, session_id=session.session_id)
+        session.runs = runs_without(session.runs, deleted)
         return deleted
 
     def get_run(self, run_id: str) -> AnyRunRecord | None:
@@ -392,21 +367,20 @@ class ConversationStore:
             ).fetchall()
         return [run for run in (run_from_row(*row) for row in rows) if run is not None]
 
-    def list_updated_sessions(self, kind: SessionKind, owner_id: str, *, since: int) -> list[tuple[str, int]]:
-        """Return ``(session_id, updated_at)`` of ``owner_id``'s sessions updated after ``since``, oldest first.
+    def list_updated_sessions(self, agent_id: str, *, since: int) -> list[tuple[str, int]]:
+        """Return ``(session_id, updated_at)`` of agent ``agent_id``'s sessions updated after ``since``, oldest first.
 
-        A session's update time moves when its row is written: a state save, a metadata change, or a run save that
-        records usage.
+        A session's update time moves when its row is written: a state save, a metadata change, or a run's terminal
+        save through ``persist_to``, which records its usage.
         """
-        owner_column = "team_id" if kind == "team" else "agent_id"
         with self.transaction(write=False) as connection:
             if self.names.sessions not in table_names(connection):
                 return []
             return connection.execute(
                 "SELECT session_id, COALESCE(updated_at, created_at) AS updated "  # noqa: S608
-                f"FROM {quote_identifier(self.names.sessions)} WHERE session_type = ? AND {owner_column} = ? "
+                f"FROM {quote_identifier(self.names.sessions)} WHERE session_type = 'agent' AND agent_id = ? "
                 "AND COALESCE(updated_at, created_at) > ? ORDER BY updated, session_id",
-                (kind, owner_id, since),
+                (agent_id, since),
             ).fetchall()
 
     def save_independent_usage(
@@ -450,7 +424,7 @@ class ConversationStore:
         record_usage: bool,
     ) -> _SavedRun:
         """Save one run from its stored dict (``record.to_dict()``), under the insertion rules."""
-        if data["status"] != RunStatus.paused.value and self.strip_system_messages:
+        if data["status"] != RunStatus.paused.value:
             # Prompts are rebuilt from config on every request; a paused run keeps them until it continues.
             data["messages"] = [message for message in data["messages"] if message["role"] != "system"]
         row = _write_run_row(connection, self.names, data, row_type=row_type, session_id=session_id)
@@ -561,6 +535,9 @@ def runs_without(runs: Iterable[AnyRunRecord], run_ids: Iterable[str]) -> list[A
 def persist_to(store: ConversationStore, session: ConversationSession) -> Callable[[AnyRunRecord], Awaitable[None]]:
     """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
 
+    The record saves under ``save_runs``' rules. Its usage replaces its earlier snapshot in the usage ledger, which
+    outlives removed runs, and the session totals change by the difference, in the same transaction; a frozen run's
+    usage is final and changes neither.
     The record and ``session.session_state``, which the run's tools change in place, are copied on the caller's task
     before the lane is awaited, so what lands is what was handed over. The state is written back, in the record's
     own transaction, when it differs from ``session.stored_session_state``, which every write of the field records,
@@ -841,28 +818,28 @@ def delete_run_subtrees_in_transaction(
     names: TableNames,
     run_ids: Collection[str],
     *,
-    session_id: str | None,
+    session_id: str,
 ) -> set[str]:
-    """Delete ``run_ids`` and every run below them in the caller's write transaction; return the deleted ids.
+    """Delete session ``session_id``'s runs ``run_ids`` and every run below them in the caller's write transaction.
 
-    Team member runs are rows whose ``parent_run_id`` is the team run, so a deleted run takes its whole subtree.
+    Returns the deleted ids. Team member runs are rows whose ``parent_run_id`` is the team run, so a deleted run
+    takes its whole subtree.
     """
     runs = quote_identifier(names.runs)
-    scope, scope_parameters = ("session_id = ? AND ", (session_id,)) if session_id is not None else ("", ())
     found = {run_id for run_id in run_ids if run_id}
     frontier = found
     while frontier:
         frontier = {
             run_id
             for (run_id,) in connection.execute(
-                f"SELECT run_id FROM {runs} WHERE {scope}parent_run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
-                (*scope_parameters, json.dumps(sorted(frontier))),
+                f"SELECT run_id FROM {runs} WHERE session_id = ? AND parent_run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
+                (session_id, json.dumps(sorted(frontier))),
             )
         } - found
         found |= frontier
     connection.execute(
-        f"DELETE FROM {runs} WHERE {scope}run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
-        (*scope_parameters, json.dumps(sorted(found))),
+        f"DELETE FROM {runs} WHERE session_id = ? AND run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
+        (session_id, json.dumps(sorted(found))),
     )
     return found
 

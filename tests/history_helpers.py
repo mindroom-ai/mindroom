@@ -73,6 +73,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
+    persist_session,
     seed_session,
 )
 from tests.fakes.summary_model import summary_model
@@ -297,7 +298,6 @@ def _session(
         metadata=metadata,
         summary=summary,
         created_at=1,
-        updated_at=1,
     )
 
 
@@ -317,7 +317,6 @@ def _team_session(
         metadata=metadata,
         summary=summary,
         created_at=1,
-        updated_at=1,
     )
 
 
@@ -374,7 +373,7 @@ def _forced_compaction_context(
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
-    seed_session(storage, session)
+    persist_session(storage, session)
     runtime_context = _hook_runtime_context(
         config=config,
         runtime_paths=runtime_paths,

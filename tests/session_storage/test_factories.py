@@ -11,7 +11,6 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage import agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
@@ -37,12 +36,7 @@ def _tables(db_file: Path) -> set[str]:
 
 
 def _run(run_id: str) -> RunRecord:
-    return RunRecord(
-        run_id=run_id,
-        agent_id="code",
-        session_id="session-1",
-        messages=[Message(role="system", content="prompt"), Message(role="user", content=run_id)],
-    )
+    return RunRecord(run_id=run_id, agent_id="code", session_id="session-1")
 
 
 def test_migrations_run_in_order_under_the_preflight_lock_before_the_store_opens(
@@ -81,10 +75,9 @@ def test_a_fresh_database_gets_its_tables_from_the_first_write_only(tmp_path: Pa
     assert store.path == tmp_path / "sessions" / "code.db"
     assert _tables(store.path) == set()
 
-    store.save_run(
+    store.save_runs(
         ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
-        _run("r1"),
-        record_usage=True,
+        [_run("r1")],
     )
 
     assert _tables(store.path) >= {
@@ -101,21 +94,6 @@ def test_a_storage_name_that_leaves_the_sessions_directory_opens_nothing(tmp_pat
         create_state_storage("../outside", tmp_path)
 
     assert list(tmp_path.iterdir()) == []
-
-
-def test_stored_runs_leave_out_the_prompt_roles_of_the_history_settings(tmp_path: Path) -> None:
-    """Every factory-opened store applies the one prompt-role policy, so a run's system message is not stored."""
-    store = _open(tmp_path)
-    store.save_run(
-        ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
-        _run("r1"),
-        record_usage=True,
-    )
-
-    loaded = store.load_session("session-1", "agent")
-
-    assert loaded is not None
-    assert [message.role for message in loaded.runs[0].messages] == ["user"]
 
 
 def test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order(tmp_path: Path) -> None:
@@ -138,7 +116,7 @@ def test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order(tmp_pa
     assert loaded is not None
     assert [run.run_id for run in loaded.runs] == ["run-1", "run-2", "run-3"]
 
-    store.delete_run_subtrees(["run-2"])
+    store.delete_run_subtrees(ConversationSession(kind="agent", session_id="session-1", owner_id="code"), ["run-2"])
     store.save_runs(loaded, [_run("run-4")])
     reopened = _open(tmp_path).load_session("session-1", "agent")
 

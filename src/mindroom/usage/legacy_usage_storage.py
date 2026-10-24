@@ -44,10 +44,11 @@ def legacy_request_model(models: Mapping[tuple[str, str], object]) -> tuple[str,
 # Replacement: v2026.9.191 introduced independent usage snapshots; no historical billing completeness is inferred.
 # Handling: Detect by schema; seed once transactionally, prefer current rows, retain unknown dates and content-free gaps.
 # Coverage: tests/test_legacy_usage_storage.py.
-def migrate_usage_database(path: Path, names: TableNames, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> None:
-    """Seed an existing database once; publication and all imported records commit together."""
+def migrate_usage_database(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> None:
+    """Seed the existing database at ``path`` once; publication and all imported records commit together."""
     if not path.is_file():
         return
+    names = TableNames.of_database(path)
     migrate_database(
         path,
         needed=lambda connection: _needs_migration(connection, names),
@@ -121,11 +122,10 @@ def _migrate_stores(runtime_paths: RuntimePaths) -> None:
     for scope in _directories(root / "private_instances"):
         directories.extend(_directories(scope))
     for directory in directories:
-        names = TableNames(directory.name)
-        path = names.database_path(directory)
+        path = TableNames(directory.name).database_path(directory)
         try:
             if not path.parent.is_symlink() and not path.is_symlink():
-                migrate_usage_database(path, names, timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)
+                migrate_usage_database(path, timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)
         except (sqlite3.Error, OSError) as error:
             # Worker code can write session databases, so one unreadable or locked store must not stop startup.
             # Its owner retries the import with the full lock timeout when it next opens the store.

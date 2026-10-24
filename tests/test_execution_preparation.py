@@ -146,7 +146,6 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
             ),
         ],
         created_at=1,
-        updated_at=1,
     )
     return PreparedScopeHistory(
         scope=scope,

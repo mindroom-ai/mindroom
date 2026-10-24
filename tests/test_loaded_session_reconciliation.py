@@ -27,7 +27,7 @@ from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history import session_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.store import ConversationStore, persist_to
+from mindroom.session_storage.store import ConversationStore, delete_run_subtrees_in_transaction, persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -122,8 +122,8 @@ def _reloaded(store: ConversationStore, session_id: str = SESSION, kind: Session
 
 def _cut(store: ConversationStore, run_id: str, session_id: str = SESSION) -> None:
     """Remove ``run_id`` as a redaction's cut does: delete its rows and record it, so a later save of it is refused."""
-    store.delete_run_subtrees([run_id], session_id=session_id)
-    with closing(sqlite3.connect(store.path)) as connection, connection:
+    with store.transaction(write=True) as connection:
+        delete_run_subtrees_in_transaction(connection, store.names, [run_id], session_id=session_id)
         connection.execute(
             f'INSERT INTO "{store.names.removed_runs}" (run_id, session_id) VALUES (?, ?)',  # noqa: S608
             (run_id, session_id),
@@ -247,7 +247,7 @@ async def test_an_approval_resume_leaves_its_loaded_session_as_the_store_holds_i
         # Another reply finished while the approval waited; the resume loads the session as the store holds it.
         later = paused.store.load_session(SESSION, "agent")
         assert later is not None
-        paused.store.save_run(later, _completed("run-later", "code", "Meanwhile."), record_usage=True)
+        paused.store.save_runs(later, [_completed("run-later", "code", "Meanwhile.")])
         session = paused.store.load_session(SESSION, "agent")
         assert session is not None
 
@@ -437,37 +437,40 @@ async def test_a_delegating_turn_keeps_the_stored_parent_when_a_summary_froze_it
     _delegating_leader(monkeypatch)
     store = _store("leader", config, paths)
     _seed(store, "leader", _completed("run-0", "leader", "Earlier."))
-    original_save_run = ConversationStore.save_run
-    refused: list[str] = []
+    original_save_runs = ConversationStore.save_runs
+    folded: list[str] = []
 
     def fold_then_save(
         self: ConversationStore,
         session: ConversationSession,
-        run: AnyRunRecord,
-        *,
-        record_usage: bool,
-    ) -> object:
-        if run.status is RunStatus.completed and DELEGATION_STATE_KEY in (run.metadata or {}):
-            # Stands in for a compaction that summarized the finished parent just before the driver's state save.
-            with closing(sqlite3.connect(self.path)) as connection, connection:
-                connection.execute(
-                    f'INSERT INTO "{self.names.summaries}" (session_id, scope_key, after_run_index, summary, '  # noqa: S608
-                    f"created_at) SELECT session_id, 'agent:leader', run_index, 'Summary.', 1 FROM \"{self.names.runs}\" "
-                    "WHERE run_id = ?",
-                    (run.run_id,),
-                )
-        outcome = original_save_run(self, session, run, record_usage=record_usage)
-        if outcome == "frozen":
-            refused.append(run.run_id)
-        return outcome
+        runs: list[AnyRunRecord],
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None:
+        handed: list[AnyRunRecord] = []
+        for run in runs:
+            if run.status is RunStatus.completed and DELEGATION_STATE_KEY in (run.metadata or {}):
+                # Stands in for a compaction that summarized the finished parent just before the driver's state save.
+                with closing(sqlite3.connect(self.path)) as connection, connection:
+                    connection.execute(
+                        f'INSERT INTO "{self.names.summaries}" (session_id, scope_key, after_run_index, summary, '  # noqa: S608
+                        f"created_at) SELECT session_id, 'agent:leader', run_index, 'Summary.', 1 FROM \"{self.names.runs}\" "
+                        "WHERE run_id = ?",
+                        (run.run_id,),
+                    )
+                folded.append(run.run_id)
+                # Marks the record, so a write of it would show in the stored row.
+                run = replace(run, metadata={**(run.metadata or {}), "written_after_fold": True})  # noqa: PLW2901
+            handed.append(run)
+        original_save_runs(self, session, handed, **kwargs)
 
-    monkeypatch.setattr(ConversationStore, "save_run", fold_then_save)
+    monkeypatch.setattr(ConversationStore, "save_runs", fold_then_save)
 
     assert "Parent done." in str(await _respond("leader", config, paths, run_id="parent-run"))
 
-    assert refused == ["parent-run"]
+    assert folded == ["parent-run"]
     session = _loaded_session(opened_scopes, "leader")
     stored = store.get_run("parent-run")
     assert stored is not None
+    assert "written_after_fold" not in (stored.metadata or {})
     assert [run.run_id for run in session.runs] == ["run-0", "parent-run"]
     assert session.runs[1].to_dict() == stored.to_dict()

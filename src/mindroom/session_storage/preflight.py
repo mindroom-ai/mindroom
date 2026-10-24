@@ -13,11 +13,13 @@ from mindroom.durable_write import fsync_directory_durable
 from mindroom.file_locks import wait_for_exclusive_lock
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at
-from mindroom.session_storage.schema import SESSION_COLUMNS, TableNames
+from mindroom.session_storage.schema import SESSION_COLUMNS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+    from mindroom.session_storage.schema import TableNames
 
 logger = get_logger(__name__)
 
@@ -33,12 +35,11 @@ _REQUIRED_SESSION_COLUMNS = frozenset(SESSION_COLUMNS)
 @contextmanager
 def session_storage_preflight(
     state_root: Path,
+    names: TableNames,
     *,
-    storage_name: str,
     timeout_seconds: float,
 ) -> Iterator[None]:
-    """Inspect and, if necessary, archive one owned sessions directory before use."""
-    names = TableNames(storage_name)
+    """Inspect and, if necessary, archive the sessions directory of the database ``names`` under ``state_root``."""
     db_file = names.database_path(state_root)
     db_dir = db_file.parent
     session_table = names.sessions

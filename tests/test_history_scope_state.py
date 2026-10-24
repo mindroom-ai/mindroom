@@ -56,7 +56,6 @@ def _shared_session(*, is_team: bool) -> ConversationSession:
             owner_id="test_agent",
             runs=[],
             created_at=1,
-            updated_at=1,
         )
     return ConversationSession(
         kind="agent",
@@ -64,7 +63,6 @@ def _shared_session(*, is_team: bool) -> ConversationSession:
         owner_id="test_agent",
         runs=[],
         created_at=1,
-        updated_at=1,
     )
 
 
@@ -145,7 +143,6 @@ def test_seen_event_ids_match_model_history_visibility(storage: ConversationStor
             owner_id=entity_id,
             runs=runs,
             created_at=1,
-            updated_at=1,
         )
     else:
         session = ConversationSession(
@@ -154,7 +151,6 @@ def test_seen_event_ids_match_model_history_visibility(storage: ConversationStor
             owner_id=entity_id,
             runs=runs,
             created_at=1,
-            updated_at=1,
         )
     update_scope_seen_event_ids(storage, session, scope, ["preserved-event"])
 

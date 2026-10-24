@@ -784,7 +784,6 @@ async def test_a_reply_persists_a_notice_an_earlier_crashed_reply_left_live(
             owner_id="assistant",
             runs=[RunRecord(run_id="run-0", agent_id="assistant", status=RunStatus.completed, messages=[crash_left])],
             created_at=1,
-            updated_at=1,
         ),
     )
 

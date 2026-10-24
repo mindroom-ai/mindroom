@@ -78,11 +78,15 @@ class UsageStorageSource:
     path: Path
     path_label: str
     scope: _UsageStorageScope
-    names: TableNames
     source_agent_id: str | None
     allowed_agent_ids: frozenset[str]
     requester_isolated: bool
     owner_id: str | None = None
+
+    @property
+    def names(self) -> TableNames:
+        """The names of the database ``path`` holds."""
+        return TableNames.of_database(self.path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,7 +445,6 @@ def _source(
         path=path,
         path_label=path.relative_to(root).as_posix(),
         scope=scope,
-        names=TableNames.of_database(path),
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset(config.agents),
         requester_isolated=requester_isolated,

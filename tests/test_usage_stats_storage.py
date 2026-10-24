@@ -17,7 +17,6 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
@@ -30,7 +29,7 @@ from mindroom.usage.stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
-from tests.conftest import create_agno_2_sessions_db, seed_session
+from tests.conftest import create_agno_2_sessions_db, persist_runs, persist_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -49,15 +48,13 @@ _SESSION_COLUMNS = """
 """
 
 
-def _source(path: Path, *, storage_name: str = "code") -> UsageStorageSource:
+def _source(path: Path) -> UsageStorageSource:
     # Existing-history fixtures pass through the same one-time import as startup.
-    names = TableNames(storage_name)
-    migrate_usage_database(path, names)
+    migrate_usage_database(path)
     return UsageStorageSource(
         path=path,
         path_label=path.name,
         scope="shared_agent",
-        names=names,
         source_agent_id="code",
         allowed_agent_ids=frozenset({"code"}),
         requester_isolated=False,
@@ -223,9 +220,9 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
 
 
 def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) -> None:
-    """The adapter reads the exact JSON representation written by MindRoom's Agno storage."""
+    """The adapter reads the exact JSON representation the conversation store writes."""
     storage = create_state_storage("code", tmp_path)
-    seed_session(
+    persist_session(
         storage,
         ConversationSession(
             kind="agent",
@@ -244,7 +241,6 @@ def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) 
                 ),
             ],
             created_at=1_723_837_600,
-            updated_at=1_723_837_600,
         ),
     )
 
@@ -355,8 +351,8 @@ def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path) 
         status=RunStatus.completed,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=8, total_tokens=20)),
     )
-    storage.save_run(session, run, record_usage=True)
-    storage.save_run(session, replace(run, created_at=1_723_924_000), record_usage=True)
+    persist_runs(storage, session, run)
+    persist_runs(storage, session, replace(run, created_at=1_723_924_000))
 
     result = list(iter_usage_storage_rows(_source(tmp_path / "sessions" / "code.db")))
 
@@ -375,10 +371,10 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         session_id="session-1",
         owner_id="engineering",
         created_at=1_723_837_600,
-        updated_at=1_723_837_600,
     )
     storage = create_state_storage("engineering", tmp_path)
-    storage.save_run(
+    persist_runs(
+        storage,
         session,
         TeamRunRecord(
             run_id="team-run",
@@ -396,9 +392,9 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
                 },
             ),
         ),
-        record_usage=True,
     )
-    storage.save_run(
+    persist_runs(
+        storage,
         session,
         RunRecord(
             run_id="member-run",
@@ -417,10 +413,9 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
                 },
             ),
         ),
-        record_usage=True,
     )
 
-    source = _source(tmp_path / "sessions" / "engineering.db", storage_name="engineering")
+    source = _source(tmp_path / "sessions" / "engineering.db")
     if legacy_encoding:
         with sqlite3.connect(source.path) as connection:
             (session_data,) = connection.execute("SELECT session_data FROM engineering_sessions").fetchone()

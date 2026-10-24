@@ -26,7 +26,7 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_tool_execution_identity, private_instance_scope_root_path
 from mindroom.usage import stats as usage_stats
-from tests.conftest import seed_session, seed_session_metrics
+from tests.conftest import persist_session, seed_session_metrics
 from tests.test_usage_stats import _config, _metrics, _model_metrics, _paths, _row, _run, _source, _wire
 from tests.test_usage_stats_tool import _context
 
@@ -100,7 +100,7 @@ def seed_private_usage(
             requester_id=requester,
         )
     storage = create_state_storage(agent, resolved.session_state_root)
-    seed_session(
+    persist_session(
         storage,
         ConversationSession(
             kind="agent",

@@ -88,7 +88,7 @@ def _seed(storage: ConversationStore, runs: Sequence[RunRecord]) -> Conversation
 
 
 def _save(storage: ConversationStore, run: AnyRunRecord, *, session: ConversationSession | None = None) -> None:
-    storage.save_run(session or _session(run), run, record_usage=True)
+    storage.save_runs(session or _session(run), [run])
 
 
 def _fold(

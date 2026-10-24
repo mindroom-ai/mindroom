@@ -1433,7 +1433,7 @@ async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary
     runner = _runner(paths)
     assert await _count(runner, config) is None
     storage = create_session_storage("mind", config, paths, execution_identity=None)
-    storage.delete_run_subtrees(["r1"])
+    storage.delete_run_subtrees(_stored("session"), ["r1"])
     later = _tool_turn("r2", result="deployed to canary")
     later.session_id = "session"
     seed_session(storage, _stored("session", later))
