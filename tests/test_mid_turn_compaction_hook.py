@@ -13,7 +13,7 @@ from mindroom.history import mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import DeferredTools, ModelRequest, NativeCompactionReplay, ToolSpec
+from mindroom.llm.provider import DeferredTools, ModelRequest, NativeCompactionReplay
 from mindroom.providers.openai.responses_wire import ResponsesWire, responses_request_kwargs
 from mindroom.providers.openai.settings import ResponsesSettings
 from mindroom.providers.pipeline.wrapped import WrappedProvider
@@ -21,7 +21,7 @@ from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.conftest import install_model_providers
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.fakes.summary_model import summary_model
-from tests.history_helpers import _make_config
+from tests.history_helpers import BIG_TOOL, _make_config
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
@@ -256,9 +256,6 @@ async def test_a_responses_route_sizes_each_request_as_its_replay_sends_it(
         assert not any(is_compaction_summary(message) for message in second.messages)
 
 
-_BIG_TOOL = ToolSpec(name="big_tool", description="d" * 80_000, parameters={})
-
-
 def small_probe() -> str:
     """Return one short tool result."""
     return "ok"
@@ -284,7 +281,7 @@ async def test_tools_the_request_defers_stay_out_of_its_size(
     model = ScriptedModel([calls(tool_call("small_probe", "call_1")), answer("done")])
 
     async def offer_big_tool(state: LoopState) -> RequestDecision:
-        state.tools = (*state.tools, _BIG_TOOL)
+        state.tools = (*state.tools, BIG_TOOL)
         return SendRequest()
 
     _, record = await collect(

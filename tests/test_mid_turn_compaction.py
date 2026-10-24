@@ -57,6 +57,7 @@ from mindroom.usage.storage import project_usage, quote_identifier
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
+    BIG_TOOL,
     TEST_AGENT_SCOPE,
     TOOL_RESULT,
     RecordingCompactionLifecycle,
@@ -471,12 +472,9 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     assert tokens < 10_000
 
 
-_BIG_TOOL = ToolSpec(name="big_tool", description="d" * 80_000, parameters={})
-
-
 def test_request_sizing_leaves_out_deferred_tool_definitions() -> None:
     """Tool search keeps deferred definitions out of the context until the model loads them."""
-    tools = [_BIG_TOOL, ToolSpec(name="lookup", description="Look up a value.", parameters={})]
+    tools = [BIG_TOOL, ToolSpec(name="lookup", description="Look up a value.", parameters={})]
 
     assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) < 1_000
     assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) > 0
@@ -537,7 +535,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     ]
 
     total = estimate_request_messages_tokens(searched, replay_model=replay_model) + mid_turn_compaction._tool_tokens(
-        [_BIG_TOOL],
+        [BIG_TOOL],
         searched,
         frozenset({"big_tool"}),
     )

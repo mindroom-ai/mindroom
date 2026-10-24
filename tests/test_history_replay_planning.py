@@ -45,49 +45,13 @@ from mindroom.token_budget import estimate_text_tokens
 from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
+    ReplayEstimate,
     _completed_run,
     _make_config,
     _runtime_paths,
     _session,
     folded_run_ids,
 )
-
-
-class _RecordingVisualReplayEstimate:
-    """Record the shared history projection while supplying a visual estimate."""
-
-    def __init__(self) -> None:
-        self.messages: list[Message] = []
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
-        self.messages = messages
-        return 100
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        return True
-
-
-class _UnavailableVisualReplayEstimate:
-    def __init__(self) -> None:
-        self.messages: list[Message] = []
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> None:
-        self.messages = messages
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        return True
-
-
-class _DominantTextReplayEstimate:
-    def __init__(self) -> None:
-        self.messages: list[Message] = []
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
-        self.messages = messages
-        return 12_000
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        return False
 
 
 def _viewed_image_message(index: int) -> Message:
@@ -104,7 +68,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
     messages = [_viewed_image_message(index) for index in range(6)]
     session = _session("viewed-images", runs=[_completed_run("run-1", messages=messages)])
     before = deepcopy(session)
-    replay_model = _RecordingVisualReplayEstimate()
+    replay_model = ReplayEstimate(100, uses_visual_tokens=True)
 
     estimate_prompt_visible_history_tokens(
         session=session,
@@ -113,7 +77,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
             policy=HistoryPolicy(mode="all"),
             max_tool_calls_from_history=None,
         ),
-        replay_model=replay_model,  # type: ignore[arg-type]
+        replay_model=replay_model,
         native_route=native_route,
     )
 
@@ -170,7 +134,7 @@ def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavail
             policy=HistoryPolicy(mode="all"),
             max_tool_calls_from_history=None,
         ),
-        replay_model=_UnavailableVisualReplayEstimate(),  # type: ignore[arg-type]
+        replay_model=ReplayEstimate(None, uses_visual_tokens=True),
         native_route=native_route,
     )
 
@@ -192,21 +156,21 @@ def test_history_estimate_adds_visual_fallback_after_dominant_provider_text_esti
         "with-image",
         runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])],
     )
-    replay_model = _DominantTextReplayEstimate()
+    replay_model = ReplayEstimate(12_000)
 
     text_tokens = estimate_prompt_visible_history_tokens(
         session=without_image,
         scope=scope,
         history_settings=settings,
         native_route=native_route,
-        replay_model=replay_model,  # type: ignore[arg-type]
+        replay_model=replay_model,
     )
     visual_tokens = estimate_prompt_visible_history_tokens(
         session=with_image,
         scope=scope,
         history_settings=settings,
         native_route=native_route,
-        replay_model=replay_model,  # type: ignore[arg-type]
+        replay_model=replay_model,
     )
 
     assert visual_tokens - text_tokens >= 5_000

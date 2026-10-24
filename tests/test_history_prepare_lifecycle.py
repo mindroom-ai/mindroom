@@ -62,6 +62,7 @@ from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
+    ReplayEstimate,
     _completed_run,
     _completed_team_run,
     _make_config,
@@ -1973,26 +1974,13 @@ async def test_the_latest_reported_request_size_decides_compaction_before_a_repl
     assert completed_outcome(lifecycle).before_tokens == expected
 
 
-@dataclass(frozen=True)
-class _FixedReplayEstimator:
-    """A route that sizes every explicit replay at ``tokens``."""
-
-    tokens: int
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        return False
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:  # noqa: ARG002
-        return self.tokens
-
-
 @pytest.mark.asyncio
 async def test_the_reported_request_size_counts_its_answer_as_the_answering_route_sizes_it(tmp_path: Path) -> None:
     """The answer the reported request did not hold is sized as the model that answered replays it."""
     prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 8_000},
-        replay_estimator=_FixedReplayEstimator(1_200),
+        replay_estimator=ReplayEstimate(1_200),
     )
 
     # The route sizes the 500-token answer at 1,200 tokens; the whole history it sizes no higher than chars / 4.
