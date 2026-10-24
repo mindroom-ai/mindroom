@@ -4806,12 +4806,12 @@ class ResponseRunner:
 
                     def build_response_stream() -> AsyncIterator[StreamInputChunk]:
                         return team_response_stream(
-                            agent_ids=list(team_request.team_agents),
+                            agent_names=agent_names,
+                            mode=mode,
                             message=prepared_prompt,
                             orchestrator=orchestrator,
                             execution_identity=tool_dispatch.execution_identity,
                             ctx=team_turn_ctx,
-                            mode=mode,
                             thread_history=model_thread_history,
                             model_name=model_name,
                             member_model_names=member_model_names,

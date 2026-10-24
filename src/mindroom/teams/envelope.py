@@ -1,12 +1,12 @@
 """Team turns on the owned runtime: prepare a turn, run its leader, and render the reply through the turn drivers.
 
 ``team_response`` and ``team_response_stream`` are the team envelopes the response runner drives through the shared
-turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply delivers
-no tool trace and renders from the finished run's records, as Agno's blocking team reply did: each member run's text
-in the order the runs ended, then the consensus. Its pause and the text a stopped or failed blocking turn records
-render from the records too. The streamed reply shows its trace through its chunks and keeps the configured order;
-it adds each failed member run's reason when the team run ends, as a resumed reply does.
-``run_prepared_team`` runs an OpenAI-compatible API team turn under the same leader hooks and storage.
+turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply, its
+pause, and the text a stopped or failed blocking turn records render from the finished run's records, kept as main
+behaves: each member run's text in the order the runs ended, then the consensus; the reply delivers no tool trace.
+A streamed reply shows its trace through its chunks, keeps the configured member order, and adds each failed member
+run's reason when the team run ends, as a resumed reply does. ``run_prepared_team`` runs an OpenAI-compatible API
+team turn under the same leader hooks and storage.
 """
 
 from __future__ import annotations
@@ -69,7 +69,6 @@ from mindroom.response_turn import (
 )
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
-from mindroom.teams.formation import team_member_name
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     allow_direct_private_team_agents,
@@ -86,11 +85,9 @@ from mindroom.teams.presentation import (
     finished_run_text,
     format_team_header,
     format_team_response,
-    team_response_text,
 )
 from mindroom.teams.resume import TeamResume, blocking_team_pause, continued_team_pause, drive_team_delegations
 from mindroom.teams.runtime import leader_tool_specs, run_team
-from mindroom.teams.spec import TeamMode
 from mindroom.teams.storage import (
     persist_into,
     scope_storage,
@@ -115,12 +112,11 @@ if TYPE_CHECKING:
     from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
     from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.identity import MatrixID
     from mindroom.response_turn import EmptyRunDiscard, TurnRunState
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.members import BuiltTeam
     from mindroom.teams.runtime import TeamRunEvent
-    from mindroom.teams.spec import TeamSpec
+    from mindroom.teams.spec import TeamMode, TeamSpec
     from mindroom.teams.storage import TeamRunRecords, TeamStorage
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -596,7 +592,11 @@ class _TeamTurn:
         self.holder.attempt_started = True
         logger.info("executing_team_response", agent_count=len(members.builds), mode=self.mode.value)
         run_input = prepared.run_input(self.media)
-        logger.info("team_prompt_preview", agents=members.display_names, prompt_preview=prepared.prompt_text[:500])
+        logger.info(
+            "team_prompt_preview",
+            agents=members.display_names,
+            prompt_preview=prepared.prompt_text[:_MAX_LOG_MESSAGE_LENGTH],
+        )
         # The turn's scope context keeps the session a run first gave it; a team without a bound scope stores nothing.
         storage: TeamStorage | None = None
         if run.scope_context is not None:
@@ -672,15 +672,16 @@ class _TeamTurn:
                         self.sync_live_turn_recorder(run, attempt)
         except Exception as error:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
+            partial = attempt.partial_snapshot()
             return ExcludedAttempt(
                 original_status=RunStatus.error,
                 response_text=self.error_text(error),
                 reason=str(error),
-                partial_text=attempt.interrupted_text(),
-                completed_tools=tuple(attempt.tool_tracker.completed_tools),
-                interrupted_tools=tuple(pending.trace_entry for pending in attempt.tool_tracker.pending_tools),
+                partial_text=partial.assistant_text,
+                completed_tools=partial.completed_tools,
+                interrupted_tools=partial.interrupted_tools,
                 run_id=attempt.run_id,
-                metadata_content=self.failure_metadata(attempt),
+                metadata_content=self.run_metadata_content(attempt, RunStatus.error),
             )
         finally:
             # The run stores its record before its events end, however they end, so a stop from here until the turn
@@ -713,7 +714,7 @@ class _TeamTurn:
             logger.exception("team_streaming_failed", agents=attempt.members.display_names)
             self.sync_live_turn_recorder(run, attempt)
             yield self.error_text(error)
-            yield AttemptResolved(HandledAttempt(metadata_content=self.failure_metadata(attempt)))
+            yield AttemptResolved(HandledAttempt(metadata_content=self.run_metadata_content(attempt, RunStatus.error)))
             return
         record = attempt.records.terminal(self.entity_name)
         # A failed member run's deltas never show why it failed; the document adds its reason now the team run ended.
@@ -739,15 +740,15 @@ class _TeamTurn:
             await self.resolve_completed(run, attempt, record, blocking=False, mark_seen=emitted_output),
         )
 
-    def failure_metadata(self, attempt: TeamAttempt) -> dict[str, Any] | None:
-        """Return the run metadata of a failed attempt when the caller collects metadata and the run was stored."""
+    def run_metadata_content(self, attempt: TeamAttempt, status: RunStatus) -> dict[str, Any] | None:
+        """Return the attempt's run metadata when the caller collects metadata and the run stored its record."""
         if self.run_metadata_collector is None or attempt.records.record is None:
             return None
         return attempt.metadata_content(
             self.config,
             runtime_paths=self.runtime_paths,
             session_id=self.session_id,
-            status=RunStatus.error,
+            status=status,
         )
 
     async def finalize_attempt(self, scope_context: ScopeSessionContext | None) -> None:
@@ -759,19 +760,20 @@ class _TeamTurn:
 
     def sync_live_turn_recorder(self, run: TurnRunState, attempt: TeamAttempt) -> None:
         """Refresh the live turn state from the attempt, so an interruption records its text and its tool calls."""
+        partial = attempt.partial_snapshot()
         run.turn_state.sync_partial(
             self.turn_recorder,
             run_metadata=run.run_metadata,
-            assistant_text=attempt.interrupted_text(),
-            completed_tools=attempt.tool_tracker.completed_tools,
-            interrupted_tools=[pending.trace_entry for pending in attempt.tool_tracker.pending_tools],
+            assistant_text=partial.assistant_text,
+            completed_tools=partial.completed_tools,
+            interrupted_tools=partial.interrupted_tools,
         )
 
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord, *, blocking: bool) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, rendered into the document it shows.
 
-        A blocking pause renders its runs' records, as Agno's blocking team pause did; a streamed one freezes the
-        document its events built.
+        A blocking pause renders its runs' records, kept as main behaves; a streamed one freezes the document its
+        events built.
         """
         paused = paused_attempt_from_response(
             record,
@@ -820,13 +822,14 @@ class _TeamTurn:
         tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
-        # its trace through its chunks. A blocking reply renders the finished runs, as Agno's did; a streamed one
-        # records the document its events built and its failed member runs' reasons, in the configured member order.
+        # its trace through its chunks. A blocking reply renders the finished runs, kept as main behaves; a streamed
+        # one records the document its events built and its failed member runs' reasons, in the configured order.
         # The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
+            body_text = format_team_response(record)
             leader_text = finished_run_text(record)
-            has_visible_output = bool(format_team_response(record)) or bool(leader_text.strip())
-            rendered = header + team_response_text(record)
+            has_visible_output = bool(body_text) or bool(leader_text.strip())
+            rendered = header + (body_text or leader_text or NO_TEAM_RESPONSE)
             silent = (
                 self.ctx.allow_no_report_response
                 and is_silent_schedule_no_report_response(leader_text)
@@ -848,16 +851,6 @@ class _TeamTurn:
         )
         if len(rendered) > _MAX_LOG_MESSAGE_LENGTH:
             logger.debug("team_response_full", agents=attempt.members.display_names, response=rendered)
-        metadata_content = (
-            attempt.metadata_content(
-                self.config,
-                runtime_paths=self.runtime_paths,
-                session_id=self.session_id,
-                status=record.status,
-            )
-            if self.run_metadata_collector is not None
-            else None
-        )
         return CompletedAttempt(
             response_text=response_text,
             replayable_text=replayable_text,
@@ -869,8 +862,8 @@ class _TeamTurn:
             runtime_model_name=attempt.runtime_model_name,
             output_tokens=record.metrics.output_tokens if record.metrics is not None else None,
             tool_executions=tuple(tool_executions),
-            completed_tools=tuple(attempt.tool_tracker.completed_tools),
-            metadata_content=metadata_content,
+            completed_tools=tuple(attempt.presentation.tool_tracker.completed_tools),
+            metadata_content=self.run_metadata_content(attempt, record.status),
         )
 
     def error_text(self, error: Exception) -> str:
@@ -1092,12 +1085,12 @@ async def team_response(
 
 
 async def team_response_stream(
-    agent_ids: list[MatrixID],
+    agent_names: list[str],
+    mode: TeamMode,
     message: str,
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
     ctx: ResponseTurnContext,
-    mode: TeamMode = TeamMode.COORDINATE,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
@@ -1123,17 +1116,13 @@ async def team_response_stream(
     Matrix identity; this entry refines its ``entity_label`` to the materialized team label and appends the
     knowledge-availability enrichment before the turn runs.
     """
-    assert orchestrator.config is not None
-    config = orchestrator.config
     turn = await asyncio.to_thread(
         _team_turn,
         ctx,
         orchestrator=orchestrator,
         execution_identity=execution_identity,
         mode=mode,
-        requested_agent_names=requested_team_agent_names(
-            [team_member_name(member_id, config, orchestrator.runtime_paths) for member_id in agent_ids],
-        ),
+        requested_agent_names=requested_team_agent_names(agent_names),
         thread_history=thread_history,
         model_name=model_name,
         media=media,

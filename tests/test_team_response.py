@@ -53,7 +53,6 @@ from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import make_visible_message, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.history_helpers import _completed_team_run, _team_session
-from tests.identity_helpers import entity_ids
 from tests.providers.anthropic_family_support import (
     isolated_provider_environment,
     json_reply,
@@ -260,16 +259,7 @@ async def test_the_router_in_a_direct_member_list_is_skipped(
     stream: bool,
 ) -> None:
     team = _team(tmp_path, monkeypatch, leader=[answer("General response")])
-    router_id = entity_ids(team.config, team.runtime_paths)[ROUTER_AGENT_NAME]
-
-    text = await team.reply(
-        stream=stream,
-        **(
-            {"agent_ids": [router_id, *team.member_ids()]}
-            if stream
-            else {"agent_names": [ROUTER_AGENT_NAME, "general"]}
-        ),
-    )
+    text = await team.reply(stream=stream, agent_names=[ROUTER_AGENT_NAME, "general"])
 
     assert text == f"{HEADER}\n**Team Consensus**:\n\nGeneral response"
     assert '<member id="general" name="GeneralAgent">' in str(_leader(team).requests[0].messages[0].content)

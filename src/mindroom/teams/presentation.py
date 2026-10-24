@@ -3,9 +3,9 @@
 
 ``TeamStreamPresentation`` is the structured document a streamed or collected team run renders from and the durable
 ``team_stream`` snapshot an approval continuation restores. Member slots are keyed by ``url_safe_member_id`` of the
-member's config name, the id Agno derived for its members, which stored snapshots and reply records carry.
-``publish_team_presentation`` shows a resumed run's document live in the reply it continues. ``format_team_response``
-renders a finished run from its records instead, as Agno's blocking team reply did.
+member's config name, the id stored snapshots and reply records carry. ``publish_team_presentation`` shows a resumed
+run's document live in the reply it continues. ``format_team_response`` renders a finished run from its records
+instead, as a blocking reply shows it, kept as main behaves.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def finished_run_text(record: AnyRunRecord) -> str:
 
 
 def format_team_response(record: TeamRunRecord) -> str:
-    """Return a finished team run's text as Agno's blocking team reply rendered it, without the header.
+    """Return a finished team run's text as a blocking team reply shows it, without the header.
 
     Each member run that ended (``ended_member_runs``, in the order they ended) contributes its ``finished_run_text``,
     so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
@@ -128,11 +128,6 @@ def format_team_response(record: TeamRunRecord) -> str:
         if (text := finished_run_text(member)).strip()
     ]
     return "\n\n".join(_with_consensus(contributions, str(record.handover_content or "")))
-
-
-def team_response_text(record: TeamRunRecord) -> str:
-    """Return a finished team run's reply without the header: its runs' text, else the leader's, else the no-reply note."""
-    return format_team_response(record) or finished_run_text(record) or NO_TEAM_RESPONSE
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
@@ -348,15 +343,15 @@ class TeamStreamPresentation:
         tool_name, result, pending_tool, completed_trace = completion
         if pending_tool is None or pending_tool.visible_tool_index is None or completed_trace is None:
             return
-        completed_trace.scope_key = pending_tool.scope_key or scope_key
+        completed_trace.scope_key = scope_key
         if self.show_tool_calls:
             updated_text, _ = complete_pending_tool_block(
-                self._slot_text(pending_tool.scope_key),
+                self._slot_text(scope_key),
                 tool_name,
                 result,
                 tool_index=pending_tool.visible_tool_index,
             )
-            self._set_slot_text(pending_tool.scope_key, updated_text)
+            self._set_slot_text(scope_key, updated_text)
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
 
     def start_member_tool(self, member_id: str, tool: ToolExecution | None) -> None:
@@ -419,6 +414,5 @@ __all__ = [
     "publish_team_presentation",
     "render_team_member_slots",
     "strip_team_display",
-    "team_response_text",
     "url_safe_member_id",
 ]

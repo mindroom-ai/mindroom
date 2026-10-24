@@ -209,7 +209,7 @@ class TeamTurn:
         )
 
     def member_ids(self) -> list[MatrixID]:
-        """Return the members' Matrix ids, as the streaming entry receives them."""
+        """Return the members' Matrix ids, as a team request names them."""
         ids = entity_ids(self.config, self.runtime_paths)
         return [ids[name] for name in self.member_names]
 
@@ -257,7 +257,7 @@ class TeamTurn:
         """Stream one team reply as the response runner does and return its chunks."""
         kwargs.setdefault("mode", self.mode)
         kwargs.setdefault("user_id", REQUESTER_ID)
-        kwargs.setdefault("agent_ids", self.member_ids())
+        kwargs.setdefault("agent_names", list(self.member_names))
         self.recorder = TurnRecorder(user_message=message)
         with tool_runtime_context(self.runtime):
             return [
