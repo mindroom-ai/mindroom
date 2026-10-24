@@ -71,11 +71,12 @@ class DeferredAgentToolkit:
 
 @dataclass(frozen=True, slots=True)
 class PreparedAgentToolBinding:
-    """A prepared function and the catalog owning its exact live agent turn."""
+    """A prepared function, the catalog owning its exact live agent turn, and its toolkit's instructions."""
 
     key: ToolKey
     function: ToolFunction
     catalog: PreparedAgentToolCatalog = field(repr=False)
+    instructions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +110,6 @@ class PreparedAgentToolCatalog:
     tool_call_limit: int | None = None
     record: RunRecord | None = None
     _bindings: dict[ToolKey, PreparedAgentToolBinding] = field(default_factory=dict, init=False)
-    _instructions: dict[ToolKey, tuple[str, ...]] = field(default_factory=dict, init=False)
     _deferred: dict[str, DeferredAgentToolkit] = field(default_factory=dict, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _call_count: int = field(default=0, init=False)
@@ -217,6 +217,7 @@ class PreparedAgentToolCatalog:
     ) -> None:
         """Bind ``functions`` of ``toolkit``, under their owner from ``owners``, or under the toolkit without one."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
+        instructions = (toolkit.guidance,) if toolkit.guidance else ()
         for function in functions:
             authored = owners is None or function.name in owners
             namespace = ((owners or {}).get(function.name) or toolkit.name) if authored else "agent"
@@ -227,10 +228,9 @@ class PreparedAgentToolCatalog:
             if key in bindings or key in self._bindings:
                 msg = f"Duplicate qualified tool: {namespace}.{function.name}"
                 raise ValueError(msg)
-            bindings[key] = PreparedAgentToolBinding(key, function, self)
+            bindings[key] = PreparedAgentToolBinding(key, function, self, instructions)
         # Nothing is recorded until every function is bound, so a refused toolkit leaves the catalog unchanged.
         self._bindings.update(bindings)
-        self._instructions.update(dict.fromkeys(bindings, (toolkit.guidance,) if toolkit.guidance else ()))
 
     def bindings(self) -> tuple[PreparedAgentToolBinding, ...]:
         """Return the bindings prepared so far, for a check over the whole prepared surface."""
@@ -288,7 +288,7 @@ class PreparedAgentToolCatalog:
             key,
             binding.function.description or "",
             dict(binding.function.parameters),
-            self._instructions[key],
+            binding.instructions,
         )
 
     async def close(self) -> None:

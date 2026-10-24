@@ -1,10 +1,10 @@
 """Decode a model's tool-call arguments and run one tool call to its outcome.
 
-``parse_tool_arguments`` reads a provider's arguments string as Agno 3.0.9 did, except that a parameter whose schema
-admits a string may keep the words none, null, true, and false, which Agno always turned into values.
-``execute_tool_call`` runs the entrypoint the way Agno's loop did: framework parameters injected, synchronous bodies
-off the event loop under the completion-ownership helpers, generators drained, and a raised exception turned into the
-error text the model reads.
+``parse_tool_arguments`` reads a provider's arguments string; a parameter whose schema admits a string may keep the
+words none, null, true, and false, which otherwise read as values.
+``execute_tool_call`` runs the entrypoint: framework parameters injected, synchronous bodies off the event loop under
+the completion-ownership helpers, generators drained, and a raised exception turned into the error text the model
+reads.
 Middleware runs on the event loop around the leaf, outermost first, and may rewrite the arguments or answer the call
 itself.
 Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.tool_system.tool_function import ToolFunction
 
-# What the loop sends the model for a call that names no function it offered; the same text Agno used.
+# What the loop sends the model for a call that names no function it offered, kept as main behaves.
 MISSING_TOOL_ERROR_TEXT = "Error: The requested tool does not exist or is not available."
 _DECODE_ERROR_TEXT = (
     "Error while decoding function arguments: {error}\n\nPlease make sure we can json.loads() the arguments and retry."
@@ -46,8 +46,7 @@ _LITERAL_WORDS: dict[str, bool | None] = {"none": None, "null": None, "true": Tr
 _MAX_SCHEMA_NODES = 256
 _MAX_ALTERNATIVES = 64
 # The session id of a call that belongs to no conversation, such as an MCP gateway or script-run call. Tools that key
-# state by session, such as ``claude_agent``, share one session across those calls, the one they used when Agno's
-# runners called them without a run context.
+# state by session, such as ``claude_agent``, share one session across those calls, kept as main behaves.
 DETACHED_SESSION_ID = "default"
 
 
@@ -306,7 +305,7 @@ async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], con
     """Call the entrypoint with the framework's and the model's arguments; drain a generator it returns."""
     entrypoint = function.entrypoint
     # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
-    # rewrites them, so values for injected names are dropped here as well, as Agno dropped them at execution.
+    # rewrites them, so values for injected names are dropped here as well.
     # A media name the schema declares belongs to the model, so that value replaces the framework's.
     kwargs = {**framework_arguments(function, context), **model_arguments(arguments, function)}
     if inspect.iscoroutinefunction(entrypoint) or inspect.isasyncgenfunction(entrypoint):

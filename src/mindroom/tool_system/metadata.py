@@ -296,14 +296,14 @@ def _validate_authored_file_access(
     raise ToolConfigOverrideError(msg)
 
 
-def _validate_authored_overrides(
+def validate_authored_tool_entry_overrides(
     tool_name: str,
     overrides: dict[str, object] | None,
     *,
     config_path_prefix: str | None = None,
     tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> dict[str, object]:
-    """Validate authored YAML overrides against one tool's declared config fields."""
+    """Validate authored YAML overrides against one tool's declared config fields and its validation mode."""
     if not overrides:
         return {}
 
@@ -357,6 +357,10 @@ def _validate_authored_overrides(
             full_path=full_path,
             tool_metadata=tool_metadata,
         )
+    try:
+        _run_authored_override_validator(tool_name, validated, validator=metadata.authored_override_validator)
+    except ValueError as exc:
+        raise ToolConfigOverrideError(str(exc)) from exc
     return validated
 
 
@@ -371,35 +375,6 @@ def _run_authored_override_validator(
         from mindroom.mcp.registry import validate_mcp_agent_overrides  # noqa: PLC0415
 
         validate_mcp_agent_overrides(tool_name, overrides)
-
-
-def validate_authored_tool_entry_overrides(
-    tool_name: str,
-    overrides: dict[str, object] | None,
-    *,
-    config_path_prefix: str | None = None,
-    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
-) -> dict[str, object]:
-    """Validate authored overrides, including any tool-specific validation mode."""
-    validated_overrides = _validate_authored_overrides(
-        tool_name,
-        overrides,
-        config_path_prefix=config_path_prefix,
-        tool_metadata=tool_metadata,
-    )
-    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
-    metadata = metadata_by_name.get(tool_name)
-    if metadata is None:
-        return validated_overrides
-    try:
-        _run_authored_override_validator(
-            tool_name,
-            validated_overrides,
-            validator=metadata.authored_override_validator,
-        )
-    except ValueError as exc:
-        raise ToolConfigOverrideError(str(exc)) from exc
-    return validated_overrides
 
 
 def sanitize_tool_init_overrides(
@@ -656,138 +631,6 @@ def _resolve_tool_credentials_manager(
     return None
 
 
-def _build_tool_instance(
-    tool_name: str,
-    runtime_paths: RuntimePaths,
-    *,
-    disable_sandbox_proxy: bool = False,
-    credential_overrides: dict[str, object] | None = None,
-    credentials_manager: CredentialsManager | None = None,
-    runtime_config: Config | None = None,
-    tool_config_overrides: dict[str, object] | None = None,
-    tool_init_overrides: dict[str, object] | None = None,
-    worker_tools_override: list[str] | None = None,
-    runtime_overrides: dict[str, object] | None = None,
-    shared_storage_root_path: Path | None = None,
-    allowed_shared_services: frozenset[str] | None = None,
-    tool_output_workspace_root: Path | None = None,
-    agent_state_root: Path | None = None,
-    tool_output_auto_save_threshold_bytes: int,
-    worker_target: ResolvedWorkerTarget | None,
-    list_mcp_functions: bool = False,
-) -> Toolkit:
-    """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
-    worker_scope = worker_target.worker_scope if worker_target is not None else None
-    routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
-    if not supports_tool_name_for_worker_scope(tool_name, worker_scope):
-        msg = unsupported_shared_only_integration_message(
-            tool_name,
-            worker_scope,
-            agent_name=routing_agent_name,
-            subject="Tool",
-        )
-        raise ToolMetadataValidationError(msg)
-
-    # Imported on first tool construction so importing the registry stays free
-    # of the agno runtime import chain (#1436).
-    from mindroom.tool_system.output_files import (  # noqa: PLC0415
-        ToolOutputFilePolicy,
-        wrap_toolkit_for_output_files,
-    )
-
-    metadata = TOOL_METADATA[tool_name]
-    factory = TOOL_REGISTRY[tool_name]
-    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
-    construction = ToolConstruction.from_factory(
-        tool_name,
-        factory,
-        tool_config_overrides=validated_tool_config_overrides,
-    )
-    with optional_dependency_environment():
-        tool_class = factory()
-    resolved_credentials_manager = _resolve_tool_credentials_manager(
-        metadata,
-        runtime_paths,
-        credentials_manager,
-    )
-    credentials = (
-        load_scoped_credentials(
-            tool_name,
-            credentials_manager=resolved_credentials_manager,
-            worker_target=worker_target,
-            allowed_shared_services=allowed_shared_services,
-            primary_built_tool=primary_owns_tool_settings(tool_name, runtime_paths=runtime_paths),
-        )
-        if resolved_credentials_manager is not None
-        else {}
-    ) or {}
-    if credential_overrides:
-        credentials = {**credentials, **credential_overrides}
-    safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
-    init_kwargs = _build_tool_config_init_kwargs(
-        tool_name,
-        metadata,
-        credentials=credentials,
-        tool_config_overrides=validated_tool_config_overrides,
-        tool_init_overrides=safe_tool_init_overrides,
-        runtime_overrides=runtime_overrides,
-    )
-    extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
-    proxy_tool_init_overrides = dict(safe_tool_init_overrides or {})
-    shell_path_prepend = init_kwargs.get("shell_path_prepend")
-    if tool_name == "shell" and isinstance(shell_path_prepend, str):
-        proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
-    init_kwargs.update(
-        _build_managed_tool_init_kwargs(
-            metadata,
-            runtime_paths=runtime_paths,
-            credentials_manager=resolved_credentials_manager,
-            worker_target=worker_target,
-            runtime_config=runtime_config,
-            tool_output_workspace_root=tool_output_workspace_root,
-            worker_tools_override=worker_tools_override,
-            agent_state_root=agent_state_root,
-        ),
-    )
-    include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
-
-    with optional_dependency_environment():
-        toolkit = cast("Any", tool_class)(**init_kwargs)
-    if list_mcp_functions:
-        # The filters and wrappers below must see the functions an MCP toolkit registers once connected.
-        register_mcp_functions(toolkit)
-    _apply_implicit_toolkit_filters(
-        toolkit,
-        include_tools=include_tools,
-        exclude_tools=exclude_tools,
-        declared_functions=frozenset(metadata.function_names or ()),
-    )
-    output_file_policy = (
-        ToolOutputFilePolicy.from_runtime(
-            tool_output_workspace_root,
-            runtime_paths,
-            auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-        )
-        if tool_output_workspace_root is not None
-        else None
-    )
-    wrap_toolkit_for_output_files(toolkit, output_file_policy)
-    if not disable_sandbox_proxy:
-        toolkit = maybe_wrap_toolkit_for_sandbox_proxy(
-            tool_name,
-            toolkit,
-            runtime_paths=runtime_paths,
-            credentials_manager=resolved_credentials_manager,
-            tool_init_overrides=proxy_tool_init_overrides or None,
-            tool_config_overrides=validated_tool_config_overrides,
-            extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
-            worker_tools_override=worker_tools_override,
-            shared_storage_root_path=shared_storage_root_path,
-            worker_target=worker_target,
-        )
-    return bind_toolkit_construction(toolkit, construction)
-
-
 def get_tool_by_name(
     tool_name: str,
     runtime_paths: RuntimePaths,
@@ -820,27 +663,125 @@ def get_tool_by_name(
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
         raise ToolMetadataValidationError(msg)
 
-    build = functools.partial(
-        _build_tool_instance,
-        tool_name,
-        runtime_paths,
-        disable_sandbox_proxy=disable_sandbox_proxy,
-        credential_overrides=credential_overrides,
-        credentials_manager=credentials_manager,
-        runtime_config=runtime_config,
-        tool_config_overrides=tool_config_overrides,
-        tool_init_overrides=tool_init_overrides,
-        worker_tools_override=worker_tools_override,
-        runtime_overrides=runtime_overrides,
-        shared_storage_root_path=shared_storage_root_path,
-        allowed_shared_services=allowed_shared_services,
-        tool_output_workspace_root=tool_output_workspace_root,
-        agent_state_root=agent_state_root,
-        tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-        worker_target=worker_target,
-        list_mcp_functions=list_mcp_functions,
-    )
+    def build() -> Toolkit:
+        worker_scope = worker_target.worker_scope if worker_target is not None else None
+        routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
+        if not supports_tool_name_for_worker_scope(tool_name, worker_scope):
+            msg = unsupported_shared_only_integration_message(
+                tool_name,
+                worker_scope,
+                agent_name=routing_agent_name,
+                subject="Tool",
+            )
+            raise ToolMetadataValidationError(msg)
 
+        # Imported on first tool construction so importing the registry stays free
+        # of the agno runtime import chain (#1436).
+        from mindroom.tool_system.output_files import (  # noqa: PLC0415
+            ToolOutputFilePolicy,
+            wrap_toolkit_for_output_files,
+        )
+
+        metadata = TOOL_METADATA[tool_name]
+        factory = TOOL_REGISTRY[tool_name]
+        validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
+        construction = ToolConstruction.from_factory(
+            tool_name,
+            factory,
+            tool_config_overrides=validated_tool_config_overrides,
+        )
+        with optional_dependency_environment():
+            tool_class = factory()
+        resolved_credentials_manager = _resolve_tool_credentials_manager(
+            metadata,
+            runtime_paths,
+            credentials_manager,
+        )
+        credentials = (
+            load_scoped_credentials(
+                tool_name,
+                credentials_manager=resolved_credentials_manager,
+                worker_target=worker_target,
+                allowed_shared_services=allowed_shared_services,
+                primary_built_tool=primary_owns_tool_settings(tool_name, runtime_paths=runtime_paths),
+            )
+            if resolved_credentials_manager is not None
+            else {}
+        ) or {}
+        if credential_overrides:
+            credentials = {**credentials, **credential_overrides}
+        safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
+        init_kwargs = _build_tool_config_init_kwargs(
+            tool_name,
+            metadata,
+            credentials=credentials,
+            tool_config_overrides=validated_tool_config_overrides,
+            tool_init_overrides=safe_tool_init_overrides,
+            runtime_overrides=runtime_overrides,
+        )
+        extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
+        proxy_tool_init_overrides = dict(safe_tool_init_overrides or {})
+        shell_path_prepend = init_kwargs.get("shell_path_prepend")
+        if tool_name == "shell" and isinstance(shell_path_prepend, str):
+            proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
+        init_kwargs.update(
+            _build_managed_tool_init_kwargs(
+                metadata,
+                runtime_paths=runtime_paths,
+                credentials_manager=resolved_credentials_manager,
+                worker_target=worker_target,
+                runtime_config=runtime_config,
+                tool_output_workspace_root=tool_output_workspace_root,
+                worker_tools_override=worker_tools_override,
+                agent_state_root=agent_state_root,
+            ),
+        )
+        include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
+
+        with optional_dependency_environment():
+            toolkit = cast("Any", tool_class)(**init_kwargs)
+        if list_mcp_functions:
+            # The filters and wrappers below must see the functions an MCP toolkit registers once connected.
+            register_mcp_functions(toolkit)
+        _apply_implicit_toolkit_filters(
+            toolkit,
+            include_tools=include_tools,
+            exclude_tools=exclude_tools,
+            declared_functions=frozenset(metadata.function_names or ()),
+        )
+        output_file_policy = (
+            ToolOutputFilePolicy.from_runtime(
+                tool_output_workspace_root,
+                runtime_paths,
+                auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+            )
+            if tool_output_workspace_root is not None
+            else None
+        )
+        wrap_toolkit_for_output_files(toolkit, output_file_policy)
+        if not disable_sandbox_proxy:
+            toolkit = maybe_wrap_toolkit_for_sandbox_proxy(
+                tool_name,
+                toolkit,
+                runtime_paths=runtime_paths,
+                credentials_manager=resolved_credentials_manager,
+                tool_init_overrides=proxy_tool_init_overrides or None,
+                tool_config_overrides=validated_tool_config_overrides,
+                extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
+                worker_tools_override=worker_tools_override,
+                shared_storage_root_path=shared_storage_root_path,
+                worker_target=worker_target,
+            )
+        return bind_toolkit_construction(toolkit, construction)
+
+    return _build_with_tool_dependencies(tool_name, runtime_paths, build)
+
+
+def _build_with_tool_dependencies(tool_name: str, runtime_paths: RuntimePaths, build: Callable[[], Toolkit]) -> Toolkit:
+    """Run ``build`` once the tool's declared dependencies are present.
+
+    An import error that installs the tool's optional extra runs ``build`` once more.
+    """
     # Pre-check dependencies using find_spec (no side effects) before importing
     metadata = TOOL_METADATA.get(tool_name)
     deps = metadata.dependencies if metadata and metadata.dependencies else []
@@ -1521,14 +1462,8 @@ def authored_tool_overrides_to_runtime(tool_name: str, overrides: dict[str, obje
     normalized = normalize_authored_tool_overrides(tool_name, overrides)
     if not normalized:
         return None
-
-    metadata = TOOL_METADATA[tool_name]
-    field_map = {field.name: field for field in metadata.agent_override_fields or []}
-    runtime_overrides: dict[str, object] = {}
-    for field_name, value in normalized.items():
-        field = field_map[field_name]
-        if field.type == "string[]":
-            runtime_overrides[field_name] = ", ".join(cast("list[str]", value))
-        else:
-            runtime_overrides[field_name] = value
-    return runtime_overrides or None
+    field_types = {field.name: field.type for field in TOOL_METADATA[tool_name].agent_override_fields or []}
+    return {
+        field_name: ", ".join(cast("list[str]", value)) if field_types[field_name] == "string[]" else value
+        for field_name, value in normalized.items()
+    }

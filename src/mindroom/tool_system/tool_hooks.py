@@ -276,37 +276,27 @@ def _resolve_tool_context(
         )
 
     reply_to_event_id = current_llm_request_log_context().get("reply_to_event_id")
-    if not isinstance(reply_to_event_id, str):
-        reply_to_event_id = None
-    correlation_id = _correlation_id_for_runtime_context(None, origin)
+    resolved = _ResolvedToolContext(
+        agent_name=agent_name or "",
+        reply_to_event_id=reply_to_event_id if isinstance(reply_to_event_id, str) else None,
+        config=config,
+        runtime_paths=runtime_paths,
+        correlation_id=_correlation_id_for_runtime_context(None, origin),
+        origin=origin,
+    )
     if dispatch_context is None:
-        return _ResolvedToolContext(
-            agent_name=agent_name or "",
-            reply_to_event_id=reply_to_event_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            correlation_id=correlation_id,
-            origin=origin,
-        )
+        return resolved
     identity = dispatch_context.execution_identity
-    return _ResolvedToolContext(
+    return replace(
+        resolved,
         agent_name=agent_name or identity.agent_name,
         room_id=identity.room_id,
         thread_id=identity.resolved_thread_id or identity.thread_id,
-        reply_to_event_id=reply_to_event_id,
         requester_id=identity.requester_id,
         session_id=identity.session_id,
         channel=identity.channel,
         execution_identity=identity,
-        config=config,
-        runtime_paths=runtime_paths,
-        correlation_id=correlation_id,
-        origin=origin,
     )
-
-
-def _format_declined_result(tool_name: str, reason: str) -> str:
-    return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
 
 
 async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _ToolHookResult:
@@ -390,8 +380,7 @@ async def _emit_after_call(
     *,
     hook_registry: HookRegistry,
     resolved_context: _ResolvedToolContext,
-    hook_arguments: dict[str, Any] | None,
-    args: dict[str, Any],
+    arguments: dict[str, Any],
     tool_name: str,
     result: _ToolHookResult,
     error: BaseException | None,
@@ -399,7 +388,7 @@ async def _emit_after_call(
     duration_ms: float,
 ) -> None:
     after_context = ToolAfterCallContext(
-        **resolved_context.hook_context_kwargs(hook_arguments if hook_arguments is not None else deepcopy(args)),
+        **resolved_context.hook_context_kwargs(arguments),
         tool_name=tool_name,
         result=result,
         error=error,
@@ -413,13 +402,12 @@ async def _run_before_hooks(
     *,
     hook_registry: HookRegistry,
     resolved_context: _ResolvedToolContext,
-    hook_arguments: dict[str, Any] | None,
-    args: dict[str, Any],
+    arguments: dict[str, Any],
     tool_name: str,
 ) -> str | None:
     """Run the before-call hooks; return the declined result when one of them declines the call."""
     before_context = ToolBeforeCallContext(
-        **resolved_context.hook_context_kwargs(hook_arguments if hook_arguments is not None else deepcopy(args)),
+        **resolved_context.hook_context_kwargs(arguments),
         tool_name=tool_name,
     )
     before_hooks_started_at = time.perf_counter()
@@ -440,7 +428,7 @@ async def _run_before_hooks(
     )
     if not before_context.declined:
         return None
-    return _format_declined_result(tool_name, before_context.decline_reason)
+    return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=before_context.decline_reason)
 
 
 @dataclass(slots=True)
@@ -570,7 +558,8 @@ async def _execute_bridge(  # noqa: C901
         has_before_hooks=has_before_hooks,
         has_after_hooks=has_after_hooks,
     )
-    hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else None
+    # The hooks of one call share one copy of its arguments, made only when a hook runs.
+    hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else {}
 
     async def finish(
         outcome: str,
@@ -585,8 +574,7 @@ async def _execute_bridge(  # noqa: C901
             await _emit_after_call(
                 hook_registry=hook_registry,
                 resolved_context=resolved_context,
-                hook_arguments=hook_arguments,
-                args=args,
+                arguments=hook_arguments,
                 tool_name=tool_name,
                 result=result,
                 error=error,
@@ -607,8 +595,7 @@ async def _execute_bridge(  # noqa: C901
         declined_result = await _run_before_hooks(
             hook_registry=hook_registry,
             resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
+            arguments=hook_arguments,
             tool_name=tool_name,
         )
         timing.before_hooks_ms = elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2)
@@ -621,7 +608,7 @@ async def _execute_bridge(  # noqa: C901
         decision = await approval_gate(origin, tool_name, deepcopy(args))
         if not decision.approved:
             reason = denial_note_for(decision.reason)
-            declined_result = _format_declined_result(tool_name, reason)
+            declined_result = _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
             duration_ms = timing.mark_result_ready()
             await finish("blocked_approval", duration_ms=duration_ms, result=declined_result, blocked=True)
             return BackgroundToolApprovalDenied(reason=reason)
@@ -686,16 +673,14 @@ async def dispatch_external_tool_hooks(
         return await _run_before_hooks(
             hook_registry=hook_registry,
             resolved_context=resolved,
-            hook_arguments=None,
-            args=arguments,
+            arguments=deepcopy(arguments),
             tool_name=tool_name,
         )
     if hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL):
         await _emit_after_call(
             hook_registry=hook_registry,
             resolved_context=resolved,
-            hook_arguments=None,
-            args=arguments,
+            arguments=deepcopy(arguments),
             tool_name=tool_name,
             result=result,
             error=error,
