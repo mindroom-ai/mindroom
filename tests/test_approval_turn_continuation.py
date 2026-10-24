@@ -338,7 +338,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         lambda *args, **kwargs: stream_agent_response(
             *args,
             **kwargs,
-            run_id_callback=lambda run_id, _model_name: run_ids.append(run_id),
+            on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id),
         ),
     )
     paused_answer = PausedAnswer()

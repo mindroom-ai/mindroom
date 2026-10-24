@@ -297,7 +297,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         lambda *args, **kwargs: stream_agent_response(
             *args,
             **kwargs,
-            run_id_callback=lambda run_id, _model_name: run_ids.append(run_id),
+            on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id),
         ),
     )
     with approval_receipt_context("Trusted approval receipt.", run_id=continuation.run_id):

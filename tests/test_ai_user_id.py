@@ -732,7 +732,7 @@ class TestUserIdPassthrough:
 
             mock_ai.assert_called_once()
             assert mock_ai.call_args.args[0].requester_id == "@alice:localhost"
-            assert callable(mock_ai.call_args.kwargs["run_id_callback"])
+            assert callable(mock_ai.call_args.kwargs["on_attempt_start"])
 
     @pytest.mark.asyncio
     async def test_streaming_passes_user_id(self, tmp_path: Path) -> None:
@@ -784,7 +784,7 @@ class TestUserIdPassthrough:
 
             mock_stream.assert_called_once()
             assert mock_stream.call_args.args[0].requester_id == "@bob:localhost"
-            assert callable(mock_stream.call_args.kwargs["run_id_callback"])
+            assert callable(mock_stream.call_args.kwargs["on_attempt_start"])
 
     @pytest.mark.asyncio
     async def test_streaming_tool_context_cleanup_survives_cross_task_close(self, tmp_path: Path) -> None:
@@ -1714,7 +1714,7 @@ class TestUserIdPassthrough:
                 runtime_paths,
                 streaming=streaming,
                 model_prompt="test\n\nUse attachment att_1.",
-                run_id_callback=lambda run_id, _model_name: run_ids.append(run_id),
+                on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id),
                 show_tool_calls=False,
                 **({} if streaming else {"tool_trace_collector": tool_trace}),
             )

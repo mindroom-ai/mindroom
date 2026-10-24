@@ -475,6 +475,8 @@ async def continue_paused_team_run(
         )
         settings = team_history_settings(config, team_name)
         plan = configured_replay_plan(history_settings=settings, estimated_tokens=0)
+        # TODO(simplify): like ResumeRunner.events (approval/resume.py), this resume names no model, so its tools see
+        # the tool context's. Pass model_name. Tools that follow the reply's model, such as claude_agent, would notice.
         resume = TeamResume(
             spec=built.spec,
             storage=storage,

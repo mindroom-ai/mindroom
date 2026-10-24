@@ -812,8 +812,8 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
 
     async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
         calls.append((turn, kwargs))
-        run_id_callback = cast("Callable[[str, str], None]", kwargs["run_id_callback"])
-        run_id_callback("call-run-1", "default")
+        on_attempt_start = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+        on_attempt_start("call-run-1", "default")
         recorder = kwargs["turn_recorder"]
         recorder.record_completed(  # type: ignore[union-attr]
             run_metadata={"model": "same-chat-model"},
@@ -958,8 +958,8 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     )
 
     async def cancel_before_playout(_turn: ResponseTurnContext, **cancel_kwargs: object) -> str:
-        run_id_callback = cast("Callable[[str, str], None]", cancel_kwargs["run_id_callback"])
-        run_id_callback("call-run-2", "default")
+        on_attempt_start = cast("Callable[[str, str], None]", cancel_kwargs["on_attempt_start"])
+        on_attempt_start("call-run-2", "default")
         recorder = cancel_kwargs["turn_recorder"]
         recorder.record_interrupted(  # type: ignore[union-attr]
             run_metadata={"model": "same-chat-model"},

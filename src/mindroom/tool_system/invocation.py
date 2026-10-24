@@ -65,8 +65,9 @@ class ToolCallContext:
     ``session_state`` is shared with the tool, which may mutate it in place; the caller persists it afterwards.
     ``call_id`` is the provider's id of the tool call being run, when the call came from a model.
     ``history_scope`` is the run's stored conversation when it is a team's, as ``RunContext`` names it.
-    ``model_name`` is the configured model the run resolved, which ``run_tool_call`` shows the call's tools as the
-    tool runtime context's ``active_model_name``; None leaves that as the surrounding context names it.
+    ``model_name`` is the configured model the run resolved, which ``run_tool_call`` binds as the tool runtime
+    context's ``active_model_name`` around the call's middleware; None leaves that as the surrounding context names it.
+    A team member's call carries the leader's model; its innermost step (``teams.members``) shows the tool the member's.
     """
 
     run_id: str

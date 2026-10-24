@@ -925,12 +925,12 @@ async def _run_cached_agent_attempt(
     *,
     storage: _AttemptStorage,
     terminal: _TerminalRecord,
-    run_id_callback: Callable[[str, str], None] | None,
+    on_attempt_start: Callable[[str, str], None] | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> AnyRunRecord:
     """Run one non-streaming agent attempt and return its finished record."""
-    if run_id_callback is not None:
-        run_id_callback(attempt.run_id, run_context.prepared_run.runtime_model_name)
+    if on_attempt_start is not None:
+        on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
     if pipeline_timing is not None:
         pipeline_timing.mark_model_request()
     events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal, stream=False)
@@ -949,7 +949,7 @@ async def _run_non_streaming_agent_attempts(
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
     storage: _AttemptStorage,
-    run_id_callback: Callable[[str, str], None] | None,
+    on_attempt_start: Callable[[str, str], None] | None,
     scope_context: ScopeSessionContext | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> _NonStreamingAttemptResult:
@@ -962,7 +962,7 @@ async def _run_non_streaming_agent_attempts(
                 attempt,
                 storage=storage,
                 terminal=terminal,
-                run_id_callback=run_id_callback,
+                on_attempt_start=on_attempt_start,
                 pipeline_timing=pipeline_timing,
             )
         return _NonStreamingAttemptResult(record=record)
@@ -1474,7 +1474,7 @@ async def run_delegated_child_response(
                 runtime_paths=runtime_paths,
                 config=active_config,
                 knowledge=knowledge.knowledge,
-                run_id_callback=lambda run_id, model_name: note_child_run_id(
+                on_attempt_start=lambda run_id, model_name: note_child_run_id(
                     child,
                     run_id,
                     runtime_paths,
@@ -1516,7 +1516,7 @@ async def ai_response(  # noqa: C901
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     knowledge: AgentKnowledge | None = None,
-    run_id_callback: Callable[[str, str], None] | None = None,
+    on_attempt_start: Callable[[str, str], None] | None = None,
     include_interactive_questions: bool = True,
     tool_function_filter: Callable[[Function], bool] | None = None,
     include_openai_compat_guidance: bool = False,
@@ -1557,7 +1557,7 @@ async def ai_response(  # noqa: C901
                 current_timestamp_ms=current_timestamp_ms,
                 current_prompt_is_structured=current_prompt_is_structured,
                 knowledge=knowledge,
-                run_id_callback=run_id_callback,
+                on_attempt_start=on_attempt_start,
                 include_interactive_questions=include_interactive_questions,
                 tool_function_filter=tool_function_filter,
                 include_openai_compat_guidance=include_openai_compat_guidance,
@@ -1636,7 +1636,7 @@ async def ai_response(  # noqa: C901
             run_context=run_context,
             attempt=attempt,
             storage=storage,
-            run_id_callback=run_id_callback,
+            on_attempt_start=on_attempt_start,
             scope_context=run.scope_context,
             pipeline_timing=pipeline_timing,
         )
@@ -1833,14 +1833,14 @@ async def _stream_agent_attempt_chunks(
     storage: _AttemptStorage,
     state: _StreamingAttemptState,
     show_tool_calls: bool,
-    run_id_callback: Callable[[str, str], None] | None,
+    on_attempt_start: Callable[[str, str], None] | None,
     state_updated: Callable[[], None] | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Start and consume one streaming agent attempt."""
     try:
-        if run_id_callback is not None:
-            run_id_callback(attempt.run_id, run_context.prepared_run.runtime_model_name)
+        if on_attempt_start is not None:
+            on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
         request_context = _attempt_request_log_context(run_context)
         with bind_llm_request_log_context(**request_context):
             if pipeline_timing is not None:
@@ -1875,7 +1875,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     knowledge: AgentKnowledge | None = None,
-    run_id_callback: Callable[[str, str], None] | None = None,
+    on_attempt_start: Callable[[str, str], None] | None = None,
     include_interactive_questions: bool = True,
     tool_function_filter: Callable[[Function], bool] | None = None,
     include_openai_compat_guidance: bool = False,
@@ -1909,7 +1909,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
         current_prompt_is_structured: Whether the current prompt already carries trusted message tags.
         knowledge: Optional shared knowledge base for RAG-enabled agents
-        run_id_callback: Optional callback that receives each attempt's run id and configured model name
+        on_attempt_start: Optional callback that receives each attempt's run id and configured model name
             before the attempt starts.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
@@ -2035,7 +2035,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             storage=storage,
             state=state,
             show_tool_calls=show_tool_calls,
-            run_id_callback=run_id_callback,
+            on_attempt_start=on_attempt_start,
             state_updated=_sync_live_turn_recorder,
             pipeline_timing=pipeline_timing,
         )
