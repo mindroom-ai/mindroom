@@ -276,32 +276,26 @@ def _resolve_tool_context(
         )
 
     reply_to_event_id = current_llm_request_log_context().get("reply_to_event_id")
-    if not isinstance(reply_to_event_id, str):
-        reply_to_event_id = None
-    correlation_id = _correlation_id_for_runtime_context(None, origin)
+    resolved = _ResolvedToolContext(
+        agent_name=agent_name or "",
+        reply_to_event_id=reply_to_event_id if isinstance(reply_to_event_id, str) else None,
+        config=config,
+        runtime_paths=runtime_paths,
+        correlation_id=_correlation_id_for_runtime_context(None, origin),
+        origin=origin,
+    )
     if dispatch_context is None:
-        return _ResolvedToolContext(
-            agent_name=agent_name or "",
-            reply_to_event_id=reply_to_event_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            correlation_id=correlation_id,
-            origin=origin,
-        )
+        return resolved
     identity = dispatch_context.execution_identity
-    return _ResolvedToolContext(
+    return replace(
+        resolved,
         agent_name=agent_name or identity.agent_name,
         room_id=identity.room_id,
         thread_id=identity.resolved_thread_id or identity.thread_id,
-        reply_to_event_id=reply_to_event_id,
         requester_id=identity.requester_id,
         session_id=identity.session_id,
         channel=identity.channel,
         execution_identity=identity,
-        config=config,
-        runtime_paths=runtime_paths,
-        correlation_id=correlation_id,
-        origin=origin,
     )
 
 
