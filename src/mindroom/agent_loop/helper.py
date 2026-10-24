@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_NO_OVERRIDES = RequestOverrides()
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class HelperResult[T: BaseModel]:
@@ -49,7 +51,7 @@ async def complete_prompt[T: BaseModel](
     role: str | None = None,
     instructions: Sequence[str] = (),
     schema: type[T] | None = None,
-    overrides: RequestOverrides | None = None,
+    overrides: RequestOverrides = _NO_OVERRIDES,
     run_id: str | None = None,
 ) -> HelperResult[T]:
     """Send ``prompt`` under a system message rendered from ``role`` and ``instructions`` as one request.
@@ -71,7 +73,7 @@ async def complete_prompt[T: BaseModel](
         ModelRequest(
             messages=tuple(messages),
             output_schema=schema,
-            overrides=overrides or RequestOverrides(),
+            overrides=overrides,
             stream=False,
         ),
     )
