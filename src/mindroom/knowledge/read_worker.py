@@ -74,6 +74,8 @@ def _read(request: ReadRequest) -> ReadResult:
         read_collection(request) as collection_name,
         closing(KnowledgeCollection(path=request.path, name=collection_name)) as collection,
     ):
+        # TODO(simplify): production reads always send an embedding, so this probe and ``ReadResult.exists`` serve
+        # only tests. Require the embedding and drop both. Only the reader tests that send bare requests would notice.
         if request.embedding is None:
             return ReadResult(exists=collection.exists())
         # ``get_collection`` raises for a vanished collection instead of recreating it.

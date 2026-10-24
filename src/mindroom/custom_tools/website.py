@@ -188,14 +188,16 @@ def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 # The crawl budget, the breadth-first queue, the 1-3 second pause before each fetch, and the 5000-character page
 # documents follow Agno's WebsiteReader, so the tool returns what it always has.
+_MAX_DEPTH = 3
+_MAX_LINKS = 10
+_PAGE_CHUNKING = FixedSizeChunking(chunk_size=5000)
+
+
 @dataclass
 class _MindRoomWebsiteReader:
     """Crawls one host through the server-fetch transport and extracts each page's main text, skipping page chrome."""
 
-    max_depth: int = 3
-    max_links: int = 10
     timeout: int = 10
-    chunking_strategy: FixedSizeChunking = field(default_factory=lambda: FixedSizeChunking(chunk_size=5000))
     _visited: set[str] = field(default_factory=set, init=False, repr=False)
     _urls_to_crawl: list[tuple[str, int]] = field(default_factory=list, init=False, repr=False)
 
@@ -236,8 +238,8 @@ class _MindRoomWebsiteReader:
         """Return whether a queued crawl URL is outside the current crawl budget."""
         return (
             not _url_matches_crawl_host(current_url, crawl_host)
-            or (current_depth > self.max_depth and current_url != starting_url)
-            or num_links >= self.max_links
+            or (current_depth > _MAX_DEPTH and current_url != starting_url)
+            or num_links >= _MAX_LINKS
         )
 
     def _log_http_status_error(self, *, safe_current_url: str, error: httpx.HTTPStatusError) -> None:
@@ -314,7 +316,7 @@ class _MindRoomWebsiteReader:
                 meta_data={"url": str(crawled_url)},
                 content=crawled_content,
             )
-            documents.extend(self.chunking_strategy.chunk(document))
+            documents.extend(_PAGE_CHUNKING.chunk(document))
         return documents
 
     def _record_response_content(

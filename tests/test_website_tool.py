@@ -104,9 +104,8 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -169,9 +168,8 @@ def test_website_reader_revalidates_redirect_targets(monkeypatch: pytest.MonkeyP
         msg = "private redirect target should be rejected before fetching"
         raise AssertionError(msg)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -237,9 +235,8 @@ def test_website_reader_records_safe_public_cross_host_redirect(monkeypatch: pyt
         assert url == final_url
         return httpx.Response(200, content=html.encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -299,9 +296,8 @@ def test_website_reader_rejects_dns_rebind_at_connect_time(monkeypatch: pytest.M
             return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, port))]
         return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -358,9 +354,8 @@ def test_website_reader_does_not_record_cross_host_redirect_content(
             return httpx.Response(302, headers={"Location": offsite_url}, request=request)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -403,9 +398,8 @@ def test_website_reader_skips_discovered_redirect_to_private_url(monkeypatch: py
             return httpx.Response(302, headers={"Location": private_url}, request=request)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -442,9 +436,8 @@ def test_website_reader_skips_discovered_url_with_invalid_port(monkeypatch: pyte
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -477,9 +470,8 @@ def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.Monkey
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -539,9 +531,8 @@ def test_website_reader_rejects_public_suffix_sibling_hosts(monkeypatch: pytest.
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
@@ -593,9 +584,8 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 
-    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
-        assert min_seconds == 1
-        assert max_seconds == 3
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
 
     monkeypatch.setattr("mindroom.custom_tools.website.log_debug", fake_log_debug)
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)

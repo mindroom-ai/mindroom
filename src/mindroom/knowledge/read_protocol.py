@@ -16,7 +16,8 @@ class ReadRequest:
 
     path: str
     collection: str
-    #: The search query's embedding; a request without one asks whether the collection exists.
+    #: The search query's embedding; a request without one asks whether the collection exists, which only tests send,
+    #: since ``ChromaReadProxy.exists`` answers in-process.
     embedding: list[float] | None = None
     limit: int = 5
     published_settings: dict[str, str] | None = None

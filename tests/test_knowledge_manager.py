@@ -21,7 +21,7 @@ from io import BufferedIOBase
 from pathlib import Path
 from threading import Event, get_ident
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -4323,7 +4323,7 @@ async def test_superseded_collection_listing_failure_is_best_effort(
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("cleanup new", encoding="utf-8")
 
-    def _raise_list_collections(self: _Client) -> list[str]:
+    def _raise_list_collections(self: _Client) -> NoReturn:
         _ = self
         msg = "list failed"
         raise RuntimeError(msg)
