@@ -866,21 +866,7 @@ class TurnStore:
         turn_record: TurnRecord,
         requester_user_id: str,
     ) -> None:
-        """Remove stale persisted runs before regenerating one edited turn."""
-        await self._remove_stale_runs_for_turn_record(
-            turn_record=turn_record,
-            requester_user_id=requester_user_id,
-            reason="edited",
-        )
-
-    async def _remove_stale_runs_for_turn_record(
-        self,
-        *,
-        turn_record: TurnRecord,
-        requester_user_id: str,
-        reason: str,
-    ) -> bool:
-        """Remove persisted runs using the exact recorded target and history scope.
+        """Remove an edited turn's persisted runs from its recorded target and history scope before it regenerates.
 
         History derived from redacted events goes first, so a loaded run holding a
         redacted event still retires a legacy summary before the edit removes that run.
@@ -888,7 +874,7 @@ class TurnStore:
         target = turn_record.conversation_target
         scope = turn_record.history_scope
         if target is None or scope is None:
-            return False
+            return
         storage = self.deps.state_writer.create_storage(
             self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
             scope=scope,
@@ -911,12 +897,11 @@ class TurnStore:
         if removed_any:
             self.deps.state_writer.deps.logger.info(
                 "Removed stale persisted history for handled turn",
-                reason=reason,
+                reason="edited",
                 source_event_ids=list(turn_record.source_event_ids),
                 session_id=target.session_id,
                 history_scope=scope.key,
             )
-        return removed_any
 
 
 def _remove_runs_for_sources(
