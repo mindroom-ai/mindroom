@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.providers.model_loading import missing_model_api_key_provider
+from mindroom.providers.credentials import missing_model_api_key_provider
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:

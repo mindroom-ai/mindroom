@@ -84,11 +84,11 @@ from mindroom.providers.anthropic.wire import (
 )
 from mindroom.providers.assistant_turn import stamp_finished_turn
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
+from mindroom.providers.credentials import uses_alternative_auth
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.providers.model_loading import uses_alternative_auth
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment

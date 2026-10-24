@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
-from mindroom.config.models import DebugConfig, ModelConfig
+from mindroom.config.models import ModelConfig
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
@@ -26,10 +26,8 @@ from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, complet
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
-from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.synthetic_adapter import SHELL_TOOL
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 from mindroom.session_storage.codec import run_from_row
@@ -43,13 +41,11 @@ from tests.providers.family_support import (
     scrub_provider_env,
 )
 from tests.providers.gemini_ollama_support import runtime_paths_for
-from tests.providers.golden_support import Wire, ndjson_response, sse_response
+from tests.providers.golden_support import Wire, ndjson_response, pipeline_provider, sse_response
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-    from mindroom.llm.provider import ModelProvider
 
 pytestmark = pytest.mark.filterwarnings(CLAUDE_DEPRECATION_FILTER)
 
@@ -76,23 +72,6 @@ def _tool(name: str) -> ToolSpec:
         requires_confirmation=None,
         external_execution=None,
         approval_type=None,
-    )
-
-
-def _pipeline(adapter: ModelProvider, *, log_dir: Path | None = None, idle: float | None = None) -> ModelProvider:
-    log = None
-    if log_dir is not None:
-        log = RequestLog(
-            model_name="default",
-            configured_provider=adapter.identity.provider,
-            debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(log_dir)),
-            storage_root=log_dir / "unused",
-        )
-    return wrap_provider(
-        adapter,
-        idle_timeout_seconds=idle,
-        media_fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
-        request_log=log,
     )
 
 
@@ -150,7 +129,7 @@ async def test_unset_tool_fields_are_omitted_where_agno_omitted_them(family: str
     """
     spec = FAMILIES[family]
     wire = Wire(spec.reply())
-    provider = _pipeline(spec.adapter(tmp_path, wire))
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
 
     await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], tools=_TRI_STATE_TOOLS))
 
@@ -246,7 +225,7 @@ async def test_every_family_replays_the_tool_calls_any_provider_stored(family: s
     wire = Wire(spec.reply())
 
     await complete(
-        _pipeline(spec.adapter(tmp_path, wire)),
+        pipeline_provider(spec.adapter(tmp_path, wire)),
         ModelRequest(messages=_stored_tool_turn(), tools=[_tool("get_weather")]),
     )
 
@@ -303,7 +282,7 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
     spec = _without_sdk_retries(FAMILIES[family])
     wire = Wire(_error_reply(family), spec.reply())
     log_dir = tmp_path / "logs"
-    provider = _pipeline(spec.adapter(tmp_path, wire), log_dir=log_dir)
+    provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)
     request = ModelRequest(
         messages=[Message(role="system", content="Be brief."), _media_message(spec, tmp_path)],
         tools=[_tool("call_tool"), _tool("lookup_order"), _tool("tool_search")],
@@ -351,7 +330,7 @@ async def test_composed_pipeline_serves_the_synthetic_family(tmp_path: Path) -> 
         runtime_paths_for(tmp_path),
     )
     log_dir = tmp_path / "logs"
-    provider = _pipeline(adapter, log_dir=log_dir, idle=_IDLE_LIMIT_SECONDS)
+    provider = pipeline_provider(adapter, log_dir=log_dir, idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
     request = ModelRequest(
         messages=[Message(role="user", content="Hi")],
         tools=[_tool("call_tool"), _tool("lookup_order"), _tool(SHELL_TOOL), _tool("tool_search")],
@@ -404,7 +383,7 @@ async def test_a_reply_without_output_records_no_time_to_first_token(family: str
     wire = Wire(_REPLIES_WITHOUT_OUTPUT[family]())
 
     turn = await complete(
-        _pipeline(spec.adapter(tmp_path, wire)),
+        pipeline_provider(spec.adapter(tmp_path, wire)),
         ModelRequest(messages=[Message(role="user", content="Hi")]),
     )
 
@@ -462,7 +441,7 @@ async def test_provider_events_without_output_keep_a_stream_inside_the_idle_limi
     """The idle limit measures the gap between provider events, including those that carry no output."""
     spec = FAMILIES[family]
     wire = Wire(spec.reply(), reply())
-    provider = _pipeline(spec.adapter(tmp_path, wire), idle=_IDLE_LIMIT_SECONDS)
+    provider = pipeline_provider(spec.adapter(tmp_path, wire), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
     request = ModelRequest(messages=[Message(role="user", content="Hi")], tools=[_tool("get_weather")])
     # The first request builds and caches the SDK client, which must not count against the paced stream's limit.
     await complete(provider, request)
@@ -495,7 +474,7 @@ async def test_failure_after_a_server_tool_started_is_final(
     """Once a hosted tool ran, a retry would run it again, so the dropped connection ends the request for good."""
     spec = FAMILIES[family]
     wire = Wire(lambda _request: reply())
-    provider = _pipeline(spec.adapter(tmp_path, wire))
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
     request = ModelRequest(messages=[Message(role="user", content="Hi")])
 
     with pytest.raises(ProviderUnavailable) as raised:
@@ -510,7 +489,7 @@ async def test_a_malformed_function_call_does_not_strip_the_request_media(tmp_pa
     spec = FAMILIES["gemini"]
     malformed = {"candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "MALFORMED_FUNCTION_CALL"}]}
     wire = Wire(lambda _request: sse_response([malformed]))
-    provider = _pipeline(spec.adapter(tmp_path, wire))
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
     image = Image(content=b"\x89PNG\r\n\x1a\n0000", mime_type="image/png")
     request = ModelRequest(
         messages=[Message(role="user", content="Look", images=[image])],
@@ -531,7 +510,7 @@ async def test_a_dropped_connection_without_server_tools_is_still_retried(tmp_pa
     """Ollama has no hosted tools, so a stream that drops before output keeps the transient retry budget."""
     spec = FAMILIES["ollama"]
     wire = Wire(lambda _request: _ollama_silent_stream(drop=True))
-    provider = _pipeline(spec.adapter(tmp_path, wire))
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
 
     with pytest.raises(ProviderUnavailable):
         await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))

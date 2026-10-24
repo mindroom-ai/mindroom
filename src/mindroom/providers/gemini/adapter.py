@@ -23,6 +23,7 @@ from mindroom.llm.errors import InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
+from mindroom.providers.credentials import uses_alternative_auth
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
@@ -38,7 +39,6 @@ from mindroom.providers.gemini.wire import (
     tool_config,
     without_tool_selection,
 )
-from mindroom.providers.model_loading import uses_alternative_auth
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:

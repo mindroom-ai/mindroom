@@ -61,14 +61,14 @@ def minimal_mode_failure_message(reason: str, agent_name: str, *, subagent: bool
     return f"{reason.rstrip('.')}. Return to standard mode with `!mode {agent_name} standard`."
 
 
-def is_model_safeguard_refusal(error: Exception | str) -> bool:
+def is_model_safeguard_refusal(error: Exception) -> bool:
     """Recognize the typed refusal and the exact text errored runs preserve."""
     return isinstance(error, ModelSafeguardRefusal) or str(error).strip() == MODEL_SAFEGUARD_REFUSAL_MESSAGE
 
 
 def _extract_provider_from_error(error: Exception) -> str | None:
     """Return the SDK that raised an untyped error, such as ``openai`` for an error from ``openai._exceptions``."""
-    top_module = (type(error).__module__ or "").split(".")[0]
+    top_module = type(error).__module__.split(".")[0]
     # TODO(simplify): An untyped httpx error names `httpx` as the provider in the authentication reply. Name no
     # provider for it, since httpx is the HTTP client and not a provider. Users would notice.
     return top_module if top_module in {"openai", "anthropic", "google", "groq", "httpx"} else None

@@ -54,8 +54,8 @@ from mindroom.model_defaults import (
     OPENAI_GPT_SOL,
     llama_cpp_server_command,
 )
+from mindroom.providers.credentials import missing_model_api_key_provider
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.providers.model_loading import missing_model_api_key_provider
 from mindroom.services.config import InstallResult, ServiceManager, ServiceStatus
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.thread_export import ThreadExportStats
@@ -3876,7 +3876,7 @@ class TestDoctor:
                 raise OSError(msg)
 
             monkeypatch.setattr(
-                "mindroom.providers.model_loading.get_runtime_shared_credentials_manager",
+                "mindroom.providers.credentials.get_runtime_shared_credentials_manager",
                 _unreadable_store,
             )
         monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")

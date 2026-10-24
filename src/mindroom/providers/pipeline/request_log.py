@@ -131,7 +131,7 @@ def _log_usage(
     payload: dict[str, Any] = {
         "model_name": log.model_name,
         "model_id": identity.id,
-        "provider": identity.provider or log.configured_provider,
+        "provider": identity.provider,
         "usage_available": usage is not None,
     }
     if served_provider is not None:

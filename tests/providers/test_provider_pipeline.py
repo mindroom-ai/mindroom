@@ -51,7 +51,6 @@ from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE, guidance_retry_stream
 from mindroom.providers.pipeline.media import FALLBACK_MARKER, media_fallback_stream
 from mindroom.providers.pipeline.refusal import refusal_stream
@@ -59,6 +58,7 @@ from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.fakes.scripted_model import Await
+from tests.providers.golden_support import pipeline_provider
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -654,7 +654,7 @@ async def test_a_refusal_is_neither_retried_nor_resent_without_media() -> None:
     """A transient failure before still retries; the refused attempt ends the request with its media intact."""
     usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=9, total_tokens=49))
     inner = _ScriptedProvider([[_transient()], [UsageReported(usage), _refusal(usage)]])
-    provider = wrap_provider(inner, idle_timeout_seconds=None, media_fallback_prompt="x", request_log=None)
+    provider = pipeline_provider(inner)
 
     with pytest.raises(ModelSafeguardRefusal):
         await complete(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
@@ -1011,7 +1011,7 @@ def _request() -> ModelRequest:
 @pytest.mark.asyncio
 async def test_composed_pipeline_drains_with_complete() -> None:
     inner = _ScriptedProvider([[_transient()], [TextDelta("done"), _turn()]])
-    provider = wrap_provider(inner, idle_timeout_seconds=None, media_fallback_prompt="x", request_log=None)
+    provider = pipeline_provider(inner)
 
     turn = await complete(provider, ModelRequest(messages=[_user()]))
 
@@ -1040,7 +1040,7 @@ async def test_reported_usage_always_sums_to_the_finished_turn(rejection: Provid
             ],
         ],
     )
-    provider = wrap_provider(inner, idle_timeout_seconds=None, media_fallback_prompt="x", request_log=None)
+    provider = pipeline_provider(inner)
 
     events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
@@ -1087,7 +1087,7 @@ async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_tu
             [UsageReported(restarted, final=False), TextDelta("done"), UsageReported(final), _turn(usage=final)],
         ],
     )
-    provider = wrap_provider(inner, idle_timeout_seconds=None, media_fallback_prompt="x", request_log=None)
+    provider = pipeline_provider(inner)
 
     events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 

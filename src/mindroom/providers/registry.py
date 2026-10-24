@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
+from mindroom.providers.credentials import dashboard_api_key
 from mindroom.providers.gemini.adapter import build_provider as build_gemini_provider
-from mindroom.providers.model_loading import dashboard_api_key
 from mindroom.providers.names import provider_route
 from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
 from mindroom.providers.openai.build import ENDPOINT_VARIABLES as OPENAI_ENDPOINT_VARIABLES
