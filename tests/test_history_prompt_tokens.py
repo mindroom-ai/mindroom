@@ -8,11 +8,11 @@ from datetime import UTC, datetime
 
 from mindroom.history.prompt_tokens import _StaticTokenEstimator, build_static_token_estimator
 from mindroom.history.replay import (
-    compaction_summary_message,
     estimate_prompt_visible_history_tokens,
     estimate_request_messages_tokens,
     estimate_summary_tokens,
 )
+from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
-
-if TYPE_CHECKING:
-    from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message
 
 _COMPACTION_SUMMARY_MARKER = "mindroom_compaction_summary"
 _SCOPE_SUMMARY = "scope"
@@ -13,32 +10,23 @@ _RUN_LOCAL_SUMMARY = "run"
 _SUMMARY_FOLLOWS_KEY = "mindroom_compaction_summary_follows"
 
 
-class _CompactionSummaryFields(TypedDict):
-    """The fields of the user message one compaction summary renders as."""
-
-    role: Literal["user"]
-    content: str
-    provider_data: dict[str, Any]
-    from_history: bool
-
-
-def compaction_summary_fields(summary: str, *, run_local: bool) -> _CompactionSummaryFields:
-    """Return the fields of the user message that replaces the history one compaction summary covers.
+def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
+    """Render one compaction summary as the user message that replaces the history it covers.
 
     The scope's summary is rebuilt from its latest summary row for every request, so it is history; a run-local summary is
     stored with its run. The marker keeps that kind when a later request replays the run and marks its messages history.
     """
-    return {
-        "role": "user",
-        "content": (
+    return Message(
+        role="user",
+        content=(
             "The earlier part of this conversation was compacted into this summary:\n\n"
             f"<compacted_history>\n{summary}\n</compacted_history>\n\n"
             "The conversation continues after this summary. If it records progress on the current request, "
             "continue that work from its next steps instead of starting over."
         ),
-        "provider_data": {_COMPACTION_SUMMARY_MARKER: _RUN_LOCAL_SUMMARY if run_local else _SCOPE_SUMMARY},
-        "from_history": not run_local,
-    }
+        provider_data={_COMPACTION_SUMMARY_MARKER: _RUN_LOCAL_SUMMARY if run_local else _SCOPE_SUMMARY},
+        from_history=not run_local,
+    )
 
 
 def compaction_summary_text(message: Message) -> str:

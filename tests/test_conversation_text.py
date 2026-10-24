@@ -6,8 +6,8 @@ import pytest
 
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.conversation_text import utterances
-from mindroom.history.replay import compaction_summary_message
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
+from mindroom.history.summary_message import compaction_summary_message
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus

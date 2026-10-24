@@ -2636,10 +2636,11 @@ visibility = ["mindroom.history.request_messages"]
 
 [[modules]]
 path = "mindroom.history.summary_message"
-depends_on = []
+depends_on = ["mindroom.llm"]
 visibility = [
     "mindroom.history.conversation_text",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.native",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
 ]
@@ -2694,6 +2695,7 @@ depends_on = [
 path = "mindroom.history.native"
 depends_on = [
     "mindroom.history.replay",
+    "mindroom.history.summary_message",
     "mindroom.history.types",
     "mindroom.native_compaction",
 ]

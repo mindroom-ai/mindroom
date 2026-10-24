@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from mindroom.history.replay import compaction_summary_message, current_summary_text
+from mindroom.history.replay import current_summary_text
+from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import NativeHistory
 from mindroom.native_compaction import recorded_native_settings, request_replay_basis
 

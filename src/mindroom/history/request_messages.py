@@ -16,13 +16,13 @@ from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
 from mindroom.history.run_visibility import replays_in_scope
-from mindroom.history.summary_message import compaction_summary_fields, is_scope_summary, summary_follows
-from mindroom.llm.messages import Message
+from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan, ScopeSummary
+    from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
 
@@ -206,7 +206,7 @@ def _with_scope_summary(messages: list[Message], summary: ScopeSummary | None) -
     index = next((i for i, message in enumerate(messages) if message.role != "system"), len(messages))
     if index < len(messages) and summary_follows(messages[index]):
         index += 1
-    return [*messages[:index], Message(**compaction_summary_fields(text, run_local=False)), *messages[index:]]
+    return [*messages[:index], compaction_summary_message(text, run_local=False), *messages[index:]]
 
 
 __all__ = [

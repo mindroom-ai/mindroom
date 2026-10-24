@@ -14,9 +14,8 @@ from mindroom.history.message_content import (
 )
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.run_visibility import replays_in_scope
-from mindroom.history.summary_message import compaction_summary_fields
+from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
-from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import (
     checkpoint_estimated_tokens,
@@ -29,6 +28,7 @@ from mindroom.token_budget import estimate_text_tokens, stable_serialize
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import PortableReplayEstimator
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
@@ -164,11 +164,6 @@ def _without_image_transport(message: Message, *, strip_content_blocks: bool) ->
     if message.images:
         updates["images"] = None
     return replace(message, **updates) if updates else message
-
-
-def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
-    """Render one compaction summary as the user message that replaces the history it covers."""
-    return Message(**compaction_summary_fields(summary, run_local=run_local))
 
 
 def estimate_summary_tokens(session: ConversationSession) -> int:

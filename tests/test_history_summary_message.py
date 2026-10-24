@@ -17,7 +17,6 @@ from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.execution_preparation import _prepared_history_with_scheduled_limit
 from mindroom.history.replay import (
-    compaction_summary_message,
     estimate_prompt_visible_history_tokens,
     estimate_request_messages_tokens,
     plan_replay_that_fits,
@@ -28,7 +27,7 @@ from mindroom.history.request_messages import (
     build_resume_request,
     scope_history_messages,
 )
-from mindroom.history.summary_message import is_compaction_summary
+from mindroom.history.summary_message import compaction_summary_message, is_compaction_summary
 from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,

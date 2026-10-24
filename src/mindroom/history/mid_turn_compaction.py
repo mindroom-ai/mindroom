@@ -20,11 +20,7 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
 from mindroom.history.policy import context_budget_after_reserve
-from mindroom.history.replay import (
-    HistorySummaryBudgetError,
-    compaction_summary_message,
-    estimate_request_messages_tokens,
-)
+from mindroom.history.replay import HistorySummaryBudgetError, estimate_request_messages_tokens
 from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
     compact_scope_mid_turn,
@@ -34,6 +30,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import new_scope_session, read_fold_basis, record_summary_usage
 from mindroom.history.summary_message import (
+    compaction_summary_message,
     compaction_summary_text,
     is_compaction_summary,
     is_scope_summary,

@@ -25,15 +25,11 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
-from mindroom.history.replay import (
-    compaction_summary_message,
-    configured_replay_plan,
-    estimate_request_messages_tokens,
-)
+from mindroom.history.replay import configured_replay_plan, estimate_request_messages_tokens
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.history.storage import _with_scope_state, new_scope_session, read_scope_state
-from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
+from mindroom.history.summary_message import compaction_summary_message, is_compaction_summary, is_scope_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleStart,

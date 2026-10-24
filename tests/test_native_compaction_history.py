@@ -13,7 +13,7 @@ import pytest
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig
 from mindroom.history.native import configure_native_history, restore_native_history, with_native_history
-from mindroom.history.replay import compaction_marker, compaction_summary_message
+from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.runtime import (
     _ScopeCompactionLifecycleResult,
@@ -24,6 +24,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import _with_scope_state
+from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
