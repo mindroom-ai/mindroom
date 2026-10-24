@@ -116,8 +116,10 @@ class GeminiProvider:
         first_output_at: float | None = None
         # Client construction reads credentials from disk; its failures are configuration errors, not transient.
         client = self._sdk_client()
+        provider = self.identity.provider_name
+        upload = None if self.vertexai else partial(uploaded_file_uri, client, provider=provider)
         try:
-            contents, system_instruction = await format_contents(request.messages, self._media_route())
+            contents, system_instruction = await format_contents(request.messages, MediaRoute(provider, upload))
             config = self._request_config(request, system_instruction)
             # The request dicts use google-genai's field names; the SDK validates them into its types.
             call = {"model": self.identity.id, "contents": cast("Any", contents), "config": cast("Any", config or None)}
@@ -141,7 +143,7 @@ class GeminiProvider:
             # Media and chunk failures arrive normalized.
             raise
         except Exception as error:
-            raise _provider_error(error, provider=self.identity.provider_name) from error
+            raise _provider_error(error, provider=provider) from error
         if request.stream and not reply.finished:
             # The stream ended before Gemini ended the reply, so the turn did not finish.
             return
@@ -230,12 +232,6 @@ class GeminiProvider:
             msg = "Participation decisions cannot safely apply Gemini body overrides"
             raise ValueError(msg)
         return without_tool_selection(config, vertexai=self.vertexai) if config else config
-
-    def _media_route(self) -> MediaRoute:
-        provider = self.identity.provider_name
-        if self.vertexai:
-            return MediaRoute(provider=provider)
-        return MediaRoute(provider=provider, upload=partial(uploaded_file_uri, self._sdk_client(), provider=provider))
 
     def _sdk_client(self) -> Client:
         if self._client is None:
