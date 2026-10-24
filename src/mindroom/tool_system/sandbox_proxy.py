@@ -530,7 +530,7 @@ def _post_worker_file_request(
     operation: Literal["save-attachment", "view-file"],
     failure: str,
 ) -> dict[str, object]:
-    """Post one attachment request and return the worker's successful response, recording a failed one against it."""
+    """Post one worker file request and return the worker's successful response, recording a failed one against it."""
     data = post_worker_proxy_json(
         config=_worker_proxy_client_config(proxy_config, runtime_paths),
         payload=payload,

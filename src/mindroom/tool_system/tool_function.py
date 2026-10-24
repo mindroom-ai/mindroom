@@ -31,7 +31,8 @@ class ToolFunction:
     ``injected_params`` names the entrypoint parameters the framework supplies at call time, which the model never
     sees and whose model-sent values are dropped.
     ``entrypoint_processed`` marks a function that does not set ``skip_entrypoint_processing`` (MCP tools and a
-    toolkit's ``@tool`` methods set it); realtime calls repeat the second schema pass main ran on such a function.
+    toolkit's ``@tool`` methods set it); realtime calls run Agno's entrypoint processing on such a function a second
+    time, which closes its object schemas (see the TODO in ``matrix_rtc/call_tools.py``).
     ``actor_state`` is what an Agno toolkit keeps on its injected agent or team (``ToolCallActor``): one dict per
     adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the

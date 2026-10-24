@@ -737,6 +737,9 @@ def get_tool_by_name(
             ),
         )
         include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
+        # TODO(simplify): the filters, output-file wrapping, and sandbox proxy below mutate the Agno toolkit before
+        # adaptation because get_tool_by_name returns it to plugins. Return the adapted toolkit and run these steps
+        # over its ToolFunctions. Plugin authors who read the returned toolkit's functions would notice.
 
         with optional_dependency_environment():
             toolkit = cast("Any", tool_class)(**init_kwargs)
@@ -780,7 +783,7 @@ def get_tool_by_name(
 def _build_with_tool_dependencies(tool_name: str, runtime_paths: RuntimePaths, build: Callable[[], Toolkit]) -> Toolkit:
     """Run ``build`` once the tool's declared dependencies are present.
 
-    An import error that installs the tool's optional extra runs ``build`` once more.
+    When ``build`` raises ImportError and the tool's optional extra installs, ``build`` runs once more.
     """
     # Pre-check dependencies using find_spec (no side effects) before importing
     metadata = TOOL_METADATA.get(tool_name)

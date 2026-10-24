@@ -76,7 +76,7 @@ class PreparedAgentToolBinding:
     key: ToolKey
     function: ToolFunction
     catalog: PreparedAgentToolCatalog = field(repr=False)
-    instructions: tuple[str, ...] = ()
+    instructions: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
