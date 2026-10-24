@@ -1993,7 +1993,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
         record = state.terminal.record
         if state.error is not None:
-            if isinstance(record, RunRecord):
+            if record is not None:
                 # A failed run stored its record and raised; a delegated child's observer learns the failure from it.
                 observe_child_record(record)
             if skipped := skip_unapproved_attempt(
