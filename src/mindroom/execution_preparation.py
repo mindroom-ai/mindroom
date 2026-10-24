@@ -75,6 +75,8 @@ logger = get_logger(__name__)
 _NO_MEMBER_DISPLAY_NAMES: Mapping[str, str] = MappingProxyType({})
 
 _IN_PROGRESS_REPLY_LABEL = "You (reply still streaming)"
+# TODO(simplify): no MindRoom code writes the interrupted-draft and partial-reply labels; only a trusted relay claim
+# could carry them. Match only the in-progress label. Models would notice only for such a relayed claim.
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset(
     {"You (interrupted reply draft)", _IN_PROGRESS_REPLY_LABEL, "You (partial reply)"},
 )
@@ -340,7 +342,6 @@ def _messages_with_current_prompt(
     member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
 ) -> TurnMessages:
     """Return the canonical live turn: its context messages, the current user prompt, and its transient context."""
-    current_ts = format_timestamp_ms(current_timestamp_ms, timezone=config.timezone)
     current_prompt = prompt
     if current_sender_id is not None:
         current_block = (
@@ -350,7 +351,7 @@ def _messages_with_current_prompt(
                 sender=current_sender_id,
                 body=prompt,
                 event_id=current_event_id,
-                ts=current_ts,
+                ts=format_timestamp_ms(current_timestamp_ms, timezone=config.timezone),
                 display_name=member_display_names.get(current_sender_id),
             )
         )

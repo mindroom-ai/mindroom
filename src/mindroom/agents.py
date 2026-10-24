@@ -735,7 +735,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         )
 
     def wrap_direct(toolkit: Toolkit) -> Toolkit:
-        # Every MindRoom-owned direct toolkit gets the same output-file wrapping and construction identity.
         threshold = config.defaults.tool_output_auto_save_threshold_bytes
         policy = _agent_tool_output_file_policy(agent_runtime, runtime_paths, threshold)
         return constructed(wrap_toolkit_for_output_files(toolkit, policy))
