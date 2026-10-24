@@ -136,6 +136,8 @@ def supports_prefill(model_id: str) -> bool:
 
 def supports_structured_outputs(model_id: str) -> bool:
     """Return whether the direct API offers ``output_config.format`` for this model."""
+    # TODO(simplify): Unlike supports_prefill, this reads the raw id, so a gateway id such as anthropic/claude-3-...
+    # counts as supporting structured output. Read it through _core_model_id too. Users of gateway ids would notice.
     return model_id not in _NON_STRUCTURED_OUTPUT_ALIASES and not model_id.startswith(_NON_STRUCTURED_OUTPUT_PREFIXES)
 
 
