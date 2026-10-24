@@ -214,16 +214,10 @@ def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _user_blocks(message: Message, *, citations: bool) -> list[Any]:
     content = message.content or ""
     blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
-    for image in message.images or ():
-        block = _image_block(image)
-        if block is not None:
-            blocks.append(block)
-    for file in message.files or ():
-        block = _document_block(file, citations=citations)
-        if block is not None:
-            blocks.append(block)
+    media = [_image_block(image) for image in message.images or ()]
+    media += [_document_block(file, citations=citations) for file in message.files or ()]
     # Audio and video are not Claude inputs; the media fallback replaces them with a note before the request.
-    return blocks
+    return blocks + [block for block in media if block is not None]
 
 
 def _image_media_type(image: Image, data: bytes | None) -> str | None:
