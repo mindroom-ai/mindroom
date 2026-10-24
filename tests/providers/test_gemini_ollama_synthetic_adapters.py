@@ -1417,13 +1417,32 @@ def test_ollama_rejects_unknown_extra_kwargs(tmp_path: Path) -> None:
         build_ollama_provider(config, runtime_paths_for(tmp_path))
 
 
-def test_ollama_host_and_key_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The host falls back to the local default, and OLLAMA_API_KEY supplies a missing key."""
-    monkeypatch.setenv("OLLAMA_API_KEY", "env-key")
+def test_ollama_host_falls_back_to_the_local_default(tmp_path: Path) -> None:
+    """Without a configured or runtime host, requests go to the local Ollama server."""
     provider = build_ollama_provider(ModelConfig(provider="ollama", id="qwen3.8:27b"), runtime_paths_for(tmp_path))
 
     assert provider.identity.endpoint == "http://localhost:11434"
-    assert provider.settings.api_key == "env-key"
+
+
+@pytest.mark.asyncio
+async def test_ollama_api_key_variable_supplies_a_missing_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """OLLAMA_API_KEY authenticates a model without its own key, and a configured key beats it."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "env-key")
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return ollama_ndjson(_ollama_done())
+
+    for api_key in (None, "ollama-key"):
+        config = ModelConfig(
+            **_config(OLLAMA, client_params={"transport": httpx.MockTransport(respond)}),
+            api_key=api_key,
+        )
+        provider = build_ollama_provider(config, runtime_paths_for(tmp_path))
+        _completed([event async for event in provider.stream(_request())])
+
+    assert [request.headers["authorization"] for request in seen] == ["Bearer env-key", "Bearer ollama-key"]
 
 
 @pytest.mark.asyncio

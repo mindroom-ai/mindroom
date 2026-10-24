@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -298,8 +297,7 @@ def _stop_reason(reply: _OllamaReply) -> StopReason | None:
 
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> OllamaProvider:
     """Build the adapter for an ``ollama`` model config."""
-    api_key = model_config.configured_api_key() or os.getenv("OLLAMA_API_KEY") or None
-    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": api_key}
+    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": model_config.configured_api_key()}
     settings = settings_from_extra_kwargs(OllamaSettings, extra_kwargs, provider=model_config.provider)
     # ``client_params`` wins over every client option, so its ``host`` is the server requests reach.
     host = str(
