@@ -177,9 +177,8 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
     assert record.tools is not None
     assert (record.tools[0].result, record.tools[0].is_error) == ("Checker overloaded", False)
     assert store.statuses == [("checker", "ERROR"), ("squad", "COMPLETED")]
-    assert [(log["event"], log["member_id"]) for log in logs if log["event"] == "team_member_run_failed"] == [
-        ("team_member_run_failed", "checker"),
-    ]
+    failures = [log for log in logs if log["event"] == "team_member_run_failed"]
+    assert [(log["team_id"], log["member_id"]) for log in failures] == [("squad", "checker")]
 
 
 async def test_a_member_approval_pauses_the_team_with_agno_s_rows() -> None:

@@ -381,7 +381,6 @@ class _MemberRuns:
     behaves.
     """
 
-    spec: TeamSpec
     record: TeamRunRecord
     ctx: RunContext
     emit: Emit
@@ -447,7 +446,7 @@ class _MemberRuns:
         except Exception as error:
             logger.warning(
                 "team_member_run_failed",
-                team_id=self.spec.id,
+                team_id=self.record.team_id,
                 member_id=member.spec.id,
                 run_id=run_id,
                 error=str(error),
@@ -473,7 +472,7 @@ async def _drive_team(
     """
 
     async def produce(emit: Emit) -> None:
-        members = _MemberRuns(spec, record, ctx, emit, persist, stream=template.stream)
+        members = _MemberRuns(record, ctx, emit, persist, stream=template.stream)
         leader = _leader_spec(spec, record, members.run, stream=template.stream)
         stream = drive_run(
             leader,
