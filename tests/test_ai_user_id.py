@@ -262,6 +262,31 @@ def _model_runtime_context(
     )
 
 
+def test_reply_usage_publishes_its_keys_in_order_with_fractions_as_decimal_strings() -> None:
+    """The ``usage`` object lists the counters, then cost and timing, then the uncached input, zero included."""
+    counts = TokenCounts(**{name: index for index, name in enumerate(TokenCounts().to_dict(), start=1)})
+    metrics = RunMetrics(tokens=counts, cost=0.5, time_to_first_token=0.25, duration=1 / 3)
+
+    payload = _ReplyUsage.of(metrics, uncached_input_tokens=0).to_wire()
+
+    assert list(payload.items()) == [
+        ("input_tokens", 1),
+        ("output_tokens", 2),
+        ("total_tokens", 3),
+        ("audio_input_tokens", 7),
+        ("audio_output_tokens", 8),
+        ("audio_total_tokens", 9),
+        ("cache_read_tokens", 4),
+        ("cache_write_tokens", 5),
+        ("reasoning_tokens", 6),
+        ("cost", "0.5"),
+        ("time_to_first_token", "0.25"),
+        ("duration", "0.333333333333"),
+        ("uncached_input_tokens", 0),
+    ]
+    assert _ReplyUsage.of(RunMetrics(), uncached_input_tokens=5).to_wire() == {}
+
+
 def test_reply_usage_preserves_zero_usage_fields_from_metrics() -> None:
     """Run metrics publish only the counters the provider reported."""
     payload = _ReplyUsage.of(
