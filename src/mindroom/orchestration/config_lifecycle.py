@@ -212,12 +212,12 @@ class ConfigReloadLifecycle:
                     requested=describe_event_journal(new_config.event_journal, self.runtime_paths),
                 )
 
-            current_authored_config = current_config.authored_model_dump()
-            new_authored_config = new_config.authored_model_dump()
-            runtime_authored_config = runtime_config.authored_model_dump() if runtime_config is not None else None
+            current_effective_config = current_config.runtime_model_dump()
+            new_effective_config = new_config.runtime_model_dump()
+            runtime_effective_config = runtime_config.runtime_model_dump() if runtime_config is not None else None
             if (
                 self._incomplete_config is None
-                and current_authored_config == new_authored_config == runtime_authored_config
+                and current_effective_config == new_effective_config == runtime_effective_config
             ):
                 logger.info("Configuration content unchanged; skipping publication")
                 self.record_applied(new_config)
@@ -226,7 +226,7 @@ class ConfigReloadLifecycle:
             if (
                 repair_config is None
                 and runtime_config is not None
-                and runtime_authored_config != current_authored_config
+                and runtime_effective_config != current_effective_config
             ):
                 repair_config = runtime_config
             requested_transition = None
@@ -275,7 +275,7 @@ class ConfigReloadLifecycle:
                 self._incomplete_config = repair_config
                 updated = await self._apply_config_transition(repair_config, fully_applied_config)
                 self._incomplete_config = None
-            if fully_applied_config.authored_model_dump() != requested_config.authored_model_dump():
+            if fully_applied_config.runtime_model_dump() != requested_config.runtime_model_dump():
                 self._incomplete_config = requested_config
                 requested_updated = await self._apply_config_transition(
                     fully_applied_config,

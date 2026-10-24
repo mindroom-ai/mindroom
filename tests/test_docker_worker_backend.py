@@ -21,6 +21,7 @@ import yaml
 from structlog.testing import capture_logs
 
 from mindroom.config.main import load_config
+from mindroom.config.personal_agents import append_personal_agent_roster_entry
 from mindroom.constants import (
     RuntimePaths,
     deserialize_runtime_paths,
@@ -77,6 +78,9 @@ from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
+from tests.conftest import test_runtime_paths
+from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
+from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -668,6 +672,77 @@ def test_docker_worker_projection_resolves_config_includes(
 
     projected = yaml.safe_load((projection.root / "config.yaml").read_text(encoding="utf-8"))
     assert projected["agents"]["code"]["display_name"] == "Code"
+
+
+def test_docker_worker_projection_includes_personal_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The worker projection reads the config file, so it expands personal agent templates itself."""
+    paths = test_runtime_paths(tmp_path)
+    append_personal_agent_roster_entry(paths, personal_agent_entry())
+    config_text = yaml.safe_dump(PERSONAL_AGENTS_BASE)
+
+    backend, _fake_client, _credential_sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        runtime_paths=paths,
+        storage_path=paths.storage_root,
+    )
+    projection = backend._projection_manager._projected_config(
+        local_worker_state_paths_for_root(tmp_path / "workers" / "personal-agents"),
+        materialize=True,
+    )
+
+    projected = yaml.safe_load((projection.root / "config.yaml").read_text(encoding="utf-8"))
+    assert projected["agents"]["mind_alice_smith"]["display_name"] == "Alice's Mind"
+    assert "personal_agents" not in projected
+
+
+def test_docker_worker_projection_sees_roster_change_while_config_is_cached(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A new roster entry reaches the projection even though the config file bytes did not change."""
+    paths = test_runtime_paths(tmp_path)
+    backend, _fake_client, _credential_sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=yaml.safe_dump(PERSONAL_AGENTS_BASE),
+        runtime_paths=paths,
+        storage_path=paths.storage_root,
+    )
+    manager = backend._projection_manager
+    host_config_path = manager.config.host_config_path
+    assert host_config_path is not None
+    assert "agents" not in manager._load_host_config_data(host_config_path)
+    assert manager._config_data_cache is not None
+
+    append_personal_agent_roster_entry(paths, personal_agent_entry())
+
+    assert "mind_alice_smith" in manager._load_host_config_data(host_config_path)["agents"]
+    assert "agents" not in manager._config_data_cache[2]
+
+
+def test_docker_worker_projection_rejects_generated_agent_name_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A generated agent that clashes with an authored one is a worker backend error."""
+    paths = test_runtime_paths(tmp_path)
+    append_personal_agent_roster_entry(paths, personal_agent_entry())
+    authored = PERSONAL_AGENTS_BASE | {"agents": {"mind_alice_smith": {"display_name": "Taken"}}}
+    backend, _fake_client, _credential_sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=yaml.safe_dump(authored),
+        runtime_paths=paths,
+        storage_path=paths.storage_root,
+    )
+
+    with pytest.raises(WorkerBackendError, match="mind_alice_smith collides"):
+        backend._projection_manager.current_resolved_agent_policies()
 
 
 def _backend(

@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -25,6 +26,7 @@ from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProf
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
+from mindroom.config.personal_agents import append_personal_agent_roster_entry
 from mindroom.config.voice import SpeechServiceConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import SendTextRequest
@@ -65,6 +67,8 @@ from tests.conftest import (
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
+from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
+from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -1163,6 +1167,34 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
 
     assert orchestrator.config is current_config
     prepare.assert_awaited_once_with(new_config, {"writer"})
+
+
+@pytest.mark.asyncio
+async def test_update_config_starts_agent_added_only_by_personal_agent_roster(tmp_path: Path) -> None:
+    """A roster entry changes no authored byte, but its generated agent still needs the reload."""
+    paths = test_runtime_paths(tmp_path)
+    current_config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    append_personal_agent_roster_entry(paths, personal_agent_entry())
+    new_config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    assert current_config.authored_model_dump() == new_config.authored_model_dump()
+    orchestrator = _MultiAgentOrchestrator(paths)
+    orchestrator.config = current_config
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock()}
+    orchestrator.running = True
+
+    with (
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(
+            orchestrator,
+            "_prepare_entity_accounts",
+            new=AsyncMock(side_effect=PermanentStartupError("stop")),
+        ) as prepare,
+        pytest.raises(PermanentStartupError, match="stop"),
+    ):
+        await orchestrator.config_reload._update_config()
+
+    assert orchestrator.config is current_config
+    prepare.assert_awaited_once_with(new_config, {"mind_alice_smith"})
 
 
 @pytest.mark.asyncio

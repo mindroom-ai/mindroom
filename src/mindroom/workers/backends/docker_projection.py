@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, cast
 import yaml
 
 from mindroom import yaml_io
+from mindroom.config.personal_agents import expand_personal_agents, read_personal_agent_roster
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
@@ -451,7 +452,7 @@ class DockerProjectionManager:
             and cached[1] is not None
             and cached[1] == _config_sources_state_fingerprint(cached[3])
         ):
-            return copy.deepcopy(cached[2])
+            return self._with_personal_agents(copy.deepcopy(cached[2]))
 
         try:
             data, source_digests, _uses_includes = load_yaml_config_source_with_digests(resolved_host_config_path)
@@ -469,7 +470,19 @@ class DockerProjectionManager:
             copy.deepcopy(normalized_data),
             source_files,
         )
-        return copy.deepcopy(normalized_data)
+        return self._with_personal_agents(copy.deepcopy(normalized_data))
+
+    def _with_personal_agents(self, config_data: dict[str, object]) -> dict[str, object]:
+        """Add the generated personal agents, which live in the roster rather than the config file.
+
+        The cache keeps the raw file data, so a roster change shows up without a config change.
+        """
+        try:
+            expansion = expand_personal_agents(config_data, read_personal_agent_roster(self._runtime_paths))
+        except (OSError, ValueError) as exc:
+            msg = f"Failed to add personal agents to the Docker worker config: {exc}"
+            raise WorkerBackendError(msg) from exc
+        return cast("dict[str, object]", expansion.data)
 
     def _asset_contents_hash(self, host_path: Path) -> str:
         resolved_host_path = host_path.expanduser().resolve()

@@ -24,6 +24,7 @@ from mindroom.config.personal_agents import (
     read_personal_agent_roster,
 )
 from mindroom.constants import tracking_dir
+from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -316,3 +317,12 @@ def test_authored_dump_round_trips_template(tmp_path: Path) -> None:
     assert authored["personal_agents"] == BASE["personal_agents"]
     revalidated = Config.validate_with_runtime(authored, test_runtime_paths(tmp_path))
     assert revalidated.agents == config.agents
+
+
+def test_runner_snapshot_includes_generated_agents(tmp_path: Path) -> None:
+    """Runners resolve agents from the snapshot, which carries generated agents but never the templates."""
+    config = _runtime_config(tmp_path, roster=(_entry(),))
+    snapshot = runner_config_snapshot(test_runtime_paths(tmp_path), config)
+    assert snapshot is not None
+    assert snapshot["agents"]["mind_alice_smith"]["display_name"] == "Alice's Mind"
+    assert "personal_agents" not in snapshot

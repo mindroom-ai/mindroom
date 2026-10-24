@@ -474,7 +474,7 @@ def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config |
         return None
     return cast(
         "dict[str, object]",
-        to_json_compatible(worker_config_data(runtime_config.authored_model_dump())),
+        to_json_compatible(worker_config_data(runtime_config.runtime_model_dump())),
     )
 
 
