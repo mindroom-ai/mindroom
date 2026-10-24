@@ -33,7 +33,6 @@ from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import ContentDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ReasoningDelta
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
@@ -45,19 +44,12 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.provider import ModelRequest, ToolSpec
+    from mindroom.llm.provider import ModelRequest, ReasoningDelta, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.teams.delegate_tools import MemberRunner
     from mindroom.teams.spec import TeamMember, TeamSpec
 
 logger = get_logger(__name__)
-
-# Agno's texts for the leader after its members' approvals were resolved.
-MEMBER_RESULTS_HEADING = "Member results after human-in-the-loop resolution:"
-MEMBER_RESULT_LINE = "[{name}]: {content}"
-MEMBER_TASK_COMPLETED = "Task completed"
-
-type MemberLoopEvent = ContentDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +59,7 @@ class MemberEvent:
     member_id: str
     member_name: str
     run_id: str
-    event: MemberLoopEvent
+    event: ContentDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted
 
 
 type TeamRunEvent = RunEvent | MemberEvent
@@ -106,27 +98,7 @@ def run_team(
         team_name=spec.name,
     )
     messages = [spec.system_message, *run_input]
-
-    async def produce(emit: Emit) -> None:
-        stream = request_template.stream
-        members = _MemberRuns(spec, record, ctx, emit, persist, stream=stream)
-        leader = _leader_spec(spec, record, members.run, stream=stream)
-        await _forward(
-            drive_run(
-                leader,
-                record,
-                messages,
-                prepare_run_tools(leader),
-                ctx=ctx,
-                hooks=hooks,
-                persist=persist,
-                template=request_template,
-                pause_content=team_paused_content,
-            ),
-            emit,
-        )
-
-    return _team_stream(produce)
+    return _drive_team(spec, record, messages, ctx=ctx, hooks=hooks, persist=persist, template=request_template)
 
 
 def continue_team(
@@ -153,6 +125,9 @@ def continue_team(
     requirements on the team run, and the leader sends no request. The leader's and the members' requests stream
     (``resume_request_template``).
     """
+    # TODO(simplify): A resume that fails or is cancelled stores this record over the paused team row, so its
+    # approval can no longer be resumed. Keep the paused row until the resume completes or pauses again. Users would
+    # notice (#3075).
     record = resumed_record(paused)
     record.member_responses = []
     # Agno's continuation started the leader's text afresh; the paused notice is not part of the answer.
@@ -170,44 +145,31 @@ def continue_team(
     )
     prepare_resume_tools(_base_leader_spec(spec), leader.approved)
     decisions.require_consumed()
-    template = resume_request_template(request_template)
 
-    async def produce(emit: Emit) -> None:
-        stream = template.stream
-        members = _MemberRuns(spec, record, ctx, emit, persist, stream=stream)
-        leader = _leader_spec(spec, record, members.run, stream=stream)
-        prepared = prepare_run_tools(leader)
+    async def entry(members: _MemberRuns) -> None:
+        results: list[str] = []
+        for plan in plans:
+            resumed = await members.resume(plan.member, plan.paused, plan.plan)
+            if resumed.status is RunStatus.paused:
+                propagate_member_pause(record, plan.member, resumed)
+            else:
+                # TODO(simplify): A resumed member's result is its raw content, or ``Task completed`` without any,
+                # unlike a first run's (``member_result_text``). Use that rule for both. Models would notice.
+                results.append(f"[{plan.member.spec.name}]: {resumed.handover_content or 'Task completed'}")
+        if plans and all(r.is_resolved() for r in record.requirements or ()):
+            _answer_delegations(record, messages, [plan.member for plan in plans], results)
 
-        async def entry() -> None:
-            results: list[str] = []
-            for plan in plans:
-                resumed = await members.resume(plan.member, plan.paused, plan.plan)
-                if resumed.status is RunStatus.paused:
-                    propagate_member_pause(record, plan.member, resumed)
-                else:
-                    content = resumed.handover_content or MEMBER_TASK_COMPLETED
-                    results.append(MEMBER_RESULT_LINE.format(name=plan.member.spec.name, content=content))
-            if plans and not any(not r.is_resolved() for r in record.requirements or ()):
-                _answer_delegations(record, messages, [plan.member for plan in plans], results)
-
-        await _forward(
-            drive_run(
-                leader,
-                record,
-                messages,
-                prepared,
-                ctx=ctx,
-                hooks=hooks,
-                persist=persist,
-                template=template,
-                entry=entry,
-                resumed=decided,
-                pause_content=team_paused_content,
-            ),
-            emit,
-        )
-
-    return _team_stream(produce)
+    return _drive_team(
+        spec,
+        record,
+        messages,
+        ctx=ctx,
+        hooks=hooks,
+        persist=persist,
+        template=resume_request_template(request_template),
+        entry=entry,
+        resumed=decided,
+    )
 
 
 def team_paused_content(record: TeamRunRecord) -> str:
@@ -224,19 +186,6 @@ def team_paused_content(record: TeamRunRecord) -> str:
     if not parts:
         return ""
     return "Team run paused. The following require input:\n" + "\n".join(parts)
-
-
-def _keep_ended_member_run(ended: list[RunRecord], record: RunRecord) -> None:
-    """Keep a member run's terminal ``record`` in ``ended``, the member runs in the order they first ended.
-
-    A member resumed within the run ends twice; its later record replaces the paused one where it stood, as Agno
-    continued the paused member's output in place.
-    """
-    run_ids = [member.run_id for member in ended]
-    if record.run_id in run_ids:
-        ended[run_ids.index(record.run_id)] = record
-    else:
-        ended.append(record)
 
 
 def team_usage_runs(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[tuple[AnyRunRecord, RunMetrics]]:
@@ -372,12 +321,12 @@ def _answer_delegations(
 
     A result waited on one of the ``resumed`` members when it is the notice the delegation gave for that member's
     pause (``waited_on_member``). The replacement lands on the run's tool entries and on the leader's request, so the
-    leader reads the members' results where it read the pause notice. ``results`` holds only the members resumed in
-    this call, so a collaborate sibling's text that completed earlier, or a member completed in an earlier chained
-    resume, no longer reaches the leader; Agno 3.0.9 lost it the same way, and the request-body parity contract keeps
-    that.
+    leader reads the members' results where it read the pause notice.
     """
-    text = "\n".join([MEMBER_RESULTS_HEADING, *results])
+    # TODO(simplify): ``results`` holds only the members resumed in this call, so a collaborate sibling that completed
+    # earlier, or a member completed in an earlier chained resume, never reaches the leader (Agno 3.0.9 lost it too).
+    # Hand the leader every member's result. Models would notice (#3075).
+    text = "\n".join(["Member results after human-in-the-loop resolution:", *results])
     answered: set[str | None] = set()
     for tool in record.tools or ():
         if any(waited_on_member(tool, member) for member in resumed):
@@ -442,30 +391,28 @@ class _MemberRuns:
     async def run(self, member: TeamMember, task: str) -> RunRecord:
         """Run ``member`` on the leader's task as a child of the team run; the task text is its whole input."""
         ctx = self._member_context(str(uuid4()))
-        ended: list[RunRecord] = []
         stream = run_agent(
             member.spec,
             [Message(role="user", content=task)],
             ctx=ctx,
             hooks=member.hooks(ctx.run_id),
-            persist=self._capture(ended),
+            persist=self._persist,
             request_template=self._request_template(member),
         )
-        return await self._finish(member, ctx.run_id, stream, ended)
+        return await self._finish(member, ctx.run_id, stream)
 
     async def resume(self, member: TeamMember, paused: RunRecord, plan: ResumePlan) -> RunRecord:
         """Resume ``member``'s paused run, under that run's hooks, from its stored messages, which hold no history."""
-        ended: list[RunRecord] = []
         stream = resume_planned(
             member.spec,
             plan,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
             ctx=self._member_context(paused.run_id),
             hooks=member.hooks(paused.run_id),
-            persist=self._capture(ended),
+            persist=self._persist,
             request_template=self._request_template(member),
         )
-        return await self._finish(member, paused.run_id, stream, ended)
+        return await self._finish(member, paused.run_id, stream)
 
     def _request_template(self, member: TeamMember) -> ModelRequest:
         return replace(member.request_template, stream=self.stream)
@@ -474,23 +421,19 @@ class _MemberRuns:
         """Return a member run's context: the team run's, so its tools share the team's state, under its own run id."""
         return replace(self.ctx, run_id=run_id, parent_run_id=self.record.run_id)
 
-    def _capture(self, ended: list[RunRecord]) -> Persist[RunRecord]:
-        async def persist(record: RunRecord) -> None:
-            ended.append(record)
-            _keep_ended_member_run(self.record.ended_member_runs, record)
-            if self.persist is not None:
-                await self.persist(record)
+    async def _persist(self, record: RunRecord) -> None:
+        # The team keeps member runs in the order they first ended; a member resumed within the run ends twice, and
+        # its later record replaces the paused one where it stood, as Agno continued the paused output in place.
+        run_ids = [run.run_id for run in self.record.ended_member_runs]
+        if record.run_id in run_ids:
+            self.record.ended_member_runs[run_ids.index(record.run_id)] = record
+        else:
+            self.record.ended_member_runs.append(record)
+        if self.persist is not None:
+            await self.persist(record)
 
-        return persist
-
-    async def _finish(
-        self,
-        member: TeamMember,
-        run_id: str,
-        stream: AsyncIterator[RunEvent],
-        ended: list[RunRecord],
-    ) -> RunRecord:
-        """Forward the member's events and return its terminal record.
+    async def _finish(self, member: TeamMember, run_id: str, stream: AsyncIterator[RunEvent]) -> RunRecord:
+        """Forward the member's events and return the terminal record its loop stored however it ended.
 
         A member whose run fails is stored ``ERROR`` by its loop and still reaches the leader, as Agno absorbed a
         member's error into the member's run, with the reason its record carries (``handover_content``); only
@@ -513,17 +456,46 @@ class _MemberRuns:
                 run_id=run_id,
                 error=str(error),
             )
-        return ended[-1]
+        return next(run for run in self.record.ended_member_runs if run.run_id == run_id)
 
 
-async def _forward(stream: AsyncIterator[RunEvent], emit: Emit) -> None:
-    async with closing_async_stream(stream):
-        async for event in stream:
-            emit(event)
+async def _drive_team(
+    spec: TeamSpec,
+    record: TeamRunRecord,
+    messages: list[Message],
+    *,
+    ctx: RunContext,
+    hooks: LoopHooks,
+    persist: Persist[AnyRunRecord] | None,
+    template: ModelRequest,
+    entry: Callable[[_MemberRuns], Awaitable[None]] | None = None,
+    resumed: Sequence[RunRequirement] | None = None,
+) -> AsyncIterator[TeamRunEvent]:
+    """Stream the leader's loop over ``messages`` and its members' runs, owning the team run's cancellation.
 
+    ``entry`` is the work the run does with its members before the loop, and ``resumed`` the leader's decided calls.
+    """
 
-async def _team_stream(produce: Callable[[Emit], Awaitable[None]]) -> AsyncIterator[TeamRunEvent]:
-    """Stream what ``produce`` emits while it runs the team, owning its cancellation."""
+    async def produce(emit: Emit) -> None:
+        members = _MemberRuns(spec, record, ctx, emit, persist, stream=template.stream)
+        leader = _leader_spec(spec, record, members.run, stream=template.stream)
+        stream = drive_run(
+            leader,
+            record,
+            messages,
+            prepare_run_tools(leader),
+            ctx=ctx,
+            hooks=hooks,
+            persist=persist,
+            template=template,
+            entry=None if entry is None else lambda: entry(members),
+            resumed=resumed,
+            pause_content=team_paused_content,
+        )
+        async with closing_async_stream(stream):
+            async for event in stream:
+                emit(event)
+
     stream = callback_event_stream(produce)
     async with closing_async_stream(stream):
         async for item in stream:
@@ -533,12 +505,8 @@ async def _team_stream(produce: Callable[[Emit], Awaitable[None]]) -> AsyncItera
 
 
 __all__ = [
-    "MEMBER_RESULTS_HEADING",
-    "MEMBER_RESULT_LINE",
-    "MEMBER_TASK_COMPLETED",
     "Emit",
     "MemberEvent",
-    "MemberLoopEvent",
     "TeamCallKey",
     "TeamRunEvent",
     "continue_team",

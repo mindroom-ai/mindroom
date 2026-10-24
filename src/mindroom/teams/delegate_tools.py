@@ -13,7 +13,7 @@ import asyncio
 import json
 from copy import deepcopy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
@@ -22,7 +22,7 @@ from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.tool_function import AdaptedToolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Sequence
+    from collections.abc import Callable, Coroutine, Sequence
 
     from mindroom.llm.runs import RunRecord, TeamRunRecord, ToolExecution
     from mindroom.teams.spec import TeamMember
@@ -31,17 +31,9 @@ if TYPE_CHECKING:
 MEMBER_PAUSED_RESULT = "Member '{name}' requires human input before continuing."
 COLLABORATE_MEMBER_PAUSED_RESULT = "Agent {name}: Requires human input before continuing."
 NO_MEMBER_RESPONSE = "No response from the member agent."
-# How Agno's non-stream collaborate delegation labeled each member's result, and its text for a member left blank.
-_COLLABORATE_MEMBER_RESULT = "Agent {name}: {result}"
-_COLLABORATE_BLANK_RESULT = "No Response"
 
-
-class MemberRunner(Protocol):
-    """Run one member on the leader's task and return its terminal record, whatever its status."""
-
-    def __call__(self, member: TeamMember, task: str) -> Coroutine[Any, Any, RunRecord]:
-        """Run ``member`` on ``task``."""
-        ...
+# Runs one member on the leader's task and returns its terminal record, whatever its status.
+type MemberRunner = Callable[[TeamMember, str], Coroutine[Any, Any, RunRecord]]
 
 
 def delegate_functions(
@@ -105,6 +97,8 @@ def member_result_text(child: RunRecord, *, stream: bool) -> str:
     The rules read the content the run hands over (``handover_content``), so a failed member gives the reason its
     run recorded, credentials redacted, where Agno gave the member's content: stale text, or the raw error.
     """
+    # TODO(simplify): The rules differ by stream mode: without streaming, a run with tools but no content reads
+    # ``null`` and a blank run without tools reads empty. Use the streamed rules in both modes. Models would notice.
     return _streamed_result(child) if stream else _blocking_result(child)
 
 
@@ -152,6 +146,9 @@ def collaborate_result_text(
     Blocking, a piece is the member's result labeled with its name, as Agno's non-stream broadcast gave it. A paused
     member contributes Agno's notice and its requirements reach the team run.
     """
+    # TODO(simplify): Pieces join with no separator, and a finished member's piece is labeled only without streaming,
+    # by a third result rule (``_labeled_result``). Label every piece by one rule and separate pieces with blank lines.
+    # Models would notice.
     pieces: list[str] = []
     for member, child in zip(members, children, strict=True):
         if child.status is RunStatus.paused:
@@ -160,7 +157,7 @@ def collaborate_result_text(
         elif stream:
             pieces.append(_streamed_result(child))
         else:
-            pieces.append(_COLLABORATE_MEMBER_RESULT.format(name=member.spec.name, result=_labeled_result(child)))
+            pieces.append(f"Agent {member.spec.name}: {_labeled_result(child)}")
     return "".join(pieces)
 
 
@@ -177,7 +174,7 @@ def _labeled_result(child: RunRecord) -> str:
             return content
         if child.tools:
             return ",".join(tool.result or "" for tool in child.tools)
-        return _COLLABORATE_BLANK_RESULT
+        return "No Response"
     return _json_text(content)
 
 
