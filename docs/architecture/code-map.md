@@ -410,7 +410,7 @@ Matrix sync callback
 | `agent_loop/tools.py` | The tools a run offers, and one assistant message's tool calls planned, run, and answered: resolution, the tool-call limit, pause classification, and result messages |
 | `agent_loop/build.py` | `AgentBuild`, what `create_agent` produces for the loop, and `prompt_for_turn`, its system message with one turn's context appended |
 | `agent_loop/prompt.py` | `PromptSpec` and `render_system_message`: an agent's system message from its prompt inputs, in the layout Agno 3.0.9 sent |
-| `agent_loop/structured.py` | Structured-output response formats and JSON prompt per provider capability, and lenient parsing of answers into the schema |
+| `agent_loop/structured.py` | The JSON prompt a JSON-mode route needs for an output schema, and lenient parsing of answers into the schema |
 | `agent_loop/helper.py` | `complete_once`: one tool-less helper request, optionally read into a schema, with the run record its usage is saved from; `complete_prompt` renders the helper's system message for it |
 | `agent_loop/output_limit.py` | `output_limit_policy`: answers the tool calls of a response the output limit cut off instead of running them, and fails the run on the third cut-off response |
 | `agent_loop/tool_search.py` | `resolve_call_tool_calls`: routes a model's portable `call_tool` wrapper calls to the deferred functions they name before the loop resolves them |

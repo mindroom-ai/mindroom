@@ -103,6 +103,7 @@ if TYPE_CHECKING:
         NativeHistoryRoute,
         PortableReplayEstimator,
         StreamEvent,
+        StructuredOutput,
         ToolChoice,
     )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -168,6 +169,7 @@ class ModelCall:
     messages: list[OwnedMessage]
     tools: list[dict[str, Any]] | None
     tool_choice: ToolChoice | None
+    # The goldens hold the format Agno's agent resolved for the route (``agno_response_format``).
     response_format: dict[str, Any] | type[BaseModel] | None
     # Routes with native tool search send these tools with defer_loading below the recorder, so the record names them.
     deferred_tool_names: list[str]
@@ -196,17 +198,17 @@ class Recorder:
         """
         return sorted(self.calls, key=lambda call: call.model_index)
 
-    def _respond_to_request(self, identity: ModelIdentity, index: int, request: ModelRequest) -> OwnedMessage:
+    def _respond_to_request(self, adapter: ModelProvider, index: int, request: ModelRequest) -> OwnedMessage:
         call = ModelCall(
-            model_id=identity.id,
-            model_provider=identity.provider,
+            model_id=adapter.identity.id,
+            model_provider=adapter.identity.provider,
             model_index=index,
             stream=request.stream,
             messages=deepcopy(list(request.messages)),
             # The goldens hold Agno's formatted tools; the owned definition formats the same way, None omitted.
             tools=[{"type": "function", "function": function_definition(tool)} for tool in request.tools],
             tool_choice=request.tool_choice,
-            response_format=request.response_format,
+            response_format=agno_response_format(request.output_schema, adapter.capabilities.structured_output),
             deferred_tool_names=sorted(request.deferred_tool_names),
         )
         self.calls.append(call)
@@ -218,7 +220,7 @@ class Recorder:
         return index
 
     def _bind_adapter(self, adapter: ModelProvider) -> _RecordingAdapter:
-        return _RecordingAdapter(adapter, partial(self._respond_to_request, adapter.identity, self._next_index()))
+        return _RecordingAdapter(adapter, partial(self._respond_to_request, adapter, self._next_index()))
 
     @contextmanager
     def installed(self) -> Iterator[None]:
@@ -304,6 +306,22 @@ def message_dict(message: OwnedMessage) -> dict[str, Any]:
     if not message.add_to_agent_memory:
         data["add_to_agent_memory"] = False
     return data
+
+
+def agno_response_format(
+    schema: type[BaseModel] | None,
+    structured_output: StructuredOutput,
+) -> dict[str, Any] | type[BaseModel] | None:
+    """Return the response format Agno's agent resolved for ``schema`` on a route with ``structured_output`` support.
+
+    Agno passed models with native structured output the class, JSON-schema models a ``json_schema`` format, and
+    every other model JSON mode; the owned request carries only the schema, which each adapter renders.
+    """
+    if schema is None or structured_output == "native":
+        return schema
+    if structured_output == "json_schema":
+        return {"type": "json_schema", "json_schema": {"name": schema.__name__, "schema": schema.model_json_schema()}}
+    return {"type": "json_object"}
 
 
 def response_format_dict(response_format: object) -> object:

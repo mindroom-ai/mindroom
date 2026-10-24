@@ -15,7 +15,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from mindroom.agent_loop.prompt import PromptSpec, render_system_message
-from mindroom.agent_loop.structured import parse_structured, select_response_format
+from mindroom.agent_loop.structured import output_format_prompt, parse_structured
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -25,7 +25,6 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.agent_loop.structured import ResponseFormat
     from mindroom.llm.provider import ModelProvider
 
 logger = get_logger(__name__)
@@ -47,21 +46,21 @@ async def complete_once[T: BaseModel](
     provider: ModelProvider,
     messages: Sequence[Message],
     *,
-    response_format: ResponseFormat[T] | None = None,
+    schema: type[T] | None = None,
     overrides: RequestOverrides | None = None,
     run_id: str | None = None,
 ) -> HelperResult[T]:
     """Send ``messages`` as one request and return the answer with a completed run record.
 
-    ``response_format`` comes from ``structured.select_response_format``; its prompt must already end the system
-    message.
+    ``schema`` asks for structured output; the system message must already end with its
+    ``structured.output_format_prompt``.
     """
     started = perf_counter()
     turn = await complete(
         provider,
         ModelRequest(
             messages=tuple(messages),
-            response_format=None if response_format is None else response_format.request_format,
+            output_schema=schema,
             overrides=overrides or RequestOverrides(),
             stream=False,
         ),
@@ -70,9 +69,9 @@ async def complete_once[T: BaseModel](
     metrics = RunMetrics(duration=perf_counter() - started)
     metrics.add(turn.usage, model_id=identity.id, provider=identity.provider_name)
     text = turn.content
-    parsed = None if response_format is None else parse_structured(text, response_format.schema)
-    if response_format is not None and parsed is None:
-        logger.warning("helper_structured_output_unparsed", schema=response_format.schema.__name__)
+    parsed = None if schema is None else parse_structured(text, schema)
+    if schema is not None and parsed is None:
+        logger.warning("helper_structured_output_unparsed", schema=schema.__name__)
     record = RunRecord(
         run_id=run_id or str(uuid4()),
         status=RunStatus.completed,
@@ -100,18 +99,17 @@ async def complete_prompt[T: BaseModel](
     ``schema`` asks for structured output the way ``provider`` supports it, so JSON-mode routes also get the JSON
     prompt at the end of the system message.
     """
-    response_format = None if schema is None else select_response_format(provider.capabilities, schema)
     system = render_system_message(
         PromptSpec(
             role=role,
             instructions=tuple(instructions),
-            output_format_prompt=None if response_format is None else response_format.prompt,
+            output_format_prompt=output_format_prompt(provider.capabilities, schema),
         ),
     )
     return await complete_once(
         provider,
         [system, Message(role="user", content=prompt)],
-        response_format=response_format,
+        schema=schema,
         overrides=overrides,
         run_id=run_id,
     )

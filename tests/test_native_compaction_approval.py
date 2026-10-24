@@ -22,13 +22,13 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.native_compaction import _NATIVE_CHECKPOINT_KEY, record_native_checkpoint, replay_basis
+from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, replay_basis
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
-from tests.history_helpers import _team_session
+from tests.history_helpers import _team_session, record_native_checkpoint
 from tests.identity_helpers import entity_ids
 from tests.providers.openai_family_support import responses_adapter
 from tests.team_turn_helpers import SESSION_ID, delegate, member_approval, squad_turn
@@ -93,7 +93,7 @@ def _paused_record(*, saved: dict[str, object] | None, portable: object = None) 
     """Return a run paused on ``lookup`` whose last response recorded the given native provenance."""
     provider_data: dict[str, object] = {}
     if saved is not None:
-        provider_data[_NATIVE_CHECKPOINT_KEY] = saved
+        provider_data[NATIVE_CHECKPOINT_KEY] = saved
     if portable is not None:
         provider_data["mindroom_portable_replay"] = portable
     tool = ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={}, requires_confirmation=True)
@@ -120,7 +120,7 @@ def _checkpointed_messages() -> list[Message]:
     checkpoint = {"route": "route-a", "threshold": 1024, "checkpoint_prefix": True, "items": [_CHECKPOINT]}
     return [
         Message(role="user", content=_TRANSCRIPT),
-        Message(role="assistant", content="Noted.", provider_data={_NATIVE_CHECKPOINT_KEY: checkpoint}),
+        Message(role="assistant", content="Noted.", provider_data={NATIVE_CHECKPOINT_KEY: checkpoint}),
     ]
 
 

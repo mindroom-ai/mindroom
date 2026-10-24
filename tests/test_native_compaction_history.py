@@ -28,7 +28,7 @@ from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.usage import MessageMetrics
-from mindroom.native_compaction import checkpoint_summary, record_native_checkpoint, replay_basis
+from mindroom.native_compaction import checkpoint_summary, replay_basis
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import seed_session
@@ -40,6 +40,7 @@ from tests.history_helpers import (
     _session,
     _team_session,
     compact_runs,
+    record_native_checkpoint,
 )
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
 from tests.providers.bare_adapter import bare_adapter

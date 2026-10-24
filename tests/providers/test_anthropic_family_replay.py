@@ -19,10 +19,9 @@ from mindroom.history.types import ScopeSummary
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec
-from mindroom.native_compaction import record_native_checkpoint
 from mindroom.providers.anthropic import prompt_cache
 from mindroom.providers.anthropic.native_compaction import native_replay_messages_for_route
-from tests.history_helpers import _completed_run, _session
+from tests.history_helpers import _completed_run, _session, record_native_checkpoint
 from tests.providers.anthropic_family_support import (
     claude_turn,
     json_reply,

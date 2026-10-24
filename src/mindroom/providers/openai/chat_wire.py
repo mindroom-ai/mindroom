@@ -14,13 +14,11 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import cache
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel
-
 from mindroom.llm.messages import split_thinking
-from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, UsageReported
+from mindroom.llm.provider import ReasoningDelta, StopReason, StructuredOutput, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.openai.errors import error_body_error
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
@@ -33,6 +31,7 @@ if TYPE_CHECKING:
 
     from openai.types import CompletionUsage
     from openai.types.chat import ChatCompletion, ChatCompletionChunk
+    from pydantic import BaseModel
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import StreamEvent, ToolChoice, ToolSpec
@@ -226,17 +225,24 @@ def _chat_tools(tools: Sequence[ToolSpec], wire: ChatWire) -> list[dict[str, Any
     return sorted(formatted, key=lambda tool: tool["function"]["name"])
 
 
-def _json_schema_format(response_format: type[BaseModel] | Mapping[str, Any], *, strict: bool) -> dict[str, Any]:
-    if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-        return {
-            "type": "json_schema",
-            "json_schema": {
-                "name": response_format.__name__,
-                "schema": strict_response_schema(response_format),
-                "strict": strict,
-            },
-        }
-    return dict(cast("Mapping[str, Any]", response_format))
+def _response_format(
+    schema: type[BaseModel] | None,
+    structured_output: StructuredOutput,
+    *,
+    strict: bool,
+) -> dict[str, Any] | None:
+    """Return the ``response_format`` that asks the route for ``schema``, or for JSON when it enforces no schema."""
+    if schema is None:
+        return None
+    if structured_output == "json_mode":
+        return {"type": "json_object"}
+    if structured_output == "native":
+        json_schema = strict_response_schema(schema)
+    else:
+        # Cerebras advertises ``json_schema`` structured output, which needs every object of the schema closed.
+        json_schema = schema.model_json_schema()
+        _close_cerebras_objects(json_schema)
+    return {"type": "json_schema", "json_schema": {"name": schema.__name__, "schema": json_schema, "strict": strict}}
 
 
 def _close_cerebras_objects(schema: Any) -> None:  # noqa: ANN401 - any JSON schema node
@@ -303,22 +309,16 @@ def _reject_native_search(params: Mapping[str, Any], model_id: str, wire: ChatWi
 def _dialect_params(
     settings: ChatSettings,
     wire: ChatWire,
-    response_format: type[BaseModel] | Mapping[str, Any] | None,
+    response_format: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Return the route dialect's request parameters that are set, structured output included."""
-    prepared = None if response_format is None else _json_schema_format(response_format, strict=settings.strict_output)
-    if prepared is not None and wire.dialect == "cerebras":
-        # Cerebras advertises ``json_schema`` structured output, which needs every object of the schema closed.
-        prepared = deepcopy(prepared)
-        prepared["json_schema"].setdefault("strict", settings.strict_output)
-        _close_cerebras_objects(prepared["json_schema"]["schema"])
     if wire.dialect == "groq":
         fields = settings.groq_request_fields()
     elif wire.dialect == "cerebras":
         fields = settings.cerebras_request_fields()
     else:
         fields = settings.openai_request_fields()
-    return {key: value for key, value in {**fields, "response_format": prepared}.items() if value is not None}
+    return {key: value for key, value in {**fields, "response_format": response_format}.items() if value is not None}
 
 
 def _add_tools(
@@ -392,7 +392,8 @@ def chat_request_kwargs(
     messages: Sequence[Message],
     tools: Sequence[ToolSpec],
     tool_choice: ToolChoice | None,
-    response_format: type[BaseModel] | Mapping[str, Any] | None,
+    output_schema: type[BaseModel] | None,
+    structured_output: StructuredOutput,
     stream: bool,
     settings: ChatSettings,
     wire: ChatWire,
@@ -401,6 +402,7 @@ def chat_request_kwargs(
 
     Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
+    response_format = _response_format(output_schema, structured_output, strict=settings.strict_output)
     params = _dialect_params(settings, wire, response_format)
     _add_tools(
         params,

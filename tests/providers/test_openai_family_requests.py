@@ -25,7 +25,12 @@ from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import chat_request_kwargs, parse_chat_completion
 from mindroom.providers.openai.legacy_replay import repair_legacy_responses_span
 from mindroom.providers.openai.responses import ResponsesAdapter
-from mindroom.providers.openai.responses_wire import parse_response, responses_input, responses_request_kwargs
+from mindroom.providers.openai.responses_wire import (
+    parse_response,
+    responses_input,
+    responses_replay,
+    responses_request_kwargs,
+)
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
@@ -111,10 +116,12 @@ def _parsed(adapter: ResponsesAdapter, output: list[dict[str, Any]], **message: 
 
 def _input(messages: list[Message], *, store: bool | None = False, portable: bool = False, **kwargs: Any) -> list[Any]:  # noqa: ANN401
     return responses_input(
-        messages,
-        store=store,
-        portable_replay=portable,
-        native_compaction=kwargs.get("native_compaction"),
+        responses_replay(
+            messages,
+            store=store,
+            portable_replay=portable,
+            native_compaction=kwargs.get("native_compaction"),
+        ),
         cache_system_prompt=kwargs.get("cache_system_prompt", False),
         explicit_breakpoint=kwargs.get("explicit_breakpoint", False),
     )
@@ -895,7 +902,8 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
         messages=[Message(role="user", content="Hi")],
         tools=(),
         tool_choice=None,
-        response_format=None,
+        output_schema=None,
+        structured_output=adapter.capabilities.structured_output,
         stream=True,
         settings=adapter.settings,
         wire=adapter.wire,

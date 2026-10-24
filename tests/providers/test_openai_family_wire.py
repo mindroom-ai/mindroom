@@ -14,7 +14,6 @@ import pytest
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
-from mindroom.agent_loop.structured import select_response_format
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
@@ -1264,11 +1263,13 @@ async def test_cerebras_structured_output_closes_every_object(tmp_path: Path) ->
         {"provider": "cerebras", "id": "gpt-oss-120b", "api_key": "k"},
         _chat_reply(_chunk({"content": "{}"}, finish_reason="stop")),
     )
-    response_format = select_response_format(built.adapter.capabilities, _Extraction).request_format
+    await _turn(built, ModelRequest(messages=[_user()], output_schema=_Extraction))
 
-    await _turn(built, ModelRequest(messages=[_user()], response_format=response_format))
-
-    sent = built.body()["response_format"]["json_schema"]
+    response_format = built.body()["response_format"]
+    sent = response_format["json_schema"]
+    # The format keeps the order the helper always sent: ``type`` first, the properties in field order.
+    assert (list(response_format), list(sent)) == (["type", "json_schema"], ["name", "schema", "strict"])
+    assert list(sent["schema"]["$defs"]["_Entity"]["properties"]) == list(_Entity.model_fields) == ["name", "kind"]
     assert sent["strict"] is True
     assert sent["schema"]["additionalProperties"] is False
     assert sent["schema"]["$defs"]["_Entity"]["additionalProperties"] is False

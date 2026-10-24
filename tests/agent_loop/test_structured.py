@@ -11,14 +11,14 @@ from agno.utils.string import parse_response_model_str
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from pydantic import BaseModel, Field
 
-from mindroom.agent_loop.structured import json_output_prompt, parse_structured, select_response_format
+from mindroom.agent_loop.structured import json_output_prompt, output_format_prompt, parse_structured
 from mindroom.llm.provider import Capabilities
 from mindroom.routing import _RoutingSuggestion
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.teams.formation import _TeamModeDecision
 from mindroom.thread_summary import _ThreadEnrichment, _ThreadSummary
 from mindroom.topic_generator import _RoomTopic
-from tests.agno_parity.prompt_scenarios import load_golden, response_format_dict
+from tests.agno_parity.prompt_scenarios import load_golden
 
 HELPER_SCHEMAS: dict[str, type[BaseModel]] = {
     "knowledge_graph": ExtractedEntities,
@@ -39,19 +39,6 @@ def _first_request(name: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("helper", sorted(HELPER_SCHEMAS))
-def test_response_formats_equal_the_helper_goldens(helper: str) -> None:
-    """Claude gets the schema, Cerebras Agno's json_schema format, and Vertex Claude JSON mode."""
-    schema = HELPER_SCHEMAS[helper]
-    for route, capabilities in (("anthropic", NATIVE), ("cerebras", JSON_SCHEMA), ("vertexai_claude", JSON_MODE)):
-        selected = select_response_format(capabilities, schema)
-        assert (
-            response_format_dict(selected.request_format)
-            == _first_request(f"helper_{helper}_{route}")["response_format"]
-        )
-        assert selected.schema is schema
-
-
-@pytest.mark.parametrize("helper", sorted(HELPER_SCHEMAS))
 def test_only_json_mode_ends_the_system_message_with_the_json_prompt(helper: str) -> None:
     """The JSON prompt follows the helper's own prompt after a blank line, on the JSON-mode route only."""
     schema = HELPER_SCHEMAS[helper]
@@ -59,13 +46,13 @@ def test_only_json_mode_ends_the_system_message_with_the_json_prompt(helper: str
         route: _first_request(f"helper_{helper}_{route}")["messages"][0]["content"]
         for route in ("anthropic", "cerebras", "vertexai_claude")
     }
-    prompt = select_response_format(JSON_MODE, schema).prompt
+    prompt = output_format_prompt(JSON_MODE, schema)
 
     assert prompt is not None
     assert system["vertexai_claude"] == f"{system['anthropic']}\n\n{prompt}"
     assert system["cerebras"] == system["anthropic"]
-    assert select_response_format(NATIVE, schema).prompt is None
-    assert select_response_format(JSON_SCHEMA, schema).prompt is None
+    assert output_format_prompt(NATIVE, schema) is None
+    assert output_format_prompt(JSON_SCHEMA, schema) is None
 
 
 class _Color(StrEnum):

@@ -32,7 +32,6 @@ from anthropic.types.beta import (
     BetaThinkingDelta,
     BetaToolUseBlock,
 )
-from pydantic import BaseModel
 
 from mindroom.constants import runtime_env_path
 from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
@@ -95,13 +94,14 @@ from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator
 
     import httpx
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types.beta import BetaMessage
     from google.auth.credentials import Credentials as GoogleCredentials
+    from pydantic import BaseModel
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
@@ -304,16 +304,14 @@ class ClaudeProvider:
             logger.warning("claude_safeguard_refusal", model_id=self.identity.id, stop_reason=raw_stop_reason)
         return UsageReported(message.metrics), TurnCompleted(message=message, stop_reason=stop_reason)
 
-    def _output_format(self, response_format: type[BaseModel] | Mapping[str, Any] | None) -> dict[str, Any] | None:
+    def _output_format(self, schema: type[BaseModel] | None) -> dict[str, Any] | None:
         """Return the ``output_config.format`` value, or None when the route answers in JSON mode instead.
 
-        A route with native structured output always gets the schema's class; a JSON-mode route gets a mapping and
-        relies on the prompt asking for JSON.
+        A JSON-mode route relies on the prompt asking for JSON.
         """
-        native = self.capabilities.structured_output == "native"
-        if not native or not isinstance(response_format, type) or not issubclass(response_format, BaseModel):
+        if schema is None or self.capabilities.structured_output != "native":
             return None
-        return {"type": "json_schema", "schema": anthropic.transform_schema(response_format.model_json_schema())}
+        return {"type": "json_schema", "schema": anthropic.transform_schema(schema.model_json_schema())}
 
     def _authored_params(self, request: ModelRequest) -> dict[str, Any]:
         """Return the model's authored request parameters with the request's overrides applied."""
@@ -389,7 +387,7 @@ class ClaudeProvider:
             route=route,
             manual_thinking=(settings.effective_thinking() or {}).get("type") == "enabled",
         )
-        output_format = self._output_format(request.response_format)
+        output_format = self._output_format(request.output_schema)
         thinking_enabled = settings.thinking_enabled() and not overrides.disable_thinking
         conversation = format_claude_messages(
             projected,

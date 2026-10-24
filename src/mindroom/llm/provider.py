@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 type MediaKind = Literal["audio", "image", "file", "video"]
 type StopReason = Literal["end", "tool_use", "output_limit", "refusal", "content_filter", "incomplete"]
 type ToolChoice = Literal["none"]
+# How a route enforces an output schema: natively, by a JSON-schema response format, or only by JSON mode.
+type StructuredOutput = Literal["native", "json_schema", "json_mode"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -49,7 +51,7 @@ class Capabilities:
     the stream retry and idle limit, unless its caller retries it itself.
     """
 
-    structured_output: Literal["native", "json_schema", "json_mode"] = "json_mode"
+    structured_output: StructuredOutput = "json_mode"
     omitted_media: frozenset[MediaKind] = frozenset()
     native_tool_search: bool = False
     native_compaction: bool = False
@@ -114,6 +116,7 @@ class ModelRequest:
     ``stream=False`` asks for one non-streaming provider call where the route offers one; its usage and finished
     turn still arrive through ``stream()`` after the response completes, without deltas, so callers read its output
     from the finished turn. A route that only streams streams the request, deltas included.
+    ``output_schema`` asks for an answer matching the pydantic class, in the wire format the adapter renders for it.
     ``deferred_tool_names`` name tools kept out of the rendered prompt: routes with native tool search defer
     them server-side, and the portable tool-search wrapper hides them behind ``call_tool`` everywhere else.
     ``portable_replay`` replays history explicitly instead of continuing provider-stored state, and
@@ -123,7 +126,7 @@ class ModelRequest:
     messages: Sequence[Message]
     tools: Sequence[ToolSpec] = ()
     tool_choice: ToolChoice | None = None
-    response_format: type[BaseModel] | Mapping[str, Any] | None = None
+    output_schema: type[BaseModel] | None = None
     overrides: RequestOverrides = RequestOverrides()
     stream: bool = True
     deferred_tool_names: frozenset[str] = frozenset()
@@ -371,6 +374,7 @@ __all__ = [
     "StopReason",
     "StreamEvent",
     "StreamProgress",
+    "StructuredOutput",
     "TextDelta",
     "ToolCallReady",
     "ToolChoice",

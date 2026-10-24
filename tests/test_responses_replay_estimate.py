@@ -28,12 +28,12 @@ from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistoryS
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import NativeCompactionReplay
-from mindroom.native_compaction import checkpoint_estimated_tokens, record_native_checkpoint
-from mindroom.providers.openai.responses_wire import responses_input
+from mindroom.native_compaction import checkpoint_estimated_tokens
+from mindroom.providers.openai.responses_wire import responses_input, responses_replay
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 from tests.conftest import seed_session
-from tests.history_helpers import _completed_run, _make_config, _session
+from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint
 from tests.providers.golden_support import pipeline_provider
 from tests.providers.openai_family_support import responses_adapter
 
@@ -49,10 +49,7 @@ _ALL_HISTORY = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_too
 def _replayed_input(adapter: ResponsesAdapter, messages: list[Message]) -> list[Any]:
     """Return the ``input`` an explicitly replayed request on ``adapter`` sends for ``messages``."""
     return responses_input(
-        messages,
-        store=False,
-        portable_replay=True,
-        native_compaction=None,
+        responses_replay(messages, store=False, portable_replay=True, native_compaction=None),
         cache_system_prompt=adapter.settings.cache_system_prompt,
         explicit_breakpoint=adapter.wire.explicit_breakpoint,
     )

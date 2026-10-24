@@ -138,14 +138,14 @@ async def test_request_settings_come_from_the_template_and_tools_from_the_spec()
     template = ModelRequest(
         messages=(),
         tool_choice="none",
-        response_format=Shape,
+        output_schema=Shape,
         deferred_tool_names=frozenset({"add"}),
     )
 
     await _run(spec(model, toolkit(add, echo)), _prompt(), request_template=template)
 
     [request] = model.requests
-    assert (request.tool_choice, request.response_format, request.deferred_tool_names) == (
+    assert (request.tool_choice, request.output_schema, request.deferred_tool_names) == (
         "none",
         Shape,
         frozenset({"add"}),
