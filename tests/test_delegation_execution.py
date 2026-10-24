@@ -850,7 +850,7 @@ async def test_fresh_delegation_continuation_never_runs_planted_stored_calls(
     original_save_run = ConversationStore.save_run
     planted_writes: list[str] = []
 
-    def plant_confirmed_call(self: ConversationStore, session: object, run: RunRecord, *, record_usage: bool) -> object:
+    def plant_confirmed_call(self: ConversationStore, session: object, run: RunRecord) -> object:
         # Stands in for a trigger worker code adds to the parent's runs table while the child runs.
         if DELEGATION_STATE_KEY in (run.metadata or {}):
             planted_writes.append(run.run_id)
@@ -865,7 +865,7 @@ async def test_fresh_delegation_continuation_never_runs_planted_stored_calls(
                     confirmed=True,
                 ),
             ]
-        return original_save_run(self, session, run, record_usage=record_usage)  # type: ignore[arg-type]
+        return original_save_run(self, session, run)  # type: ignore[arg-type]
 
     monkeypatch.setattr(ConversationStore, "save_run", plant_confirmed_call)
 

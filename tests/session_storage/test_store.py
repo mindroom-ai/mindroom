@@ -26,6 +26,7 @@ from mindroom.session_storage.store import (
     runs_without,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
+from tests.conftest import persist_runs
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -38,12 +39,12 @@ _NAMES = TableNames("code")
 
 
 def _store(tmp_path: Path) -> ConversationStore:
-    return ConversationStore(tmp_path / "code.db", _NAMES, strip_system_messages=True)
+    return ConversationStore(tmp_path / "code.db", _NAMES)
 
 
 @pytest.fixture
 def store(tmp_path: Path) -> ConversationStore:
-    """One ordinary conversation store that leaves system messages out of stored runs."""
+    """One ordinary conversation store."""
     return _store(tmp_path)
 
 
@@ -104,7 +105,7 @@ def _team_run(run_id: str, status: RunStatus = RunStatus.completed, **fields: An
 
 def _seed(store: ConversationStore, runs: list[AnyRunRecord], session: ConversationSession | None = None) -> None:
     for run in runs:
-        store.save_run(session or _session(), run, record_usage=True)
+        store.save_run(session or _session(), run)
 
 
 def _query(store: ConversationStore, sql: str, *parameters: object) -> list[tuple[Any, ...]]:
@@ -302,15 +303,22 @@ def test_a_save_keeping_visibility_never_moves_a_run(store: ConversationStore) -
 
 def test_a_folded_run_is_frozen(store: ConversationStore) -> None:
     """A stale copy of a run behind the latest summary row changes neither its row, its usage, nor the totals."""
-    _seed(store, [_run("p0", RunStatus.paused), _run("r1", content="original", metrics=_usage(10)), _run("r2")])
+    persist_runs(
+        store,
+        _session(),
+        _run("p0", RunStatus.paused),
+        _run("r1", content="original", metrics=_usage(10)),
+        _run("r2"),
+    )
     _summary_after(store, "r2")
     before, usage_before, totals_before = _stored(store, "r1"), _usage_row(store, "r1"), _totals(store)
 
     outcomes = [
-        store.save_run(_session(), _run("r1", RunStatus.paused, content="stale paused"), record_usage=True),
-        store.save_run(_session(), _run("r1", content="stale", metrics=_usage(99)), record_usage=True),
-        store.save_run(_session(), _run("p0", RunStatus.paused, content="still waiting"), record_usage=True),
+        store.save_run(_session(), _run("r1", RunStatus.paused, content="stale paused")),
+        store.save_run(_session(), _run("r1", content="stale", metrics=_usage(99))),
+        store.save_run(_session(), _run("p0", RunStatus.paused, content="still waiting")),
     ]
+    persist_runs(store, _session(), _run("r1", content="stale", metrics=_usage(99)))
 
     assert outcomes == ["frozen", "frozen", "written"]
     assert _stored(store, "r1") == before
@@ -327,8 +335,8 @@ def test_a_member_of_a_folded_team_run_is_frozen(store: ConversationStore) -> No
     _summary_after(store, "t0", "team:eng")
 
     outcomes = [
-        store.save_run(team, _run("m0", parent="t0", agent_id="helper", content="stale"), record_usage=True),
-        store.save_run(team, _run("m-new", parent="t0", agent_id="helper"), record_usage=True),
+        store.save_run(team, _run("m0", parent="t0", agent_id="helper", content="stale")),
+        store.save_run(team, _run("m-new", parent="t0", agent_id="helper")),
     ]
 
     assert outcomes == ["frozen", "frozen"]
@@ -338,13 +346,14 @@ def test_a_member_of_a_folded_team_run_is_frozen(store: ConversationStore) -> No
 
 def test_a_removed_run_is_never_written_again_but_its_usage_counts(store: ConversationStore) -> None:
     """A run a cut deleted, and a member row under it, stay gone; the provider calls behind a late save still count."""
-    _seed(store, [_run("r0", metrics=_usage(10))])
+    persist_runs(store, _session(), _run("r0", metrics=_usage(10)))
     _remove(store, "gone")
 
     outcomes = [
-        store.save_run(_session(), _run("gone", metrics=_usage(5)), record_usage=True),
-        store.save_run(_session(), _run("gone-member", parent="gone", agent_id="helper"), record_usage=False),
+        store.save_run(_session(), _run("gone", metrics=_usage(5))),
+        store.save_run(_session(), _run("gone-member", parent="gone", agent_id="helper")),
     ]
+    persist_runs(store, _session(), _run("gone", metrics=_usage(5)))
 
     assert outcomes == ["removed", "removed"]
     assert _loaded_ids(store) == ["r0"]
@@ -417,7 +426,7 @@ def test_a_usage_write_failure_rolls_back_the_run(store: ConversationStore) -> N
     )
 
     with pytest.raises(sqlite3.IntegrityError, match="usage refused"):
-        store.save_run(_session(), _run("r1"), record_usage=True)
+        persist_runs(store, _session(), _run("r1"))
 
     assert not _has_row(store, "r1")
 
@@ -646,7 +655,7 @@ def test_a_store_without_tables_reads_as_empty(tmp_path: Path) -> None:
     assert not store.has_session("s1", "agent")
     assert store.list_runs("s1") == []
     assert store.get_run("r1") is None
-    assert store.list_updated_sessions("agent", "code", since=0) == []
+    assert store.list_updated_sessions("code", since=0) == []
 
 
 def test_load_returns_none_for_a_missing_session_or_one_of_another_kind(store: ConversationStore) -> None:
@@ -819,7 +828,7 @@ def test_first_writes_to_a_fresh_database_from_many_owners_all_land(tmp_path: Pa
     def first_write(index: int) -> str:
         store = _store(tmp_path)
         start.wait()
-        return store.save_run(_session(f"s{index}"), _run(f"r{index}"), record_usage=True)
+        return store.save_run(_session(f"s{index}"), _run(f"r{index}"))
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         outcomes = list(pool.map(first_write, range(8)))
@@ -916,7 +925,7 @@ def test_a_migration_that_is_not_due_opens_no_write_transaction(tmp_path: Path) 
 
 def test_session_field_writes_leave_the_other_field_and_the_totals_alone(store: ConversationStore) -> None:
     """A state save writes only ``session_state``, a metadata update only ``metadata``, and neither moves the totals."""
-    _seed(store, [_run("r1", metrics=_usage(10))])
+    persist_runs(store, _session(), _run("r1", metrics=_usage(10)))
     session = _loaded(store)
     session.session_state = {"mindroom_pending_compaction_scope_keys": ["agent:code"]}
 
@@ -943,7 +952,7 @@ def test_every_writer_of_a_session_row_stores_absent_metadata_as_json_null(
     session = ConversationSession(session_id="s1", kind="agent", owner_id="code")
     writes = {
         "ensure_session_row": lambda: store.ensure_session_row(session),
-        "save_run": lambda: store.save_run(session, _run("r1"), record_usage=True),
+        "save_run": lambda: store.save_run(session, _run("r1")),
         "save_runs": lambda: store.save_runs(session, [_run("r1")]),
         "save_session_state": lambda: store.save_session_state(session, {}),
         "save_independent_usage": lambda: store.save_independent_usage(
@@ -1009,7 +1018,7 @@ def test_a_saved_run_gives_a_session_row_created_without_a_requester_the_runs(
     run = _requested_run("r1", "@alice:example.test")
 
     if save == "save_run":
-        store.save_run(session, run, record_usage=True)
+        store.save_run(session, run)
     else:
         store.save_runs(session, [run])
 
@@ -1034,11 +1043,11 @@ def test_a_session_row_keeps_the_first_requester_a_run_named(store: Conversation
     """A later run of another requester, or of none, leaves the row's requester alone."""
     session = _session()
 
-    store.save_run(session, _requested_run("r0", None), record_usage=True)
+    store.save_run(session, _requested_run("r0", None))
     assert _row_requester(store) is None
-    store.save_run(session, _requested_run("r1", "@alice:example.test"), record_usage=True)
-    store.save_run(session, _requested_run("r2", "@bob:example.test"), record_usage=True)
-    store.save_run(session, _requested_run("r3", None), record_usage=True)
+    store.save_run(session, _requested_run("r1", "@alice:example.test"))
+    store.save_run(session, _requested_run("r2", "@bob:example.test"))
+    store.save_run(session, _requested_run("r3", None))
 
     assert _row_requester(store) == "@alice:example.test"
 
@@ -1050,8 +1059,8 @@ def test_a_frozen_or_removed_run_does_not_name_the_requester(store: Conversation
     _remove(store, "gone")
 
     outcomes = [
-        store.save_run(_session(), _requested_run("r0", "@alice:example.test"), record_usage=True),
-        store.save_run(_session(), _requested_run("gone", "@alice:example.test"), record_usage=True),
+        store.save_run(_session(), _requested_run("r0", "@alice:example.test")),
+        store.save_run(_session(), _requested_run("gone", "@alice:example.test")),
     ]
 
     assert outcomes == ["frozen", "removed"]
@@ -1063,7 +1072,7 @@ async def test_persist_to_saves_the_record_with_its_usage_and_the_session_state_
     store: ConversationStore,
 ) -> None:
     """The run callback appends the record with its usage, and writes ``session_state`` back only after tools changed it."""
-    _seed(store, [_run("r1", metrics=_usage(10))])
+    persist_runs(store, _session(), _run("r1", metrics=_usage(10)))
     session = _loaded(store)
     persist = persist_to(store, session)
 
@@ -1206,7 +1215,7 @@ async def test_the_save_that_creates_the_session_row_records_the_state_it_stored
     session.session_state["cwd"] = "/repo"
     persist = persist_to(store, session)
 
-    store.save_run(session, _run("r1"), record_usage=True)
+    store.save_run(session, _run("r1"))
 
     assert session.stored_session_state == {"cwd": "/repo"}
     assert session.stored_session_state is not session.session_state
@@ -1296,7 +1305,7 @@ def test_unreadable_session_columns_load_as_empty(store: ConversationStore) -> N
     session = _loaded(store)
     assert (session.session_state, session.metadata) == ({}, None)
 
-    _seed(store, [_run("r1", metrics=_usage(3))])
+    persist_runs(store, _session(), _run("r1", metrics=_usage(3)))
     [(session_data, updated_at)] = _query(store, "SELECT session_data, updated_at FROM code_sessions")
     assert (session_data, updated_at > 5) == ("not json", True)
     assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 3
@@ -1307,12 +1316,12 @@ def test_json_null_session_data_counts_usage_like_an_empty_row(store: Conversati
     store.ensure_session_row(_session())
     _execute(store, "UPDATE code_sessions SET session_data = 'null', updated_at = 5 WHERE session_id = 's1'")
 
-    store.save_run(_session(), _run("r1", RunStatus.paused, metrics=_usage(3)), record_usage=True)
+    persist_runs(store, _session(), _run("r1", RunStatus.paused, metrics=_usage(3)))
     [(updated_at,)] = _query(store, "SELECT updated_at FROM code_sessions")
     assert updated_at > 5
     assert _totals(store)["input_tokens"] == 3
 
-    store.save_run(_session(), _run("r1", metrics=_usage(7)), record_usage=True)
+    persist_runs(store, _session(), _run("r1", metrics=_usage(7)))
     assert _totals(store)["input_tokens"] == 7
 
 
@@ -1321,9 +1330,13 @@ def test_json_null_session_data_counts_usage_like_an_empty_row(store: Conversati
 
 def test_a_run_saved_again_counts_once_in_the_session_totals(store: ConversationStore) -> None:
     """A run saved when it paused, again when it finished, and again to link its reply counts its final usage once."""
-    store.save_run(_session(), _run("r1", RunStatus.paused, metrics=_usage(10)), record_usage=True)
-    store.save_run(_session(), _run("r2", metrics=_usage(100, model="other-model")), record_usage=True)
-    store.save_run(_session(), _run("r1", metrics=_usage(25)), record_usage=True)
+    persist_runs(
+        store,
+        _session(),
+        _run("r1", RunStatus.paused, metrics=_usage(10)),
+        _run("r2", metrics=_usage(100, model="other-model")),
+        _run("r1", metrics=_usage(25)),
+    )
     session = _loaded(store)
     linked = copy.deepcopy(session.runs[-1])
     linked.metadata = {"matrix_response_event_id": "$reply"}
@@ -1340,14 +1353,11 @@ def test_a_run_saved_again_counts_once_in_the_session_totals(store: Conversation
 
 def test_team_member_runs_count_in_their_team_sessions_totals(store: ConversationStore) -> None:
     """Each member row and the team row add their own usage once."""
-    team = _session(kind="team", owner="eng")
-    _seed(
+    persist_runs(
         store,
-        [
-            _run("m1", parent="t1", agent_id="helper", metrics=_usage(7, model="helper-model")),
-            _team_run("t1", metrics=_usage(30)),
-        ],
-        team,
+        _session(kind="team", owner="eng"),
+        _run("m1", parent="t1", agent_id="helper", metrics=_usage(7, model="helper-model")),
+        _team_run("t1", metrics=_usage(30)),
     )
 
     totals = _totals(store)
@@ -1363,10 +1373,10 @@ def test_usage_saves_move_the_sessions_update_time_and_rewrites_do_not(store: Co
     store.save_runs(session, [_run("r1", content="rewritten")])
     assert _query(store, "SELECT updated_at FROM code_sessions") == [(5,)]
 
-    store.save_run(session, _run("r2"), record_usage=False)
+    store.save_run(session, _run("r2"))
     assert _query(store, "SELECT updated_at FROM code_sessions") == [(5,)]
 
-    store.save_run(session, _run("r3"), record_usage=True)
+    persist_runs(store, session, _run("r3"))
     [(updated_at,)] = _query(store, "SELECT updated_at FROM code_sessions")
     assert updated_at > 5
 
@@ -1421,12 +1431,13 @@ def test_independent_usage_needs_its_conversation_row(store: ConversationStore) 
         )
 
 
-def test_list_updated_sessions_returns_an_owners_sessions_updated_after_the_cursor(store: ConversationStore) -> None:
-    """Sessions are listed per kind and owner, oldest update first, strictly after the cursor."""
+def test_list_updated_sessions_returns_an_agents_sessions_updated_after_the_cursor(store: ConversationStore) -> None:
+    """An agent's sessions are listed oldest update first, strictly after the cursor; team sessions are not."""
     for session_id, owner, updated_at in (("a", "code", 10), ("b", "code", 30), ("c", "code", 20), ("d", "other", 40)):
         store.ensure_session_row(_session(session_id, owner=owner))
         _execute(store, "UPDATE code_sessions SET updated_at = ? WHERE session_id = ?", updated_at, session_id)
     store.ensure_session_row(_session("t", kind="team", owner="code"))
+    # A team row that also names the agent is still not one of the agent's sessions.
+    _execute(store, "UPDATE code_sessions SET agent_id = 'code', updated_at = 50 WHERE session_id = 't'")
 
-    assert store.list_updated_sessions("agent", "code", since=10) == [("c", 20), ("b", 30)]
-    assert [session_id for session_id, _ in store.list_updated_sessions("team", "code", since=0)] == ["t"]
+    assert store.list_updated_sessions("code", since=10) == [("c", 20), ("b", 30)]

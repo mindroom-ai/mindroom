@@ -23,6 +23,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
 from mindroom.usage.storage import quote_identifier
+from tests.conftest import persist_runs
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -129,8 +130,7 @@ def _stored_team(
     )
     storage.ensure_session_row(session)
     # The member is saved twice, as a run saved again at a checkpoint is; its calls count once.
-    for run in (leader, member, grandchild, member):
-        storage.save_run(session, run, record_usage=True)
+    persist_runs(storage, session, leader, member, grandchild, member)
     yield storage
 
 

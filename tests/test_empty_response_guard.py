@@ -159,7 +159,7 @@ def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tm
             metadata={},
         ),
     )
-    storage.save_run(live_session, _completed_run("run-empty", None), record_usage=False)
+    storage.save_run(live_session, _completed_run("run-empty", None))
 
     discard_empty_completed_run(
         scope_context=ScopeSessionContext(

@@ -24,7 +24,7 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
-from tests.conftest import seed_session
+from tests.conftest import persist_runs, persist_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -281,7 +281,7 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
             ],
         },
     )
-    seed_session(
+    persist_session(
         storage,
         ConversationSession(
             kind="agent",
@@ -348,14 +348,14 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
     storage = create_state_storage("code", paths.storage_root / "agents" / "code")
     with monkeypatch.context() as clock:
         clock.setattr("mindroom.session_storage.store.time", lambda: started)
-        session = seed_session(
+        session = persist_session(
             storage,
             ConversationSession(kind="agent", session_id="session-1", owner_id="code", runs=[run]),
         )
         run.messages = [*run.messages, request(resumed)]
         run.metrics = metrics(2_000_000)
         clock.setattr("mindroom.session_storage.store.time", lambda: resumed)
-        storage.save_run(session, run, record_usage=True)
+        persist_runs(storage, session, run)
 
     snapshot = collect_monthly_spend(config, paths, NOW, _price_table(config, paths).prices)
 

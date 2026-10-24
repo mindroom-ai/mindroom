@@ -255,7 +255,6 @@ async def _exercise_team_member_assembly(
             team_id="research",
             status=RunStatus.paused,
         ),
-        record_usage=False,
     )
     monkeypatch.setattr("mindroom.teams.resume.build_team_spec", inspect_members)
     with pytest.raises(_MemberAssemblyObservedError):

@@ -27,8 +27,8 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
+    persist_session,
     runtime_paths_for,
-    seed_session,
     seed_session_metrics,
     test_runtime_paths,
 )
@@ -103,7 +103,7 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
     context = _context(tmp_path, administrators=["@alice:example.test"])
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
     storage = create_state_storage("usage", context.runtime_paths.storage_root / "agents" / "usage")
-    seed_session(
+    persist_session(
         storage,
         ConversationSession(
             kind="agent",

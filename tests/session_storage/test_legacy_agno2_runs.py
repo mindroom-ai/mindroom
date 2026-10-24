@@ -130,7 +130,7 @@ def test_a_database_with_summary_rows_is_never_migrated_again(tmp_path: Path) ->
     migrate_to_summary_rows(db_file, _NAMES)
     store = ConversationStore(db_file, _NAMES)
     session = ConversationSession(session_id="session-1", kind="agent", owner_id="code")
-    store.save_run(session, RunRecord(run_id="run-4", agent_id="code", created_at=4), record_usage=False)
+    store.save_run(session, RunRecord(run_id="run-4", agent_id="code", created_at=4))
     _set_blob(db_file, [_entry("late", 5)])
 
     migrate_to_summary_rows(db_file, _NAMES)

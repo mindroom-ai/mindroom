@@ -143,7 +143,7 @@ async def test_restart_cleanup_uses_latest_attempt_of_the_same_delegation(  # no
     }
     for run in (completed, advanced, nested):
         assert run.session_id is not None
-        storage.save_run(rows[run.session_id], run, record_usage=True)
+        storage.save_run(rows[run.session_id], run)
     record_dir = await _record_dir(child, config, paths)
     if removed_config:
         config = config.model_copy(update={"agents": {}})

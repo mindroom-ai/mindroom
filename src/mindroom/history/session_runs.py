@@ -34,7 +34,7 @@ def updated_sessions(storage: ConversationStore, agent_name: str, *, since: int)
     """Return ``(session_id, updated_at)`` for the agent's conversations updated after ``since``, oldest first."""
     return [
         (session_id, updated_at)
-        for session_id, updated_at in storage.list_updated_sessions("agent", agent_name, since=since)
+        for session_id, updated_at in storage.list_updated_sessions(agent_name, since=since)
         if _WORKFLOW_SESSION_MARKER not in session_id
     ]
 

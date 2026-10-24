@@ -117,7 +117,6 @@ def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tupl
     store.save_run(
         ConversationSession(session_id=session_id, kind="agent", owner_id="helper"),
         record,
-        record_usage=False,
     )
     session = store.load_session(session_id, "agent")
     persisted = store.get_run(record.run_id)

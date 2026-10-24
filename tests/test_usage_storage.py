@@ -20,6 +20,7 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests, project_usage
+from tests.conftest import persist_runs
 from tests.history_helpers import compact_runs
 
 if TYPE_CHECKING:
@@ -40,7 +41,7 @@ def usage_db(tmp_path: Path) -> ConversationStore:
 
 
 def _save(storage: ConversationStore, run: RunRecord) -> None:
-    storage.save_run(_session(), run, record_usage=True)
+    persist_runs(storage, _session(), run)
 
 
 def _run(tokens: int = 10, *, run_id: str = "run-1", parent_run_id: str | None = None) -> RunRecord:

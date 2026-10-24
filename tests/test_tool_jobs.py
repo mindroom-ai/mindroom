@@ -532,7 +532,6 @@ async def test_finalize_acknowledges_only_claims_whose_call_the_parent_run_saved
     store.save_run(
         ConversationSession(session_id="parent-session", kind="agent", owner_id="parent"),
         parent,
-        record_usage=False,
     )
     owner = ConsumptionOwner(storage_factory=lambda: store)
 

@@ -27,6 +27,7 @@ from collections.abc import (
     MutableMapping,
     Sequence,
 )
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from itertools import count
@@ -153,6 +154,7 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
+from mindroom.session_storage.store import persist_to
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -174,6 +176,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
@@ -3490,16 +3493,39 @@ def squad_probe() -> Iterator[type["ProbeToolkit"]]:
 
 
 def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":
-    """Create the session's row from its fields, then persist every run it holds, in order, and return the session.
+    """Create the session's row from its fields, then save every run it holds, in order, and return the session.
 
-    Production code writes runs one at a time as they finish; tests seed whole histories with this instead. Each
-    run is saved with its usage, as the run's own save would. A row that already exists keeps its fields; change
-    them through the store's field writers.
+    Production code writes runs one at a time as they finish; tests seed whole histories with this instead. The
+    runs are saved as conversation writes, so the usage ledger and session totals stay empty; ``persist_session``
+    seeds those too. A row that already exists keeps its fields; change them through the store's field writers.
     """
     storage.ensure_session_row(session)
     for run in session.runs:
-        storage.save_run(session, run, record_usage=True)
+        storage.save_run(session, run)
     return session
+
+
+def persist_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":
+    """Seed the session as ``seed_session`` does, but save each run as its turn's terminal record, usage included."""
+    storage.ensure_session_row(session)
+    persist_runs(storage, session, *session.runs)
+    return session
+
+
+def persist_runs(storage: "ConversationStore", session: "ConversationSession", *runs: "AnyRunRecord") -> None:
+    """Hand each run to ``persist_to`` in order, as a turn hands over its terminal record, recording its usage too.
+
+    Only that save writes the usage ledger and the session totals. The saves run on an event loop of their own, so
+    sync and async tests alike can call this.
+    """
+    persist = persist_to(storage, session)
+
+    async def persist_all() -> None:
+        for run in runs:
+            await persist(run)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(asyncio.run, persist_all()).result()
 
 
 def seed_session_metrics(storage: "ConversationStore", session_id: str, totals: "Mapping[str, object]") -> None:

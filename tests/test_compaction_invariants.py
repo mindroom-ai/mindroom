@@ -228,7 +228,7 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
     assert concurrent_session is not None
     concurrent_state = HistoryScopeState(force_compact_before_next_run=True)
     storage.update_metadata(concurrent_session, lambda metadata: _with_scope_state(metadata, _SCOPE, concurrent_state))
-    storage.save_run(concurrent_session, _completed_run("run-2"), record_usage=True)
+    storage.save_run(concurrent_session, _completed_run("run-2"))
 
     seen_states: list[HistoryScopeState] = []
 

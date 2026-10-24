@@ -247,7 +247,7 @@ async def persist_delegation_state(
     handed_over = deepcopy(response)
     await run_session_storage_operation(
         lambda: store,
-        lambda opened: opened.save_run(session, handed_over, record_usage=False),
+        lambda opened: opened.save_run(session, handed_over),
     )
 
 

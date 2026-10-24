@@ -247,7 +247,7 @@ async def test_an_approval_resume_leaves_its_loaded_session_as_the_store_holds_i
         # Another reply finished while the approval waited; the resume loads the session as the store holds it.
         later = paused.store.load_session(SESSION, "agent")
         assert later is not None
-        paused.store.save_run(later, _completed("run-later", "code", "Meanwhile."), record_usage=True)
+        paused.store.save_run(later, _completed("run-later", "code", "Meanwhile."))
         session = paused.store.load_session(SESSION, "agent")
         assert session is not None
 
@@ -444,8 +444,6 @@ async def test_a_delegating_turn_keeps_the_stored_parent_when_a_summary_froze_it
         self: ConversationStore,
         session: ConversationSession,
         run: AnyRunRecord,
-        *,
-        record_usage: bool,
     ) -> object:
         if run.status is RunStatus.completed and DELEGATION_STATE_KEY in (run.metadata or {}):
             # Stands in for a compaction that summarized the finished parent just before the driver's state save.
@@ -456,7 +454,7 @@ async def test_a_delegating_turn_keeps_the_stored_parent_when_a_summary_froze_it
                     "WHERE run_id = ?",
                     (run.run_id,),
                 )
-        outcome = original_save_run(self, session, run, record_usage=record_usage)
+        outcome = original_save_run(self, session, run)
         if outcome == "frozen":
             refused.append(run.run_id)
         return outcome

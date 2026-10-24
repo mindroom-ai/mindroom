@@ -28,7 +28,7 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.events import ToolTraceEntry
-from tests.conftest import seed_session
+from tests.conftest import persist_runs, seed_session
 from tests.history_helpers import store_fold
 
 if TYPE_CHECKING:
@@ -592,7 +592,7 @@ def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_te
         ],
         metadata={"requester_id": "@alice:example.test"},
     )
-    storage.save_run(session, metered_run, record_usage=True)
+    persist_runs(storage, session, metered_run)
     with sqlite3.connect(db_path) as connection:
         original_usage = connection.execute("SELECT run_id, usage_data FROM test_scope_sessions_usage").fetchall()
     assert len(original_usage) == 1

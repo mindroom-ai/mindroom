@@ -21,6 +21,7 @@ from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.stats import collect_admin_usage
+from tests.conftest import persist_runs
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -111,7 +112,7 @@ def request_usage(tmp_path: Path) -> Iterator[tuple[Config, RuntimePaths, Conver
         authorization=AuthorizationConfig(aliases={"@alice:example.test": ["@alias:example.test"]}),
     )
     storage = create_state_storage("code", tmp_path / "agents/code")
-    storage.save_run(_session(), _run(), record_usage=True)
+    persist_runs(storage, _session(), _run())
     return config, paths, storage
 
 
@@ -120,7 +121,7 @@ def test_request_projection_survives_repeated_save_without_content(
 ) -> None:
     """Saving again replaces projected requests instead of appending or copying conversation data."""
     _, _, storage = request_usage
-    storage.save_run(_session(), _run(), record_usage=True)
+    persist_runs(storage, _session(), _run())
     with sqlite3.connect(storage.path) as connection:
         payloads = connection.execute("SELECT usage_data FROM code_sessions_usage").fetchall()
     assert len(payloads) == 1
@@ -183,7 +184,7 @@ def test_daily_usage_follows_requests_across_midnight_without_counting_extra_rep
     assert run.messages is not None
     run.messages[2].created_at = midnight + (10 if first_after_midnight else -10)
     run.messages[5].created_at = midnight + 30
-    storage.save_run(_session(), run, record_usage=True)
+    persist_runs(storage, _session(), run)
     if not retained_run:
         with sqlite3.connect(storage.path) as connection:
             connection.execute("DELETE FROM code_sessions_runs")
@@ -276,7 +277,7 @@ def test_mixed_model_requests_keep_models_and_actual_dates(
             "secret": "private provider metadata",
             "mindroom_model": {"id": model_id, "provider": provider},
         }
-    storage.save_run(_session(), run, record_usage=True)
+    persist_runs(storage, _session(), run)
     if not retained_run:
         with sqlite3.connect(storage.path) as connection:
             connection.execute("DELETE FROM code_sessions_runs")

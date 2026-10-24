@@ -446,7 +446,7 @@ class _RecordingStore(ConversationStore):
 
 def _recording_store(tmp_path: Path, name: str, *, held: threading.Event | None = None) -> _RecordingStore:
     store = create_state_storage(name, tmp_path)
-    return _RecordingStore(store.path, store.names, store.strip_system_messages, held=held)
+    return _RecordingStore(store.path, store.names, held=held)
 
 
 def _completed(run_id: str, messages: list[OwnedMessage], *, agent_id: str = "general") -> RunRecord:
@@ -3514,7 +3514,7 @@ async def test_error_responses_never_attach_notices_to_prior_completed_run(tmp_p
             await _after_batch(messages, OwnedMessage(role="tool", content=f"failed result {index}"))
             error_run = _completed(f"error-run-{index}", messages)
             error_run.status = OwnedRunStatus.error
-            store.save_run(session, error_run, record_usage=True)
+            store.save_run(session, error_run)
             register_queued_notice_storage(
                 storage_factory=lambda: store,
                 session_id="session-1",

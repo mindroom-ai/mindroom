@@ -18,6 +18,7 @@ from tests.api.test_usage_service_auth import (
     _service_assertion,
     usage_service_auth,  # noqa: F401
 )
+from tests.conftest import persist_runs
 from tests.test_request_usage import _run
 
 if TYPE_CHECKING:
@@ -46,11 +47,7 @@ def test_live_voice_duration_exports_separately_from_delegate_tokens(
     run = _run()
     run.agent_id = "test_agent"
     assert run.metrics is not None
-    storage.save_run(
-        ConversationSession(kind="agent", session_id="session", owner_id="test_agent"),
-        run,
-        record_usage=True,
-    )
+    persist_runs(storage, ConversationSession(kind="agent", session_id="session", owner_id="test_agent"), run)
     for seconds, finalized in [(12.0, False), (15.5, False), (15.5, True)]:
         storage.save_independent_usage(
             session_id="session",
@@ -123,11 +120,7 @@ def test_request_export_flag_authentication_and_cache_variants(
     run = _run()
     run.agent_id = "test_agent"
     assert run.metrics is not None
-    storage.save_run(
-        ConversationSession(kind="agent", session_id="session", owner_id="test_agent"),
-        run,
-        record_usage=True,
-    )
+    persist_runs(storage, ConversationSession(kind="agent", session_id="session", owner_id="test_agent"), run)
     runner, workers = _install_manual_export_runner(client)
     variants = [
         {"include_daily": "false", "include_requests": "false"},
@@ -179,11 +172,7 @@ def test_helper_usage_exports_once_without_counting_another_reply(
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=10, output_tokens=1, total_tokens=11)),
     )
     assert run.metrics is not None
-    storage.save_run(
-        ConversationSession(kind="agent", session_id="session", owner_id="test_agent"),
-        run,
-        record_usage=True,
-    )
+    persist_runs(storage, ConversationSession(kind="agent", session_id="session", owner_id="test_agent"), run)
     helper = {
         "model": "helper-model",
         "model_provider": "test-provider",

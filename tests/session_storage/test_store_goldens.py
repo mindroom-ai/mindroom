@@ -16,6 +16,7 @@ from mindroom.session_storage.codec import run_from_row
 from mindroom.session_storage.schema import SESSION_COLUMNS
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
+from tests.conftest import persist_runs
 from tests.llm.agno_dict_helpers import expected_run_dict
 from tests.session_storage.goldens import GoldenStore, agno_loaded_session, golden_sessions, golden_stores, stored_rows
 
@@ -207,10 +208,9 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
     # As the runtime builds the session of a conversation's first turn: it does not know the requester.
     session = ConversationSession(session_id=session_id, kind=kind, owner_id=owner, created_at=created_at)
 
-    outcomes = [fresh.save_run(session, run, record_usage=True) for run in _replayed(rows)]
+    persist_runs(fresh, session, *_replayed(rows))
 
     replayed = stored_rows(fresh.path, store.names.runs, session_id)
-    assert outcomes == ["written"] * len(rows)
     assert [[row[column] for column in _ROW_COLUMNS] for row in replayed] == [
         [row[column] for column in _ROW_COLUMNS] for row in rows
     ]
@@ -251,7 +251,7 @@ def test_a_first_turns_session_row_stores_no_metadata_as_agno_stored_it(
     fresh = ConversationStore(tmp_path / "fresh.db", store.names)
 
     for run in _replayed(rows):
-        fresh.save_run(session, run, record_usage=True)
+        fresh.save_run(session, run)
 
     column = SESSION_COLUMNS.index("metadata")
     assert golden_row[column] == "null"
@@ -337,7 +337,6 @@ def test_new_databases_get_the_layout_agno_created(tmp_path: Path) -> None:
         ConversationStore(db_file, store.names).save_run(
             session,
             RunRecord(run_id="r1", agent_id="code"),
-            record_usage=True,
         )
 
     assert _layout(tmp_path / "fresh.db", tables) == _layout(golden, tables)

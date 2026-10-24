@@ -66,7 +66,7 @@ def _child_tools(child: DelegationChild, config: Config, paths: RuntimePaths) ->
     store = create_session_storage("child", config, paths, child_execution_identity(child))
     return [
         tool
-        for session_id, _updated in store.list_updated_sessions("agent", "child", since=-1)
+        for session_id, _updated in store.list_updated_sessions("child", since=-1)
         for run in store.list_runs(session_id)
         for tool in run.tools or ()
     ]

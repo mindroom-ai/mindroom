@@ -30,7 +30,7 @@ from mindroom.usage.stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
-from tests.conftest import create_agno_2_sessions_db, seed_session
+from tests.conftest import create_agno_2_sessions_db, persist_runs, persist_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -225,7 +225,7 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
 def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) -> None:
     """The adapter reads the exact JSON representation written by MindRoom's Agno storage."""
     storage = create_state_storage("code", tmp_path)
-    seed_session(
+    persist_session(
         storage,
         ConversationSession(
             kind="agent",
@@ -355,8 +355,8 @@ def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path) 
         status=RunStatus.completed,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=8, total_tokens=20)),
     )
-    storage.save_run(session, run, record_usage=True)
-    storage.save_run(session, replace(run, created_at=1_723_924_000), record_usage=True)
+    persist_runs(storage, session, run)
+    persist_runs(storage, session, replace(run, created_at=1_723_924_000))
 
     result = list(iter_usage_storage_rows(_source(tmp_path / "sessions" / "code.db")))
 
@@ -378,7 +378,8 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         updated_at=1_723_837_600,
     )
     storage = create_state_storage("engineering", tmp_path)
-    storage.save_run(
+    persist_runs(
+        storage,
         session,
         TeamRunRecord(
             run_id="team-run",
@@ -396,9 +397,9 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
                 },
             ),
         ),
-        record_usage=True,
     )
-    storage.save_run(
+    persist_runs(
+        storage,
         session,
         RunRecord(
             run_id="member-run",
@@ -417,7 +418,6 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
                 },
             ),
         ),
-        record_usage=True,
     )
 
     source = _source(tmp_path / "sessions" / "engineering.db", storage_name="engineering")

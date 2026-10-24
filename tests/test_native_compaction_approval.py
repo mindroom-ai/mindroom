@@ -176,7 +176,7 @@ async def _resume(
     build = agents.create_agent("general", config, paths, identity, history_storage=store)
     session = new_scope_session(session_id="session-1", scope_id="general", is_team=False)
     for run in (*history, paused):
-        store.save_run(session, run, record_usage=False)
+        store.save_run(session, run)
     runner = ResumeRunner(
         build=build,
         config=config,

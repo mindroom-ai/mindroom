@@ -241,7 +241,7 @@ async def test_stored_hook_record_never_skips_gated_subagent_plugin_gate(
         after_called=True,
     )
     stored.metadata = {**(stored.metadata or {}), DELEGATION_STATE_KEY: planted.to_dict()}
-    store.save_run(session, stored, record_usage=False)
+    store.save_run(session, stored)
     approvals = _saved_approval_calls(state)
     result = await resume(
         approval_executor(config, paths),

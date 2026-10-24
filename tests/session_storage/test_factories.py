@@ -84,7 +84,6 @@ def test_a_fresh_database_gets_its_tables_from_the_first_write_only(tmp_path: Pa
     store.save_run(
         ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
         _run("r1"),
-        record_usage=True,
     )
 
     assert _tables(store.path) >= {
@@ -109,7 +108,6 @@ def test_stored_runs_leave_out_the_prompt_roles_of_the_history_settings(tmp_path
     store.save_run(
         ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
         _run("r1"),
-        record_usage=True,
     )
 
     loaded = store.load_session("session-1", "agent")

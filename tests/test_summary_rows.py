@@ -34,7 +34,7 @@ def _open(tmp_path: Path) -> ConversationStore:
 
 
 def _save(storage: ConversationStore, run: RunRecord) -> None:
-    storage.save_run(_session_row(), run, record_usage=True)
+    storage.save_run(_session_row(), run)
 
 
 def _db_path(tmp_path: Path) -> Path:

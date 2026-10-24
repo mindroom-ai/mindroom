@@ -253,7 +253,7 @@ async def test_a_team_leaders_wait_is_read_once_its_team_run_saves_the_call(tmp_
             else RunRecord(run_id="team-run", session_id=context.session_id, agent_id="squad", tools=[saved_call])
         )
         session = ConversationSession(session_id=context.session_id, kind=saved_kind, owner_id="squad")
-        store.save_run(session, replace(run, status=RunStatus.completed), record_usage=False)
+        store.save_run(session, replace(run, status=RunStatus.completed))
         await claims.finalize()
         assert (await lookup(runtime, "member-job", owner=owner, depth=0)).consumed is (saved_kind == "team")
     finally:

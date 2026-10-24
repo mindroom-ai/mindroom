@@ -22,7 +22,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
 from mindroom.usage.stats_storage import discover_admin_usage_sources
 from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, quote_identifier
-from tests.conftest import seed_session, seed_session_metrics
+from tests.conftest import persist_session, seed_session_metrics
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -75,7 +75,7 @@ async def test_system_usage_is_content_free_idempotent_and_does_not_create_conve
     assert system_only.request_coverage.unavailable_sources == before.request_coverage.unavailable_sources
 
     ordinary = create_session_storage("code", config, paths, execution_identity=None)
-    seed_session(
+    persist_session(
         ordinary,
         ConversationSession(
             kind="agent",

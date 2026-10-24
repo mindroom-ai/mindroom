@@ -142,5 +142,5 @@ class BatchCheckpoint:
         await write_with_session_state(
             store,
             session,
-            lambda opened, state: opened.save_run(session, run, record_usage=False, state=state),
+            lambda opened, state: opened.save_run(session, run, state=state),
         )

@@ -82,12 +82,11 @@ def test_incompatible_session_schema_is_archived_before_real_session_use(tmp_pat
         if kind == "agent"
         else TeamRunRecord(run_id="new-run", content="saved answer", team_id="general")
     )
-    storage.save_run(session, run, record_usage=True)
+    storage.save_run(session, run)
     if kind == "team":
         storage.save_run(
             session,
             RunRecord(run_id="member-run", parent_run_id="new-run", agent_id="member", content="member answer"),
-            record_usage=True,
         )
 
     storage = _storage(state_root)
@@ -143,7 +142,6 @@ def test_compatible_session_reopen_preserves_history_and_extra_columns(tmp_path:
     storage.save_run(
         _row("old-session"),
         RunRecord(run_id="saved-run", content="saved answer", agent_id="general", session_id="old-session"),
-        record_usage=True,
     )
     database = tmp_path / "sessions" / "general.db"
     with closing(sqlite3.connect(database)) as connection:
@@ -290,7 +288,6 @@ def test_hot_rollback_recovers_committed_state_before_schema_decision(tmp_path: 
                 agent_id="general",
                 session_id="old-session",
             ),
-            record_usage=True,
         )
         database = tmp_path / "sessions" / "general.db"
     else:
@@ -441,7 +438,6 @@ def test_compatible_old_fixture_and_current_run_rows_survive_reopen(tmp_path: Pa
     storage.save_run(
         _row("session-1"),
         RunRecord(run_id="row-only", content="new answer", agent_id="code", session_id="session-1"),
-        record_usage=True,
     )
     storage.ensure_session_row(
         ConversationSession(kind="agent", session_id="current-session", owner_id="code", created_at=2),
@@ -449,7 +445,6 @@ def test_compatible_old_fixture_and_current_run_rows_survive_reopen(tmp_path: Pa
     storage.save_run(
         _row("current-session"),
         RunRecord(run_id="current-run", content="current answer", agent_id="code", session_id="current-session"),
-        record_usage=True,
     )
 
     storage = open_storage()
@@ -489,7 +484,6 @@ def test_missing_runs_table_stays_lazy(tmp_path: Path) -> None:
     storage.save_run(
         _row("waiting"),
         RunRecord(run_id="first-run", content="first answer", agent_id="general", session_id="waiting"),
-        record_usage=True,
     )
     loaded = storage.load_session("waiting", "agent")
     assert loaded is not None
