@@ -37,7 +37,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from anthropic.types import Message as AnthropicMessage
-    from anthropic.types import MessageDeltaUsage
 
     from mindroom.llm.media import File, Image
     from mindroom.llm.provider import StopReason, ToolSpec
@@ -380,7 +379,7 @@ def _stored_assistant_blocks(message: Message) -> list[dict[str, Any]] | None:
     stored = (message.provider_data or {}).get("content_blocks")
     if not isinstance(stored, list) or not stored:
         return None
-    tool_call_ids = {call.get("id") for call in message.tool_calls or [] if isinstance(call, dict)}
+    tool_call_ids = {call.get("id") for call in message.tool_calls or []}
     return [
         dict(block)
         for block in _serialized_content_blocks(stored)
@@ -498,7 +497,7 @@ def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> l
     return formatted
 
 
-def parse_claude_usage(usage: Usage | MessageDeltaUsage | BetaUsage) -> MessageMetrics:
+def parse_claude_usage(usage: Usage | BetaUsage) -> MessageMetrics:
     """Translate Claude usage into message metrics.
 
     ``input_tokens`` excludes cache reads and writes, so ``total_tokens`` is input plus output. A compacted
@@ -514,7 +513,7 @@ def parse_claude_usage(usage: Usage | MessageDeltaUsage | BetaUsage) -> MessageM
     provider_metrics: dict[str, Any] = {}
     if usage.server_tool_use is not None:
         provider_metrics["server_tool_use"] = usage.server_tool_use.model_dump()
-    if isinstance(usage, (Usage, BetaUsage)) and usage.service_tier:
+    if usage.service_tier:
         provider_metrics["service_tier"] = usage.service_tier
     context_usage = {
         "input_tokens": counts.input_tokens,
@@ -539,7 +538,7 @@ def parse_claude_usage(usage: Usage | MessageDeltaUsage | BetaUsage) -> MessageM
     return MessageMetrics(tokens=counts.with_totals(), provider_metrics=provider_metrics)
 
 
-def tool_call_from_block(block: Any) -> dict[str, Any]:  # noqa: ANN401
+def tool_call_from_block(block: ToolUseBlock | BetaToolUseBlock) -> dict[str, Any]:
     """Return a ``tool_use`` block as the stored tool-call dict; a cut-off block keeps the arguments that parsed."""
     return {"id": block.id, "type": "function", "function": {"name": block.name, "arguments": json.dumps(block.input)}}
 
