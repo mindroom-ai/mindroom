@@ -50,7 +50,7 @@ class RequestLog:
     model_name: str
     configured_provider: str
     debug: DebugConfig
-    default_log_dir: Path
+    storage_root: Path
 
 
 def _attribution(context: Mapping[str, Any]) -> dict[str, Any]:
@@ -101,9 +101,9 @@ def _write_request_record(
     )
 
 
-def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -> Path:
-    """Return the day's request-log file under the configured directory, else under ``default_log_dir``."""
-    base_dir = Path(log_dir) if log_dir else default_log_dir
+def _daily_log_path(log_dir: str | None, storage_root: Path, now: datetime) -> Path:
+    """Return the day's request-log file in the configured directory, else in ``<storage_root>/logs/llm_requests``."""
+    base_dir = Path(log_dir) if log_dir else storage_root / "logs" / "llm_requests"
     return base_dir / f"llm-requests-{now.date().isoformat()}.jsonl"
 
 
@@ -169,7 +169,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
     log_path: Path | None = None
     request_log_id = uuid4().hex
     if log.debug.log_llm_requests:
-        log_path = _daily_log_path(log.debug.llm_request_log_dir, log.default_log_dir, datetime.now().astimezone())
+        log_path = _daily_log_path(log.debug.llm_request_log_dir, log.storage_root, datetime.now().astimezone())
         try:
             await asyncio.to_thread(
                 _write_request_record,

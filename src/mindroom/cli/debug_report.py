@@ -81,7 +81,7 @@ def _llm_request_log_dir(config_source: dict[str, Any], storage_root: Path) -> P
     """Return the directory the runtime writes LLM request logs to (see `pipeline/request_log._daily_log_path`).
 
     The configured value is used as given, so a relative directory is relative to the working directory, like the
-    runtime's; the default is the one `providers/registry` passes.
+    runtime's.
     """
     debug = config_source.get("debug")
     configured = debug.get("llm_request_log_dir") if isinstance(debug, dict) else None

@@ -1569,7 +1569,7 @@ class TestUserIdPassthrough:
                     model_name="default",
                     configured_provider="openai",
                     debug=debug,
-                    default_log_dir=tmp_path / "unused",
+                    storage_root=tmp_path / "unused",
                 ),
             ),
         )
