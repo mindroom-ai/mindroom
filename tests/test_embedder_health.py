@@ -17,6 +17,7 @@ from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.embeddings import embedder_health
 from mindroom.embeddings import errors as embedding_errors
 from mindroom.embeddings.embedder_health import (
+    EmbedderHealthRecorder,
     capture_embedder_health_recorder,
     check_embedder_health,
     embedder_in_use,
@@ -28,6 +29,7 @@ from mindroom.embeddings.errors import (
     describe_embedder_error,
     is_embedder_auth_failure_detail,
 )
+from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 
 if TYPE_CHECKING:
@@ -271,6 +273,23 @@ def test_probe_rejects_empty_vector(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         lambda *_args: _EmptyVectorEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) == "embedder returned an empty vector"
+
+
+def test_factory_gives_the_openai_embedder_its_health_recorder(tmp_path: Path) -> None:
+    """The recorder a caller passes reaches the embedder, and none passed means the current generation's."""
+    config = _config(
+        memory={"embedder": {"provider": "openai", "config": {"model": "text-embedding-3-small", "api_key": SECRET}}},
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    retired = EmbedderHealthRecorder(generation=-1)
+
+    passed = create_configured_embedder(config, runtime_paths, health_recorder=retired)
+    default = create_configured_embedder(config, runtime_paths)
+
+    assert isinstance(passed, OpenAIEmbedder)
+    assert isinstance(default, OpenAIEmbedder)
+    assert passed.health_recorder is retired
+    assert default.health_recorder == capture_embedder_health_recorder()
 
 
 def test_probe_bounds_openai_client_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
