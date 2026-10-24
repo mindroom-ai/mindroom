@@ -1,7 +1,7 @@
 """MindRoom's tool-call policy around every tool call.
 
 Plugin before and after hooks, the background-script approval gate, job and authority checkpoints, durable call
-recording, timing, and failure records. The owned loop, voice calls, scheduled tool calls, script runs, and the MCP
+recording, timing, and failure records. The agent loop, voice calls, scheduled tool calls, script runs, and the MCP
 gateway run it as a ``ToolMiddleware`` (``build_tool_hook_middleware``).
 """
 

@@ -28,7 +28,7 @@ def create_state_storage(storage_name: str, state_root: Path) -> ConversationSto
     """Open the conversation database ``<state_root>/sessions/<storage_name>.db`` with its migrations applied.
 
     Under the recovery lock, in order: a database missing required session columns is archived, an older
-    database gains its usage ledger, then its summary rows, and only then does the owned store open it. Every
+    database gains its usage ledger, then its summary rows, and only then does the conversation store open it. Every
     store leaves the prompt roles out of the runs it writes.
     """
     names = TableNames(storage_name)

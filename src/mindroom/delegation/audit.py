@@ -1,4 +1,4 @@
-"""Adapt durable delegated child state and the owned loop's events into workspace records."""
+"""Adapt durable delegated child state and the agent loop's events into workspace records."""
 
 from __future__ import annotations
 

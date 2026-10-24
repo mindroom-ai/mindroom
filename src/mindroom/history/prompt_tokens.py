@@ -36,7 +36,7 @@ def build_static_token_estimator(
     tools: Sequence[ToolSpec],
     deferred_tool_names: frozenset[str],
 ) -> _StaticTokenEstimator:
-    """Return a request-local static-token estimator for one owned build's rendered prompt and tools.
+    """Return a request-local static-token estimator for one agent build's rendered prompt and tools.
 
     Deferred tools stay off the request until tool search loads them, so they are left out of the estimate.
     """

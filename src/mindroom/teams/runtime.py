@@ -1,5 +1,5 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Team runs and resumes over the owned loop.
+"""Team runs and resumes over the agent loop.
 
 A team run is the leader's loop over its own tools plus the delegation tool for the team's mode. Members run as
 children of the team run, each ending in a record of its own with ``parent_run_id``, and their events reach the

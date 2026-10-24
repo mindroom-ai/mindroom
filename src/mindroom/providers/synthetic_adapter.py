@@ -1,4 +1,4 @@
-"""Built-in synthetic provider for local conversations and load generation, on the owned provider protocol.
+"""Built-in synthetic provider for local conversations and load generation, on the provider protocol.
 
 It streams seeded Lorem Ipsum at a fixed rate and occasionally calls the shell tool, so a response replays
 exactly from the seed and the conversation's user messages.

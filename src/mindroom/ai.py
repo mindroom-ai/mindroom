@@ -808,7 +808,7 @@ async def _start_agent_run(
     terminal: _TerminalRecord,
     stream: bool,
 ) -> AsyncIterator[RunEvent]:
-    """Run one attempt on the owned loop, storing its terminal record where the turn's scope stores.
+    """Run one attempt on the agent loop, storing its terminal record where the turn's scope stores.
 
     A run that pauses on delegations is driven on: its children run, and the run continues with their results
     through ``_continue_turn_run`` until it completes or waits for an approval. An agent whose shell reaches its
@@ -1895,7 +1895,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     initial_continuation_count: int = 0,
     on_completed: Callable[[CompletedAttempt], None] | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
-    """Generate one streaming agent response on the owned loop.
+    """Generate one streaming agent response on the agent loop.
 
     Args:
         ctx: Per-turn identity constants for this response turn. ``entity_label``

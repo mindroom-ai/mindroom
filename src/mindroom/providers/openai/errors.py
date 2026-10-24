@@ -1,4 +1,4 @@
-"""Map OpenAI SDK, OpenAI-compatible server, and transport failures to the owned provider errors.
+"""Map OpenAI SDK, OpenAI-compatible server, and transport failures to the normalized provider errors.
 
 ``retryable`` carries the transient-failure judgment the stream retry wrapper acts on; statuses and
 codes are preserved so user-facing messages and compaction can still tell failures apart.
@@ -43,7 +43,7 @@ def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
 
 
 def provider_error(error: Exception, *, provider: str) -> ProviderError:
-    """Return the owned error for one SDK or transport failure; ``provider`` is the metrics provider name."""
+    """Return the normalized error for one SDK or transport failure; ``provider`` is the metrics provider name."""
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
 
     if (failure := provider_failure(error, provider=provider)) is not None:
@@ -60,7 +60,7 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
 
 
 def error_body_error(body: object, *, provider: str, default_message: str) -> ProviderError:
-    """Return the owned error for an ``error`` object a server sent in place of its reply, after an HTTP 200."""
+    """Return the normalized error for an ``error`` object a server sent in place of its reply, after an HTTP 200."""
     message, code, error_type = _error_fields(body)
     return classify_provider_error(message or default_message, provider=provider, code=code, error_type=error_type)
 
