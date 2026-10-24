@@ -60,7 +60,6 @@ _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
 }
 _AGENT_STORAGE_HELPERS = {"create_session_storage"}
 _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
-    "_build_tool_instance": "worker_target",
     "build_agent_toolkit": "execution_identity",
     "build_worker_target_from_runtime_env": "execution_identity",
     "create_agent": "execution_identity",
@@ -82,7 +81,6 @@ _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
     ("src/mindroom/credentials/manager.py", "load_scoped_credentials", "worker_target"),
     ("src/mindroom/credentials/manager.py", "_resolve_worker_credentials_manager", "worker_target"),
     ("src/mindroom/credentials/manager.py", "save_scoped_credentials", "worker_target"),
-    ("src/mindroom/tool_system/metadata.py", "_build_tool_instance", "worker_target"),
     ("src/mindroom/runtime_resolution.py", "resolve_agent_execution", "execution_identity"),
     ("src/mindroom/runtime_resolution.py", "resolve_agent_runtime", "execution_identity"),
     ("src/mindroom/runtime_resolution.py", "resolve_knowledge_binding", "execution_identity"),
