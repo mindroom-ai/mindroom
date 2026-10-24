@@ -509,11 +509,14 @@ def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run
     return summary_rows.segment_tool_call_ids(storage, session_id=session_id, run_id=run_id)
 
 
+def first_scope_session(scope: HistoryScope, session_id: str) -> ConversationSession:
+    """Return the empty session row the first run of ``session_id`` in ``scope`` starts from."""
+    return new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
+
+
 def ensure_scope_session_row(storage: ConversationStore, session: ConversationSession, scope: HistoryScope) -> None:
     """Create the session row a first turn's fold writes against; the run's own save creates it otherwise."""
-    storage.ensure_session_row(
-        new_scope_session(session_id=session.session_id, scope_id=scope.scope_id, is_team=scope.kind == "team"),
-    )
+    storage.ensure_session_row(first_scope_session(scope, session.session_id))
 
 
 def save_working_run_changes(

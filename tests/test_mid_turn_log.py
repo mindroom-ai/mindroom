@@ -147,6 +147,16 @@ def test_a_fold_sorts_after_the_runs_it_covers_and_its_run_after_it(storage: Con
     assert loaded.summary.text == "S"
 
 
+@pytest.mark.parametrize("scope", [_SCOPE, _TEAM_SCOPE], ids=lambda scope: scope.kind)
+def test_a_first_fold_writes_against_a_row_of_its_scopes_kind(storage: ConversationStore, scope: HistoryScope) -> None:
+    """The row a first turn's fold appends to is the kind of session the scope's runs belong to."""
+    ensure_scope_session_row(storage, _session(), scope)
+
+    row = storage.load_session("session", scope.kind)
+    assert row is not None
+    assert (row.kind, row.owner_id) == (scope.kind, scope.scope_id)
+
+
 def test_a_second_fold_without_a_stored_run_covers_no_run_twice(storage: ConversationStore) -> None:
     """The running loop still holds the runs it loaded; the log knows the first fold covered them."""
     _seed(storage, [_run("r1")])

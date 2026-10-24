@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
 from mindroom.history.session_context import create_scope_session_storage
-from mindroom.history.storage import add_pending_force_compaction_scope, new_scope_session, update_scope_state_on_latest
+from mindroom.history.storage import (
+    add_pending_force_compaction_scope,
+    first_scope_session,
+    update_scope_state_on_latest,
+)
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
 
@@ -72,7 +76,7 @@ async def request_compaction_before_next_reply(
         ),
         partial(
             update_scope_state_on_latest,
-            session=new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team"),
+            session=first_scope_session(scope, session_id),
             scope=scope,
             update=lambda latest: replace(latest, force_compact_before_next_run=True),
         ),
