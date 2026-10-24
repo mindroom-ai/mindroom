@@ -2752,6 +2752,186 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
     assert "execution_scope=shared" in connect_response.json()["detail"]
 
 
+_HOMEASSISTANT_INSTANCE_ROUTES: dict[str, tuple[str, str, dict[str, Any] | None]] = {
+    "entities": ("GET", "/api/homeassistant/entities?agent_name=general&domain=light", None),
+    "service": (
+        "POST",
+        "/api/homeassistant/service?agent_name=general&domain=light&service=turn_on&entity_id=light.kitchen",
+        {"brightness": 200},
+    ),
+}
+
+
+def _call_homeassistant_instance_route(
+    api_key_client: TestClient,
+    route: str,
+    stored_connection: dict[str, Any] | None,
+    handler: Callable[[httpx.Request], httpx.Response] = lambda _request: httpx.Response(200, json=[]),
+) -> tuple[httpx.Response, list[httpx.Request], list[dict[str, object]]]:
+    """Call one stored-instance Home Assistant route against a faked transport.
+
+    Returns the route response, the requests that reached Home Assistant, and the transport's construction kwargs.
+    """
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        runtime_paths,
+        _config_with_worker_scope("shared").model_dump(),
+    )
+    if stored_connection is not None:
+        get_runtime_credentials_manager(runtime_paths).shared_manager().save_credentials(
+            "homeassistant",
+            stored_connection,
+        )
+    sent: list[httpx.Request] = []
+    transport_kwargs: list[dict[str, object]] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return handler(request)
+
+    def transport(**kwargs: object) -> httpx.MockTransport:
+        transport_kwargs.append(kwargs)
+        return httpx.MockTransport(record)
+
+    method, url, body = _HOMEASSISTANT_INSTANCE_ROUTES[route]
+    with patch("mindroom.api.homeassistant_integration.ServerFetchAsyncHTTPTransport", transport):
+        response = api_key_client.request(method, url, json=body)
+    return response, sent, transport_kwargs
+
+
+@pytest.mark.parametrize(
+    ("stored_connection", "fetch_url", "allow_private_url"),
+    [
+        ({"instance_url": "93.184.216.34:8123/", "long_lived_token": "ha-token"}, "http://93.184.216.34:8123", False),
+        (
+            {"instance_url": "http://127.0.0.1:8123", "access_token": "ha-token", "allow_private_url": True},
+            "http://127.0.0.1:8123",
+            True,
+        ),
+    ],
+    ids=["public-long-lived-token", "private-opt-in-oauth-token"],
+)
+@pytest.mark.parametrize("route", sorted(_HOMEASSISTANT_INSTANCE_ROUTES))
+def test_homeassistant_instance_routes_forward_to_the_stored_instance(
+    api_key_client: TestClient,
+    route: str,
+    stored_connection: dict[str, Any],
+    fetch_url: str,
+    allow_private_url: bool,
+) -> None:
+    """The entity and service routes send the request to the stored, normalized instance with its token."""
+    states = [
+        {
+            "entity_id": "light.kitchen",
+            "state": "on",
+            "attributes": {"brightness": 200},
+            "last_changed": "2026-10-23T10:00:00+00:00",
+            "context": {"id": "ctx"},
+        },
+        {"entity_id": "switch.fan", "state": "off", "attributes": {}},
+    ]
+    expected_method, expected_path, expected_body, expected_response = {
+        "entities": (
+            "GET",
+            "/api/states",
+            None,
+            [
+                {
+                    "entity_id": "light.kitchen",
+                    "state": "on",
+                    "attributes": {"brightness": 200},
+                    "last_changed": "2026-10-23T10:00:00+00:00",
+                },
+            ],
+        ),
+        "service": (
+            "POST",
+            "/api/services/light/turn_on",
+            {"brightness": 200, "entity_id": "light.kitchen"},
+            {"success": True, "message": "Service light.turn_on called successfully"},
+        ),
+    }[route]
+
+    response, sent, transport_kwargs = _call_homeassistant_instance_route(
+        api_key_client,
+        route,
+        stored_connection,
+        lambda _request: httpx.Response(200, json=states),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == expected_response
+    assert transport_kwargs == [{"allow_private_networks": allow_private_url}]
+    assert [(request.method, str(request.url)) for request in sent] == [
+        (expected_method, f"{fetch_url}{expected_path}"),
+    ]
+    assert sent[0].headers["authorization"] == "Bearer ha-token"
+    assert (json.loads(sent[0].content) if sent[0].content else None) == expected_body
+
+
+@pytest.mark.parametrize(
+    ("stored_connection", "detail"),
+    [
+        (None, "Not connected to Home Assistant"),
+        ({"instance_url": "http://127.0.0.1:8123"}, "Missing credentials"),
+        ({"long_lived_token": "ha-token"}, "Missing credentials"),
+        ({"instance_url": "", "access_token": "ha-token"}, "Missing credentials"),
+    ],
+    ids=["no-credentials", "private-url-without-token", "token-without-url", "empty-url"],
+)
+@pytest.mark.parametrize("route", sorted(_HOMEASSISTANT_INSTANCE_ROUTES))
+def test_homeassistant_instance_routes_require_stored_credentials(
+    api_key_client: TestClient,
+    route: str,
+    stored_connection: dict[str, Any] | None,
+    detail: str,
+) -> None:
+    """Missing credentials are reported before URL validation, and nothing reaches Home Assistant."""
+    response, sent, _transport_kwargs = _call_homeassistant_instance_route(api_key_client, route, stored_connection)
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": detail}
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("stored_connection", "detail"),
+    [
+        (
+            {"instance_url": "http://127.0.0.1:8123", "long_lived_token": "ha-token"},
+            "Private Home Assistant URLs require explicit opt-in. "
+            "Enable private URL access only for trusted self-hosted instances.",
+        ),
+        (
+            {"instance_url": "http://127.0.0.1:8123", "long_lived_token": "ha-token", "allow_private_url": "true"},
+            "Private Home Assistant URLs require explicit opt-in. "
+            "Enable private URL access only for trusted self-hosted instances.",
+        ),
+        (
+            {"instance_url": "http://169.254.169.254", "long_lived_token": "ha-token", "allow_private_url": True},
+            "Home Assistant instance URL is not allowed for server-side fetching.",
+        ),
+    ],
+    ids=["private-without-opt-in", "private-with-non-boolean-opt-in", "metadata-with-opt-in"],
+)
+@pytest.mark.parametrize("route", sorted(_HOMEASSISTANT_INSTANCE_ROUTES))
+def test_homeassistant_instance_routes_reject_disallowed_urls_before_fetching(
+    api_key_client: TestClient,
+    route: str,
+    stored_connection: dict[str, Any],
+    detail: str,
+) -> None:
+    """A stored URL the opt-in does not allow is rejected without any request to it."""
+    response, sent, _transport_kwargs = _call_homeassistant_instance_route(api_key_client, route, stored_connection)
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": detail}
+    assert sent == []
+
+
 def test_spotify_connect_uses_pending_oauth_state(
     api_key_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
