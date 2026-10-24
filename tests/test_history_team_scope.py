@@ -13,6 +13,7 @@ import pytest
 from mindroom import execution_preparation
 from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.history.prompt_tokens import build_static_token_estimator
@@ -30,6 +31,7 @@ from mindroom.history.types import (
     PreparedHistoryState,
 )
 from mindroom.llm.messages import Message
+from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact_team_members
 from mindroom.teams.runtime import leader_tool_specs, run_team
@@ -37,9 +39,10 @@ from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context
-from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.history_helpers import _runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, seed_session
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
+from tests.team_turn_helpers import SESSION_ID, delegate, member_approval, squad_turn
 
 _PAIR = TeamConfig(
     display_name="Pair",
@@ -193,7 +196,7 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
     await prepare_materialized_team_execution(
         make_turn_context("pair", session_id="session-1"),
         scope_context=scope_context,
-        spec=built.spec,
+        built=built,
         message="Current prompt",
         thread_history=None,
         config=config,
@@ -249,6 +252,36 @@ def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
         ("alpha", "Alpha"),
     ]
     assert ad_hoc.spec.max_tool_calls_per_turn == config.defaults.max_tool_calls_per_turn
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("squad_probe")
+async def test_a_saved_team_approval_resumes_under_the_history_settings_its_configured_team_authors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader's resumed request replays the one run the team authors, where the defaults would replay every run."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "checker", "Touch it")],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    team.config.teams["squad"].num_history_runs = 1
+    assert team.config.resolve_entity(None).history_settings.policy.mode == "all"
+    past = [_completed_team_run("past-1", team_id="squad"), _completed_team_run("past-2", team_id="squad")]
+    seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=past))
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+
+    await team.resume(raised.value.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
+
+    [resumed] = team.models["default"].requests
+    replayed = [str(message.content) for message in resumed.messages if message.from_history]
+    assert replayed == ["past-2 team question", "past-2 team answer"]
 
 
 def _private_pair_config(tmp_path: Path) -> tuple[Config, object]:

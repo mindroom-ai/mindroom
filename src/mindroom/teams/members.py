@@ -323,11 +323,6 @@ def configured_team(config: Config, team_name: str | None) -> str | None:
     return team_name if team_name in config.teams else None
 
 
-def team_history_settings(config: Config, team_name: str | None) -> ResolvedHistorySettings:
-    """Return the history settings of the configured team, or the defaults for an ad hoc one."""
-    return config.resolve_entity(configured_team(config, team_name)).history_settings
-
-
 def _team_member(
     build: AgentBuild,
     system_enrichment: str,
@@ -471,14 +466,11 @@ def build_team_spec(
         max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
         members=team_members,
     )
-    history_settings = team_history_settings(config, configured_team_name)
-    if jobs is None:
-        return BuiltTeam(spec=spec, history_settings=history_settings, leader_middleware=())
     return BuiltTeam(
         spec=spec,
-        history_settings=history_settings,
-        leader_middleware=jobs.middleware,
-        leader_jobs=jobs.actor,
+        history_settings=team_view.history_settings,
+        leader_middleware=() if jobs is None else jobs.middleware,
+        leader_jobs=None if jobs is None else jobs.actor,
     )
 
 
@@ -497,6 +489,5 @@ __all__ = [
     "resolve_team_member_model_names",
     "resolve_team_turn_models",
     "select_model_for_team",
-    "team_history_settings",
     "team_label",
 ]

@@ -921,7 +921,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
     await prepare_materialized_team_execution(
         team.ctx(),
         scope_context=scope_context,
-        spec=built.spec,
+        built=built,
         message="Hello",
         thread_history=[],
         config=team.config,

@@ -79,7 +79,7 @@ from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.routing import ResponderSelection
 from mindroom.teams import envelope
 from mindroom.teams.envelope import PreparedTeamExecution
-from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, team_history_settings
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
@@ -3224,7 +3224,7 @@ def _scripted_team(
     )
     return (
         resolved,
-        BuiltTeam(spec=spec, history_settings=team_history_settings(Config(), None), leader_middleware=()),
+        BuiltTeam(spec=spec, history_settings=Config().resolve_entity(None).history_settings, leader_middleware=()),
         mode,
     )
 
@@ -3413,7 +3413,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_count == 1
         preparation_kwargs = mock_prepare.await_args.kwargs
         preparation_ctx = mock_prepare.await_args.args[0]
-        assert preparation_kwargs["spec"] is built.spec
+        assert preparation_kwargs["built"] is built
         assert preparation_kwargs["message"] == "Build it"
         assert preparation_kwargs["thread_history"] == []
         assert preparation_ctx.reply_to_event_id is None
@@ -3479,7 +3479,7 @@ class TestTeamCompletion:
         assert data["choices"][0]["finish_reason"] == "stop"
         assert "Team consensus result" in data["choices"][0]["message"]["content"]
         assert mock_prepare.await_count == 1
-        assert mock_prepare.await_args.kwargs["spec"] is team[1].spec
+        assert mock_prepare.await_args.kwargs["built"] is team[1]
         assert mock_prepare.await_args.kwargs["message"] == "Build a feature"
         [run] = runs
         assert [message.content for message in run.messages] == ["Build a feature"]
@@ -3830,7 +3830,7 @@ class TestTeamCompletion:
         assert "Hello " in content_parts
         assert "world!" in content_parts
         assert mock_prepare.await_count == 1
-        assert mock_prepare.await_args.kwargs["spec"] is team[1].spec
+        assert mock_prepare.await_args.kwargs["built"] is team[1]
         [run] = runs
         assert [message.content for message in run.messages] == ["Build it"]
         assert run.request_template.stream is True
@@ -4253,7 +4253,7 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
-        assert mock_prepare.await_args.kwargs["spec"] is team[1].spec
+        assert mock_prepare.await_args.kwargs["built"] is team[1]
         assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
         [run] = runs
         assert [message.content for message in run.messages] == ["Start", "Ack", "Follow-up"]

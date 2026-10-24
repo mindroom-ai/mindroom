@@ -66,15 +66,16 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
     from mindroom.history.session_context import ScopeSessionContext
-    from mindroom.history.types import ResolvedHistorySettings, ResolvedReplayPlan
+    from mindroom.history.types import ResolvedReplayPlan
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
     from mindroom.llm.runs import AnyRunRecord, RunRecord, RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
+    from mindroom.teams.members import BuiltTeam
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
-    from mindroom.teams.spec import TeamMode, TeamSpec
+    from mindroom.teams.spec import TeamMode
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -178,17 +179,17 @@ def _route_decisions(
 class TeamResume:
     """Continue one paused team run under a turn's hooks and storage; the ``ContinueRun`` the delegation driver calls.
 
-    ``plan`` selects the stored history the leader's resume request replays: the turn's own plan within a turn, the
-    configured policy for a saved approval. ``model_name`` is the turn's model within a turn, which the resumed run's
-    tool calls carry; a saved approval's resume has none, so its calls keep the model of the tool context it runs in.
+    ``built`` is the team the run resumes as. ``plan`` selects the stored history the leader's resume request
+    replays: the turn's own plan within a turn, the configured policy for a saved approval. ``model_name`` is the
+    turn's model within a turn, which the resumed run's tool calls carry; a saved approval's resume has none, so its
+    calls keep the model of the tool context it runs in.
     """
 
-    spec: TeamSpec
+    built: BuiltTeam
     storage: RunStorage
     records: TerminalRecord[TeamRunRecord]
     hooks: LoopHooks
     request_template: ModelRequest
-    settings: ResolvedHistorySettings
     plan: ResolvedReplayPlan | None
     user_id: str | None
     toolkit_owners: Mapping[tuple[str, str], str]
@@ -209,9 +210,9 @@ class TeamResume:
                 add_approval_receipt_reader(requirement.member_run_id)
         session = self.storage.session
         # The leader's resume request: its stored system message, the summary and history ``plan`` replays, the rest.
-        history, summary = replayed_history(session, self.storage.scope, self.settings, self.plan)
+        history, summary = replayed_history(session, self.storage.scope, self.built.history_settings, self.plan)
         return continue_team(
-            self.spec,
+            self.built.spec,
             paused,
             build_resume_request(paused=paused.messages, summary=summary, history=history),
             approved=routed.approved,
@@ -468,12 +469,11 @@ async def continue_paused_team_run(
             runtime_model_name=model_name,
             prepared_history=None,
         )
-        settings = built.history_settings
-        plan = configured_replay_plan(history_settings=settings, estimated_tokens=0)
+        plan = configured_replay_plan(history_settings=built.history_settings, estimated_tokens=0)
         # TODO(simplify): like ResumeRunner.events (approval/resume.py), this resume names no model, so its tools see
         # the tool context's. Pass model_name. Tools that follow the reply's model, such as claude_agent, would notice.
         resume = TeamResume(
-            spec=built.spec,
+            built=built,
             storage=storage,
             records=attempt.records,
             hooks=leader_loop_hooks(
@@ -489,7 +489,6 @@ async def continue_paused_team_run(
                 entity_name=team_name,
             ),
             request_template=with_native_history(ModelRequest(messages=()), native),
-            settings=settings,
             plan=plan,
             user_id=user_id,
             toolkit_owners=toolkit_owners,

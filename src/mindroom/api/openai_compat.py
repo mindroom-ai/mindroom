@@ -1035,7 +1035,7 @@ async def _prepare_openai_team_execution(
     return await prepare_materialized_team_execution(
         _openai_turn_context(team_name, session_id=None, execution_identity=execution_identity),
         scope_context=scope_context,
-        spec=built.spec,
+        built=built,
         message=prompt,
         thread_history=thread_history,
         config=config,

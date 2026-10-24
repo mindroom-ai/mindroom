@@ -77,7 +77,6 @@ from mindroom.teams.members import (
     materialized_team_label,
     requested_team_agent_names,
     resolve_team_member_model_names,
-    team_history_settings,
     team_label,
 )
 from mindroom.teams.presentation import (
@@ -193,7 +192,7 @@ async def prepare_materialized_team_execution(
     ctx: ResponseTurnContext,
     *,
     scope_context: ScopeSessionContext | None,
-    spec: TeamSpec,
+    built: BuiltTeam,
     message: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     config: Config,
@@ -210,6 +209,7 @@ async def prepare_materialized_team_execution(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedTeamExecution:
     """Prepare one built team's turn: its prompt and unseen context, the scope's history, and the run metadata."""
+    spec = built.spec
     ctx = replace(
         ctx,
         transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items),
@@ -254,7 +254,7 @@ async def prepare_materialized_team_execution(
         replayed_history(
             scope_context.session,
             scope_context.scope,
-            team_history_settings(config, configured_team_name),
+            built.history_settings,
             prepared_history.replay_plan,
         )
         if scope_context is not None
@@ -537,7 +537,7 @@ class _TeamTurn:
         prepared = await prepare_materialized_team_execution(
             self.ctx,
             scope_context=run.scope_context,
-            spec=built.spec,
+            built=built,
             message=continuation_state.active_prompt,
             thread_history=self.thread_history,
             config=config,
@@ -616,12 +616,11 @@ class _TeamTurn:
             events = drive_team_delegations(
                 events,
                 TeamResume(
-                    spec=built.spec,
+                    built=built,
                     storage=storage,
                     records=attempt.records,
                     hooks=leader.hooks,
                     request_template=leader.request_template,
-                    settings=team_history_settings(config, self.configured_team_name),
                     plan=prepared.prepared_history.replay_plan,
                     user_id=self.user_id,
                     toolkit_owners=tool_owners_by_agent(*members.builds),

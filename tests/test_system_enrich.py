@@ -38,7 +38,7 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams.envelope import prepare_materialized_team_execution
-from mindroom.teams.members import ResolvedExactTeamMembers, build_team_spec, materialize_exact_team_members
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
@@ -62,7 +62,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.teams.spec import TeamSpec
 
 
 def _config(tmp_path: Path) -> Config:
@@ -360,7 +359,7 @@ def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedEx
     return members
 
 
-def _team_spec(config: Config, members: ResolvedExactTeamMembers, *, system_enrichment: str = "") -> TeamSpec:
+def _built_team(config: Config, members: ResolvedExactTeamMembers, *, system_enrichment: str = "") -> BuiltTeam:
     return build_team_spec(
         members=members,
         mode=TeamMode.COORDINATE,
@@ -372,7 +371,7 @@ def _team_spec(config: Config, members: ResolvedExactTeamMembers, *, system_enri
         model_name="default",
         configured_team_name=None,
         system_enrichment=system_enrichment,
-    ).spec
+    )
 
 
 @pytest.mark.asyncio
@@ -388,7 +387,8 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
     )
     transient_items = (EnrichmentItem(key="location", text="Current location", persist=False),)
     rendered = render_system_enrichment_block(system_items)
-    spec = _team_spec(config, _team_members(config, monkeypatch), system_enrichment=rendered)
+    built = _built_team(config, _team_members(config, monkeypatch), system_enrichment=rendered)
+    spec = built.spec
 
     assert spec.system_message is not None
     assert rendered.strip() in str(spec.system_message.content)
@@ -405,7 +405,7 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
             system_enrichment_items=system_items,
         ),
         scope_context=None,
-        spec=spec,
+        built=built,
         message="Coordinate",
         thread_history=[],
         config=config,
@@ -429,12 +429,12 @@ async def test_a_prepared_team_turn_sends_the_prompt_without_unseen_context(
 ) -> None:
     """A team turn without thread history sends its prompt alone, with no unseen context ahead of it."""
     config = _config(tmp_path)
-    spec = _team_spec(config, _team_members(config, monkeypatch))
+    built = _built_team(config, _team_members(config, monkeypatch))
 
     prepared = await prepare_materialized_team_execution(
         make_turn_context(room_id=None, thread_id=None, requester_id=None, reply_to_event_id="$event"),
         scope_context=None,
-        spec=spec,
+        built=built,
         message="Coordinate",
         thread_history=[],
         config=config,
