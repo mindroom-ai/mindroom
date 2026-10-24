@@ -607,7 +607,10 @@ async def compact_running_turn(
     """
     runs = [*basis.runs, *snapshots]
     # The summary's usage row and summary row reference the session row, which a first turn has not written yet.
-    await run_blocking_until_complete(partial(ensure_scope_session_row, storage, session, scope))
+    await run_session_storage_operation(
+        lambda: storage,
+        partial(ensure_scope_session_row, session=session, scope=scope),
+    )
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads.
     hook_runs = [*basis.runs, RunRecord(run_id="", messages=list(folded_messages))]
