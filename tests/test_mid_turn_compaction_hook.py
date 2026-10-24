@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history import mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, NativeCompactionReplay
+from mindroom.llm.provider import DeferredTools, ModelRequest, NativeCompactionReplay
 from mindroom.providers.openai.responses_wire import ResponsesWire, responses_request_kwargs
 from mindroom.providers.openai.settings import ResponsesSettings
 from mindroom.providers.pipeline.wrapped import WrappedProvider
@@ -21,14 +21,14 @@ from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.conftest import install_model_providers
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.fakes.summary_model import summary_model
-from tests.history_helpers import _make_config
+from tests.history_helpers import BIG_TOOL, _make_config
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.agent_loop.model_loop import BeforeRequestHook
+    from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState, RequestDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider, StreamEvent
@@ -82,8 +82,9 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
         history_settings=config.resolve_entity("test_agent").history_settings,
         storage=None,
         replay_plan=None,
-        deferred_tool_names=frozenset(),
         prompt_id=None,
+        lifecycle=None,
+        turn_recorder=None,
     )
 
     _, record = await collect(
@@ -146,8 +147,9 @@ async def test_a_later_loop_of_the_run_sizes_and_falls_back_by_its_own_request_s
         history_settings=config.resolve_entity("test_agent").history_settings,
         storage=None,
         replay_plan=None,
-        deferred_tool_names=frozenset(),
         prompt_id=None,
+        lifecycle=None,
+        turn_recorder=None,
     )
 
     for prompt in ("Do the task", "Continue the task"):
@@ -200,8 +202,9 @@ def _run_local_hook(config: Config, runtime_paths: RuntimePaths, model: ModelPro
         history_settings=config.resolve_entity("test_agent").history_settings,
         storage=None,
         replay_plan=None,
-        deferred_tool_names=frozenset(),
         prompt_id=None,
+        lifecycle=None,
+        turn_recorder=None,
     )
 
 
@@ -255,3 +258,50 @@ async def test_a_responses_route_sizes_each_request_as_its_replay_sends_it(
     else:
         assert summarizer.requests == []
         assert not any(is_compaction_summary(message) for message in second.messages)
+
+
+def small_probe() -> str:
+    """Return one short tool result."""
+    return "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_tools_the_request_defers_stay_out_of_its_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    deferred: bool,
+) -> None:
+    """A definition the request leaves to tool search costs nothing until a search loads it, so it never compacts."""
+    config, runtime_paths = _small_window_config(tmp_path)
+    summaries: list[object] = []
+
+    async def summarize(**kwargs: object) -> str:
+        summaries.append(kwargs)
+        msg = "summary model unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(mid_turn_compaction, "summarize_run_locally", summarize)
+    model = ScriptedModel([calls(tool_call("small_probe", "call_1")), answer("done")])
+
+    async def offer_big_tool(state: LoopState) -> RequestDecision:
+        state.tools = (*state.tools, BIG_TOOL)
+        return SendRequest()
+
+    _, record = await collect(
+        run_agent(
+            spec(model, toolkit(small_probe)),
+            [Message(role="user", content="Do the task")],
+            ctx=context(),
+            hooks=LoopHooks(before_request=(offer_big_tool, _run_local_hook(config, runtime_paths, model))),
+            persist=None,
+            request_template=ModelRequest(
+                messages=(),
+                deferred_tools=DeferredTools(names=frozenset({"big_tool"}) if deferred else frozenset()),
+            ),
+        ),
+    )
+
+    assert record.content == "done"
+    # The 80,000-character definition alone exceeds the 4,000-token window; deferred, the request fits.
+    assert len(summaries) == (0 if deferred else 1)

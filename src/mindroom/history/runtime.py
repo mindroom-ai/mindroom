@@ -41,7 +41,7 @@ from mindroom.history.session_context import (
 from mindroom.history.storage import (
     consume_pending_force_compaction_scope,
     read_scope_state,
-    update_scope_state_on_latest,
+    set_force_compaction,
 )
 from mindroom.history.summary_call import is_summary_timeout
 from mindroom.history.team_scope import ad_hoc_team_has_private_member
@@ -243,7 +243,6 @@ async def prepare_scope_history(
             resolved_inputs=resolved_inputs,
             config=config,
             model=model,
-            replay_estimator=replay_estimator,
             non_prompt_tokens=non_prompt_tokens,
         )
         if native_route is None and visible_runs
@@ -355,7 +354,6 @@ def _reported_history_tokens(
     resolved_inputs: HistoryPreparationInputs,
     config: Config,
     model: ModelProvider | None,
-    replay_estimator: PortableReplayEstimator | None,
     non_prompt_tokens: int,
 ) -> int | None:
     """Size history from the request the provider reported for the scope's latest answer, or None when stale.
@@ -372,7 +370,7 @@ def _reported_history_tokens(
         or (latest_run.model, latest_run.model_provider) != (model.identity.id, model.identity.provider)
     ):
         return None
-    messages = [message for message in latest_run.messages or [] if not message.from_history]
+    messages = [message for message in latest_run.messages if not message.from_history]
     anchor = next(
         (index for index in range(len(messages) - 1, -1, -1) if is_own_model_message(messages[index])),
         None,
@@ -391,7 +389,7 @@ def _reported_history_tokens(
     reported = reported_context_tokens(answer, model=model, config=config, model_name=resolved_inputs.active_model_name)
     if reported is None:
         return None
-    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=replay_estimator)
+    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=model.replay_estimator)
     return reported + newer_tokens - non_prompt_tokens
 
 
@@ -881,20 +879,10 @@ def _prepare_scope_state_for_run(
     if consume_pending_force_compaction_scope(session, scope):
         # The flag is stored before the request leaves the tools' state, so a crash between the two writes repeats
         # the request instead of losing it.
-        state = update_scope_state_on_latest(
-            storage,
-            session=session,
-            scope=scope,
-            update=lambda latest: replace(latest, force_compact_before_next_run=True),
-        )
+        state = set_force_compaction(storage, session=session, scope=scope, forced=True)
         storage.save_session_state(session, session_state_snapshot(session.session_state))
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
-        state = update_scope_state_on_latest(
-            storage,
-            session=session,
-            scope=scope,
-            update=lambda latest: replace(latest, force_compact_before_next_run=False),
-        )
+        state = set_force_compaction(storage, session=session, scope=scope, forced=False)
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",
             session_id=session.session_id,

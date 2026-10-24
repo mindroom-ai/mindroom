@@ -53,6 +53,7 @@ from mindroom.llm.provider import (
     StreamEvent,
     TextDelta,
     ToolCallReady,
+    ToolSpec,
     TurnCompleted,
     UsageReported,
 )
@@ -577,7 +578,33 @@ def store_fold(
 # One large tool result: a few of them outgrow a 4,000-token window.
 TOOL_RESULT = "r" * 4000
 TEST_AGENT_SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
+# One tool definition large enough to dominate a request's size unless tool search defers it.
+BIG_TOOL = ToolSpec(
+    name="big_tool",
+    description="d" * 80_000,
+    parameters={},
+    strict=None,
+    requires_confirmation=None,
+    external_execution=None,
+    approval_type=None,
+)
 _TEST_MODEL = ModelIdentity(id="test-model", provider="test", provider_name="test")
+
+
+@dataclass
+class ReplayEstimate:
+    """A route that sizes every explicit replay at ``tokens`` (None: no estimate), keeping the last replay it sized."""
+
+    tokens: int | None
+    uses_visual_tokens: bool = False
+    messages: list[Message] = field(default_factory=list)
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
+        self.messages = messages
+        return self.tokens
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        return self.uses_visual_tokens
 
 
 @dataclass

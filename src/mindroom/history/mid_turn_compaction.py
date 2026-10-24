@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -20,11 +20,8 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
 from mindroom.history.policy import context_budget_after_reserve
-from mindroom.history.replay import (
-    HistorySummaryBudgetError,
-    compaction_summary_message,
-    estimate_request_messages_tokens,
-)
+from mindroom.history.prompt_tokens import tool_definitions
+from mindroom.history.replay import HistorySummaryBudgetError, estimate_request_messages_tokens
 from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
     compact_scope_mid_turn,
@@ -34,6 +31,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import new_scope_session, read_fold_basis, record_summary_usage
 from mindroom.history.summary_message import (
+    compaction_summary_message,
     compaction_summary_text,
     is_compaction_summary,
     is_scope_summary,
@@ -78,8 +76,9 @@ class _MidTurnCompaction:
 
     ``storage`` is where the run stores, and ``replay_plan`` is the plan its requests replay the scope's stored history
     under: a fold appends a summary row to the scope when they replay some, and a run that replays none keeps its
-    summary as a message of its own. ``prompt_id`` names the turn's prompt, which every fold keeps in place. Whether
-    the provider compacts natively is read from each request, which a fallback changes.
+    summary as a message of its own. ``prompt_id`` names the turn's prompt, which every fold keeps in place. Each
+    request supplies whether the provider compacts natively, which a text fallback turns off for later requests, and
+    which tools tool search defers.
     """
 
     config: Config
@@ -92,7 +91,6 @@ class _MidTurnCompaction:
     history_settings: ResolvedHistorySettings
     storage: RunStorage | None
     replay_plan: ResolvedReplayPlan | None
-    deferred_tool_names: frozenset[str]
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None
     turn_recorder: TurnRecorder | None
@@ -141,10 +139,9 @@ def mid_turn_compaction_hook(
     history_settings: ResolvedHistorySettings,
     storage: RunStorage | None,
     replay_plan: ResolvedReplayPlan | None,
-    deferred_tool_names: frozenset[str],
     prompt_id: str | None,
-    lifecycle: CompactionLifecycle | None = None,
-    turn_recorder: TurnRecorder | None = None,
+    lifecycle: CompactionLifecycle | None,
+    turn_recorder: TurnRecorder | None,
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 
@@ -152,7 +149,7 @@ def mid_turn_compaction_hook(
     ``lifecycle`` shows the fold through the reply's notices and ``turn_recorder`` records the folded calls for an
     interrupted record.
     """
-    binding = _MidTurnCompaction(
+    compaction = _MidTurnCompaction(
         config=config,
         runtime_paths=runtime_paths,
         entity_name=entity_name,
@@ -163,14 +160,13 @@ def mid_turn_compaction_hook(
         history_settings=history_settings,
         storage=storage,
         replay_plan=replay_plan,
-        deferred_tool_names=deferred_tool_names,
         prompt_id=prompt_id,
         lifecycle=lifecycle,
         turn_recorder=turn_recorder,
     )
 
     async def hook(state: LoopState) -> RequestDecision:
-        await _prepare_request(binding, state)
+        await _prepare_request(compaction, state)
         return SendRequest()
 
     return hook
@@ -193,19 +189,21 @@ class _Policy:
     fit_limit: int
     # Set while the request asks the provider to compact; the hook then only falls back to text when it cannot fit.
     native_route: str | None
+    # The tools the request keeps off the provider until tool search loads them.
+    deferred_tool_names: frozenset[str]
 
 
-async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> None:
-    if binding.stopped:
+async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> None:
+    if compaction.stopped:
         return
-    policy = _policy(binding, state)
+    policy = _policy(compaction, state)
     if policy is None:
         return
     messages = state.messages
     # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
     request_tokens = await asyncio.to_thread(
         _request_tokens,
-        binding,
+        compaction,
         policy,
         messages,
         state.tools,
@@ -213,14 +211,14 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
     )
     if request_tokens <= policy.limit:
         return
-    scope_fold = binding.scope_fold
-    layout = _layout(messages, binding.prompt_id, scoped=scope_fold is not None)
+    scope_fold = compaction.scope_fold
+    layout = _layout(messages, compaction.prompt_id, scoped=scope_fold is not None)
     if not layout.folded and all(is_compaction_summary(message) for message in layout.history):
         # Nothing but an earlier summary would fold, so compacting again cannot shrink the request.
         return
-    summary_message = await _summarize(binding, policy, layout, messages, state.record, scope_fold, request_tokens)
+    summary_message = await _summarize(compaction, policy, layout, messages, state.record, scope_fold, request_tokens)
     if summary_message is None:
-        binding.stopped = True
+        compaction.stopped = True
         return
     if policy.native_route is not None:
         # The provider's own compaction could not keep this request within the window.
@@ -231,7 +229,7 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
         # The fold replaced the checkpoints the provider's compaction replayed, so the loop's later requests carry no
         # native settings: each route sends them as plain requests, and this hook sizes and compacts them as text.
         state.request_template = replace(state.request_template, native_compaction=None)
-    rewritten_tokens = await asyncio.to_thread(_estimated_request_tokens, binding, messages, state.tools)
+    rewritten_tokens = await asyncio.to_thread(_estimated_request_tokens, compaction, policy, messages, state.tools)
     _require_fit(policy, rewritten_tokens, summary_message)
     if rewritten_tokens > policy.limit:
         # What stays (system prompt, tools, summary, prompt) exceeds the replay window on its own; compacting again
@@ -240,11 +238,11 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
             "Compacted request still exceeds the replay window; not compacting again",
             run_id=state.record.run_id,
         )
-        binding.stopped = True
+        compaction.stopped = True
 
 
 async def _summarize(
-    binding: _MidTurnCompaction,
+    compaction: _MidTurnCompaction,
     policy: _Policy,
     layout: _Layout,
     messages: list[Message],
@@ -261,12 +259,12 @@ async def _summarize(
     inputs = replace(policy.inputs, history_settings=settings)
     try:
         if scope_fold is None:
-            summary_message = await _summarize_run_locally(binding, inputs, layout, record)
+            summary_message = await _summarize_run_locally(compaction, inputs, layout, record)
             _finish(messages, layout, summary_message, record)
             return summary_message
         store, session, scope = scope_fold
         return await _compact_scope(
-            binding,
+            compaction,
             inputs,
             layout,
             messages,
@@ -287,7 +285,7 @@ def _finish(messages: list[Message], layout: _Layout, summary_message: Message, 
 
 
 async def _compact_scope(
-    binding: _MidTurnCompaction,
+    compaction: _MidTurnCompaction,
     inputs: HistoryPreparationInputs,
     layout: _Layout,
     messages: list[Message],
@@ -307,7 +305,7 @@ async def _compact_scope(
     if basis is None:
         logger.warning("Mid-turn compaction skipped because the conversation changed", run_id=record.run_id)
         return None
-    segment = _segment(record, layout, binding.folded_member_ids)
+    segment = _segment(record, layout, compaction.folded_member_ids)
     folded_calls = folded_tool_call_ids(segment.payload())
     summary_messages: list[Message] = []
 
@@ -315,11 +313,11 @@ async def _compact_scope(
         # Runs together with the row's commit, so a stopped or failed reply's record leaves the folded calls out.
         summary_message = compaction_summary_message(summary, run_local=False)
         summary_messages.append(summary_message)
-        binding.folded_member_ids.update(
+        compaction.folded_member_ids.update(
             member["run_id"] for member in segment.member_responses if member.get("run_id")
         )
-        if binding.turn_recorder is not None:
-            binding.turn_recorder.record_folded_tool_calls(folded_calls)
+        if compaction.turn_recorder is not None:
+            compaction.turn_recorder.record_folded_tool_calls(folded_calls)
         _finish(messages, layout, summary_message, record)
 
     outcome = await compact_scope_mid_turn(
@@ -333,9 +331,9 @@ async def _compact_scope(
         folded_messages=layout.folded,
         # The size that triggered this compaction, so the history budget sees what the request needs.
         before_tokens=request_tokens,
-        config=binding.config,
-        runtime_paths=binding.runtime_paths,
-        compaction_lifecycle=binding.lifecycle,
+        config=compaction.config,
+        runtime_paths=compaction.runtime_paths,
+        compaction_lifecycle=compaction.lifecycle,
         on_commit=on_commit,
     )
     return summary_messages[0] if outcome is not None and summary_messages else None
@@ -366,26 +364,27 @@ def _segment(record: AnyRunRecord, layout: _Layout, folded_member_ids: set[str])
     )
 
 
-def _policy(binding: _MidTurnCompaction, state: LoopState) -> _Policy | None:
+def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:
     """Return the limit text compaction keeps requests under, or None when it cannot run for this request."""
     inputs = resolve_entity_preparation_inputs(
-        config=binding.config,
-        entity_name=binding.entity_name,
+        config=compaction.config,
+        entity_name=compaction.entity_name,
         static_prompt_tokens=0,
-        active_model_name=binding.model_name,
+        active_model_name=compaction.model_name,
         active_context_window=None,
-        history_settings=binding.history_settings,
+        history_settings=compaction.history_settings,
     )
     plan = inputs.execution_plan
     if not (plan.authored_compaction_enabled and plan.text_compaction_available) or plan.replay_window_tokens is None:
         return None
-    model_window = binding.config.get_model_context_window(binding.model_name)
+    model_window = compaction.config.get_model_context_window(compaction.model_name)
     native = state.request_template.native_compaction
     return _Policy(
         inputs=inputs,
         limit=context_budget_after_reserve(plan.replay_window_tokens, plan.reserve_tokens),
         fit_limit=context_budget_after_reserve(model_window or plan.replay_window_tokens, plan.reserve_tokens),
         native_route=native.route if native is not None else None,
+        deferred_tool_names=state.request_template.deferred_tools.names,
     )
 
 
@@ -401,7 +400,7 @@ def _require_fit(policy: _Policy, tokens: int, summary_message: Message) -> None
 
 
 def _request_tokens(
-    binding: _MidTurnCompaction,
+    compaction: _MidTurnCompaction,
     policy: _Policy,
     messages: list[Message],
     tools: Sequence[ToolSpec],
@@ -417,14 +416,14 @@ def _request_tokens(
         return (
             estimate_request_messages_tokens(
                 messages,
-                replay_model=binding.model.replay_estimator,
+                replay_model=compaction.model.replay_estimator,
                 native_route=policy.native_route,
             )
             # Thinking before the latest checkpoint is part of that checkpoint, not of the request.
             + _thinking_tokens(
                 [message for message in projected if not checkpoint_items(message, policy.native_route)],
             )
-            + _tool_tokens(binding, tools, projected)
+            + _tool_tokens(tools, projected, policy.deferred_tool_names)
         )
     anchor = next(
         (
@@ -437,45 +436,45 @@ def _request_tokens(
     if anchor is not None:
         reported = reported_context_tokens(
             messages[anchor],
-            model=binding.model,
-            config=binding.config,
-            model_name=binding.model_name,
+            model=compaction.model,
+            config=compaction.config,
+            model_name=compaction.model_name,
         )
         if reported is not None:
             newer = messages[anchor:]
             return (
                 reported
-                + estimate_request_messages_tokens(newer, replay_model=binding.model.replay_estimator)
+                + estimate_request_messages_tokens(newer, replay_model=compaction.model.replay_estimator)
                 + _thinking_tokens(newer)
             )
-    return _estimated_request_tokens(binding, messages, tools)
+    return _estimated_request_tokens(compaction, policy, messages, tools)
 
 
-def _estimated_request_tokens(binding: _MidTurnCompaction, messages: list[Message], tools: Sequence[ToolSpec]) -> int:
+def _estimated_request_tokens(
+    compaction: _MidTurnCompaction,
+    policy: _Policy,
+    messages: list[Message],
+    tools: Sequence[ToolSpec],
+) -> int:
     return (
-        estimate_request_messages_tokens(messages, replay_model=binding.model.replay_estimator)
+        estimate_request_messages_tokens(messages, replay_model=compaction.model.replay_estimator)
         + _thinking_tokens(messages)
-        + _tool_tokens(binding, tools, messages)
+        + _tool_tokens(tools, messages, policy.deferred_tool_names)
     )
 
 
-def _tool_tokens(binding: _MidTurnCompaction, tools: Sequence[ToolSpec], messages: Sequence[Message]) -> int:
-    """Estimate the tool definitions a request carries in full; tool search keeps deferred ones out until it loads them.
+def _tool_tokens(tools: Sequence[ToolSpec], messages: Sequence[Message], deferred: frozenset[str]) -> int:
+    """Estimate the tool definitions a request carries in full; tool search keeps ``deferred`` out until it loads them.
 
     Claude expands a search's tool references into definitions; OpenAI replays them inside the search output, and
     portable tool search returns them as an ordinary tool result, both of which the message estimate already counts.
     """
-    deferred = binding.deferred_tool_names
     if deferred:
         deferred -= claude_loaded_tool_names(messages)
     # TODO(simplify): this sizes each definition inside a Chat ``function`` envelope while the static estimate
-    # (``prompt_tokens.py``) sizes the bare fields, so one tool costs two amounts. Size both through one helper.
+    # (``prompt_tokens.py``) sizes the bare fields, so one tool costs two amounts. Size both without the envelope.
     # Operators would see compaction trigger, and models see replay trimmed, a few tokens per tool differently.
-    payloads = [
-        {"type": "function", "function": {key: value for key, value in asdict(tool).items() if value is not None}}
-        for tool in tools
-        if tool.name not in deferred
-    ]
+    payloads = [{"type": "function", "function": definition} for definition in tool_definitions(tools, deferred)]
     return estimate_text_tokens(stable_serialize(payloads))
 
 
@@ -614,12 +613,12 @@ def _prompt_context(prompt: Message, budget_tokens: int) -> Message:
 
 
 async def _summarize_run_locally(
-    binding: _MidTurnCompaction,
+    compaction: _MidTurnCompaction,
     inputs: HistoryPreparationInputs,
     layout: _Layout,
     record: AnyRunRecord,
 ) -> Message:
-    scope = HistoryScope(kind="team" if binding.is_team else "agent", scope_id=binding.scope_id)
+    scope = HistoryScope(kind="team" if compaction.is_team else "agent", scope_id=compaction.scope_id)
     # Without a stored session to append a summary row to, replayed history is summarized with the turn's exchanges,
     # as content of its own snapshot rather than a copy the summary input skips.
     history = [_snapshot_run(record, [replace(message, from_history=False)], None) for message in layout.history]
@@ -628,15 +627,15 @@ async def _summarize_run_locally(
         previous_summary=layout.previous_run_local_summary,
         snapshots=[*history, *_snapshots(record, layout, inputs)],
         scope=scope,
-        config=binding.config,
-        runtime_paths=binding.runtime_paths,
-        on_usage=_summary_usage_recorder(binding, record),
+        config=compaction.config,
+        runtime_paths=compaction.runtime_paths,
+        on_usage=_summary_usage_recorder(compaction, record),
     )
     return compaction_summary_message(summary, run_local=True)
 
 
 def _summary_usage_recorder(
-    binding: _MidTurnCompaction,
+    compaction: _MidTurnCompaction,
     record: AnyRunRecord,
 ) -> Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None:
     """Record each summary response under the reply's usage owner, else in the run's own session storage."""
@@ -657,7 +656,7 @@ def _summary_usage_recorder(
             )
 
         return record_for_owner
-    storage = binding.storage.store if binding.storage is not None else None
+    storage = compaction.storage.store if compaction.storage is not None else None
     if storage is None or not record.session_id:
         logger.warning("Mid-turn summary usage has no storage owner", run_id=record.run_id)
         return None
@@ -669,8 +668,8 @@ def _summary_usage_recorder(
         # The run's own session row may not exist yet while its first turn is still running.
         initial_session=new_scope_session(
             session_id=record.session_id,
-            scope_id=binding.scope_id,
-            is_team=binding.is_team,
+            scope_id=compaction.scope_id,
+            is_team=compaction.is_team,
         ),
     )
 

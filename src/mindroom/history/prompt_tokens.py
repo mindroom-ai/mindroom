@@ -42,12 +42,16 @@ def build_static_token_estimator(
     """
 
     def non_prompt_tokens() -> int:
-        payloads = [
-            {key: value for key, value in asdict(tool).items() if value is not None}
-            for tool in tools
-            if tool.name not in deferred_tool_names
-        ]
-        tool_tokens = estimate_text_tokens(stable_serialize(payloads))
+        tool_tokens = estimate_text_tokens(stable_serialize(tool_definitions(tools, deferred_tool_names)))
         return estimate_text_tokens(str(system_message.content or "")) + tool_tokens
 
     return _StaticTokenEstimator(cache(non_prompt_tokens))
+
+
+def tool_definitions(tools: Sequence[ToolSpec], deferred_tool_names: frozenset[str]) -> list[dict[str, object]]:
+    """Return each tool's set definition fields as a request carries them; tool search keeps deferred tools out."""
+    return [
+        {key: value for key, value in asdict(tool).items() if value is not None}
+        for tool in tools
+        if tool.name not in deferred_tool_names
+    ]

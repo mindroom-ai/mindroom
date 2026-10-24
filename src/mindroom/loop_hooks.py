@@ -179,7 +179,6 @@ def _loop_hooks(
             history_settings=history_settings,
             storage=turn.storage,
             replay_plan=turn.replay_plan,
-            deferred_tool_names=deferred_tools.names,
             prompt_id=turn.prompt_id,
             lifecycle=turn.lifecycle,
             turn_recorder=turn.turn_recorder,

@@ -28,7 +28,7 @@ summary covered to replay (see ``tests/test_compaction_fuzz.py`` for the invaria
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -385,6 +385,22 @@ def update_scope_state_on_latest(
     return read_scope_state(session, scope)
 
 
+def set_force_compaction(
+    storage: ConversationStore,
+    *,
+    session: ConversationSession,
+    scope: HistoryScope,
+    forced: bool,
+) -> HistoryScopeState:
+    """Store whether the scope's next run compacts its history first, on the stored row's latest state."""
+    return update_scope_state_on_latest(
+        storage,
+        session=session,
+        scope=scope,
+        update=lambda latest: replace(latest, force_compact_before_next_run=forced),
+    )
+
+
 @dataclass(frozen=True)
 class _ChunkBasis:
     """What one compaction chunk's summary is built on: the latest summary row and the candidate runs, as read."""
@@ -508,11 +524,14 @@ def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run
     return summary_rows.segment_tool_call_ids(storage, session_id=session_id, run_id=run_id)
 
 
+def first_scope_session(scope: HistoryScope, session_id: str) -> ConversationSession:
+    """Return the empty session row the first run of ``session_id`` in ``scope`` starts from."""
+    return new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
+
+
 def ensure_scope_session_row(storage: ConversationStore, session: ConversationSession, scope: HistoryScope) -> None:
     """Create the session row a first turn's fold writes against; the run's own save creates it otherwise."""
-    storage.ensure_session_row(
-        new_scope_session(session_id=session.session_id, scope_id=scope.scope_id, is_team=scope.kind == "team"),
-    )
+    storage.ensure_session_row(first_scope_session(scope, session.session_id))
 
 
 def save_working_run_changes(

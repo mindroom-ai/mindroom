@@ -25,15 +25,11 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
-from mindroom.history.replay import (
-    compaction_summary_message,
-    configured_replay_plan,
-    estimate_request_messages_tokens,
-)
+from mindroom.history.replay import configured_replay_plan, estimate_request_messages_tokens
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.history.storage import _with_scope_state, new_scope_session, read_scope_state
-from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
+from mindroom.history.summary_message import compaction_summary_message, is_compaction_summary, is_scope_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleStart,
@@ -62,6 +58,7 @@ from mindroom.usage.storage import project_usage, quote_identifier
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
+    BIG_TOOL,
     TEST_AGENT_SCOPE,
     TOOL_RESULT,
     RecordingCompactionLifecycle,
@@ -235,7 +232,6 @@ async def _run(
         replay_plan=configured_replay_plan(history_settings=settings, estimated_tokens=0)
         if agent.folds_into_scope
         else None,
-        deferred_tool_names=frozenset(),
         prompt_id=turn.prompt.id,
         lifecycle=agent.lifecycle,
         turn_recorder=agent.turn_recorder,
@@ -298,27 +294,6 @@ def _summary_usage(storage: ConversationStore) -> list[tuple[str, dict[str, Any]
     return [
         (session_id, usage) for session_id, usage in _usage_rows(storage) if usage.get("kind") == "compaction_summary"
     ]
-
-
-def _binding(tmp_path: Path, deferred_tool_names: frozenset[str]) -> mid_turn_compaction._MidTurnCompaction:
-    """Return the mid-turn binding of a run-local test agent whose tool search defers ``deferred_tool_names``."""
-    config, paths = _config(tmp_path)
-    return mid_turn_compaction._MidTurnCompaction(
-        config=config,
-        runtime_paths=paths,
-        entity_name="test_agent",
-        scope_id="test_agent",
-        is_team=False,
-        model_name="default",
-        model=ToolLoopModel(tool_rounds=0),
-        history_settings=config.resolve_entity("test_agent").history_settings,
-        storage=None,
-        replay_plan=None,
-        deferred_tool_names=deferred_tool_names,
-        prompt_id=None,
-        lifecycle=None,
-        turn_recorder=None,
-    )
 
 
 @pytest.mark.asyncio
@@ -498,21 +473,10 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     assert tokens < 10_000
 
 
-_BIG_TOOL = ToolSpec(
-    name="big_tool",
-    description="d" * 80_000,
-    parameters={},
-    strict=None,
-    requires_confirmation=None,
-    external_execution=None,
-    approval_type=None,
-)
-
-
-def test_request_sizing_leaves_out_deferred_tool_definitions(tmp_path: Path) -> None:
+def test_request_sizing_leaves_out_deferred_tool_definitions() -> None:
     """Tool search keeps deferred definitions out of the context until the model loads them."""
     tools = [
-        _BIG_TOOL,
+        BIG_TOOL,
         ToolSpec(
             name="lookup",
             description="Look up a value.",
@@ -523,10 +487,9 @@ def test_request_sizing_leaves_out_deferred_tool_definitions(tmp_path: Path) -> 
             approval_type=None,
         ),
     ]
-    binding = _binding(tmp_path, frozenset({"big_tool"}))
 
-    assert mid_turn_compaction._tool_tokens(binding, tools, []) < 1_000
-    assert mid_turn_compaction._tool_tokens(binding, tools, []) > 0
+    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) < 1_000
+    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"})) > 0
 
 
 @pytest.mark.parametrize("provider", ["openai", "claude"])
@@ -584,9 +547,9 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     ]
 
     total = estimate_request_messages_tokens(searched, replay_model=replay_model) + mid_turn_compaction._tool_tokens(
-        _binding(tmp_path, frozenset({"big_tool"})),
-        [_BIG_TOOL],
+        [BIG_TOOL],
         searched,
+        frozenset({"big_tool"}),
     )
 
     assert 15_000 < total < 30_000

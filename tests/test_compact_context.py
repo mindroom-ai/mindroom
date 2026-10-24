@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, get_type_hints
-from unittest.mock import AsyncMock, Mock, patch
+from typing import TYPE_CHECKING, Any, get_type_hints
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.run import RunContext
@@ -237,14 +238,15 @@ async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -
     assert result == COMPACT_CONTEXT_SUCCESS
 
 
-def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Path) -> None:
     """Manual compaction scheduling should be available without going through the tool adapter."""
     config, runtime_paths = _make_config(tmp_path)
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
 
-    result = request_compaction_before_next_reply(
+    result = await request_compaction_before_next_reply(
         scope=_AGENT_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
@@ -260,7 +262,8 @@ def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Pa
     assert result == COMPACT_CONTEXT_SUCCESS
 
 
-def test_a_manual_compaction_request_is_recorded_in_the_session_state_it_is_given(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_a_manual_compaction_request_is_recorded_in_the_session_state_it_is_given(tmp_path: Path) -> None:
     """The dict the run's tools share records the request in place, so the run's own save keeps it."""
     config, runtime_paths = _make_config(tmp_path)
     identity = _execution_identity()
@@ -268,7 +271,7 @@ def test_a_manual_compaction_request_is_recorded_in_the_session_state_it_is_give
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
     session_state: dict[str, object] = {}
 
-    result = request_compaction_before_next_reply(
+    result = await request_compaction_before_next_reply(
         scope=_AGENT_SCOPE,
         agent_name="test_agent",
         session_id="session-1",
@@ -310,46 +313,8 @@ async def test_compact_context_requires_compaction_window(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 async def test_compact_context_saves_nothing_after_budget_error(tmp_path: Path) -> None:
-    """A request that manual validation refuses leaves the stored session untouched."""
+    """A request that manual validation refuses never opens the scope's store, so it leaves the session untouched."""
     config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=None)
-    storage = Mock(spec=ConversationStore)
-    scope_context = ScopeSessionContext(
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        storage=storage,
-        session=_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]),
-        session_id="session-1",
-    )
-    identity = _execution_identity()
-    tool = CompactContextTools(
-        agent_name="test_agent",
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=identity,
-    )
-
-    with patch(
-        "mindroom.history.manual.load_scope_session",
-        return_value=scope_context,
-    ):
-        result = await tool.compact_context()
-
-    assert result == (
-        "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
-    )
-    assert storage.method_calls == []
-
-
-@pytest.mark.asyncio
-async def test_compact_context_saves_only_the_scope_metadata(tmp_path: Path) -> None:
-    """Scheduling writes only the session metadata, so it cannot overwrite runs or tool state a reply saves."""
-    config, runtime_paths = _make_config(tmp_path)
-    storage = Mock(spec=ConversationStore)
-    scope_context = ScopeSessionContext(
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        storage=storage,
-        session=_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]),
-        session_id="session-1",
-    )
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
@@ -357,22 +322,75 @@ async def test_compact_context_saves_only_the_scope_metadata(tmp_path: Path) -> 
         execution_identity=_execution_identity(),
     )
 
-    with patch(
-        "mindroom.history.manual.load_scope_session",
-        return_value=scope_context,
-    ):
+    with patch("mindroom.history.manual.create_scope_session_storage") as open_store:
         result = await tool.compact_context()
 
+    assert result == (
+        "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
+    )
+    open_store.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_compact_context_saves_only_the_scope_metadata(tmp_path: Path) -> None:
+    """Scheduling writes only the session metadata, so it cannot overwrite runs or tool state a reply saves."""
+    config, runtime_paths = _make_config(tmp_path)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
+    seeded = _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")])
+    seeded.metadata = {"other": "kept"}
+    seeded.session_state = {"tool": "state"}
+    seed_session(storage, seeded)
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
+
+    result = await tool.compact_context()
+
     assert result == COMPACT_CONTEXT_SUCCESS
-    assert [call[0] for call in storage.method_calls] == ["update_metadata"]
-    ((session, update), _) = storage.update_metadata.call_args
-    assert session is scope_context.session
-    forced = update({"other": "kept"})
-    assert forced == _with_scope_state(
+    stored = storage.load_session("session-1", "agent")
+    assert stored is not None
+    assert [run.run_id for run in stored.runs] == ["run-1"]
+    assert stored.session_state == {"tool": "state"}
+    assert stored.metadata == _with_scope_state(
         {"other": "kept"},
-        scope_context.scope,
+        _AGENT_SCOPE,
         HistoryScopeState(force_compact_before_next_run=True),
     )
+
+
+@pytest.mark.asyncio
+async def test_compact_context_writes_the_request_in_the_database_s_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The request's metadata write runs in the database's lane, behind the session's other writes."""
+    config, runtime_paths = _make_config(tmp_path)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
+    writing_threads: list[str] = []
+    update_metadata = ConversationStore.update_metadata
+
+    def recording(self: ConversationStore, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        writing_threads.append(threading.current_thread().name)
+        update_metadata(self, *args, **kwargs)
+
+    monkeypatch.setattr(ConversationStore, "update_metadata", recording)
+    tool = CompactContextTools(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
+
+    assert await tool.compact_context() == COMPACT_CONTEXT_SUCCESS
+
+    assert len(writing_threads) == 1
+    assert writing_threads[0].startswith("conversation-store"), writing_threads
 
 
 @pytest.mark.asyncio
@@ -797,7 +815,7 @@ async def test_a_consumed_compaction_request_keeps_metadata_another_writer_store
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reply that consumes a queued request stores the flag over the row's metadata, not the copy it loaded."""
+    """A reply that consumes a queued request compacts and stores the flag over the row's metadata, not its copy."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=_execution_identity())
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -828,10 +846,14 @@ async def test_a_consumed_compaction_request_keeps_metadata_another_writer_store
     stored = storage.load_session("session-1", "agent")
     assert stored is not None
     assert read_scope_seen_event_ids(storage, stored, team_scope) == {"$consumed"}
+    assert stored.summary is not None
     assert not has_queued_force_compaction(storage, "session-1", scope)
 
 
-def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_after_the_copy_loaded(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_after_the_copy_loaded(
+    tmp_path: Path,
+) -> None:
     """A team turn's consumed ids merge into the row's metadata, not its loaded copy's, so a later request stays."""
     config, runtime_paths = _make_config(tmp_path)
     identity = _execution_identity()
@@ -840,7 +862,7 @@ def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_after_th
     team_copy = storage.load_session("session-1", "agent")
     assert team_copy is not None
     # The user asks for compaction after the team turn loaded its copy of the session.
-    result = request_compaction_before_next_reply(
+    result = await request_compaction_before_next_reply(
         scope=_AGENT_SCOPE,
         agent_name="test_agent",
         session_id="session-1",

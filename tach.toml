@@ -2614,6 +2614,7 @@ depends_on = [
     "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.logging_config",
+    "mindroom.session_storage.lanes",
 ]
 
 [[modules]]
@@ -2635,10 +2636,11 @@ visibility = ["mindroom.history.request_messages"]
 
 [[modules]]
 path = "mindroom.history.summary_message"
-depends_on = []
+depends_on = ["mindroom.llm"]
 visibility = [
     "mindroom.history.conversation_text",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.native",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
 ]
@@ -2693,6 +2695,7 @@ depends_on = [
 path = "mindroom.history.native"
 depends_on = [
     "mindroom.history.replay",
+    "mindroom.history.summary_message",
     "mindroom.history.types",
     "mindroom.native_compaction",
 ]
@@ -9463,6 +9466,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.history.legacy_summary_system_prompt",
     "mindroom.history.policy",
+    "mindroom.history.prompt_tokens",
     "mindroom.history.replay",
     "mindroom.history.run_visibility",
     "mindroom.history.runtime",
