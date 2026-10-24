@@ -160,7 +160,7 @@ async def test_prepare_bound_scope_history_prepares_the_owner_s_team_scope_once(
     assert mock_finalize.call_count == 1
     assert mock_prepare.await_count == 1
     assert mock_prepare.await_args.kwargs["agent_name"] == "alpha"
-    assert mock_prepare.await_args.kwargs["scope"] == HistoryScope(kind="team", scope_id="team_alpha+zeta")
+    assert mock_prepare.await_args.kwargs["scope_context"].scope == HistoryScope("team", "team_alpha+zeta")
     assert mock_prepare.await_args.kwargs["model"] is built.spec.model
     assert estimator.estimate("Current prompt") == expected_static_prompt_tokens
     assert (
@@ -349,5 +349,5 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
         )
 
     assert mock_prepare.await_count == 1
-    assert mock_prepare.await_args.kwargs["scope"] == opened_scope
+    assert mock_prepare.await_args.kwargs["scope_context"].scope == opened_scope
     assert mock_prepare.await_args.kwargs["non_prompt_tokens"] == 2
