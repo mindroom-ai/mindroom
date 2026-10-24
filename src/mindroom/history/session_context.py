@@ -99,7 +99,6 @@ def load_scope_session(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-    create_session_if_missing: bool = False,
 ) -> ScopeSessionContext | None:
     """Load the session context of one already-resolved persisted history scope for the current request."""
     if session_id is None or scope is None:
@@ -113,7 +112,7 @@ def load_scope_session(
     )
     storage = storage_factory()
     session = storage.load_session(session_id, scope.kind)
-    context = ScopeSessionContext(
+    return ScopeSessionContext(
         scope=scope,
         storage=storage,
         session=session,
@@ -121,7 +120,6 @@ def load_scope_session(
         storage_factory=storage_factory,
         session_exists=session is not None,
     )
-    return context.with_session() if create_session_if_missing else context
 
 
 def load_bound_scope_session(

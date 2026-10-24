@@ -502,7 +502,6 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             config=config,
             runtime_paths=paths,
             execution_identity=identity,
-            create_session_if_missing=True,
         )
     model = ScriptedModel([answer("Sample output.", owned_usage(20, 2))])
     install_model_providers(monkeypatch, {"default": model})
@@ -628,7 +627,6 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
         config=config,
         runtime_paths=paths,
         execution_identity=None,
-        create_session_if_missing=True,
     )
     assert get_helper_usage_owner() is None
     context = load_scope()

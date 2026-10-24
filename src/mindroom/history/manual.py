@@ -44,7 +44,6 @@ def request_compaction_before_next_reply(
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
-        create_session_if_missing=True,
     )
     if scope_context is None:
         return "Error: Current agent has no history scope. Cannot compact context."
@@ -69,12 +68,9 @@ def request_compaction_before_next_reply(
     if unavailable is not None:
         return f"Error: Compaction is unavailable for this scope because {unavailable}."
 
-    session = scope_context.session
-    # create_session_if_missing gives a scope without a stored session its first one.
-    assert session is not None
     update_scope_state_on_latest(
         scope_context.storage,
-        session=session,
+        session=scope_context.stored_or_first_session(),
         scope=scope_context.scope,
         update=lambda latest: replace(latest, force_compact_before_next_run=True),
     )
