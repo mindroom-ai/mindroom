@@ -30,6 +30,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_summary, replay_basis
+from mindroom.providers.openai.responses_wire import system_text_digest
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import install_model_providers, seed_session
@@ -187,7 +188,11 @@ def test_portable_replay_follows_each_plans_replay_budget(tmp_path: Path) -> Non
     model = responses_adapter(tmp_path, store=True)
     resolved = _inputs(config)
     messages = [
-        Message(role="assistant", content="Previous answer", provider_data={"response_id": "resp_previous"}),
+        Message(
+            role="assistant",
+            content="Previous answer",
+            provider_data={"response_id": "resp_previous", "mindroom_system_sha256": system_text_digest([])},
+        ),
         Message(role="user", content="Continue"),
     ]
     for budget in (1000, None, 2000):
@@ -693,7 +698,12 @@ def test_restore_portable_policy_requires_latest_provenance(
         Message(
             role="assistant",
             content="Latest answer",
-            provider_data={"response_id": "resp_latest", "mindroom_response_stored": True, **provider_data},
+            provider_data={
+                "response_id": "resp_latest",
+                "mindroom_response_stored": True,
+                "mindroom_system_sha256": system_text_digest([]),
+                **provider_data,
+            },
         ),
         Message(role="user", content="Continue"),
     ]

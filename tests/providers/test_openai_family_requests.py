@@ -7,19 +7,21 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
+import httpx
 import pytest
 from openai.types.chat import ChatCompletion
 from openai.types.responses import Response, ResponseUsage
 from openai.types.responses.response_input_item_param import ResponseInputItemParam
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
+from mindroom.approval.receipt import messages_with_approval_receipt
 from mindroom.attachments.media import attachment_records_to_media
 from mindroom.attachments.storage import AttachmentRecord
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, RequestOverrides
+from mindroom.llm.provider import ModelRequest, RequestOverrides, TurnCompleted
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
@@ -32,12 +34,13 @@ from mindroom.providers.openai.responses_wire import (
     responses_input,
     responses_replay,
     responses_request_kwargs,
+    system_text_digest,
 )
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.system_prompt import render_session_context
-from tests.providers.openai_family_support import provider_runtime, responses_adapter
+from tests.providers.openai_family_support import openai_family_adapter, provider_runtime, responses_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -114,6 +117,7 @@ def _parsed(adapter: ResponsesAdapter, output: list[dict[str, Any]], **message: 
             history_generation="",
             allow_authored=False,
         ),
+        system_digest=system_text_digest([]),
         text_as_reasoning=False,
     )
     fields = {"content": parts.content, "tool_calls": parts.tool_calls or None, "provider_data": parts.provider_data}
@@ -465,13 +469,18 @@ def _request(adapter: ResponsesAdapter, messages: list[Message], **request: Any)
     return {**kwargs.pop("extra_body", {}), **kwargs}
 
 
+def _stored_response(response_id: str, prompt: list[Message] | None = None) -> dict[str, Any]:
+    """Return the provider data of a stored response whose request sent ``prompt``'s system text."""
+    return {"response_id": response_id, "mindroom_system_sha256": system_text_digest(prompt or [])}
+
+
 def test_a_stored_tool_turn_continues_whatever_the_model_name(tmp_path: Path) -> None:
     """Continuation does not depend on the model name, so aliases and non-reasoning models continue too."""
     adapter = responses_adapter(tmp_path, model_id="custom-alias", store=True)
     assistant = Message(
         role="assistant",
         tool_calls=[_call("status", "call_1")],
-        provider_data={"response_id": "resp_1"},
+        provider_data=_stored_response("resp_1"),
     )
     messages = [assistant, Message(role="tool", content="ready", tool_call_id="fc_status")]
 
@@ -479,6 +488,83 @@ def test_a_stored_tool_turn_continues_whatever_the_model_name(tmp_path: Path) ->
 
     assert (request["store"], request["previous_response_id"]) == (True, "resp_1")
     assert request["input"] == [{"type": "function_call_output", "call_id": "call_1", "output": "ready"}]
+
+
+def _stored_reply_route(root: Path) -> tuple[ResponsesAdapter, list[dict[str, Any]]]:
+    """Return a stored-response route answering every request with a text reply, and the bodies it was sent."""
+    sent: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        reply = _response([{**_ANSWER, "id": f"msg_{len(sent)}"}]).model_dump(mode="json")
+        return httpx.Response(200, json={**reply, "id": f"resp_{len(sent)}"})
+
+    config = {"provider": "openai", "id": "gpt-6-astra", "api": "responses", "api_key": "test-key"}
+    adapter = openai_family_adapter(config, root, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    return adapter, sent
+
+
+async def _reply(adapter: ResponsesAdapter, messages: list[Message]) -> Message:
+    """Send one blocking request and return the assistant message the route stores for it."""
+    events = [event async for event in adapter.stream(ModelRequest(messages=messages, stream=False))]
+    return next(event.message for event in events if isinstance(event, TurnCompleted))
+
+
+def _dated_prompt(day: str) -> Message:
+    return Message(role="system", content="You are Parity.\n" + render_session_context(f"Today is {day}."))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scenario", "sent_system_text"),
+    [("unchanged", None), ("next day", "Today is Tuesday."), ("approval receipt", "trusted approval receipt")],
+)
+async def test_a_reply_after_the_system_prompt_changes_sends_the_new_prompt(
+    tmp_path: Path,
+    scenario: str,
+    sent_system_text: str | None,
+) -> None:
+    """A stored chain holds the prompt it started with, so a changed prompt replays the history instead of chaining."""
+    adapter, sent = _stored_reply_route(tmp_path)
+    question = Message(role="user", content="Plan my day.")
+    reply = await _reply(adapter, [_dated_prompt("Monday"), question])
+    follow_up = Message(role="user", content="And tomorrow?")
+    history = [_dated_prompt("Tuesday" if scenario == "next day" else "Monday"), question, reply, follow_up]
+    if scenario == "approval receipt":
+        history = messages_with_approval_receipt(history, "trusted approval receipt", after_response_id=False)
+
+    await _reply(adapter, history)
+
+    if sent_system_text is None:
+        assert (sent[1]["previous_response_id"], sent[1]["input"]) == (
+            "resp_1",
+            [{"role": "user", "content": "And tomorrow?"}],
+        )
+        return
+    assert "previous_response_id" not in sent[1]
+    assert [item["role"] for item in sent[1]["input"]] == ["developer", "developer", "user", "assistant", "user"]
+    assert sent_system_text in sent[1]["input"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_stored_without_a_system_digest_replays_once(tmp_path: Path) -> None:
+    """A reply an older release stored replays its history once, then the route continues the reply it stores."""
+    adapter, sent = _stored_reply_route(tmp_path)
+    older = Message(
+        role="assistant",
+        content="Pack a jacket.",
+        provider_data={"response_id": "resp_older", "mindroom_response_stored": True},
+    )
+    history = [_dated_prompt("Monday"), Message(role="user", content="What should I pack?"), older]
+    follow_up = Message(role="user", content="And shoes?")
+
+    reply = await _reply(adapter, [*history, follow_up])
+    await _reply(adapter, [*history, follow_up, reply, Message(role="user", content="Thanks.")])
+
+    assert "previous_response_id" not in sent[0]
+    assert [item["role"] for item in sent[0]["input"]] == ["developer", "developer", "user", "assistant", "user"]
+    assert (sent[1]["previous_response_id"], sent[1]["input"]) == ("resp_1", [{"role": "user", "content": "Thanks."}])
 
 
 @pytest.mark.parametrize("storage", [{"store": False}, {"request_params": {"store": False}}])
@@ -538,6 +624,7 @@ def test_only_a_completed_response_records_its_replay_policy(tmp_path: Path, *, 
         store=True,
         portable_replay=portable,
         native_compaction=None,
+        system_digest=system_text_digest([]),
         text_as_reasoning=False,
     )
 
@@ -637,9 +724,10 @@ def test_only_the_initial_text_system_message_is_split() -> None:
 
 def test_a_stored_continuation_does_not_resend_the_instructions() -> None:
     """Chaining to a stored response sends only what follows it."""
+    prompt = _messages("Monday")
     messages = [
-        *_messages("Monday"),
-        Message(role="assistant", content="Introduction.", provider_data={"response_id": "resp_previous"}),
+        *prompt,
+        Message(role="assistant", content="Introduction.", provider_data=_stored_response("resp_previous", prompt)),
         Message(role="user", content="Continue."),
     ]
 
@@ -805,6 +893,7 @@ def test_usage_keeps_every_input_counter_the_sdk_reports(
             store=None,
             portable_replay=False,
             native_compaction=None,
+            system_digest=system_text_digest([]),
             text_as_reasoning=False,
         ).usage
 

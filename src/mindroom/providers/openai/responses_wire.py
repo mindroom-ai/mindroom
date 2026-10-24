@@ -1,14 +1,17 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Responses API request bodies and event parsing for the OpenAI and Codex routes.
 
-Stored responses continue with ``previous_response_id``; ``store: false`` responses and portable replay
-send the history explicitly, with ordered output items and encrypted reasoning so a later request can
-replay a tool loop exactly. A streamed turn counts only when ``response.completed`` arrives.
+Stored responses continue with ``previous_response_id`` while the request's system text is the one the chain holds;
+``store: false`` responses, portable replay, and a changed system text send the history explicitly, with ordered
+output items and encrypted reasoning so a later request can replay a tool loop exactly. A streamed turn counts only
+when ``response.completed`` arrives.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -59,6 +62,7 @@ __all__ = [
     "responses_replay",
     "responses_request_kwargs",
     "responses_stop_reason",
+    "system_text_digest",
     "usage_report",
 ]
 
@@ -72,6 +76,7 @@ _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 _MODEL_ITEM_TYPES = frozenset({"message", "reasoning", "function_call"})
 _STORED_KEY = "mindroom_response_stored"
 _PORTABLE_KEY = "mindroom_portable_replay"
+_SYSTEM_DIGEST_KEY = "mindroom_system_sha256"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -118,6 +123,33 @@ def _latest_response(messages: Sequence[Message]) -> tuple[int, dict[str, Any]] 
     return None
 
 
+def system_text_digest(messages: Sequence[Message]) -> str:
+    """Return the digest of the system text in ``messages``, which each stored response records for its request."""
+    system_text = [message.content for message in messages if message.role == "system"]
+    return hashlib.sha256(json.dumps(system_text, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> bool:
+    """Return whether a request for ``messages`` can continue the stored response that recorded ``provider_data``.
+
+    The provider keeps that response's context, including the system text its request sent or continued, and a
+    continuing request never resends it, so the response continues only when that system text is the request's.
+    Sending the system text as ``instructions``, which a chain does not carry over, would keep the chain, but
+    ``instructions`` cannot hold the explicit prompt-cache breakpoint of the shared system prefix, so a changed system
+    text replays the history instead.
+    """
+    # LEGACY_COMPAT: Stored Responses replies without the digest of their system text.
+    # Legacy format: an assistant message whose ``provider_data`` records a ``response_id`` but no
+    # ``mindroom_system_sha256``.
+    # Last legacy release: v2026.10.499; replacement: unreleased, which records the digest on every stored response.
+    # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
+    # once, with the current system text, and continues the response it stores from then on.
+    # Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_stored_without_a_system_digest_replays_once
+    return provider_data.get(_STORED_KEY) is not False and provider_data.get(_SYSTEM_DIGEST_KEY) == system_text_digest(
+        messages,
+    )
+
+
 def responses_replay(
     messages: Sequence[Message],
     *,
@@ -127,13 +159,15 @@ def responses_replay(
 ) -> ResponsesReplay:
     """Decide whether a request with storage setting ``store`` continues the latest stored response in ``messages``.
 
-    Portable replay, an unstored request, and a history whose latest response was not stored send the history
-    explicitly with its reasoning; a stored request without a stored response sends it without.
+    Portable replay, an unstored request, and a history whose latest response was not stored or holds other system
+    text send the history explicitly with its reasoning; a stored request without a stored response sends it without.
     """
     route = native_compaction.route if native_compaction is not None else None
     history = native_replay_messages(messages, route)
     latest = _latest_response(history)
-    replay_reasoning = portable_replay or store is False or (latest is not None and latest[1].get(_STORED_KEY) is False)
+    replay_reasoning = (
+        portable_replay or store is False or (latest is not None and not _continuable(latest[1], messages))
+    )
     chained = None if replay_reasoning else latest
     return ResponsesReplay(
         history=history,
@@ -440,12 +474,14 @@ def _read_ended_response(
     store: bool | None,
     portable_replay: bool,
     native_compaction: NativeCompactionReplay | None,
+    system_digest: str,
 ) -> None:
     """Record what a response that ended says about its turn, the same whether it streamed or arrived whole.
 
     A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
-    status and the incomplete reason. Both record the response id, its storage provenance, and, when unstored, its
-    reasoning; only a completed response's output is recorded for replay.
+    status and the incomplete reason. Both record the response id, its storage provenance, the ``system_digest`` of
+    its request when stored, and, when unstored, its reasoning; only a completed response's output is recorded for
+    replay.
     """
     parts.status = response.status
     parts.incomplete_reason = _incomplete_reason(response)
@@ -458,6 +494,8 @@ def _read_ended_response(
             if output.type == "reasoning":
                 parts.provider_data["reasoning_output"] = output.model_dump(exclude_none=True)
     parts.provider_data[_STORED_KEY] = store is not False
+    if store is not False:
+        parts.provider_data[_SYSTEM_DIGEST_KEY] = system_digest
     if response.status != "completed":
         return
     parts.provider_data[_PORTABLE_KEY] = portable_replay
@@ -491,6 +529,7 @@ class ResponsesStream:
     store: bool | None
     portable_replay: bool
     native_compaction: NativeCompactionReplay | None
+    system_digest: str
     text_as_reasoning: bool
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
     # Whether the response ended, completed or incomplete; a stream that stops before then did not finish the turn.
@@ -561,6 +600,7 @@ class ResponsesStream:
             store=self.store,
             portable_replay=self.portable_replay,
             native_compaction=self.native_compaction,
+            system_digest=self.system_digest,
         )
 
     def finish(self) -> ResponsesTurnParts:
@@ -604,6 +644,7 @@ def parse_response(
     store: bool | None,
     portable_replay: bool,
     native_compaction: NativeCompactionReplay | None,
+    system_digest: str,
     text_as_reasoning: bool,
 ) -> ResponsesTurnParts:
     """Read one non-streamed response into a finished turn; ``provider`` is the metrics provider name of its error.
@@ -633,5 +674,6 @@ def parse_response(
         store=store,
         portable_replay=portable_replay,
         native_compaction=native_compaction,
+        system_digest=system_digest,
     )
     return parts
