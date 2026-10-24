@@ -16,6 +16,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, complete
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
+from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.codec import run_from_row
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES, scrub_provider_env
 from tests.providers.golden_support import Wire
@@ -160,12 +161,15 @@ async def test_combined_results_reach_every_route(family: str, tmp_path: Path, m
     scrub_provider_env(monkeypatch)
     spec = FAMILIES[family]
     wire = Wire(lambda _request: spec.reply())
-    messages = build_request(
-        system=[Message(role="system", content="You are Code.")],
-        summary=None,
-        history=_history(_stored_run()),
-        turn=TurnMessages(prompt=Message(role="user", content="And tomorrow?")),
-    )
+    messages = [
+        Message(role="system", content="You are Code."),
+        *build_request(
+            summary=None,
+            history=_history(_stored_run()),
+            turn=TurnMessages(prompt=Message(role="user", content="And tomorrow?")),
+            media=MediaInputs(),
+        ),
+    ]
     tool = ToolSpec(name="get_weather", description="Weather.", parameters={"type": "object", "properties": {}})
 
     await complete(spec.adapter(tmp_path, wire), ModelRequest(messages=messages, tools=[tool]))

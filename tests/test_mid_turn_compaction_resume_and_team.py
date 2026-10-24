@@ -36,6 +36,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
+from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -213,7 +214,7 @@ async def _pause(agent: _Resumable) -> RunRecord:
     )
     events = run_agent(
         replace(build.spec, system_message=prompt_for_turn(build)),
-        build_request(system=(), summary=summary, history=history, turn=turn),
+        build_request(summary=summary, history=history, turn=turn, media=MediaInputs()),
         ctx=RunContext(run_id=str(uuid4()), session_id="session-1", session=agent.session),
         hooks=agent_loop_hooks(
             build,

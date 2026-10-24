@@ -42,6 +42,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
@@ -2483,10 +2484,10 @@ def _next_request(storage: ConversationStore, session_id: str, scope: HistorySco
         max_tool_calls_from_history=None,
     )
     messages = build_request(
-        system=(),
         summary=session.summary,
         history=history,
         turn=TurnMessages(prompt=Message(role="user", content=prompt)),
+        media=MediaInputs(),
     )
     return str([message.content for message in messages])
 

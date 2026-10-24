@@ -51,6 +51,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.media_inputs import MediaInputs
 from mindroom.model_usage import response_context_tokens
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
@@ -249,10 +250,10 @@ async def _run(
     events = run_agent(
         agent.spec(),
         build_request(
-            system=(),
             summary=session.summary if agent.replays_history else None,
             history=history,
             turn=turn,
+            media=MediaInputs(),
         ),
         ctx=RunContext(run_id=str(uuid4()), session_id=session_id, metadata=metadata),
         hooks=LoopHooks(before_request=(*agent.before_request, compaction_hook)),

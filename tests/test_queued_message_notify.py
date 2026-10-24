@@ -64,6 +64,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import QueuedMessage
 from mindroom.post_response_effects import (
@@ -3733,10 +3734,10 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
             run_agent(
                 spec(model),
                 build_request(
-                    system=(),
                     summary=None,
                     history=history,
                     turn=TurnMessages(prompt=OwnedMessage(role="user", content="Second request")),
+                    media=MediaInputs(),
                 ),
                 ctx=context(run_id="run-2", session_id="session-1"),
                 persist=persist_to(store, session),

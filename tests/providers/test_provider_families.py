@@ -23,6 +23,7 @@ from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnav
 from mindroom.llm.media import Audio, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, complete
+from mindroom.media_inputs import MediaInputs
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import wrap_provider
@@ -195,7 +196,7 @@ def _stored_tool_turn() -> list[Message]:
         max_tool_calls_from_history=None,
     )
     prompt = Message(role="user", content="And tomorrow?")
-    return build_request(system=(), summary=None, history=history, turn=TurnMessages(prompt=prompt))
+    return build_request(summary=None, history=history, turn=TurnMessages(prompt=prompt), media=MediaInputs())
 
 
 def _replayed_tool_turn(family: str, body: dict[str, Any]) -> tuple[list[object], int]:

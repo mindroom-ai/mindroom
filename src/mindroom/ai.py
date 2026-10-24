@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -240,13 +239,7 @@ class _PreparedAgentRun:
 
     def run_input(self, media: MediaInputs) -> list[Message]:
         """Return one attempt's request body, media on the prompt: the summary, the replayed history, then the turn."""
-        turn = deepcopy(self.turn)
-        prompt = turn.prompt
-        prompt.audio = media.audio or None
-        prompt.images = media.images or None
-        prompt.files = media.files or None
-        prompt.videos = media.videos or None
-        return build_request(system=(), summary=self.summary, history=deepcopy(self.history), turn=turn)
+        return build_request(summary=self.summary, history=self.history, turn=self.turn, media=media)
 
 
 @dataclass(frozen=True)
