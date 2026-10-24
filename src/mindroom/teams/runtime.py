@@ -180,15 +180,12 @@ def team_paused_content(record: TeamRunRecord) -> str:
 
     The only externally executed calls are the silent delegation calls, so a pause on delegations alone has no text.
     """
-    parts: list[str] = []
-    for requirement in record.requirements or ():
-        if requirement.needs_confirmation:
-            member = requirement.member_agent_name or "team"
-            name = requirement.tool_execution.tool_name or "unknown"
-            parts.append(f"- {member}: {name} requires confirmation")
-    if not parts:
-        return ""
-    return "Team run paused. The following require input:\n" + "\n".join(parts)
+    parts = [
+        f"- {r.member_agent_name or 'team'}: {r.tool_execution.tool_name or 'unknown'} requires confirmation"
+        for r in record.requirements or ()
+        if r.needs_confirmation
+    ]
+    return "Team run paused. The following require input:\n" + "\n".join(parts) if parts else ""
 
 
 def team_usage_runs(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[tuple[AnyRunRecord, RunMetrics]]:
