@@ -1,4 +1,4 @@
-"""Structured output is requested and read back as Agno 3.0.9 did on each of its three provider paths."""
+"""Structured output is requested and read back as main does on each of its three provider paths."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ from enum import StrEnum
 from typing import Any
 
 import pytest
-from agno.utils.prompts import get_json_output_prompt
-from agno.utils.string import parse_response_model_str
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from pydantic import BaseModel, Field
 
@@ -74,75 +72,165 @@ class _Palette(BaseModel):
     notes: str | None = None
 
 
-@pytest.mark.parametrize("schema", [_Palette, _Swatch, _RoutingSuggestion, ScheduledWorkflow])
-def test_the_json_prompt_is_agnos(schema: type[BaseModel]) -> None:
-    """Field lists, enum and object definitions, and the closing instructions match Agno's prompt."""
-    assert json_output_prompt(schema) == get_json_output_prompt(schema)
+# The JSON prompts main sent for these schemas; the helper schemas' prompts are pinned by their goldens above.
+_SWATCH_PROMPT = """\
+Provide your output as a JSON containing the following fields:
+<json_fields>
+["name", "color"]
+</json_fields>
+
+Here are the properties for each field:
+<json_field_properties>
+{
+  "name": {
+    "description": "What the swatch is called",
+    "type": "string"
+  },
+  "color": {
+    "$ref": "#/$defs/_Color"
+  },
+  "$defs": {
+    "_Color": {
+      "type": "string",
+      "enum": [
+        "red",
+        "blue"
+      ],
+      "description": ""
+    }
+  }
+}
+</json_field_properties>
+Start your response with `{` and end it with `}`.
+Your output will be passed to json.loads() to convert it to a Python object.
+Make sure it only contains valid JSON."""
+_PALETTE_PROMPT = """\
+Provide your output as a JSON containing the following fields:
+<json_fields>
+["title", "primary", "swatches", "notes"]
+</json_fields>
+
+Here are the properties for each field:
+<json_field_properties>
+{
+  "title": {
+    "type": "string"
+  },
+  "primary": {
+    "$ref": "#/$defs/_Color"
+  },
+  "swatches": {
+    "items": {
+      "$ref": "#/$defs/_Swatch"
+    },
+    "type": "array"
+  },
+  "notes": {
+    "anyOf": [
+      {
+        "type": "string"
+      },
+      {
+        "type": "null"
+      }
+    ],
+    "default": null
+  },
+  "$defs": {
+    "_Color": {
+      "type": "string",
+      "enum": [
+        "red",
+        "blue"
+      ],
+      "description": ""
+    },
+    "_Swatch": {
+      "name": {
+        "description": "What the swatch is called",
+        "type": "string"
+      },
+      "color": {
+        "$ref": "#/$defs/_Color"
+      }
+    }
+  }
+}
+</json_field_properties>
+Start your response with `{` and end it with `}`.
+Your output will be passed to json.loads() to convert it to a Python object.
+Make sure it only contains valid JSON."""
+
+
+@pytest.mark.parametrize(("schema", "expected"), [(_Swatch, _SWATCH_PROMPT), (_Palette, _PALETTE_PROMPT)])
+def test_the_json_prompt_lists_fields_and_definitions(schema: type[BaseModel], expected: str) -> None:
+    """Field lists, enum and object definitions, and the closing instructions keep the model-visible prompt."""
+    assert json_output_prompt(schema) == expected
 
 
 _ROUTING_JSON = '{"entity_name": "assistant", "reasoning": "Handbook questions."}'
-_PALETTE = _Palette(title="Sea", primary=_Color.BLUE, swatches=[_Swatch(name="deep", color=_Color.BLUE)])
-PARSE_CASES = {
-    "plain": (_RoutingSuggestion, _ROUTING_JSON),
-    "fenced": (_RoutingSuggestion, f"Here you go:\n```json\n{_ROUTING_JSON}\n```\nAnything else?"),
-    "unclosed_fence": (_RoutingSuggestion, f"Here you go:\n```json\n{_ROUTING_JSON}"),
-    "bare_fence": (_RoutingSuggestion, f"```\n{_ROUTING_JSON}\n```"),
-    "thinking": (_RoutingSuggestion, f"<think>The handbook agent fits.</think>\n{_ROUTING_JSON}"),
-    "empty_thinking": (_RoutingSuggestion, f"<think></think>{_ROUTING_JSON}"),
-    "markdown_keys": (_RoutingSuggestion, '{*"entity_name"*: "assistant", `"reasoning"`: "Handbook questions."}'),
-    "newlines_in_values": (_RoutingSuggestion, '{"entity_name": "assistant",\n"reasoning": "Two\nlines"}'),
-    "unescaped_quotes": (_RoutingSuggestion, '{"entity_name": "assistant", "reasoning": "It said "hi" first"}'),
-    "surrounding_prose": (_RoutingSuggestion, f"I pick: {_ROUTING_JSON} as requested."),
-    "split_objects": (_Palette, '{"title": "Sea", "swatches": [{"name": "a", "color": "red"}]} {"primary": "blue"}'),
+_ROUTED = _RoutingSuggestion(entity_name="assistant", reasoning="Handbook questions.")
+_DEEP = [_Swatch(name="deep", color=_Color.BLUE)]
+_PALETTE = _Palette(title="Sea", primary=_Color.BLUE, swatches=_DEEP)
+# Each answer with its schema and the model main's helpers read from it; None when no attempt validates.
+PARSE_CASES: dict[str, tuple[type[BaseModel], str, BaseModel | None]] = {
+    "plain": (_RoutingSuggestion, _ROUTING_JSON, _ROUTED),
+    "fenced": (_RoutingSuggestion, f"Here you go:\n```json\n{_ROUTING_JSON}\n```\nAnything else?", _ROUTED),
+    "unclosed_fence": (_RoutingSuggestion, f"Here you go:\n```json\n{_ROUTING_JSON}", _ROUTED),
+    "bare_fence": (_RoutingSuggestion, f"```\n{_ROUTING_JSON}\n```", _ROUTED),
+    "thinking": (_RoutingSuggestion, f"<think>The handbook agent fits.</think>\n{_ROUTING_JSON}", _ROUTED),
+    "empty_thinking": (_RoutingSuggestion, f"<think></think>{_ROUTING_JSON}", _ROUTED),
+    "markdown_keys": (
+        _RoutingSuggestion,
+        '{*"entity_name"*: "assistant", `"reasoning"`: "Handbook questions."}',
+        _ROUTED,
+    ),
+    "newlines_in_values": (
+        _RoutingSuggestion,
+        '{"entity_name": "assistant",\n"reasoning": "Two\nlines"}',
+        _RoutingSuggestion(entity_name="assistant", reasoning="Two lines"),
+    ),
+    "unescaped_quotes": (
+        _RoutingSuggestion,
+        '{"entity_name": "assistant", "reasoning": "It said "hi" first"}',
+        _RoutingSuggestion(entity_name="assistant", reasoning='It said "hi" first'),
+    ),
+    "surrounding_prose": (_RoutingSuggestion, f"I pick: {_ROUTING_JSON} as requested.", _ROUTED),
+    "split_objects": (
+        _Palette,
+        '{"title": "Sea", "swatches": [{"name": "a", "color": "red"}]} {"primary": "blue"}',
+        _Palette(title="Sea", primary=_Color.BLUE, swatches=[_Swatch(name="a", color=_Color.RED)]),
+    ),
     "split_objects_with_escapes": (
         _Palette,
         '{"title": "Sea 5\\" {draft} at C:\\\\maps\\\\", "primary": "red"} '
         '{"swatches": [{"name": "deep", "color": "blue"}]}',
+        _Palette(title='Sea 5" {draft} at C:\\maps\\', primary=_Color.RED, swatches=_DEEP),
     ),
     "split_objects_after_a_placeholder": (
         _Palette,
         'Filling in {title}: {"title": "Sea", "primary": "blue"} {"swatches": [{"name": "deep", "color": "blue"}]}',
+        _PALETTE,
     ),
     "split_lists": (
         _Palette,
         '{"title": "Sea", "primary": "red", "swatches": [{"name": "a", "color": "red"}]} '
         '{"swatches": [{"name": "b", "color": "blue"}]}',
+        _Palette(
+            title="Sea",
+            primary=_Color.RED,
+            swatches=[_Swatch(name="a", color=_Color.RED), _Swatch(name="b", color=_Color.BLUE)],
+        ),
     ),
-    "nested": (_Palette, _PALETTE.model_dump_json()),
-    "invalid_value": (_Palette, '{"title": "Sea", "primary": "green"}'),
-    "no_json": (_RoutingSuggestion, "The assistant should answer."),
-    "wrong_shape": (_RoutingSuggestion, '["assistant"]'),
+    "nested": (_Palette, _PALETTE.model_dump_json(), _PALETTE),
+    "invalid_value": (_Palette, '{"title": "Sea", "primary": "green"}', None),
+    "no_json": (_RoutingSuggestion, "The assistant should answer.", None),
+    "wrong_shape": (_RoutingSuggestion, '["assistant"]', None),
 }
 
 
 @pytest.mark.parametrize("case", sorted(PARSE_CASES))
-def test_parsing_reads_what_agno_read(case: str) -> None:
-    """Answers parse to the same model, or fail the same way, as Agno's parser."""
-    schema, text = PARSE_CASES[case]
-    assert parse_structured(text, schema) == parse_response_model_str(text, schema)
-
-
-def test_parsing_recovers_common_answer_shapes() -> None:
+def test_parsing_recovers_common_answer_shapes(case: str) -> None:
     """Fenced, unclosed-fence, thinking-prefixed, and split answers validate; text without a valid object does not."""
-    expected = _RoutingSuggestion(entity_name="assistant", reasoning="Handbook questions.")
-    for case in ("plain", "fenced", "unclosed_fence", "bare_fence", "thinking", "markdown_keys", "surrounding_prose"):
-        schema, text = PARSE_CASES[case]
-        assert parse_structured(text, schema) == expected, case
-    schema, text = PARSE_CASES["split_objects"]
-    assert parse_structured(text, schema) == _Palette(
-        title="Sea",
-        primary=_Color.BLUE,
-        swatches=[_Swatch(name="a", color=_Color.RED)],
-    )
-    deep = [_Swatch(name="deep", color=_Color.BLUE)]
-    schema, text = PARSE_CASES["split_objects_with_escapes"]
-    assert parse_structured(text, schema) == _Palette(
-        title='Sea 5" {draft} at C:\\maps\\',
-        primary=_Color.RED,
-        swatches=deep,
-    )
-    schema, text = PARSE_CASES["split_objects_after_a_placeholder"]
-    assert parse_structured(text, schema) == _Palette(title="Sea", primary=_Color.BLUE, swatches=deep)
-    for case in ("invalid_value", "no_json", "wrong_shape"):
-        schema, text = PARSE_CASES[case]
-        assert parse_structured(text, schema) is None, case
+    schema, text, expected = PARSE_CASES[case]
+    assert parse_structured(text, schema) == expected
