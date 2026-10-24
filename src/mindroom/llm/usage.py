@@ -295,7 +295,7 @@ class SessionMetrics(_Counts):
     details: dict[str, list[ModelMetrics]] | None = None
     additional_metrics: dict[str, Any] | None = None
 
-    def count_run(self, metrics: RunMetrics, *, replacing: RunMetrics | None = None) -> None:
+    def count_run(self, metrics: RunMetrics, *, replacing: RunMetrics | None) -> None:
         """Add one run's token counters, first taking back ``replacing``, what an earlier save of the same run added."""
         if replacing is not None:
             self._accumulate(replacing, sign=-1)

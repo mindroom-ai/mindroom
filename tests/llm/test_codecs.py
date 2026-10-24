@@ -608,7 +608,7 @@ def test_session_metrics_count_token_counters_as_agno_accumulated_them() -> None
     totals = agno("session_metrics_totals")
     owned = SessionMetrics()
     for case, agno_totals in zip(_run_metrics_cases(), totals, strict=True):
-        owned.count_run(_token_counters(RunMetrics.from_dict(case)))
+        owned.count_run(_token_counters(RunMetrics.from_dict(case)), replacing=None)
 
         assert owned.to_dict() == _counted_totals(agno_totals)
     assert SessionMetrics.from_dict(totals[-1]).to_dict() == totals[-1]
@@ -625,10 +625,10 @@ def test_session_metrics_count_a_saved_again_run_once() -> None:
     )
     finished = _token_counters(finished)
     once = SessionMetrics()
-    once.count_run(finished)
+    once.count_run(finished, replacing=None)
 
     twice = SessionMetrics()
-    twice.count_run(paused)
+    twice.count_run(paused, replacing=None)
     twice.count_run(finished, replacing=paused)
 
     assert twice.tokens.input_tokens == finished.tokens.input_tokens
