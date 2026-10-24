@@ -94,14 +94,7 @@ def _install_agent(
     )
     install_model_providers(
         monkeypatch,
-        {
-            "default": wrap_provider(
-                model,
-                idle_timeout_seconds=None,
-                media_fallback_prompt="",
-                request_log=request_log,
-            ),
-        },
+        {"default": wrap_provider(model, idle_timeout_seconds=None, media_fallback_prompt="", request_log=request_log)},
     )
     return config, model
 
