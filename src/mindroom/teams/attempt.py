@@ -1,7 +1,7 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
 A streamed attempt records ``TeamReplyText``, the reply's text without tool markers, however it ends; a blocking
-attempt renders its reply, what it records, and the run's metadata from the records the run hands over.
+attempt renders and records its reply from the records the run hands over, which give every attempt's run metadata.
 """
 
 from __future__ import annotations
