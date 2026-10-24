@@ -642,7 +642,7 @@ if mode == 'reader':
     local_embedder._load_sentence_transformer = load
     paths = resolve_primary_runtime_paths(config_path=root / 'other-runtime' / 'config.yaml', process_env={})
     print('ready', flush=True)
-    local_embedder.create_sentence_transformers_embedder(paths)
+    local_embedder.create_sentence_transformers_embedder(paths, 'sentence-transformers/test-model')
     print('imported complete metadata', flush=True)
 elif mode == 'mem0_reader':
     import asyncio

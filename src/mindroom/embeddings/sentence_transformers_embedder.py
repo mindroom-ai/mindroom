@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom.embeddings.errors import EmbedderRequestError, describe_embedder_error
 from mindroom.embeddings.signatures import ensure_sentence_transformers_dependencies
-from mindroom.model_defaults import SENTENCE_TRANSFORMERS_DEFAULT
 from mindroom.tool_system.dependencies import optional_dependency_environment
 
 if TYPE_CHECKING:
@@ -85,7 +84,7 @@ class _SentenceTransformersEmbedder:
 
 def create_sentence_transformers_embedder(
     runtime_paths: RuntimePaths,
-    model: str = SENTENCE_TRANSFORMERS_DEFAULT,
+    model: str,
 ) -> _SentenceTransformersEmbedder:
     """Create a local sentence-transformers embedder after ensuring its optional extra exists."""
     ensure_sentence_transformers_dependencies(runtime_paths)
