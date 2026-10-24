@@ -33,7 +33,7 @@ Agno stays for the parts that touch no loop, model, or storage, all called throu
 - Its knowledge file readers and chunkers stay.
 
 The adapter turns each Agno function into a `ToolFunction` once, when an agent is built.
-At call time the owned executor builds the `run_context` some Agno toolkits declare from owned run state, and passes no Agno agent or team, which only toolkits MindRoom does not depend on read.
+At call time the owned executor builds the `run_context` some Agno toolkits declare from owned run state, and passes a stand-in as the Agno `agent` or `team`, because DaytonaTools reads `agent.session_state`; the stand-in carries only the toolkit's own state, which is never stored.
 It is the only place the owned loop meets Agno; the `tests/test_agno_boundary.py` test restricts `agno` imports to the adapter, tool and toolkit modules, and the knowledge readers.
 The remaining `AGNO_COMPAT` markers then all fix bugs inside individual toolkits, which break only when those toolkits change, not when MindRoom adds a loop stage.
 Agno upgrades still re-verify those overrides and the injected-parameter contract.
