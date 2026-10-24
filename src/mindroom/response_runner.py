@@ -2835,34 +2835,6 @@ class ResponseRunner:
         self._note_final_delivery_timing(request, delivery)
         return delivery
 
-    def _persist_interrupted_turn(
-        self,
-        *,
-        recorder: TurnRecorder,
-        session_scope: HistoryScope,
-        session_id: str,
-        execution_identity: ToolExecutionIdentity | None,
-        run_id: str | None,
-        is_team: bool,
-        response_event_id: str | None = None,
-    ) -> None:
-        """Persist one interrupted recorder snapshot exactly once."""
-        if not recorder.claim_interrupted_persistence():
-            return
-        if response_event_id:
-            recorder.set_response_event_id(response_event_id)
-        persist_interrupted_replay_snapshot(
-            storage=self.deps.state_writer.create_storage(execution_identity, scope=session_scope),
-            session=new_scope_session(session_id=session_id, scope_id=session_scope.scope_id, is_team=is_team),
-            run_id=recorder.run_id or run_id or str(uuid4()),
-            snapshot=recorder.interrupted_snapshot(),
-        )
-
-    def _ensure_recorder_interrupted(self, recorder: TurnRecorder) -> None:
-        """Mark one recorder interrupted unless lower layers already captured richer state."""
-        if recorder.outcome == "pending":
-            recorder.mark_interrupted()
-
     def _persist_interrupted_recorder(
         self,
         *,
@@ -2874,16 +2846,21 @@ class ResponseRunner:
         is_team: bool,
         response_event_id: str | None = None,
     ) -> None:
-        """Persist one interrupted recorder snapshot after marking it interrupted."""
-        self._ensure_recorder_interrupted(recorder)
-        self._persist_interrupted_turn(
-            recorder=recorder,
-            session_scope=session_scope,
-            session_id=session_id,
-            execution_identity=execution_identity,
-            run_id=run_id,
-            is_team=is_team,
-            response_event_id=response_event_id,
+        """Persist one recorder's interrupted snapshot once, first marking a still-pending recorder interrupted."""
+        if recorder.outcome == "pending":
+            recorder.mark_interrupted()
+        if not recorder.claim_interrupted_persistence():
+            return
+        if response_event_id:
+            recorder.set_response_event_id(response_event_id)
+        # TODO(simplify): `is_team` travels beside `session_scope`; agent paths pass False with `history_scope()`,
+        # a team scope on a team bot. Derive the row kind from `session_scope.kind` and drop `is_team` here.
+        # Stored data would notice: a team bot's agent-path turn would store its interrupted row as a team run (#3075).
+        persist_interrupted_replay_snapshot(
+            storage=self.deps.state_writer.create_storage(execution_identity, scope=session_scope),
+            session=new_scope_session(session_id=session_id, scope_id=session_scope.scope_id, is_team=is_team),
+            run_id=recorder.run_id or run_id or str(uuid4()),
+            snapshot=recorder.interrupted_snapshot(),
         )
 
     async def _persist_interrupted_recorder_off_loop(
