@@ -122,6 +122,7 @@ def _prepared_history(record: AnyRunRecord) -> PreparedHistoryState:
         ),
         compaction_reply_outcome=compaction["outcome"],
         prepared_context_tokens=content["prepared_context"]["tokens"],
+        native_history=None,
     )
 
 

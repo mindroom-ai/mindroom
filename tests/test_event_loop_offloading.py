@@ -222,7 +222,7 @@ def _prepared_execution(
     prepared_context_tokens: int | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        prepared_history=PreparedHistoryState(prepared_context_tokens=prepared_context_tokens),
+        prepared_history=PreparedHistoryState(prepared_context_tokens=prepared_context_tokens, native_history=None),
         replay_plan=None,
         unseen_event_ids=list(unseen_event_ids),
         turn=TurnMessages(prompt=Message(role="user", content=prompt), transient=tuple(transient)),

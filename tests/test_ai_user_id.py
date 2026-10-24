@@ -365,7 +365,7 @@ def test_ai_run_metadata_context_falls_back_to_estimate_without_provider_counter
         model="claude-sonnet-5",
         model_provider="Anthropic",
         context_input_tokens=30_210,
-        prepared_history=PreparedHistoryState(prepared_context_tokens=30_210),
+        prepared_history=PreparedHistoryState(prepared_context_tokens=30_210, native_history=None),
     )
 
     context = metadata[AI_RUN_METADATA_KEY]["context"]
@@ -1011,7 +1011,7 @@ class TestUserIdPassthrough:
                 context=(Message(role="user", content=sensitive_marker),),
             ),
             unseen_event_ids=["event-one", "event-two"],
-            prepared_history=PreparedHistoryState(),
+            prepared_history=PreparedHistoryState(native_history=None),
         )
 
         with (

@@ -138,7 +138,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
         ) as mock_prepare,
         patch(
             "tests.test_history_team_scope.finalize_history_preparation",
-            return_value=PreparedHistoryState(replays_persisted_history=True),
+            return_value=PreparedHistoryState(replays_persisted_history=True, native_history=None),
         ) as mock_finalize,
     ):
         prepared_scope_history = await prepare_bound_scope_history(

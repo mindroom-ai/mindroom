@@ -195,6 +195,7 @@ def _prepared_team_execution_context(
         replay_plan=replay_plan,
         replays_persisted_history=replays_persisted_history,
         prepared_context_tokens=prepared_context_tokens,
+        native_history=None,
     )
     return PreparedTeamExecution(
         turn=turn,

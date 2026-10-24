@@ -176,6 +176,7 @@ def test_scheduled_history_limits_keep_or_drop_the_summary() -> None:
             num_history_runs=0,
         ),
         replays_persisted_history=True,
+        native_history=None,
     )
 
     assert _prepared_history_with_scheduled_limit(summary_only, 3) is summary_only

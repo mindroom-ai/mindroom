@@ -360,6 +360,7 @@ def test_scheduled_limit_zero_disables_replay_plan() -> None:
             num_history_runs=3,
         ),
         replays_persisted_history=True,
+        native_history=None,
     )
 
     capped = _prepared_history_with_scheduled_limit(prepared, 0)
@@ -378,6 +379,7 @@ def test_scheduled_limit_caps_larger_plans_only() -> None:
             num_history_runs=3,
         ),
         replays_persisted_history=True,
+        native_history=None,
     )
     capped = _prepared_history_with_scheduled_limit(runs_plan, 2)
     assert capped.replays_persisted_history is True
@@ -394,16 +396,18 @@ def test_scheduled_limit_caps_larger_plans_only() -> None:
             num_history_messages=1,
         ),
         replays_persisted_history=True,
+        native_history=None,
     )
     assert _prepared_history_with_scheduled_limit(tighter_plan, 2) is tighter_plan
 
     disabled_plan = PreparedHistoryState(
         replay_plan=ResolvedReplayPlan(mode="disabled", estimated_tokens=0, add_history_to_context=False),
         replays_persisted_history=False,
+        native_history=None,
     )
     assert _prepared_history_with_scheduled_limit(disabled_plan, 2) is disabled_plan
 
-    no_plan = PreparedHistoryState()
+    no_plan = PreparedHistoryState(native_history=None)
     assert _prepared_history_with_scheduled_limit(no_plan, 2) is no_plan
 
 
@@ -417,6 +421,7 @@ def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:
             num_history_runs=1,
         ),
         replays_persisted_history=True,
+        native_history=None,
     )
 
     capped = _prepared_history_with_scheduled_limit(runs_plan, 5)
@@ -654,7 +659,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
     monkeypatch.setattr(
         execution_preparation,
         "finalize_history_preparation",
-        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False),
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
     )
 
     prepared = await prepare_agent_execution_context(
@@ -706,7 +711,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     monkeypatch.setattr(
         execution_preparation,
         "finalize_history_preparation",
-        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False),
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
     )
 
     await _prepare_bound_team_execution_context(
@@ -743,7 +748,7 @@ async def test_prepare_agent_execution_context_names_real_author_of_forged_relay
     monkeypatch.setattr(
         execution_preparation,
         "finalize_history_preparation",
-        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False),
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
     )
 
     build = _build(config, runtime_paths)
@@ -1009,7 +1014,7 @@ def test_transient_context_follows_current_prompt_without_entering_replay_contex
     prepared = _PreparedExecutionContext(
         turn=turn,
         unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(),
+        prepared_history=PreparedHistoryState(native_history=None),
     )
     assert prepared.turn.context == (messages[0],)
 
