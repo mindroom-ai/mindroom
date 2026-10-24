@@ -265,13 +265,14 @@ async def prepare_materialized_team_execution(
 
 @dataclass(frozen=True)
 class _LeaderRun:
-    """How the leader of one prepared team turn runs: where it stores, its hooks, request settings, and model."""
+    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata."""
 
     spec: TeamSpec
     storage: RunStorage | None
     hooks: LoopHooks
     request_template: ModelRequest
     model_name: str
+    metadata: dict[str, Any] | None
 
     def start(
         self,
@@ -280,7 +281,6 @@ class _LeaderRun:
         run_id: str,
         session_id: str,
         user_id: str | None,
-        metadata: dict[str, Any] | None,
         records: TerminalRecord[TeamRunRecord] | None,
     ) -> AsyncIterator[TeamRunEvent]:
         """Start the run; its tools share the stored session's ``session_state``, which the store writes back."""
@@ -291,7 +291,7 @@ class _LeaderRun:
                 run_id=run_id,
                 session_id=session_id,
                 user_id=user_id,
-                metadata=metadata,
+                metadata=self.metadata,
                 session=self.storage.session if self.storage is not None else None,
                 history_scope=self.storage.scope if self.storage is not None else None,
                 model_name=self.model_name,
@@ -335,6 +335,7 @@ def _leader_run(
         ),
         request_template=with_native_history(ModelRequest(messages=(), stream=stream), history.native_history),
         model_name=prepared.runtime_model_name,
+        metadata=prepared.run_metadata,
     )
 
 
@@ -371,7 +372,6 @@ def run_prepared_team(
         run_id=str(uuid4()),
         session_id=session_id,
         user_id=user_id,
-        metadata=prepared.run_metadata,
         records=None,
     )
 
@@ -608,7 +608,6 @@ class _TeamTurn:
                 run_id=attempt.run_id,
                 session_id=self.session_id,
                 user_id=self.user_id,
-                metadata=prepared.run_metadata,
                 records=attempt.records,
             )
         if storage is not None:
