@@ -20,12 +20,15 @@ def gated_functions(
     registered_tool_name: str | None = None,
     approvals_as_jobs: bool = False,
 ) -> dict[str, ToolFunction]:
-    """Return ``toolkit``'s adapted functions by name, with the approval flags a native-approval agent sets."""
+    """Return ``toolkit``'s adapted functions by name, with the approval flags a native-approval agent sets.
+
+    The toolkit is registered as ``registered_tool_name``, or under its own name.
+    """
     adapted = apply_tool_approval_capability(
         adapt_toolkit(toolkit),
         toolkit,
         config,
-        registered_tool_name=registered_tool_name,
+        registered_tool_name=registered_tool_name or toolkit.name,
         approvals_as_jobs=approvals_as_jobs,
     )
     return {function.name: function for function in adapted.functions}

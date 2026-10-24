@@ -966,7 +966,13 @@ def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path:
     config = _config(paths, child_tools=())
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=_leader_identity())
 
-    adapted = apply_tool_approval_capability(adapt_toolkit(toolkit), toolkit, config, registered_tool_name="delegate")
+    adapted = apply_tool_approval_capability(
+        adapt_toolkit(toolkit),
+        toolkit,
+        config,
+        registered_tool_name="delegate",
+        approvals_as_jobs=False,
+    )
 
     flags = {
         function.name: (function.external_execution, function.external_execution_silent)

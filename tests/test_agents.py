@@ -4086,7 +4086,7 @@ def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
         ],
     )
 
-    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config)
+    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config, registered_tool_name="approval-test")
 
     assert filtered is toolkit
     assert set(toolkit.functions) == {"safe"}
@@ -4104,7 +4104,7 @@ def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
         ],
     )
 
-    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config)
+    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config, registered_tool_name="approval-test")
 
     assert filtered is toolkit
     assert set(toolkit.functions) == {"safe"}
@@ -4188,7 +4188,7 @@ def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:
         tools=[Function(name="dangerous", entrypoint=lambda: None)],
     )
 
-    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config)
+    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config, registered_tool_name="approval-test")
 
     assert filtered is None
 
