@@ -147,14 +147,11 @@ def track_sync_tool_completion(tracker: SyncToolCompletionTracker | None) -> Ite
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _ResolvedToolContext:
+    """Who a tool call runs for and what its hooks receive; the room, thread, and requester are its identity's."""
+
     agent_name: str
-    room_id: str | None = None
-    thread_id: str | None = None
-    reply_to_event_id: str | None
-    requester_id: str | None = None
-    session_id: str | None = None
-    channel: str | None = None
     execution_identity: ToolExecutionIdentity | None = None
+    reply_to_event_id: str | None
     config: Config | None
     runtime_paths: RuntimePaths | None
     correlation_id: str
@@ -165,6 +162,27 @@ class _ResolvedToolContext:
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
     hook_registry_state: HookRegistryState | None = None
+
+    @property
+    def room_id(self) -> str | None:
+        return None if self.execution_identity is None else self.execution_identity.room_id
+
+    @property
+    def thread_id(self) -> str | None:
+        identity = self.execution_identity
+        return None if identity is None else identity.resolved_thread_id or identity.thread_id
+
+    @property
+    def requester_id(self) -> str | None:
+        return None if self.execution_identity is None else self.execution_identity.requester_id
+
+    @property
+    def session_id(self) -> str | None:
+        return None if self.execution_identity is None else self.execution_identity.session_id
+
+    @property
+    def channel(self) -> str | None:
+        return None if self.execution_identity is None else self.execution_identity.channel
 
     def hook_context_kwargs(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -255,13 +273,8 @@ def _resolve_tool_context(
         bindings = resolve_tool_runtime_hook_bindings(runtime_context)
         return _ResolvedToolContext(
             agent_name=agent_name or identity.agent_name,
-            room_id=identity.room_id,
-            thread_id=identity.resolved_thread_id or identity.thread_id,
-            reply_to_event_id=runtime_context.reply_to_event_id,
-            requester_id=identity.requester_id,
-            session_id=identity.session_id,
-            channel=identity.channel,
             execution_identity=identity,
+            reply_to_event_id=runtime_context.reply_to_event_id,
             config=runtime_context.config,
             runtime_paths=runtime_context.runtime_paths,
             correlation_id=_correlation_id_for_runtime_context(runtime_context, origin),
@@ -274,27 +287,16 @@ def _resolve_tool_context(
             hook_registry_state=runtime_context.hook_registry_state,
         )
 
+    identity = None if dispatch_context is None else dispatch_context.execution_identity
     reply_to_event_id = current_llm_request_log_context().get("reply_to_event_id")
-    resolved = _ResolvedToolContext(
-        agent_name=agent_name or "",
+    return _ResolvedToolContext(
+        agent_name=agent_name or (identity.agent_name if identity is not None else ""),
+        execution_identity=identity,
         reply_to_event_id=reply_to_event_id if isinstance(reply_to_event_id, str) else None,
         config=config,
         runtime_paths=runtime_paths,
         correlation_id=_correlation_id_for_runtime_context(None, origin),
         origin=origin,
-    )
-    if dispatch_context is None:
-        return resolved
-    identity = dispatch_context.execution_identity
-    return replace(
-        resolved,
-        agent_name=agent_name or identity.agent_name,
-        room_id=identity.room_id,
-        thread_id=identity.resolved_thread_id or identity.thread_id,
-        requester_id=identity.requester_id,
-        session_id=identity.session_id,
-        channel=identity.channel,
-        execution_identity=identity,
     )
 
 

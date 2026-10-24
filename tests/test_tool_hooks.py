@@ -512,6 +512,44 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_call_outside_a_live_turn_reports_its_identity_s_room_resolved_thread_and_channel(
+    tmp_path: Path,
+) -> None:
+    """Without a live turn, the hooks, the failure record, and its log line read the call's own identity."""
+    seen: list[tuple[str | None, ...]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.room_id, ctx.thread_id, ctx.requester_id, ctx.session_id))
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [before])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        runtime_paths=runtime_paths,
+    )
+
+    async def explode(**kwargs: object) -> object:
+        del kwargs
+        msg = "boom"
+        raise ValueError(msg)
+
+    with patch("mindroom.tool_system.tool_hooks.logger.warning") as warning, pytest.raises(ValueError, match="boom"):
+        await bridge("explode", explode, {})
+
+    assert seen == [("!room:localhost", "$resolved-thread", "@user:localhost", _SESSION_ID)]
+    log_path = runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert (record["channel"], record["room_id"], record["thread_id"]) == (
+        "matrix",
+        "!room:localhost",
+        "$resolved-thread",
+    )
+    assert warning.call_args.kwargs["channel"] == "matrix"
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_breaks(tmp_path: Path) -> None:
     """Secondary logging failures should not mask the original tool exception."""
     seen_errors: list[BaseException | None] = []
