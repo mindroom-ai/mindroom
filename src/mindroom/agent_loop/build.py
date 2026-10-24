@@ -83,8 +83,8 @@ class AgentBuild:
     store: ConversationStore | None
     tool_owners: Mapping[str, str]
     surface: AgentSurface
-    tool_policy: tuple[ToolMiddleware, ...] = ()
-    tool_jobs: JobActor | None = None
+    tool_policy: tuple[ToolMiddleware, ...]
+    tool_jobs: JobActor | None
 
 
 def tool_owners_by_agent(*builds: AgentBuild) -> dict[tuple[str, str], str]:

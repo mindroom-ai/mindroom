@@ -211,6 +211,8 @@ def _build(turn_context: str | None = None) -> AgentBuild:
         store=None,
         tool_owners={},
         surface=AgentSurface(mode="standard", cli_shell=False),
+        tool_policy=(),
+        tool_jobs=None,
     )
 
 

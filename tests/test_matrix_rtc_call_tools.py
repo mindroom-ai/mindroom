@@ -171,6 +171,7 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
         tool_owners={},
         surface=AgentSurface(mode="standard", cli_shell=False),
         tool_policy=policy,
+        tool_jobs=None,
     )
 
 
