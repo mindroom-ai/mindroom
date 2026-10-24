@@ -27,6 +27,7 @@ from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
@@ -496,7 +497,7 @@ class ClaudeAgentTools(Toolkit):
         run_context: _RunContext | None,
     ) -> str:
         agent_name = self._namespace()
-        run_session = run_context.session_id if run_context is not None else "default"
+        run_session = run_context.session_id if run_context is not None else DETACHED_SESSION_ID
         if session_label and session_label.strip():
             return f"{agent_name}:{run_session}:{session_label.strip()}"
         return f"{agent_name}:{run_session}"
