@@ -86,7 +86,7 @@ class RefreshEmbedder:
         return not self._batching_disabled and self.embedder.sends_batches
 
     def embed_texts(self, texts: Sequence[str]) -> dict[str, list[float]]:
-        """Embed distinct chunk texts as documents, in one request when batching is usable.
+        """Embed one planned batch of chunk texts as documents, in one request when batching is usable.
 
         Batch support is a capability claim that only a real multi-input
         request can test: some OpenAI-compatible backends accept an array and
@@ -107,8 +107,6 @@ class RefreshEmbedder:
         request per remaining chunk would bury the cause.
         """
         pending = list(dict.fromkeys(texts))
-        if not pending:
-            return {}
         if not self.batches() or len(pending) == 1:
             # A single-input request proves nothing about batch support, so it
             # is never allowed to retire batching.
