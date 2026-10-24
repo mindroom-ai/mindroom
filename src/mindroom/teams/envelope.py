@@ -598,7 +598,7 @@ class _TeamTurn:
         request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,
             run_input=run_input,
-            metadata=prepared.run_metadata,
+            metadata=leader.metadata,
         )
         with bind_llm_request_log_context(**request_context):
             if self.pipeline_timing is not None:
