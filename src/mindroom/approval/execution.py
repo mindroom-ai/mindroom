@@ -120,8 +120,7 @@ async def _collect_agent_continuation(
                 await presentation.publish(progress)
             elif isinstance(event, ToolCompleted):
                 presentation.complete_tool(event.tool)
-                if event.parent_run_id is None:
-                    current_tools.append(event.tool)
+                current_tools.append(event.tool)
                 await presentation.publish(progress)
     if response is None:
         msg = "Agent continuation did not yield its final run"

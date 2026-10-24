@@ -191,7 +191,7 @@ def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_s
         state=state,
         tool_trace=presentation.tool_trace,
     )
-    apply_team_event(restored, MemberEvent("scout", "Scout", "run-2", ToolCompleted(tool, parent_run_id="team")))
+    apply_team_event(restored, MemberEvent("scout", "Scout", "run-2", ToolCompleted(tool)))
     apply_team_event(restored, MemberEvent("scout", "Scout", "run-2", ContentDelta("Four seats.")))
 
     assert restored.per_member["scout"] == "Looking.\n\nFour seats."

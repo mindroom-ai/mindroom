@@ -389,7 +389,7 @@ def test_run_events_are_frozen_values() -> None:
         ContentDelta("hi"),
         ReasoningDelta("why"),
         ToolStarted(tool),
-        ToolCompleted(tool, parent_run_id="parent"),
+        ToolCompleted(tool),
         RequestCompleted(model_id="m", provider="P", usage=MessageMetrics(output_tokens=1)),
         RunFinished(record),
     ]
@@ -402,7 +402,6 @@ def test_run_events_are_frozen_values() -> None:
         "RequestCompleted",
         "RunFinished",
     ]
-    assert events[3].parent_run_id == "parent"  # type: ignore[union-attr]
     assert events[5].record is record  # type: ignore[union-attr]
     with pytest.raises(FrozenInstanceError):
         events[0].text = "changed"  # type: ignore[misc]

@@ -28,10 +28,9 @@ class ToolStarted:
 
 @dataclass(frozen=True, slots=True)
 class ToolCompleted:
-    """A tool call finished; ``parent_run_id`` names the run that issued it when it ran in a child run."""
+    """A tool call finished."""
 
     tool: ToolExecution
-    parent_run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

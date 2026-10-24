@@ -577,7 +577,7 @@ async def test_approval_settlement_uses_typed_status(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["history", "child", "projected_child"])
+@pytest.mark.parametrize("source", ["history", "projected_child"])
 async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: str) -> None:
     """Only newly completed parent tools can request another parent continuation attempt."""
     tool = ToolExecution(
@@ -590,9 +590,7 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
     presentation = CollectedStreamPresentation(show_tool_calls=False)
     parent_tools = [tool]
     events: list[RunEvent] = []
-    if source == "child":
-        events.append(ToolCompleted(tool, parent_run_id="parent"))
-    elif source == "projected_child":
+    if source == "projected_child":
         events.append(ToolCompleted(replace(tool, tool_call_id="delegate:old-continue")))
         parent_tools = [ToolExecution(tool_call_id="delegate", tool_name="run_subagent", result="Child finished.")]
     events.append(_finished(run_id="parent", content="Final parent answer.", tools=parent_tools))
