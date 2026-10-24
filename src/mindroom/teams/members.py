@@ -15,7 +15,7 @@ from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import create_agent, team_background_jobs
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.history.session_context import resolve_bound_team_scope_context
+from mindroom.history.session_context import resolve_bound_team_scope
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
@@ -408,13 +408,13 @@ def build_team_spec(
     if scope_context is not None:
         team_id = scope_context.scope.scope_id
     else:
-        bound_scope = resolve_bound_team_scope_context(
+        scope = resolve_bound_team_scope(
             member_names=members.requested_agent_names,
             config=config,
             team_name=configured_team_name,
             execution_identity=execution_identity,
         )
-        team_id = bound_scope.scope.scope_id if bound_scope is not None else team_display_name
+        team_id = scope.scope_id if scope is not None else team_display_name
     jobs = team_background_jobs(config, runtime_paths, execution_identity)
     leader_toolkits = () if jobs is None else (jobs.controls,)
     team_members = tuple(

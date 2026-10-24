@@ -23,7 +23,7 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import (
     ScopeSessionContext,
     open_bound_scope_session_context,
-    resolve_bound_team_scope_context,
+    resolve_bound_team_scope,
 )
 from mindroom.history.types import (
     HistoryScope,
@@ -315,7 +315,7 @@ def test_private_ad_hoc_bound_team_scope_requires_requester_identity(tmp_path: P
     config, _runtime_paths = _private_pair_config(tmp_path)
 
     with pytest.raises(ValueError, match="Private ad hoc team history scope requires requester identity"):
-        resolve_bound_team_scope_context(
+        resolve_bound_team_scope(
             member_names=["private_worker", "shared"],
             config=config,
             execution_identity=None,

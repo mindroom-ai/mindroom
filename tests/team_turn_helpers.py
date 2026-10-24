@@ -22,11 +22,7 @@ from mindroom import agents
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
-from mindroom.history.session_context import (
-    create_scope_session_storage,
-    resolve_bound_history_owner,
-    resolve_bound_team_scope_context,
-)
+from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, TeamRunRecord
@@ -198,10 +194,8 @@ class TeamTurn:
     @property
     def storage(self) -> ConversationStore:
         """The store of the team's history scope."""
-        owner = resolve_bound_history_owner(self.member_names)
-        assert owner is not None
         return create_scope_session_storage(
-            agent_name=owner,
+            agent_name=self.scope.scope_id,
             scope=self.scope,
             config=self.config,
             runtime_paths=self.runtime_paths,
@@ -382,13 +376,13 @@ def build_team_turn(
         membership_turn_id=EVENT_ID,
     )
     identity = build_execution_identity_from_runtime_context(runtime)
-    bound = resolve_bound_team_scope_context(
+    scope = resolve_bound_team_scope(
         member_names=members,
         config=config,
         team_name=team_name,
         execution_identity=identity,
     )
-    assert bound is not None
+    assert scope is not None
     orchestrator = team_orchestrator(config, runtime_paths)
     orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in config.agents}
     return TeamTurn(
@@ -401,7 +395,7 @@ def build_team_turn(
         member_names=tuple(members),
         team_name=team_name,
         mode=mode,
-        scope=bound.scope,
+        scope=scope,
     )
 
 

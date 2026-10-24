@@ -68,48 +68,29 @@ class ScopeSessionContext:
         return replace(self, session=self.stored_or_first_session())
 
 
-@dataclass(frozen=True)
-class _BoundTeamScopeContext:
-    """Resolved stable owner and scope for one live team run."""
-
-    owner_agent_name: str
-    scope: HistoryScope
+def has_named_member(member_names: Sequence[str]) -> bool:
+    """Return whether a team run names a member; a team run that names none has no history."""
+    return any(member_names)
 
 
-def resolve_bound_history_owner(member_names: Sequence[str]) -> str | None:
-    """Return the member that labels one bound team run's history preparation: the first by name."""
-    # TODO(simplify): A team run resolves an owner, its first member by name, that team stores ignore and that only
-    # labels the run's history-preparation logs. Resolve the team's HistoryScope alone and log the scope. Operators
-    # reading those logs would notice.
-    return min((name for name in member_names if name), default=None)
-
-
-def resolve_bound_team_scope_context(
+def resolve_bound_team_scope(
     *,
     member_names: Sequence[str],
     config: Config,
     team_name: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> _BoundTeamScopeContext | None:
-    """Resolve the stable owner and scope backing one live team run."""
-    owner_agent_name = resolve_bound_history_owner(member_names)
-    if owner_agent_name is None:
+) -> HistoryScope | None:
+    """Resolve the history scope backing one live team run, or None when the run names no member."""
+    if not has_named_member(member_names):
         return None
-
     if team_name is not None and team_name in config.teams:
-        team_scope_id = team_name
-    else:
-        team_scope_id = ad_hoc_team_scope_id(
-            member_names,
-            config.agents,
-            requester_user_id=execution_identity.requester_id if execution_identity is not None else None,
-        )
-    if team_scope_id is None:
-        return None
-    return _BoundTeamScopeContext(
-        owner_agent_name=owner_agent_name,
-        scope=HistoryScope(kind="team", scope_id=team_scope_id),
+        return HistoryScope(kind="team", scope_id=team_name)
+    team_scope_id = ad_hoc_team_scope_id(
+        member_names,
+        config.agents,
+        requester_user_id=execution_identity.requester_id if execution_identity is not None else None,
     )
+    return HistoryScope(kind="team", scope_id=team_scope_id) if team_scope_id is not None else None
 
 
 @contextmanager
@@ -161,20 +142,19 @@ def open_bound_scope_session_context(
 ) -> Iterator[ScopeSessionContext | None]:
     """Open the canonical scope-backed session context for one bound team run."""
     if not member_names and team_name is not None and team_name in config.teams:
-        owner_agent_name, scope = team_name, HistoryScope(kind="team", scope_id=team_name)
+        scope = HistoryScope(kind="team", scope_id=team_name)
     else:
-        bound_scope = resolve_bound_team_scope_context(
+        scope = resolve_bound_team_scope(
             member_names=member_names,
             config=config,
             team_name=team_name,
             execution_identity=execution_identity,
         )
-        if bound_scope is None:
-            yield None
-            return
-        owner_agent_name, scope = bound_scope.owner_agent_name, bound_scope.scope
+    if scope is None:
+        yield None
+        return
     with open_resolved_scope_session_context(
-        agent_name=owner_agent_name,
+        agent_name=scope.scope_id,
         scope=scope,
         session_id=session_id,
         runtime_paths=runtime_paths,
@@ -193,7 +173,10 @@ def create_scope_session_storage(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> ConversationStore:
-    """Open the canonical conversation store of one persisted history scope."""
+    """Open the canonical conversation store of one persisted history scope.
+
+    ``agent_name`` names the agent whose store backs an agent scope; a team scope's store does not depend on it.
+    """
     if scope.kind == "agent":
         return create_session_storage(agent_name, config, runtime_paths, execution_identity=execution_identity)
     normalized_scope_id = _TEAM_STORAGE_NAME_PATTERN.sub("_", scope.scope_id).strip("_") or "team"
