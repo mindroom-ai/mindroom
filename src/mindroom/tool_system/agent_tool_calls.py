@@ -215,15 +215,14 @@ class PreparedAgentToolCatalog:
         self,
         toolkit: AdaptedToolkit,
         functions: Sequence[ToolFunction],
-        owners: Mapping[str, str] | None = None,
+        owners: Mapping[str, str],
     ) -> None:
-        """Bind ``functions`` of ``toolkit``, under their owner from ``owners``, or under the toolkit without one."""
+        """Bind ``functions`` of ``toolkit`` under their owner from ``owners``, or as ``agent`` when it names none."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
         instructions = (toolkit.guidance,) if toolkit.guidance else ()
         for function in functions:
-            authored = owners is None or function.name in owners
-            namespace = ((owners or {}).get(function.name) or toolkit.name) if authored else "agent"
-            if namespace == "agent" and authored:
+            namespace = owners.get(function.name, "agent")
+            if namespace == "agent" and function.name in owners:
                 msg = "The agent toolkit namespace is reserved for generated functions"
                 raise ValueError(msg)
             key = ToolKey(namespace, function.name)
@@ -266,7 +265,9 @@ class PreparedAgentToolCatalog:
                 with self.execution_context():
                     toolkit = await deferred.materialize()
                 await connect_toolkits((toolkit,), self._closes)
-                self._prepare(replace(toolkit, name=deferred.name), toolkit.functions)
+                # Every function a deferred toolkit materializes is authored in it.
+                owners = dict.fromkeys((function.name for function in toolkit.functions), deferred.name)
+                self._prepare(toolkit, toolkit.functions, owners)
                 del self._deferred[key.toolkit]
             binding = self._bindings.get(key)
             if binding is None:
