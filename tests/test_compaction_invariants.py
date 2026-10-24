@@ -167,7 +167,6 @@ def _session(runs: list[RunRecord]) -> ConversationSession:
         runs=list(runs),
         metadata=None,
         created_at=1,
-        updated_at=1,
     )
 
 

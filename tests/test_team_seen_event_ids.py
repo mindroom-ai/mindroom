@@ -30,7 +30,6 @@ async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_sn
         metadata={},
         session_state={"phase": "before"},
         created_at=1,
-        updated_at=1,
     )
     storage.ensure_session_row(stored)
     snapshot = deepcopy(stored)

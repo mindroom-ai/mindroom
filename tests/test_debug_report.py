@@ -291,7 +291,6 @@ def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]
                 for run_id, created_at in runs
             ],
             created_at=1_723_837_600,
-            updated_at=1_723_837_600,
         ),
     )
 

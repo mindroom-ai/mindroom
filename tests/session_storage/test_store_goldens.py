@@ -83,14 +83,12 @@ def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id
         session.metadata,
         session.session_state,
         session.created_at,
-        session.updated_at,
     ) == (
         agno["session_id"],
         agno["team_id"] if session.kind == "team" else agno["agent_id"],
         agno["metadata"],
         agno["session_data"]["session_state"],
         agno["created_at"],
-        agno["updated_at"],
     )
     assert _summary_dict(session.summary) == agno["summary"]
     assert [run.run_id for run in session.runs] == [run["run_id"] for run in agno["runs"]]

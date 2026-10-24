@@ -48,7 +48,6 @@ async def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path:
             owner_id="test_agent",
             runs=[run],
             created_at=1,
-            updated_at=1,
         ),
     )
     writer = ConversationStateWriter(

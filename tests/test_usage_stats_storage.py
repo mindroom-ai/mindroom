@@ -242,7 +242,6 @@ def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) 
                 ),
             ],
             created_at=1_723_837_600,
-            updated_at=1_723_837_600,
         ),
     )
 
@@ -373,7 +372,6 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         session_id="session-1",
         owner_id="engineering",
         created_at=1_723_837_600,
-        updated_at=1_723_837_600,
     )
     storage = create_state_storage("engineering", tmp_path)
     persist_runs(

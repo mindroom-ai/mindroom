@@ -99,7 +99,6 @@ def _team_session(
         metadata={},
         runs=list(runs or []),
         created_at=1,
-        updated_at=1,
     )
 
 

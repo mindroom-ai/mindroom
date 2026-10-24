@@ -64,7 +64,6 @@ class ConversationSession:
     runs: list[AnyRunRecord] = field(default_factory=list)
     summary: ScopeSummary | None = None
     created_at: int = field(default_factory=lambda: int(time()))
-    updated_at: int | None = None
 
 
 __all__ = [

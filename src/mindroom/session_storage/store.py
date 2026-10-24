@@ -143,7 +143,7 @@ class ConversationStore:
             loaded = self._read_load(connection, session_id, kind)
         if loaded is None:
             return None
-        _, agent_id, team_id, session_data, metadata, created_at, updated_at = loaded.row
+        _, agent_id, team_id, session_data, metadata, created_at = loaded.row
         state = _session_state(session_data)
         return ConversationSession(
             session_id=session_id,
@@ -155,7 +155,6 @@ class ConversationStore:
             runs=loaded.runs(),
             summary=loaded.summary,
             created_at=created_at,
-            updated_at=updated_at,
         )
 
     def _read_load(self, connection: sqlite3.Connection, session_id: str, kind: SessionKind) -> _Load | None:
@@ -209,7 +208,7 @@ class ConversationStore:
         if self.names.sessions not in table_names(connection):
             return None
         row = connection.execute(
-            "SELECT session_type, agent_id, team_id, session_data, metadata, created_at, updated_at "  # noqa: S608
+            "SELECT session_type, agent_id, team_id, session_data, metadata, created_at "  # noqa: S608
             f"FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",
             (session_id,),
         ).fetchone()

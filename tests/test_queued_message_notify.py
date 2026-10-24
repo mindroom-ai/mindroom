@@ -477,7 +477,6 @@ def _seed(
             owner_id=owner,
             runs=list(runs),
             created_at=1,
-            updated_at=1,
         ),
     )
 

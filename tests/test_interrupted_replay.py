@@ -364,7 +364,6 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
             ],
             metadata={},
             created_at=1,
-            updated_at=1,
         ),
     )
     stale_session = ConversationSession(
@@ -374,7 +373,6 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
         runs=[_completed_run("old1", "First response")],
         metadata={},
         created_at=1,
-        updated_at=1,
     )
 
     snapshot = build_interrupted_replay_snapshot(
@@ -510,7 +508,6 @@ def test_an_interrupted_replay_and_the_session_state_it_carries_commit_together_
             runs=[_completed_run("old1", "First response")],
             metadata={},
             created_at=1,
-            updated_at=1,
         ),
     )
     session = storage.load_session("session-1", "agent")

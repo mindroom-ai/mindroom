@@ -297,7 +297,6 @@ def _session(
         metadata=metadata,
         summary=summary,
         created_at=1,
-        updated_at=1,
     )
 
 
@@ -317,7 +316,6 @@ def _team_session(
         metadata=metadata,
         summary=summary,
         created_at=1,
-        updated_at=1,
     )
 
 
