@@ -60,78 +60,6 @@ desktop_app = typer.Typer(
     no_args_is_help=True,
 )
 
-_USER_ID_OPTION: str | None = typer.Option(
-    None,
-    "--user-id",
-    help="Expected Matrix user ID; required for password login and optional for SSO.",
-    rich_help_panel="Matrix connection",
-)
-
-_HOMESERVER_OPTION: str | None = typer.Option(
-    None,
-    "--homeserver",
-    help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
-    rich_help_panel="Matrix connection",
-)
-
-_CLOUDFLARE_ACCESS_OPTION: bool = typer.Option(
-    False,
-    "--cloudflare-access",
-    envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
-    help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
-    rich_help_panel="Matrix connection",
-)
-
-_MATRIX_HTTP_HEADERS_FILE_OPTION: Path | None = typer.Option(
-    None,
-    "--matrix-http-headers-file",
-    envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
-    help="Owner-only JSON file of HTTP headers added to every Matrix request.",
-    rich_help_panel="Matrix connection",
-)
-
-_CONFIG_PATH_OPTION: Path | None = typer.Option(
-    None,
-    "--config",
-    "-c",
-    help="MindRoom config path used for runtime env.",
-)
-
-_STORAGE_PATH_OPTION: Path | None = typer.Option(
-    None,
-    "--storage-path",
-    "-s",
-    help="Desktop bridge state directory.",
-)
-
-_CODE_OPTION: str = typer.Option(
-    ...,
-    "--code",
-    help="Short-lived code returned by !desktop setup.",
-    rich_help_panel="Pairing",
-)
-
-_CONTROLLER_USER_ID_OPTION: str = typer.Option(
-    ...,
-    "--controller-user-id",
-    help="Pinned cloud controller Matrix user.",
-    rich_help_panel="Pairing",
-)
-
-_CONTROLLER_DEVICE_ID_OPTION: str = typer.Option(
-    ...,
-    "--controller-device-id",
-    help="Pinned cloud controller device.",
-    rich_help_panel="Pairing",
-)
-
-_CONTROLLER_ED25519_OPTION: str = typer.Option(
-    ...,
-    "--controller-ed25519",
-    help="Pinned controller fingerprint.",
-    rich_help_panel="Pairing",
-)
-
 
 @desktop_app.command("app", rich_help_panel="Advanced")
 def desktop_native_app(
@@ -214,8 +142,18 @@ def _request_required_desktop_permissions() -> None:
 
 @desktop_app.command("login", rich_help_panel="Advanced")
 def desktop_login(
-    user_id: str | None = _USER_ID_OPTION,
-    homeserver: str | None = _HOMESERVER_OPTION,
+    user_id: str | None = typer.Option(
+        None,
+        "--user-id",
+        help="Expected Matrix user ID; required for password login and optional for SSO.",
+        rich_help_panel="Matrix connection",
+    ),
+    homeserver: str | None = typer.Option(
+        None,
+        "--homeserver",
+        help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
+        rich_help_panel="Matrix connection",
+    ),
     login_method: DesktopLoginMethod = typer.Option(  # noqa: B008
         DesktopLoginMethod.AUTO,
         "--login-method",
@@ -232,11 +170,33 @@ def desktop_login(
         "--open-browser/--no-open-browser",
         help="Open Matrix SSO in the default browser; otherwise print the URL.",
     ),
-    cloudflare_access: bool = _CLOUDFLARE_ACCESS_OPTION,
+    cloudflare_access: bool = typer.Option(
+        False,
+        "--cloudflare-access",
+        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
+        rich_help_panel="Matrix connection",
+    ),
     replace: bool = typer.Option(False, "--replace", help="Replace the saved session with a fresh Matrix device."),
-    matrix_http_headers_file: Path | None = _MATRIX_HTTP_HEADERS_FILE_OPTION,
-    config_path: Path | None = _CONFIG_PATH_OPTION,
-    storage_path: Path | None = _STORAGE_PATH_OPTION,
+    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--matrix-http-headers-file",
+        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
+        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
+        rich_help_panel="Matrix connection",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="MindRoom config path used for runtime env.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Desktop bridge state directory.",
+    ),
 ) -> None:
     """Log in once, create an Olm device, and save its access token privately."""
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
@@ -378,14 +338,56 @@ def _print_device_identity(
 
 @desktop_app.command("pair", rich_help_panel="Advanced")
 def desktop_pair(
-    code: str = _CODE_OPTION,
-    controller_user_id: str = _CONTROLLER_USER_ID_OPTION,
-    controller_device_id: str = _CONTROLLER_DEVICE_ID_OPTION,
-    controller_ed25519: str = _CONTROLLER_ED25519_OPTION,
-    cloudflare_access: bool = _CLOUDFLARE_ACCESS_OPTION,
-    matrix_http_headers_file: Path | None = _MATRIX_HTTP_HEADERS_FILE_OPTION,
-    config_path: Path | None = _CONFIG_PATH_OPTION,
-    storage_path: Path | None = _STORAGE_PATH_OPTION,
+    code: str = typer.Option(
+        ...,
+        "--code",
+        help="Short-lived code returned by !desktop setup.",
+        rich_help_panel="Pairing",
+    ),
+    controller_user_id: str = typer.Option(
+        ...,
+        "--controller-user-id",
+        help="Pinned cloud controller Matrix user.",
+        rich_help_panel="Pairing",
+    ),
+    controller_device_id: str = typer.Option(
+        ...,
+        "--controller-device-id",
+        help="Pinned cloud controller device.",
+        rich_help_panel="Pairing",
+    ),
+    controller_ed25519: str = typer.Option(
+        ...,
+        "--controller-ed25519",
+        help="Pinned controller fingerprint.",
+        rich_help_panel="Pairing",
+    ),
+    cloudflare_access: bool = typer.Option(
+        False,
+        "--cloudflare-access",
+        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
+        rich_help_panel="Matrix connection",
+    ),
+    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--matrix-http-headers-file",
+        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
+        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
+        rich_help_panel="Matrix connection",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="MindRoom config path used for runtime env.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Desktop bridge state directory.",
+    ),
 ) -> None:
     """Claim one requester-agent pairing through authenticated Matrix E2EE."""
     from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
@@ -426,10 +428,30 @@ def desktop_pair(
 
 @desktop_app.command("setup", rich_help_panel="Set up and run")
 def desktop_setup(
-    code: str = _CODE_OPTION,
-    controller_user_id: str = _CONTROLLER_USER_ID_OPTION,
-    controller_device_id: str = _CONTROLLER_DEVICE_ID_OPTION,
-    controller_ed25519: str = _CONTROLLER_ED25519_OPTION,
+    code: str = typer.Option(
+        ...,
+        "--code",
+        help="Short-lived code returned by !desktop setup.",
+        rich_help_panel="Pairing",
+    ),
+    controller_user_id: str = typer.Option(
+        ...,
+        "--controller-user-id",
+        help="Pinned cloud controller Matrix user.",
+        rich_help_panel="Pairing",
+    ),
+    controller_device_id: str = typer.Option(
+        ...,
+        "--controller-device-id",
+        help="Pinned cloud controller device.",
+        rich_help_panel="Pairing",
+    ),
+    controller_ed25519: str = typer.Option(
+        ...,
+        "--controller-ed25519",
+        help="Pinned controller fingerprint.",
+        rich_help_panel="Pairing",
+    ),
     allow_requester: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--allow-requester",
@@ -448,12 +470,44 @@ def desktop_setup(
         help="Save allowed app IDs, or choose apps later in the macOS app.",
         rich_help_panel="Access",
     ),
-    user_id: str | None = _USER_ID_OPTION,
-    homeserver: str | None = _HOMESERVER_OPTION,
-    cloudflare_access: bool = _CLOUDFLARE_ACCESS_OPTION,
-    matrix_http_headers_file: Path | None = _MATRIX_HTTP_HEADERS_FILE_OPTION,
-    config_path: Path | None = _CONFIG_PATH_OPTION,
-    storage_path: Path | None = _STORAGE_PATH_OPTION,
+    user_id: str | None = typer.Option(
+        None,
+        "--user-id",
+        help="Expected Matrix user ID; required for password login and optional for SSO.",
+        rich_help_panel="Matrix connection",
+    ),
+    homeserver: str | None = typer.Option(
+        None,
+        "--homeserver",
+        help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
+        rich_help_panel="Matrix connection",
+    ),
+    cloudflare_access: bool = typer.Option(
+        False,
+        "--cloudflare-access",
+        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
+        rich_help_panel="Matrix connection",
+    ),
+    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--matrix-http-headers-file",
+        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
+        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
+        rich_help_panel="Matrix connection",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="MindRoom config path used for runtime env.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Desktop bridge state directory.",
+    ),
 ) -> None:
     """Pair and save the connection shared with the macOS app."""
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
@@ -625,8 +679,18 @@ def desktop_access(
         "--shell/--no-shell",
         help="Let agents request shell commands, each approved on this computer while the bridge runs.",
     ),
-    config_path: Path | None = _CONFIG_PATH_OPTION,
-    storage_path: Path | None = _STORAGE_PATH_OPTION,
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="MindRoom config path used for runtime env.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Desktop bridge state directory.",
+    ),
 ) -> None:
     """Save the read-only folders and shell access shared with the macOS app.
 
@@ -822,10 +886,32 @@ def desktop_run(
         "-l",
         help="Set the logging level (DEBUG, INFO, WARNING, ERROR)",
     ),
-    cloudflare_access: bool = _CLOUDFLARE_ACCESS_OPTION,
-    matrix_http_headers_file: Path | None = _MATRIX_HTTP_HEADERS_FILE_OPTION,
-    config_path: Path | None = _CONFIG_PATH_OPTION,
-    storage_path: Path | None = _STORAGE_PATH_OPTION,
+    cloudflare_access: bool = typer.Option(
+        False,
+        "--cloudflare-access",
+        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
+        rich_help_panel="Matrix connection",
+    ),
+    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--matrix-http-headers-file",
+        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
+        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
+        rich_help_panel="Matrix connection",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="MindRoom config path used for runtime env.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Desktop bridge state directory.",
+    ),
 ) -> None:
     """Run the bridge with the saved app, folder, and shell setup.
 
