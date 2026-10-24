@@ -127,7 +127,7 @@ class ConversationStore:
             row = self._session_row(connection, session_id)
         if row is None:
             return None
-        return SessionFields(metadata=_decoded_mapping(row[5]), session_state=_session_state(row[4]))
+        return SessionFields(metadata=_decoded_mapping(row[4]), session_state=_session_state(row[3]))
 
     def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
         """Load one session with the runs a reply reasons over, or None when it is missing or of another kind.
@@ -139,7 +139,7 @@ class ConversationStore:
             loaded = self._read_load(connection, session_id, kind)
         if loaded is None:
             return None
-        _, agent_id, team_id, _, session_data, metadata, created_at, updated_at = loaded.row
+        _, agent_id, team_id, session_data, metadata, created_at, updated_at = loaded.row
         state = _session_state(session_data)
         return ConversationSession(
             session_id=session_id,
@@ -199,7 +199,7 @@ class ConversationStore:
         if self.names.sessions not in table_names(connection):
             return None
         return connection.execute(
-            "SELECT session_type, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at "  # noqa: S608
+            "SELECT session_type, agent_id, team_id, session_data, metadata, created_at, updated_at "  # noqa: S608
             f"FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",
             (session_id,),
         ).fetchone()
