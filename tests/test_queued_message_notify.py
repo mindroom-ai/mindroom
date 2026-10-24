@@ -3654,11 +3654,9 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
         assert isinstance(response_turn_id, str)
         response_1_ids.append(response_turn_id)
         messages.append(OwnedMessage(role="assistant", content="First response handoff"))
-        _seed(_queued_notice_storage(tmp_path), _completed("run-1", messages))
-        _register_notice_storage(
-            _queued_notice_storage(tmp_path),
-            storage_factory=lambda: _queued_notice_storage(tmp_path),
-        )
+        store = _queued_notice_storage(tmp_path)
+        _seed(store, _completed("run-1", messages))
+        _register_notice_storage(store, storage_factory=lambda: _queued_notice_storage(tmp_path))
         return "First response handoff"
 
     response_1 = await lifecycle.run_locked_response(
