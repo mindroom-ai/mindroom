@@ -2,7 +2,7 @@
 """Gemini wire format: request contents, function declarations, schema conversion, and stream parsing.
 
 Request values are plain dicts in google-genai's field names.
-The SDK validates them into its own types and serializes the same JSON body Agno's typed objects produced.
+The SDK validates them into its own types before it serializes the request.
 """
 
 from __future__ import annotations
@@ -214,8 +214,8 @@ async def _local_part(
     """
     file_path = Path(path)
     # TODO(simplify): local audio and video always go through the Files API where there is one, even when small
-    # enough to inline, as Agno sent them. Inline them up to the limit like other media and drop ``always_upload``.
-    # Operators would see fewer Files API uploads; models get the same media.
+    # enough to inline. Inline them up to the limit like other media and drop ``always_upload``. Operators would
+    # see fewer Files API uploads; models get the same media.
     inline_limit = 0 if always_upload and route.upload is not None else _INLINE_MEDIA_LIMIT_BYTES
     size, data = await asyncio.to_thread(_read_local_media, file_path, kind, route.provider, inline_limit)
     if not size:
@@ -299,7 +299,7 @@ async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
 
 def function_declarations(tools: Sequence[ToolSpec]) -> dict[str, Any] | None:
     """Return the Gemini tool that declares ``tools``, sorted by name for stable request prefixes."""
-    # Agno built each declaration with ``description or ""``, so a tool without one still sends an empty string.
+    # A tool without a description sends an empty one, kept as main behaves.
     declarations = [
         _without_none(name=tool.name, description=tool.description or "", parameters=convert_schema(tool.parameters))
         for tool in sorted(tools, key=lambda tool: tool.name)
@@ -409,8 +409,8 @@ def convert_schema(  # noqa: C901, PLR0911, PLR0912
 
     The input is never modified.
     """
-    # TODO(simplify): tool and output schemas are rewritten into Gemini's OpenAPI subset, as Agno did, which drops
-    # some descriptions and invents an ``example_key`` property for dicts. Send them as authored, in the SDK's
+    # TODO(simplify): tool and output schemas are rewritten into Gemini's OpenAPI subset, which drops some
+    # descriptions and invents an ``example_key`` property for dicts. Send them as authored, in the SDK's
     # recommended ``parameters_json_schema`` and ``response_json_schema``, and delete this. Models would notice.
     root = schema if root is None else root
     if "$ref" in schema:
@@ -498,7 +498,7 @@ def convert_schema(  # noqa: C901, PLR0911, PLR0912
 
 def _property_schema(value: Mapping[str, Any], root: Mapping[str, Any], visited: frozenset[str]) -> dict[str, Any]:
     value_type = value.get("type", "")
-    # A ["<type>", "null"] list keeps its first entry, as Agno's conversion did.
+    # A ["<type>", "null"] list type is sent as its first entry, kept as main behaves.
     nullable = isinstance(value_type, list) and "null" in value_type
     converted = convert_schema({**value, "type": value_type[0]} if nullable else value, root, visited)
     if converted is None:
@@ -567,19 +567,18 @@ def read_chunk(
     """Add one streamed chunk (or one ``whole_response`` from a non-streamed call) to ``reply`` and return its events.
 
     Gemini repeats the reply's cumulative usage on every chunk, so each chunk that carries usage reports it first, as
-    a partial report that replaces the one before: a reply stopped, stalled, or failed after any chunk, or while a
-    chunk's output is delivered, still settles what was billed. Only a finished candidate's usage counts toward the
-    reply's own usage, as Agno counted it. A candidate that ended in a malformed tool call reports its usage and
-    nothing else; ``malformed_tool_call_error`` then ends the reply. A chunk that shows Google Search grounding or
-    code execution at work reports that hosted tool's start.
+    a partial report that replaces the one before. Only a finished candidate's usage, the reply's total, counts toward
+    the reply's own usage. A candidate that ended in a malformed tool call reports its usage and nothing else;
+    ``malformed_tool_call_error`` then ends the reply. A chunk that shows Google Search grounding or code execution
+    at work reports that hosted tool's start.
     """
     if not chunk.candidates:
         if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason is not None:
             # A blocked prompt gets feedback instead of a candidate, which ends the reply.
             reply.prompt_blocked = True
-        # TODO(simplify): a chunk without candidates, such as a blocked prompt, counts its prompt usage only when the
-        # reply arrives whole, as Agno's two parsers differed. Count it in both modes and drop ``whole_response``.
-        # Operators would see the usage of streamed blocked prompts.
+        # TODO(simplify): a blocked prompt's usage counts only when the reply arrives whole. Count a blocking chunk's
+        # usage when streamed too, as it ends the reply, and drop ``whole_response``. Operators would see the usage
+        # of streamed blocked prompts.
         if not whole_response or chunk.usage_metadata is None:
             return []
         reply.usage = _usage_metrics(chunk.usage_metadata)

@@ -57,7 +57,7 @@ _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GeminiSettings:
-    """The ``extra_kwargs`` a Gemini model accepts, named as Agno's ``Gemini`` fields."""
+    """The ``extra_kwargs`` a Gemini model accepts."""
 
     api_key: str | None = field(default=None, metadata=SECRET)
     vertexai: bool = False
@@ -83,7 +83,8 @@ class GeminiSettings:
     thinking_budget: int | None = None
     include_thoughts: bool | None = None
     thinking_level: str | None = None
-    # Google Search grounding, sent in place of the request's function tools.
+    # Google Search grounding, sent in place of the request's function tools, so a grounded model calls no
+    # function; kept as main behaves.
     search: bool = False
 
 
@@ -108,9 +109,7 @@ class GeminiProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.
 
-        Media uploads and downloads happen first, so their SDK and transport errors are normalized too. Usage is
-        reported as each chunk carries it, ahead of the chunk's output, so an attempt that fails or is cut off
-        afterwards, such as one that ended in a malformed tool call, still settles it.
+        Media uploads and downloads happen first, so their SDK and transport errors are normalized too.
         """
         started = time.monotonic()
         reply = GeminiReply()
@@ -171,12 +170,12 @@ class GeminiProvider:
         request: ModelRequest,
         system_instruction: str | list[Any] | None,
     ) -> dict[str, Any] | GenerateContentConfig:
-        """Return the generation config of one request, in the order Agno's Gemini built it."""
+        """Return the generation config of one request."""
         settings = self.settings
         overrides = request.overrides
         # TODO(simplify): an authored ``generation_config`` key that has a dedicated field, such as temperature, is
-        # dropped when that field is unset, as Agno did. Let a dedicated field replace the key only when it is set.
-        # Operators and models would notice.
+        # dropped when that field is unset. Let a dedicated field replace the key only when it is set. Operators and
+        # models would notice.
         config: dict[str, Any] = {
             **(settings.generation_config or {}),
             **(settings.generative_model_kwargs or {}),
@@ -206,7 +205,6 @@ class GeminiProvider:
         # default, so dropping a ``thinking_budget: 0`` would turn thinking on, and the Pro models cannot turn it off.
         if thinking := {key: value for key, value in thinking.items() if value is not None}:
             config["thinking_config"] = thinking
-        # Agno sent built-in tools instead of the function declarations, so a grounded model calls no function.
         if settings.search:
             config["tools"] = [{"google_search": {}}]
         elif (declarations := function_declarations(request.tools)) is not None:
