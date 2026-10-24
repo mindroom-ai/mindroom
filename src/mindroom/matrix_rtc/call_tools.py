@@ -221,7 +221,7 @@ async def record_call_token_usage(
 ) -> None:
     """Upsert a realtime call's speech-model tokens for the caller, one request per response.
 
-    The call's model has its entry under ``details`` even before any response, kept as main stores it.
+    The call's model has its entry under ``details`` even before any response, so stored usage names it from the start.
     """
     metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider="OpenAI")]})
     messages: list[Message] = []
