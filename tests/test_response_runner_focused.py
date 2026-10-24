@@ -38,6 +38,7 @@ from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt_readers as approval_receipt
 from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.receipt import messages_with_approval_receipt
+from mindroom.approval.receipt_readers import take_unsent_receipt
 from mindroom.approval.response import plan_approval_calls, require_ordered_pause_presentation
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.authorization import ReplyMembershipPendingError
@@ -167,6 +168,7 @@ from mindroom.tool_system.runtime_context import ToolDispatchContext, build_exec
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch
 from tests.approval_continuation_helpers import (
+    advance_continuation,
     approval_continuation,
     claim_continuation,
     freeze_resume_final,
@@ -4842,6 +4844,103 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
             "directly or through a matching timed approval window.",
         ),
         ("tool", "published"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approvals_decided(tmp_path: Path) -> None:
+    """After two approvals in a row, the resume's receipt records the first approval's call beside the second's.
+
+    Each resume's receipt reaches only the request it is projected into, so the second resume's readers learn how
+    the first approval's call was authorized from the second receipt alone.
+    """
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    def approved(tool_call_id: str, tool_name: str, *, human_approval_required: bool) -> ApprovalCall:
+        return ApprovalCall(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            invoking_agent="general",
+            expires_at_ns=1,
+            decision=ApprovalDecision.APPROVED,
+            human_approval_required=human_approval_required,
+        )
+
+    first = approval_continuation(
+        approval_id="approval-chain",
+        calls=(approved("call-1", "save_file", human_approval_required=True),),
+        execution_identity={},
+    )
+    assert await paused_for_approval(store, first) is not None
+    claimed = await claim_continuation(
+        store,
+        first.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    second_calls = (
+        approved("call-2", "save_file", human_approval_required=True),
+        approved("call-3", "read_file", human_approval_required=False),
+    )
+    advanced = await advance_continuation(
+        store,
+        first.approval_id,
+        claimant_generation=claimed.generation,
+        run_id=claimed.run_id,
+        session_id=claimed.session_id,
+        calls=second_calls,
+    )
+    assert advanced is not None
+    second = await store.activate_approval_continuation(first.approval_id, expected_generation=advanced.generation)
+    assert second is not None
+    assert (second.state, second.generation, second.calls) == ("ready", 1, second_calls)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    receipts: list[str | None] = []
+
+    async def continue_run(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
+        receipts.append(take_unsent_receipt(second.run_id))
+        return CompletedApprovalRun(response_text="done", metadata_content={})
+
+    with (
+        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
+        patch.object(
+            runner.deps.tool_runtime,
+            "build_dispatch_context",
+            return_value=ToolDispatchContext(execution_identity=identity),
+        ),
+        patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run),
+    ):
+        async with resumed_approval(bot, second) as resumed:
+            await runner._continue_entity_call(
+                resumed,
+                request=request,
+                target=request.response_envelope.target,
+                tool_trace_collector=[],
+                progress=None,
+            )
+
+    granted = (
+        "human approval was required and granted before execution, directly or through a matching timed approval "
+        "window."
+    )
+    assert receipts == [
+        "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
+        "paused tool calls were authorized. Do not infer approval policy from tool success alone.\n"
+        f"- `save_file` (tool call id `call-1`): {granted}\n"
+        f"- `save_file` (tool call id `call-2`): {granted}\n"
+        "- `read_file` (tool call id `call-3`): human approval was not required; policy approved execution.",
     ]
 
 

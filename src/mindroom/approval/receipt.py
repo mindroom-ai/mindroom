@@ -40,7 +40,7 @@ def _receipt_call_label(call: ApprovalCall) -> str:
 
 
 def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
-    """Render trusted model context for one exact approval generation."""
+    """Render trusted model context for the decided ``calls`` of every approval in the run so far, in pause order."""
     lines = [_APPROVAL_RECEIPT_HEADER]
     for call in calls:
         if call.decision is None:

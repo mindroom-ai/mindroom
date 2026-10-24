@@ -7137,6 +7137,43 @@ class TestApprovalContinuations:
         assert advanced.runtime_generation == "runtime-a"
         assert advanced.calls == calls
 
+    async def test_advanced_continuation_keeps_every_earlier_generation_s_decided_calls(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Every loader returns the calls each earlier approval decided beside the current generation's."""
+        alice = journal_store.principal("agent@alice")
+        await self.admit_sources(alice)
+        first = await paused_for_approval(alice, self.continuation())
+        assert first is not None
+        assert first.earlier_calls == ()
+        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        calls = (
+            ApprovalCall(
+                tool_call_id="call-2",
+                tool_name="write_file",
+                invoking_agent="agent",
+                expires_at_ns=time.time_ns() + 60_000_000_000,
+            ),
+        )
+
+        advanced = await advance_continuation(
+            alice,
+            "approval-1",
+            claimant_generation=claimed.generation,
+            run_id="run-2",
+            session_id="session-1",
+            calls=calls,
+        )
+
+        assert advanced is not None
+        [paged] = [continuation for _principal, continuation in await journal_store.approval_continuations()]
+        assert [
+            (continuation.calls, continuation.earlier_calls)
+            for continuation in (advanced, *await alice.pending_approvals(), paged)
+        ] == [(calls, first.calls)] * 3
+
     async def test_automatically_decided_chained_generation_stays_fenced_until_activation(
         self,
         alice: PrincipalStore,

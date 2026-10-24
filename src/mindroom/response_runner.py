@@ -2642,7 +2642,8 @@ class ResponseRunner:
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
         denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
         paused_answer = _paused_answer()
-        with approval_receipt_context(build_approval_receipt(continuation.calls), run_id=continuation.run_id):
+        receipt = build_approval_receipt((*continuation.earlier_calls, *continuation.calls))
+        with approval_receipt_context(receipt, run_id=continuation.run_id):
             if continuation.entity_kind == "team":
 
                 async def continue_team() -> CompletedApprovalRun | PausedAttempt:
