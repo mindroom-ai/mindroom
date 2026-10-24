@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn
 
-from mindroom.agent_cli.bash import MinimalBashTools
+from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner
@@ -21,7 +21,6 @@ from mindroom.hooks import render_enrichment_block, render_system_enrichment_blo
 from mindroom.llm.messages import Message
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -122,7 +121,7 @@ def minimal_turn(
 
 def presented_build(build: AgentBuild) -> AgentBuild:
     """Return ``build`` as a minimal turn's requests present it: the Bash facade is its only tool."""
-    return replace(build, spec=replace(build.spec, toolkits=(adapt_toolkit(MinimalBashTools()),)))
+    return replace(build, spec=replace(build.spec, toolkits=(minimal_bash_toolkit(),)))
 
 
 def _failure(build: AgentBuild, delegation_depth: int, reason: str) -> str:
@@ -273,8 +272,7 @@ async def minimal_attempt(
     except BaseException as exc:
         await catalog.close()
         _raise_failure(build, delegation_depth, exc)
-    facade = adapt_toolkit(MinimalBashTools(execute=owner.execute_bash))
     return (
-        replace(spec, toolkits=(facade,)),
+        replace(spec, toolkits=(minimal_bash_toolkit(owner.execute_bash),)),
         replace(hooks, tool_middleware=(), before_dispatch=owner.checkpoint.capture),
     )

@@ -188,7 +188,7 @@ visibility = [
 [[interfaces]]
 from = ["mindroom.agent_cli.bash"]
 expose = [
-    "MinimalBashTools",
+    "minimal_bash_toolkit",
 ]
 
 [[modules]]
@@ -8741,7 +8741,6 @@ depends_on = [
     "mindroom.agent_loop.build",
     "mindroom.hooks",
     "mindroom.llm",
-    "mindroom.tool_system.agno_toolkits",
 ]
 visibility = [
     "mindroom.ai",

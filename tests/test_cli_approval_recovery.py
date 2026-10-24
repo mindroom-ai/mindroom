@@ -21,7 +21,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom import agents, ai
 from mindroom.agent_cli import cli_approval_recovery, response_owner
 from mindroom.agent_cli.approval import CliApprovalCall
-from mindroom.agent_cli.bash import MinimalBashTools
+from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.checkpoint import BatchCheckpoint
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.agent_cli.events import emit_cli_suspension, project_cli_execution
@@ -810,7 +810,7 @@ async def _checkpointed_batch(
             for call_id, c in batch
         ],
     )
-    [bash] = adapt_toolkit(MinimalBashTools()).functions
+    [bash] = minimal_bash_toolkit().functions
     planned = [
         PlannedCall(
             call_id=call_id,

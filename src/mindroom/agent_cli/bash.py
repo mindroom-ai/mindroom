@@ -4,19 +4,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.agno_toolkits import Function, Toolkit
+from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tool_system.tool_function import ToolValue  # noqa: TC001 - Agno resolves tool annotations
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 
-__all__ = ["MinimalBashTools"]
+__all__ = ["minimal_bash_toolkit"]
 
 
-class MinimalBashTools(Toolkit):
+def minimal_bash_toolkit(
+    execute: Callable[[ToolKey, dict[str, object], str], Awaitable[str | ToolValue]] | None = None,
+) -> AdaptedToolkit:
     """Project only effective shell functions into one provider-visible function.
 
     The required execution owner retains the canonical prepared call, approval
@@ -24,22 +26,9 @@ class MinimalBashTools(Toolkit):
     intentionally no raw-worker or ordinary-proxy fallback here.
     """
 
-    def __init__(
-        self,
-        *,
-        execute: Callable[[ToolKey, dict[str, object], str], Awaitable[str | ToolValue]] | None = None,
-    ) -> None:
-        self._execute = execute
-        super().__init__(name="minimal_bash", tools=[])
-        # Derived once from the signature, as Agno derives a callable's schema, which the provider sees.
-        function = Function.from_callable(self.bash)
-        self.async_functions["bash"] = function
-        self.functions["bash"] = function
-
     # TODO(simplify): `command` is optional in the schema, yet every call without one fails. Make it a required
     # string. Models would see the changed tool schema.
     async def bash(
-        self,
         command: str | None = None,
         timeout: int | None = None,  # noqa: ASYNC109
         tail: int = 100,
@@ -64,7 +53,11 @@ class MinimalBashTools(Toolkit):
             arguments["timeout"] = timeout
         call = current_tool_call()
         call_id = call.context.call_id if call is not None else None
-        if self._execute is None or not call_id:
+        if execute is None or not call_id:
             msg = "Bash requires an active response owner"
             raise RuntimeError(msg)
-        return await self._execute(ToolKey("shell", "run_shell_command"), arguments, call_id)
+        return await execute(ToolKey("shell", "run_shell_command"), arguments, call_id)
+
+    # The provider sees the schema Agno derives from the signature and docstring.
+    function = adapt_function(Function.from_callable(bash))
+    return AdaptedToolkit(name="minimal_bash", functions=(function,), instructions=None)

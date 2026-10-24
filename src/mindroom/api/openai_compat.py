@@ -103,7 +103,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
-    from mindroom.llm.runs import RunRecord, TeamRunRecord
+    from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.teams.envelope import PreparedTeamExecution
     from mindroom.teams.runtime import TeamRunEvent
@@ -270,10 +270,10 @@ def _usage_from_run_metadata(run_metadata: dict[str, Any]) -> _UsageInfo:
     )
 
 
-def _usage_from_team_output(record: TeamRunRecord, members: Sequence[RunRecord]) -> _UsageInfo:
+def _usage_from_team_output(record: TeamRunRecord) -> _UsageInfo:
     """Sum usage over the runs of a team turn, normalizing each run for its own provider."""
     total = _UsageInfo()
-    for run, metrics in team_usage_runs(record, members):
+    for run, metrics in team_usage_runs(record, record.ended_member_runs):
         usage = _usage_info(
             input_tokens=metrics.input_tokens,
             output_tokens=metrics.output_tokens,
@@ -774,16 +774,16 @@ async def _chat_completions(  # noqa: C901, PLR0912
 # ---------------------------------------------------------------------------
 
 
-def _openai_agent_turn_context(
-    agent_name: str,
+def _openai_turn_context(
+    entity_label: str,
     *,
-    session_id: str,
-    model_name: str,
-    execution_identity: ToolExecutionIdentity | None = None,
+    session_id: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    model_name: str | None = None,
 ) -> ResponseTurnContext:
-    """Build the turn context for one OpenAI-compatible agent completion."""
+    """Build the turn context for one OpenAI-compatible completion, which has no Matrix conversation."""
     return ResponseTurnContext(
-        entity_label=agent_name,
+        entity_label=entity_label,
         session_id=session_id,
         run_id=None,
         correlation_id=uuid4().hex,
@@ -812,7 +812,7 @@ async def _non_stream_completion(
     """Handle non-streaming chat completion."""
     run_metadata: dict[str, Any] = {}
     response_text = await ai_response(
-        _openai_agent_turn_context(
+        _openai_turn_context(
             agent_name,
             session_id=session_id,
             model_name=model_name,
@@ -856,7 +856,7 @@ async def _non_stream_completion(
 # ---------------------------------------------------------------------------
 
 
-async def _stream_completion(  # noqa: C901, PLR0915
+async def _stream_completion(
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -875,7 +875,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
         stream_with_tool_execution_identity(
             execution_identity,
             stream_factory=lambda: stream_agent_response(
-                _openai_agent_turn_context(
+                _openai_turn_context(
                     agent_name,
                     session_id=session_id,
                     model_name=model_name,
@@ -913,37 +913,21 @@ async def _stream_completion(  # noqa: C901, PLR0915
 
     state = CompletionStreamState.begin(agent_name)
     stream_completed = False
-    stream_failed = False
 
     async def event_generator() -> AsyncIterator[str]:
-        nonlocal stream_completed, stream_failed
-        saw_text_delta = False
+        nonlocal stream_completed
+        saw_text_delta = stream_failed = False
         completed_body: str | None = None
         try:
-            # 1. Initial role announcement
             yield sse_chunk(state, {"role": "assistant"})
-
-            # 2. Yield the peeked first event
-            if isinstance(first_event, RunFinished):
-                content = first_event.record.content
-                completed_body = str(content) if content is not None else None
-            else:
-                text = extract_stream_text(first_event, state.tool_state)
-                if text:
-                    if isinstance(first_event, ContentDelta | str):
-                        saw_text_delta = True
-                    yield sse_chunk(state, {"content": text})
-
-            # 3. Stream remaining content
-            # Error strings after the first event are sent as content chunks
-            # since we can't switch to an error HTTP status mid-stream.
-            async for event in stream:
+            # The peeked first event, then the rest. A failure after the first event is sent as a content chunk,
+            # since the HTTP status is already sent.
+            event: AIStreamChunk | None = first_event
+            while event is not None:
                 if isinstance(event, RunFinished):
                     content = event.record.content
                     completed_body = str(content) if content is not None else completed_body
-                    continue
-                failure_text = extract_agent_stream_failure(event)
-                if failure_text is not None:
+                elif (failure_text := extract_agent_stream_failure(event)) is not None:
                     stream_failed = True
                     logger.warning(
                         "Stream emitted terminal failure",
@@ -953,20 +937,16 @@ async def _stream_completion(  # noqa: C901, PLR0915
                     )
                     yield sse_chunk(state, {"content": failure_text})
                     break
-                text = extract_stream_text(event, state.tool_state)
-                if text:
+                elif text := extract_stream_text(event, state.tool_state):
                     if isinstance(event, ContentDelta | str):
                         saw_text_delta = True
                     yield sse_chunk(state, {"content": text})
+                event = await anext(stream, None)
 
             if completed_body and not saw_text_delta and not stream_failed:
                 yield sse_chunk(state, {"content": completed_body})
-
-            # 4. Final chunk with finish_reason
             logger.info("Chat completion sent", model=agent_name, stream=True)
             yield sse_chunk(state, {}, finish_reason="stop")
-
-            # 5. Stream terminator
             yield SSE_DONE
             stream_completed = not stream_failed
         finally:
@@ -1054,17 +1034,7 @@ async def _prepare_openai_team_execution(
 ) -> PreparedTeamExecution:
     """Prepare one OpenAI-compatible team turn: the scope summary, the replayed history, then the turn."""
     return await prepare_materialized_team_execution(
-        ResponseTurnContext(
-            entity_label=team_name,
-            session_id=None,
-            run_id=None,
-            correlation_id=uuid4().hex,
-            reply_to_event_id=None,
-            room_id=None,
-            thread_id=None,
-            requester_id=execution_identity.requester_id if execution_identity is not None else None,
-            matrix_run_metadata=None,
-        ),
+        _openai_turn_context(team_name, session_id=None, execution_identity=execution_identity),
         scope_context=scope_context,
         spec=built.spec,
         message=prompt,
@@ -1227,12 +1197,12 @@ async def _non_stream_team_completion(
                     message=ChatMessage(role="assistant", content=response_text),
                 ),
             ],
-            usage=_usage_from_team_output(record, record.ended_member_runs),
+            usage=_usage_from_team_output(record),
         )
         return OpenAIJSONResponse(content=result.model_dump())
 
 
-async def _stream_team_completion(  # noqa: C901
+async def _stream_team_completion(  # noqa: C901, PLR0915
     team_name: str,
     model_id: str,
     prompt: str,
@@ -1325,25 +1295,39 @@ async def _stream_team_completion(  # noqa: C901
 
         state = CompletionStreamState.begin(model_id)
         stream_completed = False
-        stream_failed = False
-
-        def mark_stream_failed() -> None:
-            nonlocal stream_failed
-            stream_failed = True
 
         async def _event_generator() -> AsyncGenerator[str, None]:
+            """Yield the SSE chunks of the team stream, starting with ``first_event``, which was already pulled.
+
+            A run that fails mid-stream closes its started tool calls as interrupted and ends with a failure chunk,
+            since the HTTP status is already sent.
+            """
             nonlocal stream_completed
+            tool_state = state.tool_state
             try:
-                async for chunk in _team_stream_event_generator(
-                    stream=stream,
-                    first_event=first_event,
-                    state=state,
-                    team_name=team_name,
-                    mark_stream_failed=mark_stream_failed,
-                ):
-                    yield chunk
-                    if chunk == SSE_DONE and not stream_failed:
-                        stream_completed = True
+                yield sse_chunk(state, {"role": "assistant"})
+                text = _team_stream_text(first_event, tool_state)
+                if text:
+                    yield sse_chunk(state, {"content": text})
+                failed = False
+                try:
+                    async for event in stream:
+                        text = _team_stream_text(event, tool_state)
+                        if text:
+                            yield sse_chunk(state, {"content": text})
+                except Exception:
+                    logger.exception("Team stream failed during iteration", team=team_name)
+                    failed = True
+                # Tool calls that started but never completed, such as those a pause left waiting.
+                pending = finalize_pending_tools(tool_state)
+                if pending:
+                    yield sse_chunk(state, {"content": pending})
+                if failed:
+                    yield sse_chunk(state, {"content": "Team execution failed."})
+                logger.info("Team completion sent", team=team_name, stream=True)
+                yield sse_chunk(state, {}, finish_reason="stop")
+                yield SSE_DONE
+                stream_completed = not failed
             finally:
                 await _cleanup()
 
@@ -1351,7 +1335,7 @@ async def _stream_team_completion(  # noqa: C901
             _event_generator(),
             media_type="text/event-stream",
         )
-        response.completion_predicate = lambda: stream_completed and not stream_failed
+        response.completion_predicate = lambda: stream_completed
     except Exception:
         stack.close()
         raise
@@ -1368,49 +1352,3 @@ def _team_stream_text(event: TeamRunEvent, tool_state: ToolStreamState) -> str |
     if isinstance(inner, ToolStarted | ToolCompleted):
         return format_stream_tool_event(inner, tool_state)
     return event.text if isinstance(event, ContentDelta) else None
-
-
-async def _team_stream_event_generator(
-    *,
-    stream: AsyncIterator[TeamRunEvent],
-    first_event: TeamRunEvent,
-    state: CompletionStreamState,
-    team_name: str,
-    mark_stream_failed: Callable[[], None],
-) -> AsyncIterator[str]:
-    """Yield the SSE chunks of one team stream, starting with ``first_event``, which the caller already pulled.
-
-    A run that fails mid-stream closes its started tool calls as interrupted and ends with a failure chunk, since
-    the HTTP status is already sent.
-    """
-    tool_state = state.tool_state
-
-    def _chunk(content: str) -> str:
-        return sse_chunk(state, {"content": content})
-
-    yield sse_chunk(state, {"role": "assistant"})
-    text = _team_stream_text(first_event, tool_state)
-    if text:
-        yield _chunk(text)
-
-    failed = False
-    try:
-        async for event in stream:
-            text = _team_stream_text(event, tool_state)
-            if text:
-                yield _chunk(text)
-    except Exception:
-        logger.exception("Team stream failed during iteration", team=team_name)
-        mark_stream_failed()
-        failed = True
-
-    # Tool calls that started but never completed, such as those a pause left waiting.
-    pending = finalize_pending_tools(tool_state)
-    if pending:
-        yield _chunk(pending)
-    if failed:
-        yield _chunk("Team execution failed.")
-
-    logger.info("Team completion sent", team=team_name, stream=True)
-    yield sse_chunk(state, {}, finish_reason="stop")
-    yield SSE_DONE

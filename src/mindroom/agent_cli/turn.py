@@ -504,7 +504,6 @@ class LiveTurnTools(TurnToolBridge):
             msg = "Minimal Bash has no CLI environment"
             raise RuntimeError(msg)
         entrypoint = binding.function.entrypoint
-        assert entrypoint is not None
         with bound_agent_cli_shell_env(self.shell_env, window=window):
             if inspect.iscoroutinefunction(entrypoint):
                 return await entrypoint(**arguments)
@@ -618,7 +617,6 @@ class LiveTurnTools(TurnToolBridge):
                 if not started:
                     started = True
                     tool = requirement.tool_execution
-                    assert tool is not None
                     yield AgentToolCallEvent("started", str(tool.tool_call_id), binding.key, execution=tool)
                 result = await advance_cli_delegation(
                     binding,
