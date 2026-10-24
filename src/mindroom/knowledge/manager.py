@@ -984,7 +984,7 @@ class KnowledgeManager:
         start: int,
         *,
         vanished_files: set[str],
-        on_file_result: Callable[[Path], Awaitable[None]] | None,
+        on_file_result: Callable[[Path], Awaitable[None]],
     ) -> tuple[list[_PreparedFile], int]:
         """Read and chunk the next batch of files once; return it and where the following batch starts.
 
@@ -1000,8 +1000,7 @@ class KnowledgeManager:
             end += 1
             prepared_file = await self._prepare_file(file_path, vanished_files=vanished_files)
             if prepared_file is None:
-                if on_file_result is not None:
-                    await on_file_result(file_path)
+                await on_file_result(file_path)
                 continue
             prepared.append(prepared_file)
             text_bytes += prepared_file.text_bytes()
@@ -1015,8 +1014,8 @@ class KnowledgeManager:
         embedder: RefreshEmbedder,
         indexed_signatures: dict[str, FileSignature],
         vanished_files: set[str],
-        on_file_result: Callable[[Path], Awaitable[None]] | None = None,
-        on_batch_complete: Callable[[], Awaitable[None]] | None = None,
+        on_file_result: Callable[[Path], Awaitable[None]],
+        on_batch_complete: Callable[[], Awaitable[None]],
     ) -> int:
         """Reindex resolved files in bounded batches while holding the operation lock.
 
@@ -1054,8 +1053,7 @@ class KnowledgeManager:
                     detail=self._global_embedder_failure,
                 )
                 return indexed_count
-            if on_batch_complete is not None:
-                await on_batch_complete()
+            await on_batch_complete()
         return indexed_count
 
     async def _index_file_batch(
@@ -1066,7 +1064,7 @@ class KnowledgeManager:
         collection: KnowledgeCollection,
         embedder: RefreshEmbedder,
         indexed_signatures: dict[str, FileSignature],
-        on_file_result: Callable[[Path], Awaitable[None]] | None = None,
+        on_file_result: Callable[[Path], Awaitable[None]],
     ) -> int:
         """Write one prepared batch, capping live tasks at the concurrency limit."""
 
@@ -1080,10 +1078,9 @@ class KnowledgeManager:
                 embedder=embedder,
                 indexed_signatures=indexed_signatures,
             )
-            if on_file_result is not None:
-                # Recorded per file, not per batch: an interruption partway
-                # through a batch must still keep every file it finished.
-                await on_file_result(prepared.path)
+            # Recorded per file, not per batch: an interruption partway
+            # through a batch must still keep every file it finished.
+            await on_file_result(prepared.path)
             return indexed
 
         concurrency = min(self._max_concurrent_file_indexes, len(batch))

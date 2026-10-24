@@ -1989,16 +1989,29 @@ async def test_reindex_files_locked_records_files_vanishing_during_refresh(tmp_p
     indexed_signatures: dict[str, tuple[int, int, str]] = {}
     collection = manager._published_collection
     assert collection is not None
+    reported: list[Path] = []
+    batches_completed = 0
+
+    async def _report_file(file_path: Path) -> None:
+        reported.append(file_path)
+
+    async def _complete_batch() -> None:
+        nonlocal batches_completed
+        batches_completed += 1
+
     indexed = await manager._reindex_files_locked(
         [vanished],
         collection=collection,
         embedder=RefreshEmbedder(_FakeEmbedder()),
         indexed_signatures=indexed_signatures,
         vanished_files=vanished_files,
+        on_file_result=_report_file,
+        on_batch_complete=_complete_batch,
     )
     assert indexed == 0
     assert indexed_signatures == {}
     assert vanished_files == {"gone.md"}
+    assert (reported, batches_completed) == ([vanished], 1)
 
 
 @pytest.mark.asyncio

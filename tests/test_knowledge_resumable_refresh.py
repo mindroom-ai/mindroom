@@ -2809,6 +2809,13 @@ async def test_journal_compaction_bound_survives_restart(
         assert run.journal_appends == 9, "a resumed run restarted the compaction count"
         final_path = docs_path / "doc0007.md"
         KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+        async def _ignore_file(_file_path: Path) -> None:
+            """Leave the journal to the explicit persist below, which is the append under test."""
+
+        async def _ignore_batch() -> None:
+            """Leave the compaction to the explicit call below."""
+
         assert (
             await manager._reindex_files_locked(
                 [final_path],
@@ -2816,6 +2823,8 @@ async def test_journal_compaction_bound_survives_restart(
                 embedder=run.embedder,
                 indexed_signatures=run.completed,
                 vanished_files=run.vanished,
+                on_file_result=_ignore_file,
+                on_batch_complete=_ignore_batch,
             )
             == 1
         )
