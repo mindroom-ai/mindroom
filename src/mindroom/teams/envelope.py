@@ -127,31 +127,6 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
 type TeamStreamChunk = str | StructuredStreamChunk
 
 
-def _team_request_log_context(
-    ctx: ResponseTurnContext,
-    *,
-    team_name: str,
-    prompt: str,
-    run_input: Sequence[Message],
-    metadata: dict[str, object] | None,
-) -> dict[str, object]:
-    return build_llm_request_log_context(
-        RequestAttribution(
-            agent_id=team_name,
-            session_id=ctx.session_id or "",
-            room_id=ctx.room_id,
-            thread_id=ctx.thread_id,
-            reply_to_event_id=ctx.reply_to_event_id,
-            requester_id=ctx.requester_id,
-            correlation_id=ctx.correlation_id,
-        ),
-        prompt=prompt,
-        model_prompt=None,
-        full_prompt=render_prepared_team_messages_text(run_input),
-        metadata=metadata,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Preparing a turn
 # ---------------------------------------------------------------------------
@@ -484,6 +459,31 @@ class _TeamTurn:
         assert self.ctx.session_id is not None
         return self.ctx.session_id
 
+    def request_log_context(
+        self,
+        *,
+        prompt: str,
+        run_input: Sequence[Message],
+        metadata: dict[str, object] | None,
+    ) -> dict[str, object]:
+        """Return the request-log context of one attempt's leader requests, which carry the team's name."""
+        ctx = self.ctx
+        return build_llm_request_log_context(
+            RequestAttribution(
+                agent_id=self.entity_name,
+                session_id=self.session_id,
+                room_id=ctx.room_id,
+                thread_id=ctx.thread_id,
+                reply_to_event_id=ctx.reply_to_event_id,
+                requester_id=ctx.requester_id,
+                correlation_id=ctx.correlation_id,
+            ),
+            prompt=prompt,
+            model_prompt=None,
+            full_prompt=render_prepared_team_messages_text(run_input),
+            metadata=metadata,
+        )
+
     async def members_for_attempt(self, continuation_state: TurnContinuationRunState) -> ResolvedExactTeamMembers:
         """Return the attempt's member set: the turn's members for its first attempt, rebuilt for every later one."""
         holder = self.holder
@@ -595,9 +595,7 @@ class _TeamTurn:
         )
         if self.run_id_callback is not None:
             self.run_id_callback(attempt.run_id)
-        request_context = _team_request_log_context(
-            self.ctx,
-            team_name=self.entity_name,
+        request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,
             run_input=run_input,
             metadata=prepared.run_metadata,
