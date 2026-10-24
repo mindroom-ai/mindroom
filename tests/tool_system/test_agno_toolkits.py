@@ -9,6 +9,7 @@ import pytest
 from agno.run import RunContext  # noqa: TC002 - pydantic resolves the annotations at wrap time.
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
+from agno.utils.schema import AGNO_INJECTED_PARAMS, FRAMEWORK_INJECTED_PARAMS
 
 from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system import agno_toolkits
@@ -144,6 +145,11 @@ def test_every_field_of_agnos_function_is_named_by_one_row_of_the_adapter_table(
     named = [name for names in agno_toolkits._FUNCTION_FIELDS for name in names]
 
     assert sorted(named) == sorted(Function.model_fields)
+
+
+def test_the_reserved_names_are_every_name_agno_fills_itself() -> None:
+    """A name Agno starts reserving fails here, instead of silently becoming a parameter the model may fill."""
+    assert set(agno_toolkits._RESERVED_NAMES) == {*FRAMEWORK_INJECTED_PARAMS, *AGNO_INJECTED_PARAMS, "fc"}
 
 
 def _lookup_country(country: str) -> str:
