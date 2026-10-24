@@ -516,8 +516,6 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
     response = outcome.response
     paused = paused_attempt_from_response(
         response,
-        fallback_session_id=child.session_id,
-        fallback_run_id=child.run_id,
         toolkit_owners=outcome.toolkit_owners,
     )
     if paused is None:

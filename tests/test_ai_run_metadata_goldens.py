@@ -291,8 +291,6 @@ async def test_a_team_approval_resume_publishes_the_golden_run_metadata(
     assert paused.status is RunStatus.paused
     attempt = paused_attempt_from_response(
         paused,
-        fallback_session_id=SQUAD_APPROVED,
-        fallback_run_id=paused.run_id,
         toolkit_owners={("checker", "multiply"): "calculator"},
     )
     assert attempt is not None

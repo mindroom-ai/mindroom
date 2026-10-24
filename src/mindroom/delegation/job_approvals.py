@@ -36,8 +36,6 @@ async def request_child_approvals(
     """
     paused = paused_attempt_from_response(
         response,
-        fallback_session_id=child.session_id,
-        fallback_run_id=child.run_id,
         toolkit_owners=toolkit_owners,
     )
     if paused is None or owner.requester_id is None:

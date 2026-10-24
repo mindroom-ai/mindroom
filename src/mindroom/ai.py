@@ -1644,8 +1644,6 @@ async def ai_response(  # noqa: C901
         if record.status is RunStatus.paused:
             paused_attempt = paused_attempt_from_response(
                 record,
-                fallback_session_id=session_id,
-                fallback_run_id=attempt.run_id,
                 toolkit_owners=tool_owners_by_agent(prepared_run.build),
             )
             if paused_attempt is None:
@@ -2036,8 +2034,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         if record.status is RunStatus.paused:
             paused_attempt = paused_attempt_from_response(
                 record,
-                fallback_session_id=session_id,
-                fallback_run_id=attempt.run_id,
                 toolkit_owners=tool_owners_by_agent(prepared_run.build),
             )
             if paused_attempt is None:

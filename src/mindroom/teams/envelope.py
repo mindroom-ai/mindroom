@@ -751,8 +751,6 @@ class _TeamTurn:
         """
         paused = paused_attempt_from_response(
             record,
-            fallback_session_id=self.session_id,
-            fallback_run_id=attempt.run_id,
             toolkit_owners=tool_owners_by_agent(*attempt.members.builds),
         )
         if paused is None:

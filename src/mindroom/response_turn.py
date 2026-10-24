@@ -541,13 +541,14 @@ def local_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
 def paused_attempt_from_response(
     record: AnyRunRecord,
     *,
-    fallback_session_id: str | None,
-    fallback_run_id: str | None,
     toolkit_owners: Mapping[tuple[str, str], str],
 ) -> PausedAttempt | None:
-    """Extract confirmation requirements from one paused run record."""
+    """Extract confirmation requirements from one paused run record, which names its run and session."""
     if record.status is not RunStatus.paused:
         return None
+    if record.session_id is None:
+        msg = f"Paused run {record.run_id!r} names no session"
+        raise RuntimeError(msg)
     delegation = DelegationState.from_metadata(record.metadata)
     if delegation.pending_tools:
         if delegation.pending_child_id is not None:
@@ -562,8 +563,8 @@ def paused_attempt_from_response(
             toolkit_owners=toolkit_owners,
             tools=[ToolExecution.from_dict(tool) for tool in delegation.pending_tools],
             requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
-            session_id=record.session_id or fallback_session_id,
-            run_id=record.run_id or fallback_run_id,
+            session_id=record.session_id,
+            run_id=record.run_id,
         )
         return (
             replace(
@@ -578,8 +579,8 @@ def paused_attempt_from_response(
         toolkit_owners=toolkit_owners,
         tools=record.tools or (),
         requirements=record.requirements or (),
-        session_id=record.session_id or fallback_session_id,
-        run_id=record.run_id or fallback_run_id,
+        session_id=record.session_id,
+        run_id=record.run_id,
     )
 
 
@@ -588,8 +589,8 @@ def _paused_attempt_from_pause(
     tools: Sequence[ToolExecution],
     requirements: Sequence[RunRequirement],
     toolkit_owners: Mapping[tuple[str, str], str],
-    session_id: str | None,
-    run_id: str | None,
+    session_id: str,
+    run_id: str,
 ) -> PausedAttempt | None:
     """Build one restartable pause from a run's paused tools and confirmation requirements."""
     pending_requirements = tuple(requirement for requirement in requirements if requirement.needs_confirmation)
@@ -614,7 +615,7 @@ def _paused_attempt_from_pause(
         if tool.tool_call_id not in known_call_ids:
             pending_tools.append(tool)
             known_call_ids.add(tool.tool_call_id)
-    if not pending_tools or session_id is None or run_id is None:
+    if not pending_tools:
         return None
     return PausedAttempt(
         session_id=session_id,

@@ -112,8 +112,6 @@ async def advance_cli_delegation(
     view.status = RunStatus.paused
     paused = paused_attempt_from_response(
         view,
-        fallback_session_id=catalog.run.session_id,
-        fallback_run_id=catalog.run.run_id,
         toolkit_owners={(context.agent_name, binding.key.function): binding.key.toolkit},
     )
     if paused is None:

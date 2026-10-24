@@ -180,8 +180,6 @@ async def _setup(
     monkeypatch.setattr(CalculatorTools, "multiply", multiply)
     attempt = paused_attempt_from_response(
         paused,
-        fallback_session_id=paused.session_id,
-        fallback_run_id=paused.run_id,
         toolkit_owners={("code", "multiply"): "calculator"},
     )
     assert attempt is not None

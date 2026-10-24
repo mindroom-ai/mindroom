@@ -296,15 +296,23 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
 
     paused = response_turn_module.paused_attempt_from_response(
         response,
-        fallback_session_id="fallback-session",
-        fallback_run_id="fallback-run",
         toolkit_owners={},
     )
 
     assert paused is not None
+    assert (paused.session_id, paused.run_id) == ("team-session", "team-run")
     assert paused.tools == (tool,)
     assert paused.requirements == (requirement,)
     assert paused.requirements[0].member_display_name == "researcher"
+
+
+def test_a_paused_run_without_a_session_fails_instead_of_losing_its_pause() -> None:
+    """The pause is resumed from the session its record names, so a record that names none cannot pause a reply."""
+    tool = ToolExecution(tool_call_id="call", tool_name="dangerous", requires_confirmation=True)
+    record = RunRecord(run_id="run-1", status=RunStatus.paused, tools=[tool], requirements=[RunRequirement(tool)])
+
+    with pytest.raises(RuntimeError, match="names no session"):
+        response_turn_module.paused_attempt_from_response(record, toolkit_owners={})
 
 
 @pytest.mark.parametrize(
@@ -344,12 +352,11 @@ def test_a_paused_child_s_toolkit_owners_are_the_toolkits_its_sources_recorded(
 
     paused = response_turn_module.paused_attempt_from_response(
         response,
-        fallback_session_id=None,
-        fallback_run_id=None,
         toolkit_owners={},
     )
 
     assert paused is not None
+    assert (paused.session_id, paused.run_id) == ("parent-session", "parent-run")
     assert paused.toolkit_owners == owners
 
 
@@ -392,8 +399,6 @@ def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
     with pytest.raises(RuntimeError, match="missing its exact tool-call ID"):
         response_turn_module.paused_attempt_from_response(
             paused_record,
-            fallback_session_id=None,
-            fallback_run_id=None,
             toolkit_owners={},
         )
 
@@ -415,8 +420,6 @@ def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
     with pytest.raises(RuntimeError, match="duplicate tool-call IDs"):
         response_turn_module.paused_attempt_from_response(
             paused_record,
-            fallback_session_id=None,
-            fallback_run_id=None,
             toolkit_owners={},
         )
 

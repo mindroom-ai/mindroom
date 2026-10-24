@@ -524,8 +524,6 @@ async def continue_paused_team_run(
             attempt.show_unshown_handover(run)
         paused = paused_attempt_from_response(
             continued,
-            fallback_session_id=session_id,
-            fallback_run_id=run_id,
             toolkit_owners=toolkit_owners,
         )
         if paused is not None:
