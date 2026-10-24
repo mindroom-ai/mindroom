@@ -224,8 +224,6 @@ if TYPE_CHECKING:
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
-    from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import SessionKind
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
     from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_system.events import ToolTraceEntry
@@ -1076,6 +1074,9 @@ def _requested_by_a_person(origin: TurnOrigin) -> bool:
     )
 
 
+# TODO(simplify): ResponseRunner mixes the agent and team turn drivers, approval pause, resume, and recovery,
+# inbox ownership with its shutdown recovery proofs, and the locked span lifecycle. Split approval handling and
+# the team driver into focused modules, as teams/ was. Contributors only; no behavior change (#3075).
 @dataclass
 class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
@@ -2439,15 +2440,9 @@ class ResponseRunner:
         final: FinalDeliveryOutcome,
     ) -> ResponseOutcome:
         """Build normal post-response facts for one resumed native run."""
-        execution_identity = parse_tool_execution_identity_payload(
-            continuation.execution_identity,
-            error_prefix="Approval continuation execution_identity",
-        )
         return ResponseOutcome(
             response_run_id=final.response_run_id or continuation.run_id,
             session_id=continuation.session_id,
-            session_type="team" if continuation.entity_kind == "team" else "agent",
-            execution_identity=execution_identity,
             run_succeeded=final.terminal_status == "completed",
             response_target=target,
             thread_summary_room_id=continuation.room_id if target.resolved_thread_id is not None else None,
@@ -2606,11 +2601,8 @@ class ResponseRunner:
             history_scope = self.deps.state_writer.history_scope()
         return self._build_persist_response_event_id_effect(
             session_id=continuation.session_id,
-            session_type=self.deps.state_writer.session_type_for_scope(history_scope),
-            create_storage=lambda: self.deps.state_writer.create_storage(
-                execution_identity,
-                scope=history_scope,
-            ),
+            scope=history_scope,
+            execution_identity=execution_identity,
         )
 
     async def _continue_entity_call(
@@ -2835,34 +2827,6 @@ class ResponseRunner:
         self._note_final_delivery_timing(request, delivery)
         return delivery
 
-    def _persist_interrupted_turn(
-        self,
-        *,
-        recorder: TurnRecorder,
-        session_scope: HistoryScope,
-        session_id: str,
-        execution_identity: ToolExecutionIdentity | None,
-        run_id: str | None,
-        is_team: bool,
-        response_event_id: str | None = None,
-    ) -> None:
-        """Persist one interrupted recorder snapshot exactly once."""
-        if not recorder.claim_interrupted_persistence():
-            return
-        if response_event_id:
-            recorder.set_response_event_id(response_event_id)
-        persist_interrupted_replay_snapshot(
-            storage=self.deps.state_writer.create_storage(execution_identity, scope=session_scope),
-            session=new_scope_session(session_id=session_id, scope_id=session_scope.scope_id, is_team=is_team),
-            run_id=recorder.run_id or run_id or str(uuid4()),
-            snapshot=recorder.interrupted_snapshot(),
-        )
-
-    def _ensure_recorder_interrupted(self, recorder: TurnRecorder) -> None:
-        """Mark one recorder interrupted unless lower layers already captured richer state."""
-        if recorder.outcome == "pending":
-            recorder.mark_interrupted()
-
     def _persist_interrupted_recorder(
         self,
         *,
@@ -2874,16 +2838,21 @@ class ResponseRunner:
         is_team: bool,
         response_event_id: str | None = None,
     ) -> None:
-        """Persist one interrupted recorder snapshot after marking it interrupted."""
-        self._ensure_recorder_interrupted(recorder)
-        self._persist_interrupted_turn(
-            recorder=recorder,
-            session_scope=session_scope,
-            session_id=session_id,
-            execution_identity=execution_identity,
-            run_id=run_id,
-            is_team=is_team,
-            response_event_id=response_event_id,
+        """Persist one recorder's interrupted snapshot once, first marking a still-pending recorder interrupted."""
+        if recorder.outcome == "pending":
+            recorder.mark_interrupted()
+        if not recorder.claim_interrupted_persistence():
+            return
+        if response_event_id:
+            recorder.set_response_event_id(response_event_id)
+        # TODO(simplify): `is_team` travels beside `session_scope`; agent paths pass False with `history_scope()`,
+        # a team scope on a team bot. Derive the row kind from `session_scope.kind` and drop the `is_team` parameters.
+        # Stored data would notice: a team bot's agent-path turn would store its interrupted row as a team run (#3075).
+        persist_interrupted_replay_snapshot(
+            storage=self.deps.state_writer.create_storage(execution_identity, scope=session_scope),
+            session=new_scope_session(session_id=session_id, scope_id=session_scope.scope_id, is_team=is_team),
+            run_id=recorder.run_id or run_id or str(uuid4()),
+            snapshot=recorder.interrupted_snapshot(),
         )
 
     async def _persist_interrupted_recorder_off_loop(
@@ -3680,16 +3649,16 @@ class ResponseRunner:
         self,
         *,
         session_id: str,
-        session_type: SessionKind,
-        create_storage: Callable[[], ConversationStore],
+        scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
     ) -> Callable[[str, str], Awaitable[None]]:
         """Build the response-event persistence callback for one session-backed response."""
 
         async def persist_response_event_id(run_id: str, response_event_id: str) -> None:
             await self.deps.state_writer.apersist_response_event_id_in_session_run(
-                create_storage=create_storage,
+                create_storage=partial(self.deps.state_writer.create_storage, execution_identity, scope=scope),
                 session_id=session_id,
-                session_type=session_type,
+                session_type=scope.kind,
                 run_id=run_id,
                 response_event_id=response_event_id,
             )
@@ -4711,19 +4680,14 @@ class ResponseRunner:
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
             allow_direct_private_agents=allow_direct_private_agents,
         )
-        session_type = self.deps.state_writer.session_type_for_scope(session_scope)
-
-        def team_storage_factory() -> ConversationStore:
-            return self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
-
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(tool_dispatch),
             session_id=session_id,
-            session_type=session_type,
+            session_type=session_scope.kind,
             scope=session_scope,
             room_id=request.room_id,
             thread_id=resolved_target.resolved_thread_id,
-            create_storage=team_storage_factory,
+            create_storage=partial(self.deps.state_writer.create_storage, execution_identity, scope=session_scope),
         )
         orchestrator = self.deps.runtime.orchestrator
         if orchestrator is None:
@@ -4775,8 +4739,6 @@ class ResponseRunner:
             return {**fallback, **team_run_metadata_content} or None
 
         async def persist_failed_team_turn() -> None:
-            if current_task_is_process_shutdown():
-                return
             await self._persist_failed_turn(
                 team_turn_recorder,
                 is_team=True,
@@ -4800,8 +4762,8 @@ class ResponseRunner:
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
-            session_type=session_type,
-            create_storage=team_storage_factory,
+            scope=session_scope,
+            execution_identity=execution_identity,
         )
         # A configured team keeps the conversations it answers in its members' shared memory.
         queue_memory_persistence = (
@@ -5058,8 +5020,6 @@ class ResponseRunner:
             return ResponseOutcome(
                 response_run_id=team_turn_recorder.run_id or response_run_id,
                 session_id=session_id,
-                session_type="team",
-                execution_identity=tool_dispatch.execution_identity,
                 run_succeeded=team_turn_recorder.outcome == "completed",
                 response_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
@@ -5448,7 +5408,7 @@ class ResponseRunner:
             )
             raise
 
-    async def _process_and_respond(  # noqa: C901, PLR0912, PLR0915
+    async def _process_and_respond(  # noqa: C901, PLR0912
         self,
         request: ResponseRequest,
         *,
@@ -5472,19 +5432,18 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_type = self.deps.state_writer.session_type_for_scope(session_scope)
-
-        def history_storage_factory() -> ConversationStore:
-            return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
-
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
-            session_type=session_type,
+            session_type=session_scope.kind,
             scope=session_scope,
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
-            create_storage=history_storage_factory,
+            create_storage=partial(
+                self.deps.state_writer.create_storage,
+                runtime.tool_dispatch.execution_identity,
+                scope=session_scope,
+            ),
         )
         # The caller's list survives raising exit paths (cancellation, stream
         # re-raises), unlike the returned outcome.
@@ -5610,19 +5569,18 @@ class ResponseRunner:
             request=request,
         )
         session_scope = self.deps.state_writer.history_scope()
-        session_type = self.deps.state_writer.session_type_for_scope(session_scope)
-
-        def history_storage_factory() -> ConversationStore:
-            return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
-
         session_started_watch = lifecycle.setup_session_watch(
             tool_context=runtime_context_from_dispatch_context(runtime.tool_dispatch),
             session_id=runtime.session_id,
-            session_type=session_type,
+            session_type=session_scope.kind,
             scope=session_scope,
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
-            create_storage=history_storage_factory,
+            create_storage=partial(
+                self.deps.state_writer.create_storage,
+                runtime.tool_dispatch.execution_identity,
+                scope=session_scope,
+            ),
         )
         # The streaming path keeps these caller-owned (unlike the non-streaming
         # path's returned _NonStreamingGeneration): the metadata dict must stay
@@ -6022,8 +5980,8 @@ class ResponseRunner:
 
         persist_response_event_id = self._build_persist_response_event_id_effect(
             session_id=session_id,
-            session_type=self.deps.state_writer.session_type_for_scope(history_scope),
-            create_storage=lambda: self.deps.state_writer.create_storage(execution_identity),
+            scope=history_scope,
+            execution_identity=execution_identity,
         )
 
         async def generate(_message_id: str | None) -> None:
@@ -6067,8 +6025,6 @@ class ResponseRunner:
                 # returned generation outcome never materialized.
                 response_run_id=attempt_run_ids[-1] if attempt_run_ids else response_run_id,
                 session_id=session_id,
-                session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
-                execution_identity=execution_identity,
                 run_succeeded=(
                     generation.run_succeeded
                     if generation is not None

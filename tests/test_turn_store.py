@@ -330,7 +330,6 @@ async def _store_with_storage(
 ) -> TurnStore:
     state_writer = MagicMock()
     state_writer.create_storage.return_value = storage
-    state_writer.session_type_for_scope.return_value = "agent"
     state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
     store = TurnStore(
         TurnStoreDeps(
@@ -1213,7 +1212,6 @@ async def test_each_history_scope_that_read_a_redacted_source_drops_it_when_open
     }
     state_writer = MagicMock()
     state_writer.create_storage.side_effect = lambda _identity, *, scope: storages[scope.key]
-    state_writer.session_type_for_scope.side_effect = lambda scope: scope.kind
     state_writer.history_scope.return_value = agent_scope
     store = TurnStore(
         TurnStoreDeps(
@@ -1284,7 +1282,6 @@ async def test_another_requesters_private_scope_drops_a_redacted_source_when_ope
     state_writer = MagicMock()
     state_writer.history_scope.return_value = default_scope
     state_writer.create_storage.side_effect = lambda identity, *, scope: storages[(scope.key, identity)]
-    state_writer.session_type_for_scope.side_effect = lambda scope: scope.kind
     tool_runtime = MagicMock()
     tool_runtime.build_execution_identity.side_effect = lambda *, target, user_id: user_id  # noqa: ARG005
     store = TurnStore(
@@ -1642,7 +1639,6 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
     storage = _seeded_storage_with_runs(tmp_path, session, name="team_private")
     state_writer = MagicMock()
     state_writer.create_storage.return_value = storage
-    state_writer.session_type_for_scope.return_value = "team"
     state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
     store = TurnStore(
         TurnStoreDeps(
@@ -2521,7 +2517,6 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     storage = storage_factory()
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
-    store.deps.state_writer.session_type_for_scope.return_value = "agent"
     edited = RunRecord(
         run_id="edited",
         agent_id="agent",
@@ -3006,7 +3001,6 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     store = await _store(journal_store)
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
-    store.deps.state_writer.session_type_for_scope.return_value = "agent"
     await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
     storage = storage_factory()

@@ -49,10 +49,6 @@ class ConversationStateWriter:
             return HistoryScope(kind="team", scope_id=self.deps.agent_name)
         return HistoryScope(kind="agent", scope_id=self.deps.agent_name)
 
-    def session_type_for_scope(self, scope: HistoryScope) -> SessionKind:
-        """Return the kind of session row one persisted history scope writes."""
-        return scope.kind
-
     def team_history_scope(
         self,
         team_agents: list[MatrixID],

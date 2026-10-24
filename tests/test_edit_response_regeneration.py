@@ -759,7 +759,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         ) as mock_fetch_history,
         patch.object(
             bot._turn_store,
-            "_remove_stale_runs_for_turn_record",
+            "remove_stale_runs_for_edit",
             return_value=True,
         ) as mock_remove_stale_runs,
     ):
@@ -2411,7 +2411,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
             bot._turn_store,
-            "_remove_stale_runs_for_turn_record",
+            "remove_stale_runs_for_edit",
         ) as mock_recorded_cleanup,
     ):
         mock_context.return_value = MagicMock(

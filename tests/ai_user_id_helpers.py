@@ -279,7 +279,6 @@ def _build_response_runner(
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
     bot.enable_streaming = enable_streaming
-    bot.show_tool_calls = False
     bot.orchestrator = orchestrator
     bot._conversation_resolver = MagicMock()
     bot._conversation_resolver.build_message_target = MagicMock(
@@ -331,7 +330,6 @@ def _build_response_runner(
         )
 
     bot._conversation_state_writer.team_history_scope = MagicMock(side_effect=_team_history_scope_for_test)
-    bot._conversation_state_writer.session_type_for_scope = MagicMock(side_effect=lambda scope: scope.kind)
     bot._edit_message = AsyncMock(return_value=True)
     agent_reply_memberships = AgentReplyMembershipIndex()
     bot.agent_reply_memberships = agent_reply_memberships
