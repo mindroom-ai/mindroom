@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.lanes import _lane, run_session_storage_operation
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.store import ConversationStore
 
@@ -39,6 +39,9 @@ def _blocking(log: list[str], started: threading.Event, release: threading.Event
 async def test_operations_on_one_database_run_one_at_a_time_off_the_event_loop(tmp_path: Path) -> None:
     """An operation on a database waits for the one before it, on the database's own thread."""
     store = _store(tmp_path)
+    # A lane lives only while someone holds it. Hold it for the whole test, so the second operation joins the
+    # first one's lane even if its worker thread reaches the lane only after the first operation has finished.
+    held_lane = _lane(store)
     log: list[str] = []
     started, release = threading.Event(), threading.Event()
     first = asyncio.create_task(run_session_storage_operation(lambda: store, _blocking(log, started, release)))
@@ -57,6 +60,7 @@ async def test_operations_on_one_database_run_one_at_a_time_off_the_event_loop(t
     lane_thread = log[0].removeprefix("start ")
     assert log == [f"start {lane_thread}", "end", f"second {lane_thread}"]
     assert lane_thread != str(threading.get_ident())
+    assert _lane(store) is held_lane
 
 
 @pytest.mark.asyncio
