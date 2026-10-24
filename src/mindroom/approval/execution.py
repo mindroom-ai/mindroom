@@ -46,6 +46,7 @@ from mindroom.response_turn import (
     local_approval_requirements,
     paused_attempt_from_response,
 )
+from mindroom.run_storage import TerminalRecord, scope_run_storage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
@@ -70,8 +71,7 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent
     from mindroom.llm.runs import ToolExecution
     from mindroom.media_inputs import MediaInputs
-    from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import ConversationSession
+    from mindroom.run_storage import RunStorage
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
@@ -92,23 +92,23 @@ async def _collect_agent_continuation(
     events: AsyncIterator[RunEvent],
     presentation: CollectedStreamPresentation,
     *,
+    run_id: str,
     progress: ProgressPublisher | None,
 ) -> _CollectedAgentContinuation:
-    """Collect ordered events while leaving terminal fallback text for lifecycle settlement.
+    """Collect ordered events of run ``run_id`` while leaving terminal fallback text for lifecycle settlement.
 
     A failure of the resumed run propagates as its exception once the stream has reported it, and a failure while
     the events are presented closes the stream before it propagates.
     """
-    response: RunRecord | None = None
+    finished = TerminalRecord(RunRecord)
     saw_content_delta = False
     completed_ids: set[str | None] = set()
     await presentation.publish(progress)
     async with closing_async_stream(events):
         async for event in events:
-            if isinstance(event, RunFinished):
-                assert isinstance(event.record, RunRecord)
-                response = event.record
-            elif isinstance(event, TextDelta):
+            if finished.collect(event):
+                continue
+            if isinstance(event, TextDelta):
                 presentation.append_text(event.text)
                 saw_content_delta = saw_content_delta or bool(event.text)
                 await presentation.publish(progress)
@@ -119,9 +119,7 @@ async def _collect_agent_continuation(
                 presentation.complete_tool(event.call)
                 completed_ids.add(event.call.tool_call_id)
                 await presentation.publish(progress)
-    if response is None:
-        msg = "Agent continuation did not yield its final run"
-        raise RuntimeError(msg)
+    response = finished.terminal(run_id)
     # The run's own calls this continuation completed; child approval results are projected into the root
     # presentation too, but only the parent run's calls can continue its turn.
     completed = tuple(tool for tool in response.tools or () if tool.tool_call_id in completed_ids)
@@ -171,8 +169,7 @@ async def _continue_persisted_agent(
     continuation: ApprovalContinuation,
     persisted: RunRecord,
     *,
-    store: ConversationStore,
-    session: ConversationSession,
+    storage: RunStorage,
     paused_answer: PausedAnswer,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -197,9 +194,7 @@ async def _continue_persisted_agent(
         runtime_paths=runtime_paths,
         agent_name=continuation.entity_name,
         model_name=model_name,
-        store=store,
-        session=session,
-        scope=HistoryScope(kind="agent", scope_id=continuation.entity_name),
+        storage=storage,
         user_id=continuation.requester_id,
     )
     delegated = has_delegation_state(persisted)
@@ -210,8 +205,8 @@ async def _continue_persisted_agent(
     )
     events = drive_delegation_stream(
         native_events,
-        store=store,
-        session=session,
+        record_type=RunRecord,
+        storage=storage,
         continue_parent=runner.continue_run,
         run_child=run_delegated_child_response,
         agent_name=continuation.entity_name,
@@ -229,7 +224,7 @@ async def _continue_persisted_agent(
         tool_trace=list(paused_answer.tool_trace),
         track_hidden_tools=True,
     )
-    collected = await _collect_agent_continuation(events, presentation, progress=progress)
+    collected = await _collect_agent_continuation(events, presentation, run_id=continuation.run_id, progress=progress)
     response = collected.response
     paused = paused_attempt_from_response(
         response,
@@ -492,6 +487,7 @@ class AgentApprovalExecution:
             session_id=continuation.session_id,
             storage_factory=storage_factory,
         )
+        storage = scope_run_storage(scope_context)
         try:
             async with typing_indicator(
                 self.client(),
@@ -513,8 +509,7 @@ class AgentApprovalExecution:
                                 continuation,
                                 cli_call,
                                 persisted,
-                                session,
-                                store,
+                                storage,
                                 paused_answer=paused_answer,
                                 runtime_context=runtime_context,
                                 decisions=decisions,
@@ -562,8 +557,7 @@ class AgentApprovalExecution:
                             build,
                             continuation,
                             persisted,
-                            store=store,
-                            session=session,
+                            storage=storage,
                             paused_answer=paused_answer,
                             config=config,
                             runtime_paths=self.runtime_paths,

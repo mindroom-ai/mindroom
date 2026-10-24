@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.run_storage import RunStorage
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
 
 logger = get_logger(__name__)
@@ -102,13 +103,16 @@ class _MidTurnCompaction:
     folded_member_ids: set[str] = field(default_factory=set)
 
     @property
-    def scoped_session(self) -> ConversationSession | None:
-        """Return the session a fold appends its summary row to, or None when the run's requests replay no history."""
+    def scope_fold(self) -> tuple[ConversationStore, ConversationSession, HistoryScope] | None:
+        """Return the store, session, and scope a fold appends its summary row to, checked once for the fold to use.
+
+        None when the run's requests replay no history or the run stores in no scope, so its folds stay within it.
+        """
         storage = self.storage
         if storage is None or storage.store is None or storage.scope is None:
             return None
         replays_history = self.replay_plan is not None and self.replay_plan.add_history_to_context
-        return storage.session if replays_history else None
+        return (storage.store, storage.session, storage.scope) if replays_history else None
 
 
 @dataclass(frozen=True)
@@ -209,12 +213,12 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
     )
     if request_tokens <= policy.limit:
         return
-    session = binding.scoped_session
-    layout = _layout(messages, binding.prompt_id, scoped=session is not None)
+    scope_fold = binding.scope_fold
+    layout = _layout(messages, binding.prompt_id, scoped=scope_fold is not None)
     if not layout.folded and all(is_compaction_summary(message) for message in layout.history):
         # Nothing but an earlier summary would fold, so compacting again cannot shrink the request.
         return
-    summary_message = await _summarize(binding, policy, layout, messages, state.record, session, request_tokens)
+    summary_message = await _summarize(binding, policy, layout, messages, state.record, scope_fold, request_tokens)
     if summary_message is None:
         binding.stopped = True
         return
@@ -245,7 +249,7 @@ async def _summarize(
     layout: _Layout,
     messages: list[Message],
     record: AnyRunRecord,
-    session: ConversationSession | None,
+    scope_fold: tuple[ConversationStore, ConversationSession, HistoryScope] | None,
     request_tokens: int,
 ) -> Message | None:
     """Fold the history and every exchange of the turn into a summary and rewrite the request.
@@ -256,11 +260,22 @@ async def _summarize(
     settings = replace(policy.inputs.history_settings, max_tool_calls_from_history=None)
     inputs = replace(policy.inputs, history_settings=settings)
     try:
-        if session is None:
+        if scope_fold is None:
             summary_message = await _summarize_run_locally(binding, inputs, layout, record)
             _finish(messages, layout, summary_message, record)
             return summary_message
-        return await _compact_scope(binding, inputs, layout, messages, record, session, request_tokens)
+        store, session, scope = scope_fold
+        return await _compact_scope(
+            binding,
+            inputs,
+            layout,
+            messages,
+            record,
+            request_tokens,
+            store=store,
+            session=session,
+            scope=scope,
+        )
     except Exception:
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=record.run_id)
         return None
@@ -277,20 +292,18 @@ async def _compact_scope(
     layout: _Layout,
     messages: list[Message],
     record: AnyRunRecord,
-    session: ConversationSession,
     request_tokens: int,
+    *,
+    store: ConversationStore,
+    session: ConversationSession,
+    scope: HistoryScope,
 ) -> Message | None:
-    """Append one summary row covering the scope's stored runs after the latest row and this run's exchanges.
+    """Append one summary row to ``scope`` covering its stored runs after the latest row and this run's exchanges.
 
     The row holds the run's folded part as its segment; the append leaves the turn's session as the store holds it,
     and once the row is stored, the run's request and record follow.
     """
-    assert binding.storage is not None
-    storage = binding.storage.store
-    scope = binding.storage.scope
-    assert storage is not None
-    assert scope is not None
-    basis = await asyncio.to_thread(read_fold_basis, storage, session, scope)
+    basis = await asyncio.to_thread(read_fold_basis, store, session, scope)
     if basis is None:
         logger.warning("Mid-turn compaction skipped because the conversation changed", run_id=record.run_id)
         return None
@@ -310,7 +323,7 @@ async def _compact_scope(
         _finish(messages, layout, summary_message, record)
 
     outcome = await compact_scope_mid_turn(
-        storage=storage,
+        storage=store,
         session=session,
         scope=scope,
         resolved_inputs=inputs,

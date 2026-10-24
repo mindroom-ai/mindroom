@@ -18,9 +18,8 @@ from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn,
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.llm.messages import Message
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
-from mindroom.teams.members import _team_member, build_team_spec, materialize_exact_team_members
+from mindroom.teams.members import _team_member, build_team_spec, materialize_exact_team_members, team_history_settings
 from mindroom.teams.spec import TeamMode
-from mindroom.teams.storage import team_history_settings
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.conversation import current_conversation
 from mindroom.tool_jobs.instances import pin_background_tool_jobs

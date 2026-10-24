@@ -22,6 +22,7 @@ from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
@@ -81,6 +82,7 @@ async def _catalog(
         agent_name="helper",
         run=RunContext(run_id="run", session_id="session", user_id="@alice:test", session=session),
         runtime_context=_runtime(tmp_path),
+        storage=RunStorage(None, session, None),
         middleware=middleware,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
     )
@@ -101,12 +103,14 @@ async def _events(
 
 
 def test_a_catalog_cannot_be_built_for_a_run_without_a_session(tmp_path: Path) -> None:
-    """A run no store keeps has no session for the catalog's checkpoints and delegations, so it fails at once."""
+    """A run outside the session its catalog's checkpoints and delegations write fails at once."""
+    session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
     with pytest.raises(ValueError, match="belongs to a session"):
         agent_tool_calls.PreparedAgentToolCatalog(
             agent_name="helper",
             run=RunContext(run_id="run", session_id="session", user_id="@alice:test"),
             runtime_context=_runtime(tmp_path),
+            storage=RunStorage(None, session, None),
         )
 
 

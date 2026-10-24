@@ -84,6 +84,7 @@ async def test_a_failed_resume_keeps_its_error_and_runs_the_approved_tool_once(t
                 persist=persist,
             ),
             presentation,
+            run_id="run",
             progress=None,
         )
 

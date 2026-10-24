@@ -75,6 +75,7 @@ from mindroom.response_turn import (
     local_approval_requirements,
     paused_attempt_from_response,
 )
+from mindroom.run_storage import RunStorage, TerminalRecord
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -126,8 +127,6 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -226,17 +225,18 @@ def _awaiting_answers[R: AnyRunRecord](response: R) -> R:
 
 
 async def persist_delegation_state(
-    store: ConversationStore | None,
-    session: ConversationSession,
+    storage: RunStorage,
     response: AnyRunRecord,
     state: DelegationState,
 ) -> None:
-    """Save native child ownership on its real parent run, including hidden calls.
+    """Save native child ownership on its real parent run, including hidden calls, where ``storage`` stores the run.
 
     The run's row is rewritten in place without touching the usage ledger: the loop recorded the run's usage when
-    it stored the pause, and records the continuation's when that ends. ``session`` then holds the run as stored.
+    it stored the pause, and records the continuation's when that ends. The storage's session then holds the run as
+    stored.
     """
     response.metadata = {**(response.metadata or {}), DELEGATION_STATE_KEY: state.to_dict()}
+    store, session = storage.store, storage.session
     if store is None:
         msg = "Durable delegation requires persisted session storage"
         raise RuntimeError(msg)
@@ -347,7 +347,7 @@ async def _execute_child(
         execution_identity=identity,
         only=child.persona.kept_knowledge if child.persona is not None else None,
     )
-    storage = await asyncio.to_thread(
+    store = await asyncio.to_thread(
         create_session_storage,
         child.child_agent_name,
         config,
@@ -362,7 +362,7 @@ async def _execute_child(
         identity,
         active_model_name=child.model_name,
         knowledge=knowledge.knowledge,
-        history_storage=storage,
+        history_storage=store,
         refresh_scheduler=refresh_scheduler,
         delegation_depth=child.depth,
         supports_native_tool_approval=True,
@@ -371,7 +371,7 @@ async def _execute_child(
         required_tool_names=required_tool_names,
         persona=child.persona,
     )
-    session = await asyncio.to_thread(storage.load_session, child.session_id, "agent")
+    session = await asyncio.to_thread(store.load_session, child.session_id, "agent")
     if session is None:
         msg = "Delegated run's session is no longer available"
         raise RuntimeError(msg)
@@ -383,9 +383,7 @@ async def _execute_child(
         runtime_paths=runtime_paths,
         agent_name=child.child_agent_name,
         model_name=child.model_name,
-        store=storage,
-        session=session,
-        scope=HistoryScope(kind="agent", scope_id=child.child_agent_name),
+        storage=RunStorage(store, session, HistoryScope(kind="agent", scope_id=child.child_agent_name)),
         user_id=identity.requester_id,
     )
     with tool_runtime_context(child_context):
@@ -484,7 +482,7 @@ async def _continue_child(
     """Apply child decisions and drive any further nested delegations."""
 
     async def continue_run(paused: RunRecord, resume: ResumeDecisions, _on_event: ResumeEvents | None) -> RunRecord:
-        return await forward_resume(_observed_child_events(runner.events(paused, resume)), None, record_type=RunRecord)
+        return await forward_resume(_observed_child_events(runner.events(paused, resume)), None, paused=paused)
 
     driver_decisions: dict[str, bool] | None = decisions
     if not has_delegation_state(persisted):
@@ -498,8 +496,7 @@ async def _continue_child(
         approval_calls = ()
     return await _drive_delegations(
         persisted,
-        store=runner.store,
-        session=runner.session,
+        storage=runner.storage,
         continue_parent=continue_run,
         agent_name=child.child_agent_name,
         run_child=run_child,
@@ -1375,8 +1372,7 @@ def prepare_delegation_state(
 async def _drive_delegations[R: AnyRunRecord](
     response: R,
     *,
-    store: ConversationStore | None,
-    session: ConversationSession,
+    storage: RunStorage,
     continue_parent: ContinueRun[R],
     agent_name: str,
     run_child: ChildResponseRunner,
@@ -1395,7 +1391,7 @@ async def _drive_delegations[R: AnyRunRecord](
 
     ``continue_parent`` resumes the parent with the decisions on its own calls and its children's results, and
     returns its new terminal record; the loop behind it refuses anything but exact coverage of the calls the parent
-    waits for. ``store`` and ``session`` are where the parent's row lives.
+    waits for. ``storage`` is where the parent's row lives.
     """
     if not has_delegation_state(response):
         return response
@@ -1434,7 +1430,7 @@ async def _drive_delegations[R: AnyRunRecord](
             )
         ):
             return response
-        persist = partial(persist_delegation_state, store, session, response)
+        persist = partial(persist_delegation_state, storage, response)
         # Calls answered on an earlier entry keep their answers; only the calls still waiting advance.
         for requirement in external:
             result = await advance_delegation_call(
@@ -1473,49 +1469,43 @@ async def _drive_delegations[R: AnyRunRecord](
         )
         own = ResumeDecisions()
         state.clear_pending()
-        await persist_delegation_state(store, session, response, state)
+        await persist_delegation_state(storage, response, state)
     return response
 
 
 async def drive_delegation_stream[R: AnyRunRecord](
     events: AsyncIterator[RunEvent],
     *,
-    store: ConversationStore | None,
-    session: ConversationSession,
+    record_type: type[R],
+    storage: RunStorage,
     continue_parent: ContinueRun[R],
     **options: Unpack[_DelegationOptions],
 ) -> AsyncIterator[RunEvent]:
     """Pass a run's events through; when it ends paused on delegations, drive them and end with the driven record.
 
-    The driven record is paused when a child waits for approval or the parent's own calls do, else the parent's
-    continuation ended it.
+    The run's terminal record is a ``record_type`` record, and a run that ends without one fails. The driven record
+    is paused when a child waits for approval or the parent's own calls do, else the parent's continuation ended it.
     """
-    record: AnyRunRecord | None = None
+    finished = TerminalRecord(record_type)
     async with closing_async_stream(events):
         async for event in events:
-            if isinstance(event, RunFinished):
-                record = event.record
-            else:
+            if not finished.collect(event):
                 yield event
-    if record is None:
-        return
+    record = finished.terminal(options["agent_name"])
     if record.status is not RunStatus.paused or not has_delegation_state(record):
         yield RunFinished(record)
         return
 
-    paused = cast("R", record)
-
     async def drive(on_event: Callable[[object], None]) -> R:
         return await _drive_delegations(
-            paused,
-            store=store,
-            session=session,
+            record,
+            storage=storage,
             continue_parent=continue_parent,
             on_event=on_event,
             **options,
         )
 
-    driven: AnyRunRecord = paused
+    driven: AnyRunRecord = record
     driven_stream = callback_event_stream(drive)
     async with closing_async_stream(driven_stream):
         async for event in driven_stream:

@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRecord
     from mindroom.response_turn import ResponseTurnContext
-    from mindroom.session_storage.store import ConversationStore
+    from mindroom.run_storage import RunStorage
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 __all__ = [
@@ -155,7 +155,7 @@ async def prepare_minimal_catalog(
     build: AgentBuild,
     *,
     run: RunContext,
-    store: ConversationStore | None,
+    storage: RunStorage,
     delegation_depth: int,
     record: RunRecord | None = None,
 ) -> PreparedAgentToolCatalog:
@@ -174,7 +174,7 @@ async def prepare_minimal_catalog(
         agent_name=build.spec.id,
         run=run,
         runtime_context=runtime,
-        store=store,
+        storage=storage,
         middleware=agent_tool_middleware(build),
         max_tool_calls_per_turn=build.spec.max_tool_calls_per_turn,
         record=record,
@@ -237,7 +237,7 @@ async def minimal_attempt(
     hooks: LoopHooks,
     *,
     run: RunContext,
-    store: ConversationStore | None,
+    storage: RunStorage,
     response_context: ResponseTurnContext,
     context_documents: Mapping[str, str],
     delegation_depth: int,
@@ -257,7 +257,7 @@ async def minimal_attempt(
     catalog = await prepare_minimal_catalog(
         build,
         run=run,
-        store=store,
+        storage=storage,
         delegation_depth=delegation_depth,
     )
     try:

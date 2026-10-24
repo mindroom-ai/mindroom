@@ -119,6 +119,7 @@ async def test_an_agent_continuation_whose_publication_fails_closes_its_run_stre
         await _collect_agent_continuation(
             events(),
             CollectedStreamPresentation(show_tool_calls=True),
+            run_id="run",
             progress=progress,
         )
     assert closed == [True]

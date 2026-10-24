@@ -66,7 +66,7 @@ from mindroom.response_turn import (
     stream_response_turn,
     stream_with_llm_request_log_context,
 )
-from mindroom.run_storage import attempt_run_storage, persist_into, scope_run_storage
+from mindroom.run_storage import bind_turn_session, persist_into, scope_run_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
 from mindroom.teams.members import (
@@ -77,6 +77,7 @@ from mindroom.teams.members import (
     materialized_team_label,
     requested_team_agent_names,
     resolve_team_member_model_names,
+    team_history_settings,
     team_label,
 )
 from mindroom.teams.presentation import (
@@ -88,7 +89,6 @@ from mindroom.teams.presentation import (
 )
 from mindroom.teams.resume import TeamResume, blocking_team_pause, continued_team_pause, drive_team_delegations
 from mindroom.teams.runtime import leader_tool_specs, run_team
-from mindroom.teams.storage import team_history_settings
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -584,7 +584,7 @@ class _TeamTurn:
             prompt_preview=prepared.prompt_text[:_MAX_LOG_MESSAGE_LENGTH],
         )
         # A team without a bound scope stores nothing.
-        storage = attempt_run_storage(run)
+        storage = bind_turn_session(run)
         leader = _leader_run(
             built,
             prepared,

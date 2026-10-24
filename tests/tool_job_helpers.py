@@ -788,15 +788,12 @@ class DelegatingLeader:
             runtime_paths=self.paths,
             agent_name="leader",
             model_name="default",
-            store=self.store,
-            session=self.session,
-            scope=_LEADER_SCOPE,
+            storage=RunStorage(self.store, self.session, _LEADER_SCOPE),
             user_id=self.identity.requester_id,
         )
         return await _drive_delegations(
             record,
-            store=self.store,
-            session=self.session,
+            storage=runner.storage,
             continue_parent=runner.continue_run,
             agent_name="leader",
             run_child=run_child,

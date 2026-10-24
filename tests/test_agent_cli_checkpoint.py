@@ -8,6 +8,7 @@ import sys
 import threading
 from contextlib import closing
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -71,7 +72,7 @@ async def _capture(checkpoint: BatchCheckpoint, record: RunRecord, messages: lis
 
 async def _stored_catalog(tmp_path: Path) -> PreparedAgentToolCatalog:
     catalog = await _catalog(tmp_path, [])
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.storage = replace(catalog.storage, store=create_state_storage("helper", tmp_path))
     return catalog
 
 
@@ -95,8 +96,8 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
     original = deepcopy(messages)
     assistant.content = "mutated after capture"
     await checkpoint.persist("bash-1")
-    assert catalog.store is not None
-    saved = catalog.store.get_run("run")
+    assert catalog.storage.store is not None
+    saved = catalog.storage.store.get_run("run")
     assert isinstance(saved, RunRecord)
     assert [item.to_dict() for item in saved.messages] == [item.to_dict() for item in original]
     assert [tool.tool_call_id for tool in saved.tools or ()] == ["bash-1", "bash-2"]
@@ -125,8 +126,8 @@ async def test_the_turns_session_holds_the_checkpoint_as_stored(tmp_path: Path) 
 
     await checkpoint.persist("bash-1")
 
-    assert catalog.store is not None
-    stored = catalog.store.load_session("session", "agent")
+    assert catalog.storage.store is not None
+    stored = catalog.storage.store.load_session("session", "agent")
     assert stored is not None
     assert [(run.run_id, run.status) for run in catalog.session.runs] == [("run", RunStatus.cancelled)]
     assert [run.to_dict() for run in catalog.session.runs] == [run.to_dict() for run in stored.runs]
@@ -140,11 +141,11 @@ async def test_approval_checkpoint_refreshes_mutable_session_state(tmp_path: Pat
     await checkpoint.persist("bash-1")
     catalog.run.session_state["before_approval"] = "kept"
     await checkpoint.persist_approval("bash-1")
-    assert catalog.store is not None
-    fields = catalog.store.read_session_fields("session")
+    assert catalog.storage.store is not None
+    fields = catalog.storage.store.read_session_fields("session")
     assert fields is not None
     assert fields.session_state["before_approval"] == "kept"
-    saved = catalog.store.get_run("run")
+    saved = catalog.storage.store.get_run("run")
     assert saved is not None
     assert saved.messages[0].tool_calls[0]["id"] == "bash-1"
 
@@ -156,7 +157,7 @@ async def test_a_checkpoint_and_the_state_its_calls_ran_with_are_stored_together
     checkpoint = BatchCheckpoint(catalog)
     await _capture(checkpoint, _record(), [_assistant("bash-1")])
     await checkpoint.persist("bash-1")
-    store = catalog.store
+    store = catalog.storage.store
     assert store is not None
     with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute(
@@ -177,7 +178,7 @@ async def test_a_checkpoint_and_the_state_its_calls_ran_with_are_stored_together
 async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_changed(tmp_path: Path) -> None:
     """A state one Bash call changes and the next restores is stored restored, though a checkpoint stored the change."""
     catalog = await _stored_catalog(tmp_path)
-    store = catalog.store
+    store = catalog.storage.store
     assert store is not None
     session = catalog.session
     session.session_state["cwd"] = "/repo"
@@ -239,8 +240,8 @@ async def test_approval_checkpoint_keeps_completed_sibling_result(tmp_path: Path
     )
     checkpoint.complete("done", result)
     await checkpoint.persist_approval("waiting")
-    assert catalog.store is not None
-    saved = catalog.store.get_run("run")
+    assert catalog.storage.store is not None
+    saved = catalog.storage.store.get_run("run")
     assert saved is not None
     assert saved.messages[-1].tool_call_id == "done"
     assert saved.messages[-1].content == "real sibling result"

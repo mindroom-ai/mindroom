@@ -48,8 +48,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import ReportedCall
     from mindroom.llm.runs import RunRecord
-    from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import ConversationSession
+    from mindroom.run_storage import RunStorage
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding, PreparedAgentToolCatalog
     from mindroom.tool_system.events import ToolTraceEntry
@@ -75,8 +74,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     continuation: ApprovalContinuation,
     payload: CliApprovalCall,
     persisted: RunRecord,
-    session: ConversationSession,
-    store: ConversationStore,
+    storage: RunStorage,
     *,
     paused_answer: PausedAnswer,
     runtime_context: ToolRuntimeContext,
@@ -95,6 +93,9 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     if continuation.state != "claimed":
         msg = "CLI recovery requires its native claimed continuation"
         raise ValueError(msg)
+    store, session = storage.store, storage.session
+    # An approval resumes in the scope store it was saved in.
+    assert store is not None
     persisted = deepcopy(persisted)
     approved = tuple(call for call in continuation.calls if decisions.get(call.tool_call_id))
     external = payload.external_requirement
@@ -162,7 +163,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         catalog = await prepare_minimal_catalog(
             build,
             run=run,
-            store=store,
+            storage=storage,
             delegation_depth=payload.delegation_depth,
             record=persisted,
         )

@@ -251,7 +251,7 @@ async def test_an_approval_resume_leaves_its_loaded_session_as_the_store_holds_i
         session = paused.store.load_session(SESSION, "agent")
         assert session is not None
 
-        record = await replace(paused.runner, session=session).continue_run(
+        record = await replace(paused.runner, storage=replace(paused.runner.storage, session=session)).continue_run(
             paused.record,
             _approved(paused.record),
             None,
@@ -285,7 +285,11 @@ async def test_an_approval_resume_whose_run_a_cut_removed_leaves_it_out_of_its_l
         assert session is not None
         assert [run.run_id for run in session.runs] == ["parent-run"]
 
-        await replace(paused.runner, session=session).continue_run(paused.record, _approved(paused.record), None)
+        await replace(paused.runner, storage=replace(paused.runner.storage, session=session)).continue_run(
+            paused.record,
+            _approved(paused.record),
+            None,
+        )
 
     assert session.runs == []
     assert _as_stored(session) == _reloaded(paused.store)

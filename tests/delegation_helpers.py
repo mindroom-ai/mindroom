@@ -36,6 +36,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.message_target import MessageTarget
 from mindroom.providers import registry as provider_registry
 from mindroom.response_turn import PausedAnswer, ResponsePausedForApproval
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.teams.envelope import team_response
@@ -418,9 +419,7 @@ async def pause_parent(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
         model_name=config.get_agent(agent_name).model,
-        store=store,
-        session=session,
-        scope=HistoryScope(kind="agent", scope_id=agent_name),
+        storage=RunStorage(store, session, HistoryScope(kind="agent", scope_id=agent_name)),
         user_id=identity.requester_id,
     )
     return PausedParent(record, store, session, runner)

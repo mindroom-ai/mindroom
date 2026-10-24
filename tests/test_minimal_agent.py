@@ -39,6 +39,7 @@ from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.memory.functions import MemoryPromptParts
+from mindroom.run_storage import RunStorage
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
@@ -85,7 +86,7 @@ async def _attempt(build, runtime, session: ConversationSession, *, run_id: str 
         replace(build.spec, system_message=_turn(build).system_message),
         NO_HOOKS,
         run=run,
-        store=build.store,
+        storage=RunStorage(build.store, session, None),
         response_context=_turn_context(),
         context_documents=minimal_context_documents(build),
         delegation_depth=0,
@@ -592,6 +593,7 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
     )
+    session = _session(runtime)
     with tool_runtime_context(runtime):
         catalog = await prepare_minimal_catalog(
             minimal,
@@ -599,9 +601,9 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
                 run_id="run",
                 session_id=runtime.session_id,
                 user_id=runtime.requester_id,
-                session=_session(runtime),
+                session=session,
             ),
-            store=None,
+            storage=RunStorage(None, session, None),
             delegation_depth=0,
         )
         try:
@@ -709,7 +711,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         assert offered_tools(request) == ["bash"]
         assert "optional long role" not in str(request.messages)
         assert "actual current request" in str(request.messages)
-    store = owners[0].catalog.store
+    store = owners[0].catalog.storage.store
     assert store is not None
     saved = store.load_session(ctx.session_id, "agent")
     assert saved is not None

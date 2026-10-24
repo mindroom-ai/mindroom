@@ -52,6 +52,7 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     apply_exact_approval_decisions,
 )
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
@@ -465,8 +466,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
             continuation,
             CliApprovalCall.from_dict(continuation.cli_call),
             persisted,
-            session,
-            store,
+            RunStorage(store, session, None),
             paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
             runtime_context=runtime,
             decisions={"hidden": approved},
@@ -584,8 +584,7 @@ async def test_a_later_save_of_the_recovered_session_keeps_the_state_the_recover
             continuation,
             CliApprovalCall.from_dict(continuation.cli_call),
             persisted,
-            session,
-            store,
+            RunStorage(store, session, None),
             paused_answer=PausedAnswer(text="", tool_trace=()),
             runtime_context=runtime,
             decisions={"hidden": True},
@@ -674,8 +673,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
             continuation,
             CliApprovalCall.from_dict(continuation.cli_call),
             persisted,
-            session,
-            store,
+            RunStorage(store, session, None),
             paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
             runtime_context=runtime,
             decisions={"bash": approved},
@@ -764,8 +762,7 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
             continuation,
             CliApprovalCall.from_dict(continuation.cli_call),
             persisted,
-            session,
-            store,
+            RunStorage(store, session, None),
             paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
             runtime_context=runtime,
             decisions={"bash": False},
@@ -810,7 +807,7 @@ async def _checkpointed_batch(
             session=session,
         ),
         runtime_context=runtime,
-        store=store,
+        storage=RunStorage(store, session, None),
     )
     checkpoint = BatchCheckpoint(catalog)
     batch = [("call_completed", "completed sibling"), ("old-bash", "never replay outer")]
@@ -1050,8 +1047,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             continuation,
             CliApprovalCall.from_dict(continuation.cli_call),
             persisted,
-            session,
-            store,
+            RunStorage(store, session, None),
             paused_answer=PausedAnswer(text=presentation.response_text, tool_trace=tuple(presentation.tool_trace)),
             runtime_context=runtime,
             decisions={"hidden": True},

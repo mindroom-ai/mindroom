@@ -27,6 +27,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.message_target import MessageTarget
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -293,6 +294,7 @@ async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tm
             build_execution_identity_from_runtime_context(runtime),
             agent_mode="minimal",
         )
+        session = ConversationSession(session_id=runtime.session_id, kind="agent", owner_id="helper")
         with tool_runtime_context(runtime):
             catalog = await prepare_minimal_catalog(
                 build,
@@ -300,9 +302,9 @@ async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tm
                     run_id="run",
                     session_id=runtime.session_id,
                     user_id=runtime.requester_id,
-                    session=ConversationSession(session_id=runtime.session_id, kind="agent", owner_id="helper"),
+                    session=session,
                 ),
-                store=None,
+                storage=RunStorage(None, session, None),
                 delegation_depth=0,
             )
             try:

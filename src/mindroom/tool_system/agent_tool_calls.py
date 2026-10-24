@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.spec import RunContext
     from mindroom.llm.runs import RunRecord
-    from mindroom.session_storage.store import ConversationStore
+    from mindroom.run_storage import RunStorage
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -96,17 +96,18 @@ class AgentToolCallEvent:
 class PreparedAgentToolCatalog:
     """One turn's catalog of the agent's tools, each under the toolkit it was authored in.
 
-    ``run`` is the turn's run identity, whose session holds the state its calls share; that session and ``store``
-    are where the run is stored, and ``record`` is the run itself once known: the live run after its first tool batch
-    is planned, or the stored run a recovery continues. ``middleware`` is the build's tool-call policy, which every
-    call runs through, and ``max_tool_calls_per_turn`` bounds the calls of one turn. The toolkits it connects, the
-    ones a run reaches only through it and every deferred toolkit it materializes, stay connected until it closes.
+    ``run`` is the turn's run identity, whose session holds the state its calls share; ``storage`` is where the run is
+    stored, that same session included, and ``record`` is the run itself once known: the live run after its first
+    tool batch is planned, or the stored run a recovery continues. ``middleware`` is the build's tool-call policy,
+    which every call runs through, and ``max_tool_calls_per_turn`` bounds the calls of one turn. The toolkits it
+    connects, the ones a run reaches only through it and every deferred toolkit it materializes, stay connected until
+    it closes.
     """
 
     agent_name: str
     run: RunContext
     runtime_context: ToolRuntimeContext
-    store: ConversationStore | None = None
+    storage: RunStorage
     middleware: Sequence[ToolMiddleware] = ()
     max_tool_calls_per_turn: int | None = None
     record: RunRecord | None = None
@@ -118,17 +119,15 @@ class PreparedAgentToolCatalog:
     _closes: list[ToolkitClose] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
-        """Refuse a run without a session, which the catalog's checkpoints and delegations need."""
-        if self.run.session is None:
-            msg = "A tool catalog needs a run that belongs to a session"
+        """Refuse a run whose calls share another session's state than the one its checkpoints and delegations write."""
+        if self.run.session is not self.storage.session:
+            msg = "A tool catalog needs a run that belongs to a session, the one its storage stores"
             raise ValueError(msg)
 
     @property
     def session(self) -> ConversationSession:
         """Return the session the turn's run is stored to, which the catalog's checkpoints and delegations write."""
-        # RunContext is frozen, and construction refused a run without a session.
-        assert self.run.session is not None
-        return self.run.session
+        return self.storage.session
 
     @contextmanager
     def execution_context(self) -> Iterator[None]:

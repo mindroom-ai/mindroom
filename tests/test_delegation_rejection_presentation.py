@@ -13,7 +13,7 @@ from mindroom.delegation.execution import _drive_delegations, drive_delegation_s
 from mindroom.delegation.state import DelegationState
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
-from mindroom.llm.runs import RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -95,8 +95,7 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
         parent = await pause_parent("leader", "Delegate", config=config, runtime_paths=paths, identity=identity)
         response = parent.record
         options = {
-            "store": parent.store,
-            "session": parent.session,
+            "storage": parent.runner.storage,
             "continue_parent": parent.runner.continue_run,
             "agent_name": "leader",
             "run_child": unused_child,
@@ -122,6 +121,7 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
         completed = None
         async for event in drive_delegation_stream(
             stored_run(),
+            record_type=RunRecord,
             **options,
             decisions=decisions,
             denial_reasons=dict.fromkeys(decisions or {}),

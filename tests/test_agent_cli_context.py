@@ -13,6 +13,7 @@ from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig
 from mindroom.error_handling import MinimalModeUnavailableError
 from mindroom.hooks import EnrichmentItem
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.test_agent_cli_authority import _runtime_context
@@ -85,7 +86,7 @@ async def test_a_catalog_for_another_requester_names_the_recovery_command(tmp_pa
         await prepare_minimal_catalog(
             build,
             run=RunContext(run_id="run", session_id="session", user_id="@mallory:example.test", session=session),
-            store=None,
+            storage=RunStorage(None, session, None),
             delegation_depth=0,
         )
     with (
@@ -95,6 +96,6 @@ async def test_a_catalog_for_another_requester_names_the_recovery_command(tmp_pa
         await prepare_minimal_catalog(
             replace(build, spec=replace(build.spec, toolkits=())),
             run=RunContext(run_id="run", session_id="session", user_id=runtime.requester_id, session=session),
-            store=None,
+            storage=RunStorage(None, session, None),
             delegation_depth=1,
         )

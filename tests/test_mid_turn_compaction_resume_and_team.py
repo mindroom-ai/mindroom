@@ -154,9 +154,7 @@ class _Resumable:
             runtime_paths=self.runtime_paths,
             agent_name="test_agent",
             model_name="default",
-            store=self.store,
-            session=session,
-            scope=TEST_AGENT_SCOPE,
+            storage=RunStorage(self.store, session, TEST_AGENT_SCOPE),
             user_id=None,
         )
 
@@ -408,8 +406,7 @@ async def test_a_continuation_on_the_turns_own_session_replays_no_run_the_fold_s
         agent.build.spec,
         paused,
         _approved(paused),
-        session=agent.session,
-        scope=TEST_AGENT_SCOPE,
+        storage=RunStorage(store=agent.store, session=agent.session, scope=TEST_AGENT_SCOPE),
         settings=agent.build.history_settings,
         plan=plan,
         user_id=None,
@@ -428,7 +425,7 @@ async def test_a_continuation_on_the_turns_own_session_replays_no_run_the_fold_s
         persist=persist_to(agent.store, agent.session),
         request_template=agent.build.request_template,
     )
-    record = await forward_resume(events, None, record_type=RunRecord)
+    record = await forward_resume(events, None, paused=paused)
 
     assert record.status is RunStatus.completed
     resumed = model.requests[before]

@@ -92,7 +92,7 @@ from mindroom.response_turn import (
 from mindroom.run_storage import (
     RunStorage,
     TerminalRecord,
-    attempt_run_storage,
+    bind_turn_session,
     persist_into,
     without_terminal_record,
 )
@@ -713,7 +713,7 @@ def _begin_attempt(
     prepared_run = run_context.prepared_run
     run.unseen_event_ids = prepared_run.unseen_event_ids
     run.run_metadata = run_context.metadata
-    storage = attempt_run_storage(run)
+    storage = bind_turn_session(run)
     if storage is None:
         storage = RunStorage(
             store=prepared_run.build.store,
@@ -796,7 +796,7 @@ async def _start_agent_run(
             spec,
             hooks,
             run=run,
-            store=storage.store,
+            storage=storage,
             response_context=run_context.turn,
             context_documents=prepared.cli_context,
             delegation_depth=run_context.delegation_depth,
@@ -806,7 +806,7 @@ async def _start_agent_run(
         await bind_standard_cli(
             build,
             run=run,
-            store=storage.store,
+            storage=storage,
             response_context=run_context.turn,
             delegation_depth=run_context.delegation_depth,
             refresh_scheduler=run_context.refresh_scheduler,
@@ -821,8 +821,8 @@ async def _start_agent_run(
     )
     driven = drive_delegation_stream(
         events,
-        store=storage.store,
-        session=storage.session,
+        record_type=RunRecord,
+        storage=storage,
         continue_parent=partial(
             _continue_turn_run,
             run_context,
@@ -868,8 +868,7 @@ async def _continue_turn_run(
         spec,
         paused,
         decisions,
-        session=storage.session,
-        scope=storage.scope,
+        storage=storage,
         settings=prepared.build.history_settings,
         plan=prepared.prepared_history.replay_plan,
         user_id=run_context.turn.requester_id,
@@ -878,7 +877,7 @@ async def _continue_turn_run(
         persist=persist_into(terminal, storage),
         request_template=run_context.request_template,
     )
-    return await forward_resume(events, on_event, record_type=RunRecord)
+    return await forward_resume(events, on_event, paused=paused)
 
 
 @timed("model_request_to_completion")

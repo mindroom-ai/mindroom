@@ -91,7 +91,7 @@ async def _windowed_shell(
     windowed = wrap_native_shell_window((_toolkit("shell", run_shell_command),), {"run_shell_command": "shell"})
     assert windowed is not None
     catalog = await _catalog(tmp_path, windowed)
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.storage = replace(catalog.storage, store=create_state_storage("helper", tmp_path))
     owner = LiveTurnTools(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,

@@ -317,7 +317,7 @@ async def test_agent_continuation_defers_terminal_only_content() -> None:
     presentation = CollectedStreamPresentation(show_tool_calls=True, response_text="Before approval. ")
     terminal = _finished(content="After approval.")
 
-    response = await _collect_agent_continuation(_events(terminal), presentation, progress=None)
+    response = await _collect_agent_continuation(_events(terminal), presentation, run_id="run", progress=None)
 
     assert response.response is terminal.record
     assert response.terminal_content == "After approval."
@@ -332,6 +332,7 @@ async def test_streamed_text_is_the_continuation_delta_and_the_record_adds_nothi
     response = await _collect_agent_continuation(
         _events(TextDelta("After "), TextDelta("approval."), _finished(content="After approval.")),
         presentation,
+        run_id="run",
         progress=None,
     )
 
@@ -362,7 +363,7 @@ async def test_agent_approval_completion_preserves_recovered_same_name_trace(com
     events = [ToolCompleted(tool.call)] if completion_source == "stream" else []
     events.append(_finished(run_id="current-run", tools=[tool]))
 
-    await _collect_agent_continuation(_events(*events), presentation, progress=None)
+    await _collect_agent_continuation(_events(*events), presentation, run_id="run", progress=None)
 
     assert presentation.final_text().startswith(prefix)
     assert presentation.tool_trace[0] == ToolTraceEntry(type="tool_call_started", tool_name="inspect")
@@ -385,6 +386,7 @@ async def test_agent_chained_pause_anchors_a_terminal_only_pending_tool() -> Non
     await _collect_agent_continuation(
         _events(_finished(run_id="run-2", status=RunStatus.paused, tools=[tool])),
         presentation,
+        run_id="run",
         progress=None,
     )
 
@@ -407,6 +409,7 @@ async def test_agent_continuation_keeps_text_after_a_stripped_tool_marker() -> N
     collected = await _collect_agent_continuation(
         _events(_finished(content="After approval.", tools=[tool])),
         presentation,
+        run_id="run",
         progress=None,
     )
     presentation.append_text(collected.terminal_content)
@@ -427,6 +430,7 @@ async def test_agent_continuation_reuses_an_existing_visible_tool_separator() ->
     collected = await _collect_agent_continuation(
         _events(_finished(content="After approval.", tools=[tool])),
         presentation,
+        run_id="run",
         progress=None,
     )
     presentation.append_text(collected.terminal_content)
@@ -448,6 +452,7 @@ async def test_hidden_agent_continuation_separates_text_across_the_tool_boundary
     collected = await _collect_agent_continuation(
         _events(_finished(content="After approval.", tools=[tool])),
         presentation,
+        run_id="run",
         progress=None,
     )
     presentation.append_text(collected.terminal_content)
@@ -472,6 +477,7 @@ async def test_hidden_agent_continuation_separates_text_across_a_new_tool_bounda
             _finished(content="After tool.", tools=[tool]),
         ),
         presentation,
+        run_id="run",
         progress=None,
     )
     presentation.append_text(collected.terminal_content)

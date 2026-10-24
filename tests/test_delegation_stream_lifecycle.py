@@ -22,6 +22,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished, TextDelta
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -57,8 +58,8 @@ async def _unused_continue(paused: RunRecord, _decisions: ResumeDecisions, _on_e
 def _stream(**options: object) -> AsyncIterator[RunEvent]:
     return execution.drive_delegation_stream(
         _paused_run(),
-        store=None,
-        session=new_scope_session(session_id="session-1", scope_id="leader", is_team=False),
+        record_type=RunRecord,
+        storage=RunStorage(None, new_scope_session(session_id="session-1", scope_id="leader", is_team=False), None),
         continue_parent=_unused_continue,
         agent_name="leader",
         run_child=cast("Callable", None),
@@ -258,16 +259,13 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
             runtime_paths=paths,
             agent_name="leader",
             model_name="test-model",
-            store=store,
-            session=session,
-            scope=HistoryScope(kind="agent", scope_id="leader"),
+            storage=RunStorage(store, session, HistoryScope(kind="agent", scope_id="leader")),
             user_id=identity.requester_id,
         )
         with pytest.raises(failure, match="Consumer stopped"):
             await execution._drive_delegations(
                 paused,
-                store=store,
-                session=session,
+                storage=runner.storage,
                 continue_parent=runner.continue_run,
                 agent_name="leader",
                 run_child=unused_child,

@@ -52,10 +52,11 @@ from mindroom.dynamic_workflows.validation import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
-from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
 from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.run_storage import TerminalRecord
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
@@ -984,11 +985,11 @@ async def _arun_agent(context: ToolRuntimeContext, build: AgentBuild, prompt: st
         ),
         request_template=build.request_template,
     )
-    content: object = ""
+    finished = TerminalRecord(RunRecord)
     async for event in events:
-        if isinstance(event, RunFinished) and event.record.content is not None:
-            content = event.record.content
-    return content
+        finished.collect(event)
+    content = finished.terminal(invocation_id).content
+    return content if content is not None else ""
 
 
 def _resolve_participant_model_name(

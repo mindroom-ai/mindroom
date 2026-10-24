@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.response_turn import ResponseTurnContext
-    from mindroom.session_storage.store import ConversationStore
+    from mindroom.run_storage import RunStorage
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -104,7 +104,7 @@ async def bind_standard_cli(
     build: AgentBuild,
     *,
     run: RunContext,
-    store: ConversationStore | None,
+    storage: RunStorage,
     response_context: ResponseTurnContext,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
@@ -118,7 +118,7 @@ async def bind_standard_cli(
         agent_name=build.spec.id,
         run=run,
         runtime_context=runtime,
-        store=store,
+        storage=storage,
         middleware=agent_tool_middleware(build),
         max_tool_calls_per_turn=build.spec.max_tool_calls_per_turn,
     )

@@ -38,8 +38,10 @@ from mindroom.run_storage import persist_into, scope_run_storage
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.members import (
     build_team_spec,
+    configured_team,
     materialize_exact_team_members,
     materialized_team_label,
+    team_history_settings,
     team_label,
 )
 from mindroom.teams.presentation import (
@@ -50,7 +52,6 @@ from mindroom.teams.presentation import (
     publish_team_presentation,
 )
 from mindroom.teams.runtime import MemberEvent, continue_team
-from mindroom.teams.storage import configured_team, team_history_settings
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -242,7 +243,7 @@ class TeamResume:
         The driver forwards a parent's events without reading them, so member events ride along.
         """
         events = cast("AsyncIterator[RunEvent]", self.events(paused, decisions))
-        return await forward_resume(events, on_event, record_type=TeamRunRecord)
+        return await forward_resume(events, on_event, paused=paused)
 
 
 def _member_call_event(requirement: RunRequirement, event: ToolStarted | ToolCompleted) -> RunEvent:
@@ -278,8 +279,8 @@ def drive_team_delegations(
     """
     driven = drive_delegation_stream(
         cast("AsyncIterator[RunEvent]", events),
-        store=resume.storage.store,
-        session=resume.storage.session,
+        record_type=TeamRunRecord,
+        storage=resume.storage,
         continue_parent=resume,
         agent_name=team_name,
         run_child=run_delegated_child_response,

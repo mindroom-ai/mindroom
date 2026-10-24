@@ -1258,6 +1258,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.matrix.typing",
     "mindroom.response_turn",
+    "mindroom.run_storage",
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.settings",
@@ -1281,7 +1282,6 @@ depends_on = [
     "mindroom.loop_hooks",
     "mindroom.response_turn",
     "mindroom.run_storage",
-    "mindroom.session_storage.store",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.runtime_context",
 ]
@@ -1305,7 +1305,15 @@ visibility = ["mindroom.ai", "mindroom.approval.resume", "mindroom.teams"]
 [[modules]]
 path = "mindroom.run_storage"
 depends_on = ["mindroom.llm", "mindroom.session_storage.store"]
-visibility = ["mindroom.ai", "mindroom.api.openai_compat", "mindroom.approval.resume", "mindroom.teams"]
+visibility = [
+    "mindroom.ai",
+    "mindroom.api.openai_compat",
+    "mindroom.approval.execution",
+    "mindroom.approval.resume",
+    "mindroom.custom_tools.dynamic_workflow",
+    "mindroom.delegation.execution",
+    "mindroom.teams",
+]
 
 [[modules]]
 path = "mindroom.approval.tool_owners"
@@ -1595,6 +1603,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.llm",
     "mindroom.response_turn",
+    "mindroom.run_storage",
     "mindroom.runtime_resolution",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system",
@@ -7714,6 +7723,7 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.knowledge.utils",
     "mindroom.response_turn",
+    "mindroom.run_storage",
     "mindroom.approval.tool_approval",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.conversation",

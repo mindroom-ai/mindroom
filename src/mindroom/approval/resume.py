@@ -19,13 +19,10 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
-from mindroom.llm.events import RunFinished
 from mindroom.llm.request_context import RequestAttribution
-from mindroom.llm.runs import RunRecord
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.response_turn import stream_with_llm_request_log_context
-from mindroom.run_storage import RunStorage
-from mindroom.session_storage.store import persist_to
+from mindroom.run_storage import TerminalRecord, persist_into
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -39,12 +36,11 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
-    from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
+    from mindroom.history.types import ResolvedHistorySettings, ResolvedReplayPlan
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest
-    from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import ConversationSession
+    from mindroom.llm.runs import AnyRunRecord, RunRecord
+    from mindroom.run_storage import RunStorage
 
 type ResumeEvents = Callable[[RunEvent], None]
 type ContinueRun[R: AnyRunRecord] = Callable[[R, ResumeDecisions, ResumeEvents | None], Awaitable[R]]
@@ -81,8 +77,7 @@ def resume_from_session(
     paused: RunRecord,
     decisions: ResumeDecisions,
     *,
-    session: ConversationSession,
-    scope: HistoryScope | None,
+    storage: RunStorage,
     settings: ResolvedHistorySettings,
     plan: ResolvedReplayPlan | None,
     user_id: str | None,
@@ -91,14 +86,15 @@ def resume_from_session(
     request_template: ModelRequest,
     model_name: str | None = None,
 ) -> AsyncIterator[RunEvent]:
-    """Resume ``paused`` in ``session`` with ``decisions``: the history ``plan`` replays, then the paused request.
+    """Resume ``paused`` where ``storage`` stores it with ``decisions``: the history ``plan`` replays, then the request.
 
     The resume reuses the paused run's stored system message and shares the session's state with its tools; the
     stream ends with ``RunFinished`` as ``resume_agent``'s does. ``model_name`` is the model a live turn's attempt
     runs on, which its tool calls carry; ``ResumeRunner`` passes none, so its calls keep the model of the tool context
     it runs in.
     """
-    history, summary = replayed_history(session, scope, settings, plan)
+    session = storage.session
+    history, summary = replayed_history(session, storage.scope, settings, plan)
     return resume_agent(
         spec,
         paused,
@@ -157,31 +153,26 @@ async def forward_resume[R: AnyRunRecord](
     events: AsyncIterator[RunEvent],
     on_event: ResumeEvents | None,
     *,
-    record_type: type[R],
+    paused: R,
 ) -> R:
-    """Drain a resume, handing every event but the last to ``on_event``, and return its terminal ``record_type`` record."""
-    record: R | None = None
+    """Drain the resume of ``paused``, handing every event but the last to ``on_event``; return its terminal record."""
+    finished = TerminalRecord(type(paused))
     async with closing_async_stream(events):
         async for event in events:
-            if isinstance(event, RunFinished):
-                assert isinstance(event.record, record_type)
-                record = event.record
-            elif on_event is not None:
+            if not finished.collect(event) and on_event is not None:
                 on_event(event)
-    # A run ends with ``RunFinished`` or raises.
-    assert record is not None
-    return record
+    return finished.terminal(paused.run_id)
 
 
 @dataclass(frozen=True, kw_only=True)
 class ResumeRunner:
-    """Resumes one paused run of a rebuilt agent against its store, with the hooks an agent turn installs.
+    """Resumes one paused run of a rebuilt agent where ``storage`` stores it, with the hooks an agent turn installs.
 
-    A resume replays the history the configured policy selects from ``session`` now, not a turn's narrowed plan; the
-    run's native history settings come from the paused request's last response. A resume that answers the run's own
-    paused calls with an approval's decisions makes the run a reader of that approval's receipt. The run keeps one set
-    of hooks for its whole life, so per-run hook state, such as the output-limit count or a failed compaction's stop,
-    carries across its delegation continuations.
+    A resume replays the history the configured policy selects from the stored session now, not a turn's narrowed
+    plan; the run's native history settings come from the paused request's last response. A resume that answers the
+    run's own paused calls with an approval's decisions makes the run a reader of that approval's receipt. The run
+    keeps one set of hooks for its whole life, so per-run hook state, such as the output-limit count or a failed
+    compaction's stop, carries across its delegation continuations.
     """
 
     build: AgentBuild
@@ -189,9 +180,7 @@ class ResumeRunner:
     runtime_paths: RuntimePaths
     agent_name: str
     model_name: str
-    store: ConversationStore
-    session: ConversationSession
-    scope: HistoryScope
+    storage: RunStorage
     user_id: str | None
 
     @cached_property
@@ -206,7 +195,7 @@ class ResumeRunner:
                 config=self.config,
                 runtime_paths=self.runtime_paths,
                 model_name=self.model_name,
-                storage=RunStorage(self.store, self.session, self.scope),
+                storage=self.storage,
                 replay_plan=self._replay_plan,
                 prompt_id=None,
             ),
@@ -216,7 +205,7 @@ class ResumeRunner:
     def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
         """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` as ``resume_agent``'s does."""
         build = self.build
-        native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
+        native = restore_native_history(build.spec.model, persisted_run=paused, session=self.storage.session)
         if decisions.approved or decisions.denied:
             add_approval_receipt_reader(paused.run_id)
         # TODO(simplify): this resume, like a saved team approval's TeamResume, names no model, so its tools see the
@@ -226,8 +215,7 @@ class ResumeRunner:
             build.spec,
             paused,
             decisions,
-            session=self.session,
-            scope=self.scope,
+            storage=self.storage,
             settings=build.history_settings,
             plan=self._replay_plan,
             user_id=self.user_id,
@@ -235,7 +223,7 @@ class ResumeRunner:
             # TODO(simplify): A failed or cancelled resume stores its terminal row over the paused run, so its approval
             # can no longer be retried. Keep the paused row until the resume completes or pauses again. Users and
             # stored data would notice: a failed approval stays answerable (#3075).
-            persist=persist_to(self.store, self.session),
+            persist=persist_into(None, self.storage),
             request_template=with_native_history(build.request_template, native),
         )
         return with_resumed_turn_log_context(events)
@@ -247,7 +235,7 @@ class ResumeRunner:
         on_event: ResumeEvents | None,
     ) -> RunRecord:
         """Resume ``paused`` with ``decisions``, forwarding its events, and return its terminal record."""
-        return await forward_resume(self.events(paused, decisions), on_event, record_type=RunRecord)
+        return await forward_resume(self.events(paused, decisions), on_event, paused=paused)
 
 
 __all__ = [

@@ -1,8 +1,8 @@
 """Where one agent or team run stores, the terminal record it hands over, and the persist callback that keeps both.
 
-A turn's attempt takes its ``RunStorage`` from the turn's scope context (``attempt_run_storage``), which keeps the
-session the attempt saves into for the turn's later attempts; a team run outside a turn takes it from the scope
-context it runs in (``scope_run_storage``). The hooks a run installs read the same value (``HookTurn``).
+A turn binds the session its attempts save into to its scope context and takes each attempt's ``RunStorage`` from it
+(``bind_turn_session``); any other run in a scope takes it from the scope context it runs in (``scope_run_storage``).
+The run's hooks, resume, delegation driver, and tool catalog read the same value.
 """
 
 from __future__ import annotations
@@ -41,11 +41,12 @@ def scope_run_storage(scope_context: ScopeSessionContext) -> RunStorage:
     return RunStorage(scope_context.storage, scope_context.stored_or_first_session(), scope_context.scope)
 
 
-def attempt_run_storage(run: TurnRunState) -> RunStorage | None:
-    """Return where the turn's next attempt is stored, or None when the turn has no scope context.
+def bind_turn_session(run: TurnRunState) -> RunStorage | None:
+    """Bind the session the turn's runs save into to its scope context, and return where its next attempt is stored.
 
     A scope without a stored session gets its first session, which stays on the turn's scope context, so a later
     attempt of the same turn replays this one's run and an empty-run discard finds it, as a reload of the scope would.
+    A turn without a scope context binds nothing and gets None.
     """
     if run.scope_context is None:
         return None
@@ -81,7 +82,7 @@ class TerminalRecord[R: AnyRunRecord]:
     def terminal(self, name: str) -> R:
         """Return the record the run ended with, which a run that finished without raising always handed over.
 
-        ``name`` names the run when it handed none over: an agent run by its run id, a team run by its team.
+        ``name`` names the run in the error when it handed none over: its run id, or the entity it ran as.
         """
         if self.record is None:
             raise without_terminal_record(self.kind, name)
@@ -89,9 +90,9 @@ class TerminalRecord[R: AnyRunRecord]:
 
 
 def without_terminal_record(kind: type[RunRecord | TeamRunRecord], name: str) -> RuntimeError:
-    """Return the error for a ``kind`` run named ``name`` that finished without handing over the record it ended with."""
-    run = f"team {name!r} run" if kind is TeamRunRecord else f"agent run {name!r}"
-    return RuntimeError(f"{run} ended without its terminal record")
+    """Return the error for a ``kind`` run named ``name`` that finished without handing over its terminal record."""
+    entity = "team" if kind is TeamRunRecord else "agent"
+    return RuntimeError(f"{entity} run {name!r} ended without its terminal record")
 
 
 def persist_into[R: AnyRunRecord](
@@ -119,7 +120,7 @@ def persist_into[R: AnyRunRecord](
 __all__ = [
     "RunStorage",
     "TerminalRecord",
-    "attempt_run_storage",
+    "bind_turn_session",
     "persist_into",
     "scope_run_storage",
     "without_terminal_record",

@@ -24,6 +24,7 @@ from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TurnComp
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, replay_basis
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
@@ -182,9 +183,7 @@ async def _resume(
         runtime_paths=paths,
         agent_name="general",
         model_name="default",
-        store=store,
-        session=session,
-        scope=HistoryScope(kind="agent", scope_id="general"),
+        storage=RunStorage(store, session, HistoryScope(kind="agent", scope_id="general")),
         user_id=identity.requester_id,
     )
     await runner.continue_run(paused, ResumeDecisions(denied={"call-1": "Declined"}), None)

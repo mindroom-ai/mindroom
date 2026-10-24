@@ -35,6 +35,7 @@ from mindroom.llm.events import ToolCompleted
 from mindroom.llm.provider import Capabilities, TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
+from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import ConversationStore
@@ -811,7 +812,9 @@ async def test_the_driver_saves_the_parent_as_it_was_handed_over(tmp_path: Path)
 
     holder = asyncio.create_task(run_session_storage_operation(lambda: store, hold_the_lane))
     assert await asyncio.to_thread(lane_held.wait, 30)
-    saving = asyncio.create_task(execution.persist_delegation_state(store, session, parent, DelegationState()))
+    saving = asyncio.create_task(
+        execution.persist_delegation_state(RunStorage(store, session, None), parent, DelegationState()),
+    )
     await asyncio.sleep(0)
     parent.content = "changed while the lane was busy"
     release.set()
@@ -1021,8 +1024,7 @@ async def test_a_run_keeps_its_hooks_across_its_delegation_continuations(
         ):
             await execution._drive_delegations(
                 parent.record,
-                store=parent.store,
-                session=parent.session,
+                storage=parent.runner.storage,
                 continue_parent=parent.runner.continue_run,
                 agent_name="leader",
                 run_child=run_delegated_child_response,

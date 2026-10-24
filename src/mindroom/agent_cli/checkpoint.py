@@ -133,7 +133,7 @@ class BatchCheckpoint:
     async def _save(self, run: RunRecord) -> None:
         run.status = RunStatus.cancelled
         catalog = self.catalog
-        store = catalog.store
+        store = catalog.storage.store
         if store is None:
             msg = "CLI history requires persisted session storage"
             raise RuntimeError(msg)

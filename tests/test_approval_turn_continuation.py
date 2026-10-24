@@ -498,7 +498,7 @@ async def test_approval_settlement_preserves_tool_boundary(
     events = [ToolStarted(tool.call), ToolCompleted(tool.call)] if boundary == "new" else []
     events.append(_finished(content="After approval.", tools=[tool]))
 
-    collected = await _collect_agent_continuation(_events(*events), presentation, progress=None)
+    collected = await _collect_agent_continuation(_events(*events), presentation, run_id="run", progress=None)
     trace: list[ToolTraceEntry] = []
     result = await _stream_continuation_turn(
         _continuation_turn_context(continuation, model_name="default", metadata=None),
@@ -599,7 +599,7 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
         parent_tools = [ToolExecution(tool_call_id="delegate", tool_name="run_subagent", result="Child finished.")]
     events.append(_finished(run_id="parent", content="Final parent answer.", tools=parent_tools))
 
-    collected = await _collect_agent_continuation(_events(*events), presentation, progress=None)
+    collected = await _collect_agent_continuation(_events(*events), presentation, run_id="run", progress=None)
 
     assert presentation.final_text() == ""
     assert collected.terminal_content == "Final parent answer."
@@ -615,7 +615,7 @@ async def test_the_calls_a_continuation_completed_are_its_runs_own_entries() -> 
     events = [ToolStarted(current.call), ToolCompleted(current.call), finished]
 
     presentation = CollectedStreamPresentation(show_tool_calls=False)
-    collected = await _collect_agent_continuation(_events(*events), presentation, progress=None)
+    collected = await _collect_agent_continuation(_events(*events), presentation, run_id="run", progress=None)
 
     assert len(collected.tool_executions) == 1
     assert collected.tool_executions[0] is current
