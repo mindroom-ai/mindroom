@@ -22,7 +22,7 @@ from mindroom.agent_loop.tools import (
     tool_result_message,
 )
 from mindroom.llm.errors import incomplete_stream_error
-from mindroom.llm.events import RequestCompleted, ToolCompleted, ToolStarted
+from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
@@ -137,7 +137,7 @@ class LoopEnded:
     paused: bool
 
 
-type LoopEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted | LoopEnded
+type LoopEvent = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | LoopEnded
 
 
 @dataclass
@@ -211,7 +211,6 @@ async def run_model_loop(
         assert turn is not None
         message = turn.message
         _accept_turn(message, state, progress, identity)
-        yield RequestCompleted(message.metrics)
         if not message.tool_calls:
             break
         async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn):
