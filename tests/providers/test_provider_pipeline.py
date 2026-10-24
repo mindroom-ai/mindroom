@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.llm.provider import StreamEvent
+    from mindroom.llm.provider import ModelProvider, StreamEvent
 
 _PROMPT = "Use the attached image."
 _FALLBACK_PROMPT = "Media was not inspected."
@@ -645,12 +645,7 @@ async def test_a_refusal_is_neither_retried_nor_resent_without_media(tmp_path: P
     """A transient failure before still retries; the refused attempt ends the request with its media intact."""
     usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=9, total_tokens=49))
     inner = _ScriptedProvider([[_transient()], [UsageReported(usage), _refusal(usage)]])
-    provider = wrap_provider(
-        inner,
-        idle_timeout_seconds=None,
-        media_fallback_prompt="x",
-        request_log=_request_log(tmp_path, enabled=False),
-    )
+    provider = _composed(inner, tmp_path)
 
     with pytest.raises(ModelSafeguardRefusal):
         await complete(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
@@ -794,6 +789,16 @@ def _request_log(tmp_path: Path, *, enabled: bool = True, provider: str = "opena
         configured_provider=provider,
         debug=DebugConfig(log_llm_requests=enabled, llm_request_log_dir=str(tmp_path) if enabled else None),
         storage_root=tmp_path / "default",
+    )
+
+
+def _composed(inner: ModelProvider, tmp_path: Path) -> ModelProvider:
+    """Wrap ``inner`` in the full pipeline as the registry does, with the request log off."""
+    return wrap_provider(
+        inner,
+        idle_timeout_seconds=None,
+        media_fallback_prompt="x",
+        request_log=_request_log(tmp_path, enabled=False),
     )
 
 
@@ -1007,12 +1012,7 @@ def _request() -> ModelRequest:
 @pytest.mark.asyncio
 async def test_composed_pipeline_drains_with_complete(tmp_path: Path) -> None:
     inner = _ScriptedProvider([[_transient()], [TextDelta("done"), _turn()]])
-    provider = wrap_provider(
-        inner,
-        idle_timeout_seconds=None,
-        media_fallback_prompt="x",
-        request_log=_request_log(tmp_path, enabled=False),
-    )
+    provider = _composed(inner, tmp_path)
 
     turn = await complete(provider, ModelRequest(messages=[_user()]))
 
@@ -1041,12 +1041,7 @@ async def test_reported_usage_always_sums_to_the_finished_turn(rejection: Provid
             ],
         ],
     )
-    provider = wrap_provider(
-        inner,
-        idle_timeout_seconds=None,
-        media_fallback_prompt="x",
-        request_log=_request_log(tmp_path, enabled=False),
-    )
+    provider = _composed(inner, tmp_path)
 
     events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
@@ -1096,12 +1091,7 @@ async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_tu
             [UsageReported(restarted, final=False), TextDelta("done"), UsageReported(final), _turn(usage=final)],
         ],
     )
-    provider = wrap_provider(
-        inner,
-        idle_timeout_seconds=None,
-        media_fallback_prompt="x",
-        request_log=_request_log(tmp_path, enabled=False),
-    )
+    provider = _composed(inner, tmp_path)
 
     events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
 
