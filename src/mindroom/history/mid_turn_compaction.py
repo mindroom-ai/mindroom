@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -20,6 +20,7 @@ from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
 from mindroom.history.policy import context_budget_after_reserve
+from mindroom.history.prompt_tokens import tool_definitions
 from mindroom.history.replay import HistorySummaryBudgetError, estimate_request_messages_tokens
 from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
@@ -471,13 +472,9 @@ def _tool_tokens(tools: Sequence[ToolSpec], messages: Sequence[Message], deferre
     if deferred:
         deferred -= claude_loaded_tool_names(messages)
     # TODO(simplify): this sizes each definition inside a Chat ``function`` envelope while the static estimate
-    # (``prompt_tokens.py``) sizes the bare fields, so one tool costs two amounts. Size both through one helper.
+    # (``prompt_tokens.py``) sizes the bare fields, so one tool costs two amounts. Size both without the envelope.
     # Operators would see compaction trigger, and models see replay trimmed, a few tokens per tool differently.
-    payloads = [
-        {"type": "function", "function": {key: value for key, value in asdict(tool).items() if value is not None}}
-        for tool in tools
-        if tool.name not in deferred
-    ]
+    payloads = [{"type": "function", "function": definition} for definition in tool_definitions(tools, deferred)]
     return estimate_text_tokens(stable_serialize(payloads))
 
 

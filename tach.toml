@@ -9465,6 +9465,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.history.legacy_summary_system_prompt",
     "mindroom.history.policy",
+    "mindroom.history.prompt_tokens",
     "mindroom.history.replay",
     "mindroom.history.run_visibility",
     "mindroom.history.runtime",
