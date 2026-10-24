@@ -72,16 +72,12 @@ __all__ = ["ENDPOINT_VARIABLES", "OPENAI_FAMILY_PROVIDERS", "ProviderRuntime", "
 
 logger = get_logger(__name__)
 
-# The runtime env variable that sets the ``openai`` endpoint, for Chat and Responses alike, when the config sets none.
-_OPENAI_BASE_URL_VARIABLE = "OPENAI_BASE_URL"
 # Routes whose public endpoint and model ids support Responses native compaction.
 _NATIVE_COMPACTION_ENDPOINTS = frozenset({OPENAI_BASE_URL_DEFAULT, CODEX_BASE_URL})
 _NATIVE_COMPACTION_MODEL_PREFIXES = ("gpt-5.3-codex", "gpt-5.4", "gpt-6")
 _NATIVE_COMPACTION_AUTHORED_KEYS = ("context_management", "previous_response_id", "background", "store")
 # Explicit prompt-cache breakpoints exist on the public API from GPT-5.6.
 _BREAKPOINT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-|$)")
-_CHAT_OMITTED_MEDIA: frozenset[MediaKind] = frozenset({"video"})
-_ALL_MEDIA: frozenset[MediaKind] = frozenset({"audio", "image", "file", "video"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -90,12 +86,12 @@ class _ChatRoute:
 
     provider: str
     provider_name: str
-    base_url: str | None
-    api_key_env: str | None
-    dialect: ChatDialect
-    accepted: frozenset[str]
+    base_url: str | None = None
+    api_key_env: str | None = None
+    dialect: ChatDialect = "openai"
+    accepted: frozenset[str] = CHAT_FIELDS
     structured_output: Literal["native", "json_schema", "json_mode"] = "native"
-    omitted_media: frozenset[MediaKind] = _CHAT_OMITTED_MEDIA
+    omitted_media: frozenset[MediaKind] = frozenset({"video"})
     # The runtime env variable that sets the endpoint when the config sets none.
     base_url_variable: str | None = None
 
@@ -104,18 +100,14 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
     "openai": _ChatRoute(
         provider="OpenAI",
         provider_name="OpenAI Chat",
-        base_url=None,
+        base_url=OPENAI_BASE_URL_DEFAULT,
         api_key_env="OPENAI_API_KEY",
-        dialect="openai",
-        accepted=CHAT_FIELDS,
-        base_url_variable=_OPENAI_BASE_URL_VARIABLE,
+        base_url_variable="OPENAI_BASE_URL",
     ),
     "azure": _ChatRoute(
         provider="Azure",
         provider_name="Azure",
-        base_url=None,
         api_key_env=AZURE_OPENAI_ENV_BY_KEY["api_key"],
-        dialect="openai",
         accepted=CHAT_FIELDS
         | {"api_version", "azure_endpoint", "azure_deployment", "azure_ad_token", "azure_ad_token_provider"},
     ),
@@ -124,7 +116,6 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         provider_name="OpenRouter",
         base_url=OPENROUTER_BASE_URL_DEFAULT,
         api_key_env="OPENROUTER_API_KEY",
-        dialect="openai",
         accepted=CHAT_FIELDS | {"models", "cache_system_prompt", "extended_cache_time"},
     ),
     "deepseek": _ChatRoute(
@@ -132,38 +123,20 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         provider_name="DeepSeek",
         base_url=DEEPSEEK_BASE_URL_DEFAULT,
         api_key_env="DEEPSEEK_API_KEY",
-        dialect="openai",
         accepted=CHAT_FIELDS | {"use_thinking"},
         structured_output="json_mode",
     ),
-    "zai": _ChatRoute(
-        provider="ZAI",
-        provider_name="ZAI",
-        base_url=ZAI_BASE_URL_DEFAULT,
-        api_key_env=None,
-        dialect="openai",
-        accepted=CHAT_FIELDS,
-    ),
-    "llama_cpp": _ChatRoute(
-        provider="LlamaCpp",
-        provider_name="LlamaCpp",
-        base_url="http://127.0.0.1:8080/v1",
-        api_key_env=None,
-        dialect="openai",
-        accepted=CHAT_FIELDS,
-    ),
+    "zai": _ChatRoute(provider="ZAI", provider_name="ZAI", base_url=ZAI_BASE_URL_DEFAULT),
+    "llama_cpp": _ChatRoute(provider="LlamaCpp", provider_name="LlamaCpp", base_url="http://127.0.0.1:8080/v1"),
     "kimi": _ChatRoute(
         provider="Kimi",
         provider_name="Kimi Chat",
         base_url=KIMI_BASE_URL,
-        api_key_env=None,
-        dialect="openai",
         accepted=CHAT_FIELDS | {"kimi_home", "prompt_cache_key"},
     ),
     "groq": _ChatRoute(
         provider="Groq",
         provider_name="Groq",
-        base_url=None,
         api_key_env="GROQ_API_KEY",
         dialect="groq",
         accepted=GROQ_FIELDS,
@@ -174,12 +147,11 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
     "cerebras": _ChatRoute(
         provider="Cerebras",
         provider_name="Cerebras",
-        base_url=None,
         api_key_env="CEREBRAS_API_KEY",
         dialect="cerebras",
         accepted=CEREBRAS_FIELDS,
         structured_output="json_schema",
-        omitted_media=_ALL_MEDIA,
+        omitted_media=frozenset({"audio", "image", "file", "video"}),
         base_url_variable="CEREBRAS_BASE_URL",
     ),
 }
@@ -227,7 +199,7 @@ def _provider_default_sampling(model_id: str) -> bool:
 
 
 def _authored_base_url(client_params: Mapping[str, Any] | None, base_url: str | None) -> str | None:
-    """Return the endpoint a config sets; ``client_params.base_url`` overrides ``base_url``, as in Agno."""
+    """Return the endpoint a config sets; ``client_params`` wins over ``base_url``, as over every client option."""
     return (client_params or {}).get("base_url") or base_url
 
 
@@ -253,7 +225,7 @@ def _sdk_client_kwargs(
     settings: ChatSettings | ResponsesSettings,
     http_client: httpx.AsyncClient,
 ) -> dict[str, Any]:
-    """Return SDK client keywords in Agno's precedence: the configured values that are set, then ``client_params``.
+    """Return SDK client keywords: the configured values that are set, with ``client_params`` merged over them.
 
     ``client_params.base_url`` is already in the configured endpoint (Groq and Cerebras append their API path
     to it), and the shared HTTP client always wins.
@@ -290,14 +262,22 @@ def _openai_client(
     return AsyncOpenAI(**_sdk_client_kwargs({"api_key": api_key, **options}, settings, http_client))
 
 
-def _chat_base_url(route_key: str, route: _ChatRoute, settings: ChatSettings, runtime: ProviderRuntime) -> str:
-    configured = _authored_base_url(settings.client_params, settings.base_url) or (
+def _route_base_url(
+    route_key: str,
+    client_params: Mapping[str, Any] | None,
+    base_url: str | None,
+    runtime: ProviderRuntime,
+) -> str:
+    """Return a route's endpoint: the config's, else its endpoint variable's, else its default.
+
+    Responses on the ``openai`` route reads the endpoint the ``openai`` Chat route does.
+    """
+    route = _CHAT_ROUTES[route_key]
+    configured = _authored_base_url(client_params, base_url) or (
         runtime.runtime_paths.env_value(route.base_url_variable) if route.base_url_variable else None
     )
-    if route_key == "openai":
-        return configured or OPENAI_BASE_URL_DEFAULT
+    # Groq and Cerebras endpoints are hosts, as configs for their SDKs give them; the route appends its API path.
     if route_key == "groq":
-        # The Groq SDK's base URL was a host; its paths start with /openai/v1.
         return f"{(configured or GROQ_HOST_DEFAULT).rstrip('/')}/openai/v1"
     if route_key == "cerebras":
         return f"{(configured or CEREBRAS_HOST_DEFAULT).rstrip('/')}/v1"
@@ -340,6 +320,8 @@ def _chat_client_factory(
                     "AZURE_OPENAI_API_KEY environment variable, azure_ad_token, or azure_ad_token_provider"
                 )
                 raise AuthenticationFailed(msg, provider=route.provider_name, status_code=401, code=MISSING_API_KEY)
+            # TODO(simplify): Azure accepts `timeout` and `max_retries` but leaves them out of its client. Build it from
+            # the shared client options, as the other routes do. Operators who set either would notice.
             azure: dict[str, Any] = {
                 "api_key": key,
                 "api_version": settings.api_version or "2024-10-21",
@@ -361,7 +343,7 @@ def _chat_client_factory(
         if not key:
             if route.api_key_env is not None:
                 raise missing_api_key_error(route.api_key_env, provider=route.provider_name)
-            # OpenAI-compatible local and keyless endpoints took Agno's placeholder key.
+            # The SDK client requires a key, so keyless OpenAI-compatible endpoints get a placeholder.
             key = "not-provided"
         return _openai_client(key, options, settings, http_client)
 
@@ -409,7 +391,7 @@ def _build_chat(route_key: str, model_id: str, model_config: ModelConfig, runtim
     api_key = _configured_key(route_key, model_config, runtime)
     if route_key in {"openrouter", "zai"} and not api_key:
         logger.warning("No API key found in environment or CredentialsManager", provider=route_key)
-    base_url = _chat_base_url(route_key, route, settings, runtime)
+    base_url = _route_base_url(route_key, settings.client_params, settings.base_url, runtime)
     endpoint = (
         (settings.client_params or {}).get("azure_endpoint") or settings.azure_endpoint or base_url
         if route_key == "azure"
@@ -493,26 +475,19 @@ def _build_responses(
     )
     # One storage setting drives both request building and history replay.
     store = (settings.request_params or {}).get("store", settings.store)
-    authored_base_url = _authored_base_url(settings.client_params, settings.base_url)
     if route_key == "codex":
         store = False if store is None else store
-        base_url = authored_base_url or CODEX_BASE_URL
+        base_url = _authored_base_url(settings.client_params, settings.base_url) or CODEX_BASE_URL
         provider, provider_name = "OpenAI Codex", "OpenAI Codex Responses"
     else:
-        base_url = (
-            authored_base_url or runtime.runtime_paths.env_value(_OPENAI_BASE_URL_VARIABLE) or OPENAI_BASE_URL_DEFAULT
-        )
+        base_url = _route_base_url("openai", settings.client_params, settings.base_url, runtime)
         provider, provider_name = "OpenAI", "OpenAI Responses"
     endpoint = base_url.rstrip("/")
     identity = ModelIdentity(id=model_id, provider=provider, provider_name=provider_name, endpoint=endpoint)
     capabilities = Capabilities(
         structured_output="native",
         omitted_media=frozenset({"audio", "video"}),
-        native_tool_search=openai_native_tool_search_supported(
-            route_key,
-            model_id,
-            base_url=base_url if route_key == "openai" else None,
-        ),
+        native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
         approval_receipt_after_response_id=True,
         provider_default_sampling=_provider_default_sampling(model_id),
@@ -566,10 +541,7 @@ def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatA
         return _build_responses("codex", model_id, model_config, runtime)
     if route_key == "openai":
         extra_kwargs = model_config.extra_kwargs or {}
-        base_url = _authored_base_url(
-            extra_kwargs.get("client_params"),
-            extra_kwargs.get("base_url"),
-        ) or runtime.runtime_paths.env_value(_OPENAI_BASE_URL_VARIABLE)
+        base_url = _route_base_url("openai", extra_kwargs.get("client_params"), extra_kwargs.get("base_url"), runtime)
         if model_config.api == "responses" or (
             model_config.api is None and openai_native_tool_search_supported("openai", model_id, base_url=base_url)
         ):

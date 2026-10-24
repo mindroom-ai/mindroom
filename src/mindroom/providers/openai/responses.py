@@ -116,11 +116,7 @@ class ResponsesAdapter:
         return responses_request_kwargs(
             model_id=self.identity.id,
             request=request,
-            settings=request_settings(
-                self.settings,
-                request.overrides,
-                sampling=not self.capabilities.provider_default_sampling,
-            ),
+            settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
         )
 

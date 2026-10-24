@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
     from openai import AsyncOpenAI
 
-    from mindroom.llm.provider import RequestOverrides
+    from mindroom.llm.provider import Capabilities, RequestOverrides
     from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 
 __all__ = ["SDKClients", "request_settings"]
@@ -43,14 +43,13 @@ class SDKClients:
 def request_settings[S: (ChatSettings, ResponsesSettings)](
     settings: S,
     overrides: RequestOverrides,
-    *,
-    sampling: bool,
+    capabilities: Capabilities,
 ) -> S:
     """Return the settings one request is built from: its temperature override replaces the model's temperature.
 
-    Setting a model's temperature did the same under Agno, so the route's own rules still apply to it, such as
-    Codex dropping every temperature. ``sampling=False`` leaves sampling to the provider.
+    The route's own rules then apply to the override, such as Codex dropping every temperature; a model that leaves
+    sampling to the provider (``provider_default_sampling``) ignores it.
     """
-    if not sampling or overrides.temperature is None:
+    if capabilities.provider_default_sampling or overrides.temperature is None:
         return settings
     return replace(settings, temperature=overrides.temperature)

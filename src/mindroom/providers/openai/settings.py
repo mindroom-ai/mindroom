@@ -118,7 +118,7 @@ class ChatSettings:
         }
 
     def groq_request_fields(self) -> dict[str, Any]:
-        """Return the request fields the ``groq`` dialect sends; Agno's Groq had no ``organization`` or ``extra_body``."""
+        """Return the request fields the ``groq`` dialect sends from these settings, unset ones as None."""
         return {
             "frequency_penalty": self.frequency_penalty,
             "logit_bias": self.logit_bias,
@@ -212,8 +212,7 @@ class ResponsesSettings:
         }
 
 
-# Each route accepts the request fields its wire sends and the settings the wire or client reads otherwise. Agno
-# OpenAIChat's ``modalities`` and ``audio`` (audio output) are retired.
+# Each route accepts the request fields its wire sends and the settings the wire or client reads otherwise.
 CHAT_FIELDS = _CLIENT_FIELDS | {*ChatSettings().openai_request_fields(), "strict_output", "request_params", "role_map"}
 GROQ_FIELDS = _CLIENT_FIELDS - {"organization"} | {*ChatSettings().groq_request_fields(), "request_params"}
 CEREBRAS_FIELDS = _CLIENT_FIELDS - {"organization"} | {
@@ -233,7 +232,7 @@ RESPONSES_FIELDS = _CLIENT_FIELDS | {
     "request_params",
     "cache_system_prompt",
 }
-# The Responses fields the Codex endpoint rejects; Agno's Codex model took them and dropped them from every request.
+# The Responses fields the Codex endpoint rejects; config load retires them and every Codex request drops them.
 CODEX_REJECTED_FIELDS = frozenset({"max_output_tokens", "temperature"})
 CODEX_FIELDS = RESPONSES_FIELDS - CODEX_REJECTED_FIELDS | {
     "codex_home",

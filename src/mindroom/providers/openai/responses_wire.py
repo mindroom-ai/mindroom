@@ -169,7 +169,7 @@ def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
     return call_ids
 
 
-def _agno_input(messages: Sequence[Message], *, store: bool | None) -> list[Any]:
+def _input_items(messages: Sequence[Message], *, store: bool | None) -> list[Any]:
     """Convert canonical messages to Responses input items, continuing after the last stored response."""
     canonical = reformat_tool_call_ids(messages, "responses")
     to_format, continued = _continued_messages(canonical, store=store)
@@ -233,7 +233,7 @@ def responses_input(
     route = native_compaction.route if native_compaction is not None else None
     prepared = native_replay_messages(prepared, route)
     replay_store = False if explicit else store
-    formatted = _agno_input(prepared, store=replay_store)
+    formatted = _input_items(prepared, store=replay_store)
     # Ordered output is restored only for the spans the request still sends.
     prepared, _ = _continued_messages(prepared, store=replay_store)
     formatted = formatted_input_with_provider_items(
@@ -262,15 +262,6 @@ def _tool_dicts(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
                 property_schema["type"] = property_schema["type"][0]
         functions.append(definition)
     return sorted(functions, key=lambda tool: tool["name"])
-
-
-def _text_format(response_format: type[BaseModel], *, strict: bool) -> dict[str, Any]:
-    return {
-        "type": "json_schema",
-        "name": response_format.__name__,
-        "schema": strict_response_schema(response_format),
-        "strict": strict,
-    }
 
 
 def _with_encrypted_reasoning(params: dict[str, Any]) -> None:
@@ -315,7 +306,12 @@ def _base_params(settings: ResponsesSettings, request: ModelRequest) -> dict[str
     # Responses takes native structured output, so a request's format is always its output model class.
     response_format = request.response_format
     if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-        text["format"] = _text_format(response_format, strict=settings.strict_output)
+        text["format"] = {
+            "type": "json_schema",
+            "name": response_format.__name__,
+            "schema": strict_response_schema(response_format),
+            "strict": settings.strict_output,
+        }
     params = {
         **settings.request_fields(),
         "include": copy.deepcopy(settings.include),
@@ -483,8 +479,7 @@ class ResponsesStream:
 
     An output item other than the model's own message, reasoning, or function call is a hosted tool at work, and
     its start is reported as such. ``text_as_reasoning`` also records the output text in the stored reasoning, in
-    event order with any summary text, as Agno did for a model config that authors ``reasoning`` without
-    ``reasoning_summary``.
+    event order with any summary text, kept as main behaves.
     """
 
     wire: ResponsesWire
@@ -614,8 +609,8 @@ def parse_response(
 ) -> ResponsesTurnParts:
     """Read one non-streamed response into a finished turn.
 
-    ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary, as
-    Agno did for a model config that authors ``reasoning``.
+    ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary, kept as
+    main behaves.
     """
     if response.error:
         raise _response_error(response.error.code, response.error.message, provider=wire.provider_name)

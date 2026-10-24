@@ -65,11 +65,7 @@ class ChatAdapter:
             tool_choice=request.tool_choice,
             response_format=request.response_format,
             stream=request.stream,
-            settings=request_settings(
-                self.settings,
-                request.overrides,
-                sampling=not self.capabilities.provider_default_sampling,
-            ),
+            settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
         )
         if self.wire.route != "openrouter":
